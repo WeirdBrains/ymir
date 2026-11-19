@@ -47,6 +47,28 @@ struct Target {
     standin: Option<String>,
 }
 
+/// A chat request's route, decided without waiting: a cached answer, or a model node and the
+/// model that answers there (the stand-in while the requested model loads). [`Coordinator::run_chat`]
+/// then loads the model if it is still cold and streams the answer. The split lets the infer/2
+/// host name the answering model in `Accepted` before anything streams.
+pub struct Prepared {
+    /// The model that answers (the stand-in when [`Prepared::standin`] is set).
+    pub model: String,
+    pub standin: Option<String>,
+    route: Route,
+}
+
+enum Route {
+    Cached(Vec<Event>),
+    Node { node: Arc<dyn ModelNode>, cold: bool },
+}
+
+impl Prepared {
+    pub fn cache_hit(&self) -> bool {
+        matches!(self.route, Route::Cached(_))
+    }
+}
+
 impl Coordinator {
     pub fn new(nodes: Vec<Arc<dyn ModelNode>>, main: Option<String>, cache: Arc<dyn AnswerCache>) -> Self {
         Self::with_options(nodes, main, cache, CoordinatorOptions::default())
@@ -166,20 +188,39 @@ impl Coordinator {
         }
     }
 
-    /// Picks the node for a chat or completion, loading the model if it is cold, or answering
-    /// with the stand-in while it loads in the background.
-    async fn target(&self, model: &str, wait: bool) -> Result<Target, InferError> {
+    /// Picks the node for a chat or completion without waiting: a ready one, or the stand-in
+    /// (whose model then loads in the background), or a cold node (`true`: load it first).
+    fn choose(&self, model: &str, wait: bool) -> Result<(Target, bool), InferError> {
         let (node, status) = self.pick(model, false)?;
         if status.state == ModelState::Ready {
-            return Ok(Target { node, model: model.into(), standin: None });
+            return Ok((Target { node, model: model.into(), standin: None }, false));
         }
         if !wait && let Some(t) = self.standin_for(model, &node, &status) {
             self.load_in_background(node, model.to_string());
-            return Ok(t);
+            return Ok((t, false));
         }
-        tracing::info!(model = %model, node = node.name(), "cold start: loading");
-        node.load(model, false).await?;
-        Ok(Target { node, model: model.into(), standin: None })
+        Ok((Target { node, model: model.into(), standin: None }, true))
+    }
+
+    /// [`Coordinator::choose`], then loads a cold model.
+    async fn target(&self, model: &str, wait: bool) -> Result<Target, InferError> {
+        let (t, cold) = self.choose(model, wait)?;
+        if cold {
+            tracing::info!(model = %t.model, node = t.node.name(), "cold start: loading");
+            t.node.load(&t.model, false).await?;
+        }
+        Ok(t)
+    }
+
+    /// Decides where a chat goes (see [`Prepared`]). `raw` (infer/2 raw mode) skips the cache
+    /// and the stand-in.
+    pub fn prepare_chat(&self, req: &ChatRequest, raw: bool) -> Result<Prepared, InferError> {
+        let model = self.resolve(req.model.as_deref())?;
+        if !raw && let Some(events) = self.cache.get(&model, req) {
+            return Ok(Prepared { model, standin: None, route: Route::Cached(events) });
+        }
+        let (t, cold) = self.choose(&model, req.wait_for_model || raw)?;
+        Ok(Prepared { model: t.model, standin: t.standin, route: Route::Node { node: t.node, cold } })
     }
 
     /// The stand-in, when policy allows it for this cold `model` on `node`.
@@ -215,17 +256,29 @@ impl Coordinator {
     }
 
     async fn route(&self, req: ChatRequest) -> Result<Reply, InferError> {
-        let model = self.resolve(req.model.as_deref())?;
-        if let Some(events) = self.cache.get(&model, &req) {
-            return Ok(Reply {
-                model,
-                node: "cache".into(),
-                cache_hit: true,
-                standin: None,
-                events: Box::pin(futures::stream::iter(events.into_iter().map(Ok))),
-            });
+        let p = self.prepare_chat(&req, false)?;
+        self.run_chat(p, req).await
+    }
+
+    /// Streams the answer for a [`Prepared`] route, loading a cold model first.
+    pub async fn run_chat(&self, p: Prepared, req: ChatRequest) -> Result<Reply, InferError> {
+        let (node, cold) = match p.route {
+            Route::Cached(events) => {
+                return Ok(Reply {
+                    model: p.model,
+                    node: "cache".into(),
+                    cache_hit: true,
+                    standin: None,
+                    events: Box::pin(futures::stream::iter(events.into_iter().map(Ok))),
+                });
+            }
+            Route::Node { node, cold } => (node, cold),
+        };
+        if cold {
+            tracing::info!(model = %p.model, node = node.name(), "cold start: loading");
+            node.load(&p.model, false).await?;
         }
-        let t = self.target(&model, req.wait_for_model).await?;
+        let t = Target { node, model: p.model, standin: p.standin };
         let events = match t.node.chat(&t.model, &req).await {
             Ok(s) => s,
             // The engine died between the pick and the request. Nothing has streamed yet, so a
@@ -273,16 +326,26 @@ impl Coordinator {
         Ok(Reply { model: t.model, node: t.node.name().to_string(), cache_hit: false, standin: t.standin, events })
     }
 
-    async fn route_embed(&self, req: EmbedRequest) -> Result<Embeddings, InferError> {
-        let model = match req.model.as_deref() {
+    /// The embedding model a request means (`None`/`default`: the first one in the catalog).
+    pub fn resolve_embedding(&self, model: Option<&str>) -> Result<String, InferError> {
+        match model {
             None | Some("default") | Some("ymir") => self
                 .merged_catalog()
                 .into_iter()
                 .find(|m| m.purpose == "embedding")
                 .map(|m| m.id)
-                .ok_or_else(|| InferError::BadRequest("no model given and this pool has no embedding model".into()))?,
-            Some(m) => m.to_string(),
-        };
+                .ok_or_else(|| InferError::BadRequest("no model given and this pool has no embedding model".into())),
+            Some(m) => Ok(m.to_string()),
+        }
+    }
+
+    /// Embeds with the model a request means.
+    pub async fn embed_with(&self, req: EmbedRequest) -> Result<Embeddings, InferError> {
+        self.route_embed(req).await
+    }
+
+    async fn route_embed(&self, req: EmbedRequest) -> Result<Embeddings, InferError> {
+        let model = self.resolve_embedding(req.model.as_deref())?;
         let (node, status) = self.pick(&model, true)?;
         if status.state != ModelState::Ready {
             tracing::info!(model = %model, node = node.name(), "cold start: loading");

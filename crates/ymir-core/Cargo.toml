@@ -10,9 +10,11 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 futures.workspace = true
+getrandom.workspace = true
 libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -21,7 +23,11 @@ tokio.workspace = true
 tokio-stream.workspace = true
 toml.workspace = true
 tracing.workspace = true
+weirdnet-agent.workspace = true
+weirdnet-device-link.workspace = true
 weirdnet-model.workspace = true
+weirdnet-net.workspace = true
+weirdnet-sync.workspace = true
 ymir-alerts.workspace = true
 ymir-backends.workspace = true
 ymir-infer.workspace = true

@@ -21,6 +21,7 @@ repository = "https://github.com/WeirdBrains/ymir"
 authors = ["Weird Brains"]
 
 [workspace.dependencies]
+async-trait = "0.1"
 # Crates in this workspace. The ones marked "to be extracted" in their README are generic and move
 # to weirdnet-* crates (Weirdnet lead); app crates depend on them only through these names.
 ymir-infer = { path = "crates/ymir-infer", version = "0.1.0" }
