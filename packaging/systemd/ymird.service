@@ -1,0 +1,22 @@
+# Ymir node daemon, user level. Packages install this as /usr/lib/systemd/user/ymird.service.
+# Enable it for your user with:  systemctl --user enable --now ymird
+# Keep it running after logout:  loginctl enable-linger $USER
+# (A tar.gz install writes its own unit with `ymirctl service install`.)
+[Unit]
+Description=Ymir node (model, inference and app roles)
+Documentation=https://github.com/WeirdBrains/ymir
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ymird
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+Environment=YMIR_LOG=info
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

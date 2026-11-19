@@ -1,0 +1,98 @@
+# Ymir release config for weirdnet-project-helpers (scripts/weirdnet_release.py, vendored; never edit it here).
+helpers = "0.3.2"
+project = "ymir"
+require_message = true
+next = [
+  "build the release files: scripts/package.py for each Linux target (the Release workflow does all platforms)",
+  "python3 scripts/weirdnet_release.py github {version}   # upload dist/ to the GitHub release",
+  "python3 scripts/weirdnet_release.py assets {version}   # every platform file is on the release",
+  "python3 scripts/package.py --recipe, commit, then: python3 scripts/weirdnet_release.py taur {version} --dry-run",
+]
+
+[env]
+CARGO_TARGET_DIR = "a scratch disk/cargo-target/ymir"
+
+[[files]]                       # [workspace.package] version; every crate uses version.workspace
+kind = "cargo-workspace"
+path = "Cargo.toml"
+primary = true
+
+[[files]]
+kind = "cargo-lock"
+path = "Cargo.lock"
+
+[[files]]                       # the Homebrew template's version (sha256s come from the release workflow)
+kind = "regex"
+path = "packaging/homebrew/ymir.rb"
+pattern = '^(  version ")\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?"'
+replace = '\g<1>{version}"'
+
+[changelog]
+path = "CHANGELOG.md"
+
+[checks]
+commands = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo test --workspace --locked",
+]
+
+[crates]
+# The ymir-* crates are publish = false: the generic ones move to weirdnet-* crates (Weirdnet lead).
+publish = []
+
+[taur]
+org = "WeirdBrains"
+
+[[taur.packages]]
+name = "ymir-bin"
+dir = "packaging/arch/ymir-bin"
+srcinfo = "generate"
+source_contains = "v{version}"
+
+[github]
+files = [
+  "dist/ymir-{version}-*-unknown-linux-gnu.tar.gz",
+  "dist/ymir-{version}-*-unknown-linux-gnu.zip",
+  "dist/ymir_{debver}-1_*.deb",
+  "dist/ymir-bin-{pkgver}-1-*.pkg.tar.zst",
+]
+sums = "SHA256SUMS"
+
+[[platforms]]
+os = "linux"
+arch = ["x86_64", "aarch64"]
+formats = ["tar.gz", "zip", "deb", "rpm", "pkg.tar.zst", "nix"]
+channels = ["github", "taur", "nix"]
+assets = [
+  "ymir-{version}-x86_64-unknown-linux-gnu.tar.gz",
+  "ymir-{version}-aarch64-unknown-linux-gnu.tar.gz",
+  "ymir_{debver}-1_amd64.deb",
+  "ymir_{debver}-1_arm64.deb",
+  "ymir-{version}-1.x86_64.rpm",
+  "ymir-{version}-1.aarch64.rpm",
+  "ymir-bin-{pkgver}-1-x86_64.pkg.tar.zst",
+  "ymir-bin-{pkgver}-1-aarch64.pkg.tar.zst",
+]
+
+[[platforms]]
+os = "macos"
+arch = ["x86_64", "aarch64"]
+formats = ["tar.gz", "zip", "brew-formula"]
+channels = ["github", "homebrew"]
+assets = ["ymir-{version}-*-apple-darwin.tar.gz"]
+
+[[platforms]]
+os = "windows"
+arch = ["x86_64", "aarch64"]
+formats = ["zip", "exe", "exe-wix"]
+channels = ["github"]
+assets = ["ymir-{version}-*-pc-windows-msvc.zip", "YmirSetup-{version}.exe"]
+
+[[platforms]]
+os = "android"
+opt_out = "a serving daemon can't run in the background on mobile (Android needs a foreground service and thermals make it impractical)"
+
+[[platforms]]
+os = "ios"
+opt_out = "a serving daemon can't run in the background on mobile (iOS forbids it)"

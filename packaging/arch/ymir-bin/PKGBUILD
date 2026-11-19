@@ -1,0 +1,53 @@
+# Maintainer: m3talsmith <m3talsmith@gmail.com>
+# Prebuilt binaries from the GitHub release. scripts/package.py --recipe (and the release workflow)
+# fill in pkgver and the sha256sums; scripts/weirdnet_release.py taur publishes this recipe to TAUR.
+pkgname=ymir-bin
+_ver=0.1.0
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Private cloud of LLM models on your own machines (node daemon and CLI) (prebuilt binary)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/WeirdBrains/ymir"
+license=('BSD-3-Clause')
+depends=('glibc' 'libgcc')
+optdepends=('llama.cpp: the llama-server engine for GGUF models'
+            'python-vllm: the vLLM engine (NVIDIA)')
+provides=('ymir')
+conflicts=('ymir' 'ymir-git')
+options=('!strip' '!debug')
+source_x86_64=("ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('0efe4d81edcbb906bfc52faadab785d609aa227b02765a0bf675422c3fc9821f')
+sha256sums_aarch64=('c9386d0b3aea282675fbdfa3e8b4930c79e1410d71dae9f3fc4d3f9e3ac83761')
+
+package() {
+  cd "ymir-${_ver}-${CARCH}-unknown-linux-gnu"
+  install -Dm755 bin/ymird "${pkgdir}/usr/bin/ymird"
+  install -Dm755 bin/ymirctl "${pkgdir}/usr/bin/ymirctl"
+  install -Dm644 share/doc/ymir/README.md "${pkgdir}/usr/share/doc/ymir/README.md"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/user/ymird.service" <<'UNIT'
+# Ymir node daemon, user level. Packages install this as /usr/lib/systemd/user/ymird.service.
+# Enable it for your user with:  systemctl --user enable --now ymird
+# Keep it running after logout:  loginctl enable-linger $USER
+# (A tar.gz install writes its own unit with `ymirctl service install`.)
+[Unit]
+Description=Ymir node (model, inference and app roles)
+Documentation=https://github.com/WeirdBrains/ymir
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ymird
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+Environment=YMIR_LOG=info
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
+UNIT
+}
