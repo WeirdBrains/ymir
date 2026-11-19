@@ -1,0 +1,26 @@
+[package]
+name = "ymir-backends"
+description = "Engine adapters (llama.cpp server, vLLM) and the local supervisor for a model node. To be extracted into weirdnet-backends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+futures.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+ymir-infer.workspace = true
+
+[lints]
+workspace = true

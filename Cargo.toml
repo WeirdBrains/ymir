@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/ymir-hw",
     "crates/ymir-infer",
+    "crates/ymir-backends",
 ]
 
 [workspace.package]
