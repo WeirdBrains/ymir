@@ -21,6 +21,21 @@ pub struct Daemon {
     supervisor: Option<Supervisor>,
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
+    socket_id: Option<(u64, u64)>,
+    reaper: Option<JoinHandle<()>>,
+}
+
+/// (device, inode) of a file, to tell our socket from a successor's.
+fn file_id(p: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(p).ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::symlink_metadata(p).ok().map(|_| (0, 0))
+    }
 }
 
 impl Daemon {
@@ -72,9 +87,7 @@ impl Daemon {
         let mut tasks = Vec::new();
 
         // Idle unload.
-        if let Some(sup) = &supervisor {
-            tasks.push(sup.spawn_reaper(std::time::Duration::from_secs(2)));
-        }
+        let reaper = supervisor.as_ref().map(|sup| sup.spawn_reaper(std::time::Duration::from_secs(2)));
 
         // Keep the stand-in warm.
         if let (Some(c), Some(standin), true) = (&coordinator, cfg.standin(), cfg.inference.standin_warm) {
@@ -135,6 +148,7 @@ impl Daemon {
 
         // Control socket.
         let listener = control::bind(&paths.socket()).await?;
+        let socket_id = file_id(&paths.socket());
         let handler = Arc::new(ControlHandler {
             node: name.clone(),
             roles: roles.names().into_iter().map(str::to_string).collect(),
@@ -146,19 +160,25 @@ impl Daemon {
         });
         tasks.push(tokio::spawn(control::serve(listener, handler, stop_rx)));
         tracing::info!(node = %name, roles = ?roles.names(), "ymird started");
-        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks })
+        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper })
     }
 
     /// Stops the bridge and control socket, then every engine.
     pub async fn shutdown(self) {
         let _ = self.stop.send(true);
+        if let Some(r) = &self.reaper {
+            r.abort();
+        }
         for t in self.tasks {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
         }
         if let Some(s) = &self.supervisor {
             s.shutdown().await;
         }
-        let _ = std::fs::remove_file(self.paths.socket());
+        // Only our own socket: a new ymird may already have replaced it while engines stopped.
+        if self.socket_id.is_some() && file_id(&self.paths.socket()) == self.socket_id {
+            let _ = std::fs::remove_file(self.paths.socket());
+        }
         tracing::info!("ymird stopped");
     }
 }
