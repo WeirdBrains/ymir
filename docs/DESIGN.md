@@ -341,14 +341,39 @@ that machine's own bridge or Bragi.
   sinks plus a health rule pack built on `weirdnet-rules` 0.1.0 (conditions over an event history,
   loop protection, schedules), not a rule engine of its own. The rules add dedupe ("at most once an
   hour", plus a recovery notice, as the Wi-Fi fallback alert does). Sinks: SMTP (the password lives
-  in the OS keyring, never in config), webhooks, and push. A push carries only `weirdnet-push`'s
-  96-byte sealed wake payload with a reason code, so the push sink just wakes the device, which then
-  fetches the alert itself over Weirdnet. APNs and FCM need a push server (open question). A model node with no inference
-  node in reach can still send its own SMTP alert if configured.
+  in the OS keyring, never in config), webhooks, and push (below).
+
 - Built-in rules carried from server-a/server-b: backend crash loop, model load failure, node lost, **network
   degraded** (the primary interface is down and traffic is on a fallback route, i.e. the Wi-Fi
   fallback alert, generalized), relayed-only for too long, disk low, GPU hot, failover happened.
 - Peer watching replaces a separate monitor host (the dev box's monitor timer).
+
+### Push (decided 2026-11-19: `weirdnet-push`, owned by the inference node)
+
+The inference node owns push. It runs the push sender and holds the APNs and FCM credentials. To
+alert a phone (or say a long job finished), it sends `weirdnet-push`'s 96-byte sealed wake payload
+with a reason code; Apple and Google see only ciphertext. The phone wakes, and Bragi fetches the
+alert or result itself over Weirdnet from an inference node. With several inference nodes, the
+lease holder sends, so a phone isn't woken twice.
+
+What `weirdnet-push` 0.1.0 already has (checked in its source): the wake payload, handles and the
+device-side `ReplayGuard`; a client; and a **server component** (feature `server`, the
+`weirdnet-push` binary) with an **APNs sender** (token auth with the `.p8` key, team id, alert push
+with `mutable-content`) and an **FCM HTTP v1 sender** (service-account JSON), plus the relay wake path
+for F-Droid builds. The senders sit behind a library `Service` (`register`, `rotate`, `unregister`,
+`wake`), so the inference node can embed it in-process.
+
+What is missing: the server's only front end is an HTTP router (`server::serve` binds `listen` and
+expects TLS in front), and Ymir has no HTTP or HTTPS endpoints. So **Weirdnet-lead work:** a
+Weirdnet front end for `Service` (device registration, rotation, unregistration and wake requests over
+a `weirdnet-net` protocol, authorized by the roster) so the inference node embeds the senders with no
+network listener. Until then, push to phones is off (alerts go by SMTP and to apps that are open).
+
+What m3talsmith has to provide: an **Apple developer account key** (an APNs `.p8` auth key and team id)
+for iOS, and a **Firebase project** (a service-account JSON) for FCM on Play builds. F-Droid builds use
+the relay wake path and need neither. These credentials live only on inference nodes, in the keyring
+or 0600 files referenced by name from config, never in the repo. A model node with no inference
+  node in reach can still send its own SMTP alert if configured.
 
 ### Cold-start fallback
 
@@ -436,8 +461,9 @@ admits a caller only if `Roster::check_caller` says it is a linked device. `ymir
 new machine prints the offer; **m3talsmith admits it from an existing roster device** (comparing the SAS
 code), then turns on the roles it should run. Until a roster member admits it,
 `Roster::check_caller` answers `NotAdmitted` and every node refuses it. Linking sends the identity
-seed to the new device (`weirdnet-device-link`), and `SyncState::new` needs that seed, so every
-service node holds m3talsmith's root seed today; a cert-only server link is an open question. Unlinking (revocation in the roster) cuts the device off everywhere as soon as peers see
+seed to the new device (`weirdnet-device-link`), and `SyncState::new` needs that seed, so model and
+inference nodes hold m3talsmith's root seed (decided 2026-11-19; see [Root seed on service
+nodes](#root-seed-on-service-nodes)). Unlinking (revocation in the roster) cuts the device off everywhere as soon as peers see
 the roster update; `weirdnet-sync` rotates its epoch key at the same time.
 
 There are no invites, memberships or permission roles. The role toggles say what a device does,
@@ -775,7 +801,7 @@ hardware, not hard-coded per host).
 | `weirdnet-agent` 0.2.0 | `remote::infer` (`InferHost`, `Admission`, `RemoteModel`), `remote::task`, `ModelBackend`; gains `pool` and `context` (below) |
 | `weirdnet-model` 0.2.1 | catalog, consent-gated download, in-process llama.cpp, CPU checks |
 | `weirdnet-storage` 0.1.0 | encrypted local databases (context replicas, cache, metrics) |
-| `weirdnet-push` 0.1.0 | sealed 96-byte wake payloads for alerts and job completion |
+| `weirdnet-push` 0.1.0 | sealed 96-byte wake payloads, `ReplayGuard`, and the `server` feature's APNs and FCM senders, embedded in the inference node |
 | `weirdnet-rules` 0.1.0 | the rule engine under `weirdnet-alerts` |
 | `weirdnet-schemes`, `weirdnetctl` | registering `weirdnet-ymir://` and `weirdnet-bragi://` |
 | `weirdnet-update` | signed update metadata, if Ymir self-updates (open question) |
@@ -809,7 +835,11 @@ roles, no API keys, no HTTPS endpoint).
 - **`weirdnet-device-link`, `weirdnet-relay`**: releases on `weirdnet-net` 0.8, and a redeploy of the
   public relay (gate for M3, M4 and B1).
 - **`weirdnet-sync`**: running on an app's `Node` (option B above) and local eviction / on-demand
-  working sets (before M5).
+  working sets (before M5); later, a cert-only server link (M10).
+- **`weirdnet-push`**: a Weirdnet (non-HTTP) front end for the server `Service`, so it can be embedded
+  with no listener.
+- **`weirdnet-update`**: the self-update flow for `ymird` (signed full packages, boot-health rollback)
+  uses what 0.1.0 already has; any gaps found in M9 go to the Weirdnet lead.
 
 ### New crates proposed (Weirdnet lead)
 
@@ -845,6 +875,24 @@ All crates set `license = "BSD-3-Clause"`.
   in-process path.
 - **Revocation:** unlinking a device in the roster cuts it off everywhere as soon as peers see the
   update, and rotates the sync key so it can't read new context.
+
+### Root seed on service nodes
+
+Decided 2026-11-19: for now, model and inference nodes get m3talsmith's root identity seed through
+`weirdnet-device-link`, like any linked device. They are his own machines on his own network.
+
+- **Risk:** anyone who copies the seed off a node *is* m3talsmith on Weirdnet, in every app, not just
+  Ymir. Unlinking that node in the roster stops it as a device, but doesn't help against a stolen
+  seed: recovering from that means rotating the root identity on every device. A headless server is
+  also more exposed than a phone (remote shells, backups, disk images).
+- **Mitigation now:** the seed is stored in the OS keyring where one exists, otherwise in a file with
+  mode 0600 owned by the service account (system installs) or the user, never in `node.toml`, logs,
+  backups made by Ymir, or crash reports. `ymirctl` never prints it. Disk images and backups of
+  service nodes should be treated as holding the identity.
+- **Follow-up (later milestone M10, owned by the Weirdnet lead):** a cert-only server link in
+  `weirdnet-sync`/`weirdnet-device-link`, so a service node gets a node certificate and the sync keys
+  it needs but not the seed, and can be revoked without rotating the root identity. Existing nodes
+  then re-link and their seed copies are wiped.
 - **No network listeners besides Weirdnet.** The OpenAI bridge binds `127.0.0.1` only and can't be
   configured otherwise. Backend ports (llama-server, vLLM) bind to loopback. Ray workers and
   llama.cpp RPC servers for groups bind to the private-link address only; they have no auth of their
@@ -939,6 +987,20 @@ has `[roles] app = true` and nothing else.
 - **User-level by default** (systemd user unit with lingering, launchd agent); `--system` for headless
   servers where it is genuinely system-level.
 - Prebuilt binaries only; installing never needs Rust. Release files are signed with minisign.
+
+### Updates (decided 2026-11-19: both)
+
+- **Package managers are the primary path** (TAUR/pacman, apt, dnf, Nix, Homebrew, winget).
+- **`ymird` can also update itself** from signed releases through `weirdnet-update`: org root pinned at
+  build time, signed manifests, anti-rollback state, and the boot-health state machine, so an update
+  that doesn't come up healthy rolls back to the previous version automatically. Each release file is
+  also minisign-signed and checked before install.
+- **Off when a package manager installed it:** the package marks the install as managed, and
+  self-update is then disabled automatically unless the user opts in (`ymirctl update --self on`),
+  so the package database and the binary never disagree silently.
+- Updates are never forced (AGENTS.md): self-update defaults to "ask" for each release; automatic
+  install is opt-in. On a multi-node pool, `ymirctl update --pool` rolls model nodes one at a time,
+  draining each first.
 - `install.sh` detects OS and arch, downloads and verifies the signed archive, installs to
   `~/.local/bin`, then runs `ymirctl setup` (skippable).
 - Backends are fetched by `weirdnet-backends` with consent (vLLM's venv is large).
@@ -1183,8 +1245,12 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M7 Split models.** Group jobs: vLLM + Ray over RoCE, llama.cpp RPC over Ethernet; big mode on
   server-a/server-b reproduced as a group job.
 - **M8 server-a/server-b migration** (steps above, each approved by m3talsmith).
-- **M9 Breadth and hardening.** Windows service, BSD packages, a security review of the roster check,
+- **M9 Breadth and hardening.** Self-update via `weirdnet-update` with rollback; push via the
+  embedded `weirdnet-push` senders (once its Weirdnet front end exists); Windows service, BSD packages, a security review of the roster check,
   role boundaries and backend ports, 1.0 criteria.
+- **M10 Cert-only server link** (Weirdnet lead). `weirdnet-sync`/`weirdnet-device-link` give service
+  nodes a node certificate and sync keys without the root seed; Ymir nodes re-link and wipe their seed
+  copies; a node can then be revoked without rotating the root identity.
 
 ## Decisions (2026-11-19)
 
@@ -1211,6 +1277,13 @@ m3talsmith answered the first round of open questions:
     app, talking only to inference nodes). Apps never call model nodes directly.
 11. **Roles are placed freely:** independent toggles per node, any combination on any device, any
     number of each; the protocol is the same local or remote, with an in-process fast path.
+12. **Root seed on service nodes (resolved 2026-11-19):** model and inference nodes get the root seed
+    through device-link for now, stored in the keyring or a 0600 file; a cert-only server link follows
+    as M10 (Weirdnet lead).
+13. **Push (resolved 2026-11-19):** `weirdnet-push`, owned by the inference node, which runs the sender
+    and holds the APNs and FCM credentials m3talsmith provides.
+14. **Updates (resolved 2026-11-19):** both. Package managers first; signed self-update with rollback
+    via `weirdnet-update`, off by default for package-manager installs unless the user opts in.
 
 ## Review by the Weirdnet lead (2026-11-19)
 
@@ -1225,17 +1298,14 @@ bridge hardening; who admits a device; and the job approval rule.
 
 ## Open questions for m3talsmith
 
-1. **Seed on service nodes:** linking a device with `weirdnet-device-link` sends the identity seed,
-   and `SyncState::new` needs it, so every model and inference node would hold m3talsmith's root seed.
-   Is that acceptable, or should `weirdnet-sync` get a cert-only server link (Weirdnet work)?
-2. **Push server:** who runs the APNs/FCM push server for alert and job wake-ups (WeirdBrains' push
-   service per AGENTS.md, or self-hosted)?
+Resolved 2026-11-19: the root seed on service nodes (decision 12), the push server (13) and updates
+(14).
+
+1. **Nodes per process:** two `weirdnet-net` nodes per process for now (recommended), or wait for
+   `weirdnet-sync` to run on an app's node? See [Weirdnet nodes per process](#weirdnet-nodes-per-process).
+2. **Private link trust:** Ray and llama.cpp RPC have no auth. Is "direct cable or isolated VLAN
+   only" acceptable, or do we need a tunnel (with the bandwidth cost)?
 3. **Relay and device-link bump:** may the Weirdnet lead release `weirdnet-relay` and
    `weirdnet-device-link` on `weirdnet-net` 0.8 and redeploy the public relay? (Gates M3, M4 and B1.)
 4. **Roster and sync group:** does Ymir share Morph's roster and sync group (same identity, one
    device list), or get its own?
-5. **Nodes per process:** two `weirdnet-net` nodes per process for now (recommended), or wait for
-   `weirdnet-sync` to run on an app's node? See [Weirdnet nodes per process](#weirdnet-nodes-per-process).
-6. **Private link trust:** Ray and llama.cpp RPC have no auth. Is "direct cable or isolated VLAN
-   only" acceptable, or do we need a tunnel (with the bandwidth cost)?
-7. **Updates:** package managers only, or `weirdnet-update` signed self-updates for the daemon?
