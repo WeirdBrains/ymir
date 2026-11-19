@@ -636,6 +636,14 @@ are stopped, not removed, until the final step.
 
 A Jan-like chat app with Weirdnet built in. It is a pool client: it never needs the bridge.
 
+**One app, two shells.** The desktop app (GPUI) and the phone app (Flutter) work exactly the same
+way. Both (1) get their models from the Ymir inference nodes and (2) send prompts across the cloud.
+All of that behaviour lives in one crate, `bragi-core`: the same discovery, the same merged model
+list, the same routing, the same streaming and cancel, the same history and pairing. Only the UI
+shell differs. Neither platform is a special case: there is no desktop-only or phone-only way of
+finding nodes, picking models or sending prompts. Anything that exists on only some devices is an
+optional extra, offered the same way on both and marked as such below.
+
 ### Same repo or its own?
 
 **Its own repo, `WeirdBrains/bragi`.** Reasons:
@@ -649,7 +657,7 @@ A Jan-like chat app with Weirdnet built in. It is a pool client: it never needs 
   `weirdnet-serve` node, not only Ymir.
 - It matches Morph and Muninn: one product per repo, with a Rust core and thin shells.
 
-### What it does
+### What it does (identical on desktop and phone)
 
 1. **Finds nodes and models:** `weirdnet-pool` discovers serving nodes the user can reach (own
    linked devices, pools they're a member of), reads capability records and merges them into **one
@@ -658,16 +666,18 @@ A Jan-like chat app with Weirdnet built in. It is a pool client: it never needs 
 2. **Sends prompts over Weirdnet** to the node the router picks, with streaming tokens, a stop
    button (cancel resets the stream), retry before the first token, and "continue on another node"
    after a failure.
-3. **Offline fallback:** with no reachable node, it runs a small local model in-process through
-   `weirdnet-model` (`llama`, Metal on iOS/macOS, Vulkan or CPU on Android), offered and downloaded
-   only with consent. The picker shows it as "On this device".
+3. **Optional extra, same on both: offline on-device model.** If the user turns it on, with no
+   reachable node `bragi-core` runs a small model in-process through `weirdnet-model` (`llama`;
+   Metal on macOS and iOS, CUDA, Vulkan or CPU elsewhere), downloaded only with consent. It is off by
+   default on every platform and shows in the same picker as "On this device". It is not how the
+   app normally works: the normal path is always the cloud.
 4. **History:** chats are stored in an encrypted `weirdnet-storage` database and synced between the
    user's linked devices with `weirdnet-sync` (an op log; messages are append-only, titles and
    settings LWW, folders and tags as OR-sets). Sync is per device-roster, end to end encrypted.
 5. **Pairing:** the first launch either links to an existing Weirdnet identity on another device
    (`weirdnet-device-link`, the QR and SAS flow) or accepts a pool invite link (`weirdnet-bragi://join/...`
    or a `weirdnet-ymir://` pool invite).
-6. Extras later: attachments (sent as content roots), agent mode through `remote::task` with
+6. Extras later, on both shells at once: attachments (sent as content roots), agent mode through `remote::task` with
    `weirdnet-agent` approvals, MCP tools through `weirdnet-mcp`.
 
 ### Stack (decided by m3talsmith): GPUI desktop, Flutter phones, one Rust core
@@ -685,11 +695,14 @@ The same shape Morph uses (`morph-core`, `morph-desktop` on GPUI, `morph-bridge`
                  └── weirdnet-pool, weirdnet-sync, weirdnet-storage, weirdnet-model, weirdnet-agent
 ```
 
-- **`bragi-core`** is the one client core: it owns the tokio runtime (one per process: the bridge
+- **`bragi-core`** is the one client core and holds all behaviour; the shells only draw it: it owns the tokio runtime (one per process: the bridge
   starts it on mobile; `bragi-desktop` starts it beside GPUI's executor, as Morph does), the Weirdnet
   node, discovery, the merged catalog, routing, streaming, history and settings. It exposes named
   actions and observable state, so menus, keybindings and both shells dispatch the same actions
   (AGENTS.md: no business logic in front ends).
+- The two shells differ only in how they reach the core: GPUI calls it in-process, Flutter through
+  the bridge. The calls, events and results are the same on both (the bridge API below is the same
+  action set GPUI dispatches).
 - **GPUI desktop** (`bragi-desktop`) links `bragi-core` directly; token streams are `futures`
   streams polled on GPUI's executor, which updates the view entity per batch of tokens.
 - **Flutter mobile** (`bragi-bridge`, thin): `flutter_rust_bridge` v2, pinned to the version Morph
@@ -707,9 +720,11 @@ The same shape Morph uses (`morph-core`, `morph-desktop` on GPUI, `morph-bridge`
   so the Dart isolate isn't flooded; backpressure is the coalescing, not dropped tokens.
 - **Cancel** from Dart calls `cancel(request_id)`, which drops the Weirdnet call (stream reset, the
   node aborts generation). Closing the Dart stream subscription does the same.
-- Lifecycle: on mobile background the core calls `Node::pause`; on resume `Node::resume`, and on
-  network change `Node::network_changed`. An in-flight answer on iOS is lost if the OS suspends the
-  app; the UI offers "continue". Push wake-ups (`weirdnet-push`) can tell the app a long job finished.
+- Lifecycle is one `bragi-core` code path for both shells: when the OS backgrounds or suspends the
+  app (minimised or sleeping laptop, backgrounded phone) the core calls `Node::pause`, on return
+  `Node::resume`, and on a network change `Node::network_changed`. If an answer is cut off, both apps
+  offer the same "continue". The OS may suspend phones sooner; that changes timing, not behaviour.
+- Optional extra on both: push wake-ups (`weirdnet-push`) to say a long job finished, off by default.
 - Errors cross as typed enums, never panics; the core catches panics at the boundary.
 
 ### Platform targets
@@ -730,20 +745,26 @@ Per the AGENTS.md matrix, as Morph's `release.toml` does:
 - F-Droid builds are reproducible with FOSS-only dependencies, no FCM (push off unless the user
   opts in to the relay wake path). The Rust core is built per ABI (`aarch64-linux-android`,
   `x86_64-linux-android`) with cargo-ndk; iOS as an XCFramework (`aarch64-apple-ios`, simulator
-  targets). In-process llama.cpp on mobile is optional per build (it adds size).
+  targets). The optional on-device model is included in every build where llama.cpp builds; a
+  slimmer build without it is allowed on any platform, and the cloud path is the same with or without.
 - Updates: Salty Gull (`salty-client`) for asset and full updates where the platform allows;
   F-Droid off by default.
 
 ### Bragi milestones
 
-- **B1 Core and desktop:** `bragi-core` + `bragi-desktop` on Linux: link to the identity, catalog
-  from one node, streaming chat with cancel, local history. Tests over `weirdnet-net` in-memory
-  transports with a fake `InferHost`.
+Every milestone ships its features in `bragi-core` for both shells; a shell lagging a milestone is
+a bug, not a design difference. The shared test suite runs against `bragi-core`, and both shells
+run the same end-to-end scenario (pair, list models, chat, cancel, continue).
+
+- **B1 Core and both shells:** `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
+  Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
+  Tests over `weirdnet-net` in-memory transports with a fake `InferHost`.
 - **B2 Pool client:** multi-node catalog, routing via `weirdnet-pool`, retries, "continue on another
-  node", stand-in and cache flags in the UI.
-- **B3 Mobile:** `bragi-bridge` + Flutter app on Android (apk, aab, F-Droid) and iOS (TestFlight).
-- **B4 Offline and sync:** on-device model fallback; history sync across linked devices.
-- **B5 Breadth:** macOS and Windows packages, BSDs where GPUI allows, agent mode and attachments.
+  node", stand-in and cache flags, in both shells.
+- **B3 Platforms:** iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
+- **B4 Sync and optional extras:** history sync across linked devices; the optional on-device model
+  and push wake-ups, on both shells.
+- **B5 Breadth:** BSDs where GPUI allows, agent mode and attachments, on both shells.
 
 ## Milestones (Ymir)
 

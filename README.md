@@ -20,6 +20,10 @@ it were one server on `localhost`.
 - Models too big for one machine can be split across nodes (big mode, generalized).
 - Redis, Caddy, Tailscale and a second node are all optional.
 
+The chat client, Bragi, has its own repo. Its desktop (GPUI) and phone (Flutter) apps work exactly
+the same way: both get their models from the Ymir nodes and send prompts across the cloud, through
+one shared Rust core. Only the UI shell differs.
+
 Generic pieces live in `weirdnet-*` crates; this repo holds only the Ymir-specific app.
 
 ## License
