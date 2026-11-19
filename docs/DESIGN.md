@@ -138,9 +138,9 @@ failure handling don't change with placement.
 
 | Pair | Protocol | Crate (owner) | Messages |
 |---|---|---|---|
-| App → Inference | `/weirdnet-agent/infer/1` (extended) and `/weirdnet-agent/catalog/1` | `weirdnet-agent` `pool` (app side, decided 2026-11-19) and `serve` host traits (inference side); Weirdnet lead | catalog query and subscribe (models, state, which are warm), infer with streaming tokens, cancel, `Queued`, embeddings, jobs, `context_ref` |
-| Inference → Model | `/weirdnet-agent/infer/1` (raw mode: fully assembled messages, `assistant_prefix`) and `/weirdnet-backends/node/1` | `weirdnet-agent` (inference), `weirdnet-backends` `node` (caps and control); Weirdnet lead | signed capability records (hardware, models, state, queue, tokens/s, warm prefixes), `Load`, `Unload`, `Drain`, `GroupUp`/`GroupDown`, health |
-| Inference ↔ Inference | `weirdnet-sync/v1` pull protocol, `/ymir/coord/1` | `weirdnet-sync` (context, pool policy, leases); Ymir (leases and placement plans) | synced context and policy; scheduler lease; placement plans |
+| App → Inference | `/weirdnet-agent/infer/2` (new version; `/1` still served) and `/weirdnet-agent/catalog/1` | `weirdnet-agent` `pool` (app side, decided 2026-11-19) and `serve` host traits (inference side); Weirdnet lead | catalog query and subscribe (models, state, which are warm), infer with streaming tokens, cancel, `Queued`, embeddings, jobs, `context_ref` |
+| Inference → Model | `/weirdnet-agent/infer/2` (raw mode: fully assembled messages, `assistant_prefix`) and `/weirdnet-backends/node/1` | `weirdnet-agent` (inference), `weirdnet-backends` `node` (caps and control); Weirdnet lead | signed capability records (hardware, models, state, queue, tokens/s, warm prefixes), `Load`, `Unload`, `Drain`, `GroupUp`/`GroupDown`, health |
+| Inference ↔ Inference | `/weirdnet/sync/2` (the `weirdnet-sync` pull protocol), `/ymir/coord/1` | `weirdnet-sync` (context, pool policy, leases); Ymir (leases and placement plans) | synced context and policy; scheduler lease; placement plans |
 | Any → any (admin) | `/ymir/control/1` | Ymir | `ymirctl` commands: status, policy edits, drain, group up/down |
 
 The model-node wrapper is generic (`weirdnet-backends::node` plus `weirdnet-agent` `InferHost`), so
@@ -151,8 +151,9 @@ pieces.
 
 One daemon, **`ymird`**, with roles switched on in `node.toml` (`[roles] model = true`,
 `inference = true`, `app = true`) or on the command line (`ymird --roles model,inference`). Each
-enabled role runs as a component in the same process and they share one `weirdnet-net` node. The app
-role inside `ymird` is the loopback OpenAI bridge. `ymirctl` is the CLI for any of them. Bragi is a
+enabled role runs as a component in the same process (see [Weirdnet nodes per process](#weirdnet-nodes-per-process)
+for how many `weirdnet-net` nodes that takes today). The app role inside `ymird` is the loopback
+OpenAI bridge. `ymirctl` is the CLI for any of them. Bragi is a
 separate app and is always an app node. The single-box quickstart enables all three roles in one
 `ymird`.
 
@@ -175,7 +176,7 @@ separate app and is always an app node. The single-box quickstart enables all th
 ```
   App nodes:  Bragi (GPUI desktop, Flutter phone) · loopback OpenAI bridge (Jan, scripts) · any weirdnet-agent app
                  └──── weirdnet-agent pool: find inference nodes, catalog, infer, cancel, resume ────┐
-                                                                                                      │ /weirdnet-agent/infer/1
+                                                                                                      │ /weirdnet-agent/infer/2
                                                                                                       │ /weirdnet-agent/catalog/1
   Inference nodes (one or more, active-active):                                                       ▼
    ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -183,7 +184,7 @@ separate app and is always an app node. The single-box quickstart enables all th
    │   and placement, cold-start stand-ins, mid-answer resume, fairness, group jobs               │
    │ weirdnet-agent context + weirdnet-sync (context, pool policy) · weirdnet-semcache · alerts   │
    └───────────────┬──────────────────────────────────────────────────────────────┬──────────────┘
-                   │ /weirdnet-agent/infer/1 (raw) · /weirdnet-backends/node/1     │
+                   │ /weirdnet-agent/infer/2 (raw) · /weirdnet-backends/node/1     │
   Model nodes:     ▼                                                               ▼
    ┌──────────────────────────────────┐                             ┌──────────────────────────────┐
    │ weirdnet-backends node wrapper:  │                             │ ...same...                   │
@@ -193,10 +194,34 @@ separate app and is always an app node. The single-box quickstart enables all th
    └──────────────────────────────────┘                             └──────────────────────────────┘
 ```
 
-Every node runs `ymird` with one `weirdnet-net` `Node` and the Ymir `Profile` (scheme
-`weirdnet-ymir://`; it bootstraps from the public WeirdBrains relay by default, and the operator can
-override that), as a systemd user or system unit, a launchd agent, or a Windows service running as
-`NT SERVICE\ymird` (AGENTS.md).
+Every device runs `ymird` as a systemd user or system unit, a launchd agent, or a Windows service
+running as `NT SERVICE\ymird` (AGENTS.md). It bootstraps from the public WeirdBrains relay by
+default, and the operator can override that.
+
+### Profiles
+
+The Ymir and Bragi `Profile`s are copies of `weirdnet_net::profile::WEIRDNET` that change **only**
+`join_link`, `answer_link` and `link_mark` (to `weirdnet-ymir://` and `weirdnet-bragi://` links).
+Every other identifier (protocol, names, certificate and offer labels, port) stays as in `WEIRDNET`.
+That is required, not a style choice: `Roster::check_caller` verifies a caller's certificate with
+`profile.verify_cert` (weirdnet-sync 0.5, `src/roster.rs`), so a device whose certs were issued under a
+different profile would not be admitted, and the apps would stop sharing one network (AGENTS.md:
+apps share one Weirdnet network and use their own protocol names).
+
+### Weirdnet nodes per process
+
+The goal is one `weirdnet-net` `Node` per `ymird`. That isn't possible with released crates:
+`weirdnet_sync::start_node` starts its own `Node` on `SYNC_PROFILE` (weirdnet-sync 0.5, `src/net.rs`),
+so context sync can't yet ride an app's node. Two options:
+
+- **A. Two nodes for now (recommended).** `ymird` (on inference nodes) and Bragi run their app node
+  and a sync node side by side under the same device identity. It works with what is published,
+  costs one extra set of connections, and doesn't block M5. Model nodes, which don't sync, have one.
+- **B. One node, after Weirdnet work.** `weirdnet-sync` learns to run its handler on an app's existing
+  `Node` (accepting `/weirdnet/sync/2` there). Cleaner, but it is new Weirdnet lead work and gates M5.
+
+We recommend A now and moving to B when `weirdnet-sync` supports it, with no protocol change. This
+is an open question for m3talsmith.
 
 ### Model node
 
@@ -243,21 +268,39 @@ reachable, model nodes keep what they have loaded and every coordinator keeps ro
 
 ### Inference protocol details
 
-`remote::infer` (streaming tokens, cancel, `Admission`/`Busy`, `RemoteModel` fallback) is extended
-for the cloud (Weirdnet lead):
+`remote::infer` (streaming tokens, cancel, `Admission`/`Busy`, `RemoteModel` fallback) gets a new
+protocol version, **`/weirdnet-agent/infer/2`** (Weirdnet lead). It can't be an in-place extension
+of `/1`: a 0.2 server would ignore `assistant_prefix` and generate the prefix again (duplicate text),
+and a 0.2 client fails on an unknown `Queued` frame. Servers serve `/1` and `/2` side by side; a
+client resumes only when the server's `Accepted` says `resume: true`.
 
-- request fields: `priority` (`interactive`, `batch`, `background`), `job_id` and `idempotency_key`,
-  a `context_ref` (conversation id and head, see [Context sync](#context-sync)) or inline messages,
-  an optional `assistant_prefix` for resume, sampling parameters and seed, `response_format`, tools.
-  The calling device is taken from the authenticated peer, never from the body;
+What `/2` adds:
+
+- request fields: `priority` (`interactive`, `batch`, `background`), a stable `job_id` plus an
+  `attempt` number, a `context_ref` (conversation id and head, see [Context sync](#context-sync)) or
+  inline messages, an optional `assistant_prefix` with its length for resume, sampling parameters and
+  seed, `response_format`, tools;
+- the caller's identity: `serve()` and `InferHost::open` receive the transport-authenticated peer
+  and its presented cert (today `open` gets only the model name), so hosts can run
+  `Roster::check_caller`, per-device fairness and role checks. Nothing about the caller is taken from
+  the body;
+- `Accepted { id, model, resume }`: `resume: true` only from servers that honour `assistant_prefix`;
+- frames: `Delta { offset, text }` (offset = characters of the answer before this delta), new
+  `Reasoning { offset, text }` and `ToolCall { index, complete call }` frames, `Usage`, `Done`;
+- `Queued { position }` before the first token, from a real priority queue on the server; each
+  `Queued` frame resets the client's accept timeout (10 s, `DEFAULT_ACCEPT_TIMEOUT`), so a queued
+  request isn't mistaken for a dead node;
 - a raw mode for inference → model calls (assembled messages only, no context lookups);
-- an `embeddings` call next to `infer`;
+- an `embeddings` call: vectors as CBOR byte strings of little-endian `f32`, streamed one item per
+  frame;
 - response metadata: served-by model node, model revision, cache hit or stand-in flag, resume
-  offsets, token counts and timings;
-- a `Queued { position }` progress frame before the first token.
+  offsets, token counts and timings.
 
-The 8 MiB frame cap stays; large inputs (attachments, documents for batch jobs) travel as
-`weirdnet-net` `content` roots fetched by whoever needs them.
+The 8 MiB frame cap stays as a guard; anything bigger (attachments, documents for batch jobs, large
+embedding inputs) travels as `weirdnet-net` `content` roots fetched by whoever needs them.
+
+`RemoteModel` keeps its current default (give up once tokens have streamed). Resume is opt-in: the
+`pool` turns it on, other apps can.
 
 **Streaming tokens:** each call is one stream, app → inference and inference → model. Tokens flow as
 frames with backpressure (the `weirdnet-net` stream window); the inference node forwards frames as
@@ -275,13 +318,17 @@ that machine's own bridge or Bragi.
 - Endpoints: `/v1/models`, `/v1/chat/completions` with SSE, `/v1/completions`, `/v1/embeddings`,
   translated to `weirdnet-agent` pool calls to inference nodes.
 - It runs inside `ymird` (app role) or alone (`ymirctl bridge`) on a laptop that runs no other role.
-- A local token, generated at setup, stored 0600 in the config dir and shown by `ymirctl bridge
-  token`, guards against other local OS users. Calls leave the machine as this device's identity.
+- A local token, generated at setup, kept in the OS keyring (not a file) and shown by `ymirctl bridge
+  token`, is required on **every** endpoint, `/v1/models` and `/metrics` included. It guards against
+  other local OS users and local web pages. Calls leave the machine as this device's identity.
+- DNS-rebinding guard: requests whose `Host` header isn't `127.0.0.1:<port>` or `localhost:<port>`
+  are refused. No CORS headers are sent, so browsers can't read responses cross-origin.
 - `/v1/models` lists the **pool's** models (the merged catalog).
 - Stateless OpenAI requests are mapped onto synced contexts by message-prefix hash, so failover works
   for them too (ephemeral retention, see Context sync).
-- Error mapping: `Busy` → 503 with `Retry-After`; stand-in answers carry `x-ymir-standin: <model>`;
-  cache hits `x-ymir-cache: hit`; resumed answers `x-ymir-resumed: <node>`.
+- Error mapping: `Busy` → 503 with `Retry-After`; stand-in answers carry `x-weirdnet-standin: <model>`;
+  cache hits `x-weirdnet-cache: hit`; resumed answers `x-weirdnet-resumed: <node>` (generic
+  `x-weirdnet-*` headers, since the bridge is a Weirdnet crate).
 
 ### Health, metrics and alerts
 
@@ -289,11 +336,14 @@ that machine's own bridge or Bragi.
   temperature (NVML, amdsmi, IOKit), unified-memory pressure, disk, queue depths, tokens/s and time to
   first token. Inference nodes add cache hit rate, context-sync lag, failovers, and peers and paths
   (direct or relayed). `ymirctl status` shows the whole pool.
-- Metrics are also available as Prometheus text on the loopback bridge (`/metrics`), optional.
-- `weirdnet-alerts` (new) runs on inference nodes (the lease holder sends, to avoid duplicates):
-  rules over health events, dedupe ("at most once an hour", plus a recovery notice, as the Wi-Fi
-  fallback alert does), and sinks: Weirdnet push to m3talsmith's devices (`weirdnet-push`), SMTP (the
-  password lives in the OS keyring, never in config) and webhooks. A model node with no inference
+- Metrics are also available as Prometheus text on the loopback bridge (`/metrics`, token required), optional.
+- `weirdnet-alerts` (new) runs on inference nodes (the lease holder sends, to avoid duplicates). It is
+  sinks plus a health rule pack built on `weirdnet-rules` 0.1.0 (conditions over an event history,
+  loop protection, schedules), not a rule engine of its own. The rules add dedupe ("at most once an
+  hour", plus a recovery notice, as the Wi-Fi fallback alert does). Sinks: SMTP (the password lives
+  in the OS keyring, never in config), webhooks, and push. A push carries only `weirdnet-push`'s
+  96-byte sealed wake payload with a reason code, so the push sink just wakes the device, which then
+  fetches the alert itself over Weirdnet. APNs and FCM need a push server (open question). A model node with no inference
   node in reach can still send its own SMTP alert if configured.
 - Built-in rules carried from server-a/server-b: backend crash loop, model load failure, node lost, **network
   degraded** (the primary interface is down and traffic is on a fallback route, i.e. the Wi-Fi
@@ -343,8 +393,10 @@ devices, link speeds; used for splitting) and what each backend can do here.
 | llama.cpp RPC (`rpc-server`) | Everywhere llama.cpp builds | Split GGUF models across mixed nodes. |
 
 There is no llama-swap backend. `weirdnet-backends` holds the per-engine adapters (launch arguments,
-readiness and health probes, request abort, slot save and restore, pinned checksummed builds per
-platform, installed with consent; vLLM in its own uv venv as `/opt/llm/vllm` today). Ymir's process
+readiness and health probes, request abort, slot save and restore, and pinned checksummed engine
+builds per platform, fetched with `weirdnet-model`'s download and `Consent` rather than a second
+downloader; vLLM in its own uv venv as `/opt/llm/vllm` today). Hardware detection in `weirdnet-model`
+`hw` doesn't depend on `llama-cpp-2`, so it works without the `llama` feature. Ymir's process
 manager decides what runs when.
 
 ### Model sizing
@@ -381,13 +433,17 @@ The pool is m3talsmith's own devices. A machine joins, in any role, by being **l
 his Weirdnet identity** (`weirdnet-device-link`, the QR offer and SAS check; it needs a bump from
 `weirdnet-net` 0.4 to 0.8 first). It then appears in the `weirdnet-sync` roster, and every node
 admits a caller only if `Roster::check_caller` says it is a linked device. `ymirctl pool link` on the
-new machine prints the offer; m3talsmith approves on any linked device, then turns on the roles it
-should run. Unlinking (revocation in the roster) cuts the device off everywhere as soon as peers see
+new machine prints the offer; **m3talsmith admits it from an existing roster device** (comparing the SAS
+code), then turns on the roles it should run. Until a roster member admits it,
+`Roster::check_caller` answers `NotAdmitted` and every node refuses it. Linking sends the identity
+seed to the new device (`weirdnet-device-link`), and `SyncState::new` needs that seed, so every
+service node holds m3talsmith's root seed today; a cert-only server link is an open question. Unlinking (revocation in the roster) cuts the device off everywhere as soon as peers see
 the roster update; `weirdnet-sync` rotates its epoch key at the same time.
 
 There are no invites, memberships or permission roles. The role toggles say what a device does,
-not what it may do. As defence in depth, a model node serves only callers that advertise the
-inference role, so apps can't bypass the coordinator by mistake.
+not what it may do. As defence in depth only, a model node serves only callers that advertise the
+inference role in `peer_apps`, so apps can't bypass the coordinator by mistake. That role is
+self-declared, so it is never the security boundary; the roster check is.
 
 Discovery uses `weirdnet-net` as it is: nodes find each other by key (`request_key`), user record and
 `peer_apps` (each node does `serve_app("ymir", …)` and lists its roles), with `PeerHint`s for LAN and
@@ -435,26 +491,30 @@ passed on and resumes from it.
 1. **Buffer what was shown.** As frames arrive, the receiver (the inference node for model-node
    streams, the app's `weirdnet-agent` pool for inference-node streams) appends their text (and
    reasoning text) to a buffer and only then forwards them. Tool-call frames are held until the call
-   is complete and never forwarded half-built. The inference node also checkpoints the buffer into
-   the synced context (every 250 ms or 64 tokens).
+   is complete and never forwarded half-built (`ToolCall` frames carry only complete calls).
 2. **Detect failure:** the stream resets, the connection drops, or no frame arrives within the stall
-   timeout (default 15 s, or 3× the recent inter-token time, whichever is larger).
+   timeout (default 15 s, or 3× the recent inter-token time, whichever is larger). The stall timeout
+   is shorter than `weirdnet-net`'s 30 s stream resume window, so on a stall the receiver sends
+   `Cancel` and resets the stream itself rather than waiting for the path to come back.
 3. **Model node died** (the common case): the inference node reruns its routing with that node
    excluded, preferring the same model and revision, then the same model at another quant, then the
    stand-in only if the policy allows (flagged), and a node that has the prefix warm. It sends the
-   same assembled messages, sampling parameters and seed, plus `assistant_prefix` = its buffer. The
+   same assembled messages, sampling parameters and seed, the same `job_id` with `attempt` + 1, plus
+   `assistant_prefix` = its buffer and its length. It only resumes on a server whose `Accepted` says
+   `resume: true`; otherwise it picks another replica. The
    model node renders the chat template with the final assistant message left open (vLLM
    `continue_final_message`, llama.cpp assistant prefill) and generates only what comes after it.
    The app sees one unbroken stream.
 4. **Inference node died:** the app's pool sends the request to another inference node with the same
    `context_ref` and `assistant_prefix` = the app's buffer. That node reads the context (synced), and
    continues as in step 3.
-5. **No duplicate tokens:** model nodes never re-emit the prefix; the receiver appends only new text
-   after its buffer. If a partial tool call was held back, the prefix ends before it and the call is
-   generated again whole. As a guard, if a resumed stream starts by repeating the tail of the prefix
-   (a token-boundary quirk), the receiver trims the overlap.
+5. **No duplicate tokens, by offsets:** every `Delta` and `Reasoning` frame carries its offset in the
+   answer. The resumed stream starts at offset = prefix length, and the receiver appends a frame only
+   if its offset equals its buffer length (it drops anything at a lower offset, and treats a gap as a
+   failure). Frames from an old attempt are recognised by `attempt` and dropped. If a partial tool call
+   was held back, the prefix ends before it and the call is generated again whole.
 6. **Limits and signalling:** up to two resumes per answer per level; the final frame's metadata
-   records each resume offset and node (`x-ymir-resumed` on the bridge), and Bragi shows a small
+   records each resume offset and node (`x-weirdnet-resumed` on the bridge), and Bragi shows a small
    "continued on server-b" note. If nothing can take it, the app gets the partial answer with a clear error.
    Sampling after a resume is a fresh draw, so the continuation is valid but not bit-identical.
 
@@ -471,9 +531,11 @@ serves inference nodes, Bragi and the bridge.
 
 All of it is generic and goes in Weirdnet crates, not Ymir:
 
-- **`weirdnet-sync`** (unchanged design, needs its net 0.8 release): HLC, the append-only op log,
-  LWW registers and OR-sets, tombstone GC, sealed pages under the roster's `SyncKey` with epoch
-  rotation, and the pull protocol.
+- **`weirdnet-sync`** 0.5 (already on `weirdnet-net` 0.8): HLC, the append-only op log, LWW registers
+  and OR-sets, tombstone GC, sealed pages under the roster's `SyncKey` with epoch rotation, chunked
+  values, and the `/weirdnet/sync/2` pull protocol. **Gap:** 0.5 has no way to drop a local copy without
+  a tombstone and no on-demand working sets; that needs a `weirdnet-sync` design (Weirdnet lead)
+  before M5. Until then inference nodes hold the full context set.
 - **`weirdnet-agent` `context` module (new):** the conversation schema as sync records, the
   `context_ref` that requests carry, assembly of a prompt from a context, the storage trait (backed
   by `weirdnet-storage` in apps) and retention rules. `weirdnet-agent` Companions (Morph) can use the
@@ -483,11 +545,11 @@ All of it is generic and goes in Weirdnet crates, not Ymir:
 
 | Item | Synced? | How |
 |---|---|---|
-| Messages (user, assistant, tool results) | Yes, text | Append-only op per message; assistant messages are written in checkpoints while streaming (every 250 ms or 64 tokens) and closed when done, so a failover target has the partial answer too. |
+| Messages (user, assistant, tool results) | Yes, text | Append-only op per message; an assistant message is written when it completes. Jobs also checkpoint per finished task. Mid-answer resume doesn't need a checkpoint: the receiver's buffer is the source. |
 | System prompt, model choice, sampling settings, title | Yes | LWW registers per conversation. |
 | Folders, tags, pins | Yes | OR-sets. |
 | Attachments | Reference synced, bytes fetched on demand | A `weirdnet-net` content root (BLAKE3) and metadata in the record; chunks are fetched by a node only when a prompt needs them, and cached locally. |
-| Retrieved context (RAG snippets, tool outputs) | Yes, as text with its source reference | Snippets up to 256 KiB inline; anything larger becomes a content root. |
+| Retrieved context (RAG snippets, tool outputs) | Yes, as text with its source reference | Stored as sync values (chunked by `weirdnet-sync` up to 16 MiB); anything larger becomes a content root. |
 | Prefix-cache hints | Yes, as small hints | Per model and tokenizer revision: block hashes of the token prefix (e.g. a hash per 256 tokens) and which nodes reported them warm. Advisory only. |
 | KV cache | **No** | Stays local on the node that computed it: it is large, and tied to the model, quant, backend and hardware. |
 | Semantic cache entries | No (separate) | Pooled by `weirdnet-semcache`, not by context sync. |
@@ -505,13 +567,14 @@ restarts).
 AGENTS.md rules out transfer size caps, so the limits are about what each device keeps, not what
 can move:
 
-- A single synced record (one message or checkpoint) stays under the sync page cap (256 KiB today);
-  longer messages are split across ops and reassembled. Bigger payloads are content roots.
+- Long values need no splitting of our own: `weirdnet-sync` sends pages of up to 112 KiB
+  (`PAGE_BUDGET`) and already splits values up to 16 MiB into BLAKE3-checked chunks. Anything bigger
+  is a content root.
 - **Clients (Bragi) keep everything** they have history for.
-- **Inference nodes keep a working set**: conversations active in the last 30 days, within a disk
-  budget (default 2 GiB of context per inference node), least recently used first out. Evicting drops
-  only the local copy (no tombstone); if it's needed again, the inference node pulls it from any
-  device that has it.
+- **Inference nodes keep a working set** (once `weirdnet-sync` supports it, see the gap above):
+  conversations active in the last 30 days, within a disk budget (default 2 GiB of context per
+  inference node), least recently used first out. Evicting drops only the local copy (no tombstone);
+  if it's needed again, the inference node pulls it from any device that has it.
 - A request whose context the inference node lacks carries the `context_ref`; it pulls missing ops
   from the caller (which always has them) before serving. Small one-off requests can carry their
   messages inline instead.
@@ -610,9 +673,14 @@ An inference node accepts a job from an app (through the `weirdnet-agent` pool):
 over a corpus given as a content root, or `remote::task` subtasks with their approvals). It fans
 them out with the same scoring at `batch` priority, with a concurrency cap per node, per-task retries
 by idempotency key, and results streamed back as they finish (or in order, on request). Cancel stops
-all of them. The job record is synced, so if its inference node dies another picks it up, and a
-laptop that submitted it can sleep while it runs. Agent subtasks keep `weirdnet-agent`'s approval and budget rules: a subtask never gains
-tools the parent didn't have.
+all of them. The job record is synced, so if its inference node dies another picks it up, and the
+laptop that submitted it can sleep while it runs.
+
+Approvals for agent subtasks: `remote::task` normally asks the submitting device, which may be
+asleep. Rule: a job declares **pre-approved tool scopes** when it is submitted (approved then, on
+that device, under `weirdnet-agent`'s policy); a subtask that needs anything outside them waits for
+approval from the submitting device up to a timeout (default 10 minutes) and is then **denied**, and
+the job carries on without it. A subtask never gains tools the parent didn't have.
 
 ### Shared semantic cache
 
@@ -621,11 +689,12 @@ tools the parent didn't have.
 - **Rules carried over from `rvl-app.py` `cacheable()`:** single user turn, text only, no tools, one
   choice; the key context is a hash of the system prompt and sampling parameters; models can opt out.
   Cosine-distance threshold **0.12** (server-a's deployed value), TTL 24 h.
-- **Local mode (default, single box):** an embedded vector index (HNSW) in an encrypted
-  `weirdnet-storage` database. Redis/RedisVL is an optional backend behind the same trait.
+- **Storage (AGENTS.md storage rule):** the crate defines a storage trait; the app owns the schema and
+  migrations. Ymir backs it with an embedded vector index (HNSW) in its own encrypted
+  `weirdnet-storage` database by default, or Redis/RedisVL.
 - Runs on inference nodes, before routing (a hit never reaches a model node).
-- **Pool mode** (several inference nodes): entries are sharded by rendezvous hashing on the model to a
-  home inference node plus one replica, so a lookup is one call. All nodes use the same embedding model and revision, pinned by
+- **Pool mode** (several inference nodes): entries are sharded by rendezvous hashing on the model plus the
+  key-context hash (system prompt and sampling parameters) to a home inference node plus one replica, so a lookup is one call. All nodes use the same embedding model and revision, pinned by
   the pool policy; a change starts a fresh cache. The pool is one owner, so entries are shared across
   all linked devices.
 - Hits are flagged to the client and can be skipped per request (`cache: false`).
@@ -701,16 +770,17 @@ hardware, not hard-coded per host).
 |---|---|
 | `weirdnet-net` 0.8.0 | node, streams, `serve_app`/`peer_apps`/`resolve_app`, key-only dialing, relays, hole punching, `content` for attachments and large inputs, `events`/`network_changed` |
 | `weirdnet-keys` 0.1.1 | node and user keys, sealing, storage keys |
-| `weirdnet-sync` 0.5.0 | device roster and `Roster::check_caller` (the only authorization), synced pool policy, and context replication (HLC, op log, LWW, OR-set, sealed pages). Its next release moves to net 0.8. |
-| `weirdnet-device-link` 0.1.0 | linking a machine to m3talsmith's identity (needs a bump to net 0.8) |
+| `weirdnet-sync` 0.5.0 | device roster and `Roster::check_caller` (the only authorization), synced pool policy, and context replication (HLC, op log, LWW, OR-set, sealed pages, chunked values). Already on net 0.8. |
+| `weirdnet-device-link` 0.1.0 | linking a machine to m3talsmith's identity. Pins `weirdnet-net =0.4.0` and `weirdnet-keys =0.1.0`: needs a release on net 0.8 (gates M3, M4 and B1). |
 | `weirdnet-agent` 0.2.0 | `remote::infer` (`InferHost`, `Admission`, `RemoteModel`), `remote::task`, `ModelBackend`; gains `pool` and `context` (below) |
 | `weirdnet-model` 0.2.1 | catalog, consent-gated download, in-process llama.cpp, CPU checks |
 | `weirdnet-storage` 0.1.0 | encrypted local databases (context replicas, cache, metrics) |
-| `weirdnet-push` | alert and wake delivery to phones |
+| `weirdnet-push` 0.1.0 | sealed 96-byte wake payloads for alerts and job completion |
+| `weirdnet-rules` 0.1.0 | the rule engine under `weirdnet-alerts` |
 | `weirdnet-schemes`, `weirdnetctl` | registering `weirdnet-ymir://` and `weirdnet-bragi://` |
 | `weirdnet-update` | signed update metadata, if Ymir self-updates (open question) |
 | `weirdnet-mcp` 0.3.0 | optional `ymirctl mcp` tools (status, load, chat) |
-| `weirdnet-relay` 0.5.0 | optional own relay (needs a bump to net 0.8) |
+| `weirdnet-relay` 0.5.0 | the public WeirdBrains relay and an optional own relay. Pins `weirdnet-net =0.4.0` and serves `/weirdnet/names/1`, while net 0.8 nodes use `/weirdnet/names/2`: needs a release on net 0.8 and a redeploy of the public relay (gates M3, M4 and B1). |
 
 No longer used by this design: `weirdnet-access`, `weirdnet-accounts` and `weirdnet-tls` (no
 roles, no API keys, no HTTPS endpoint).
@@ -718,8 +788,11 @@ roles, no API keys, no HTTPS endpoint).
 ### Extensions to existing crates (Weirdnet lead)
 
 - **`weirdnet-agent`**:
-  - `remote::infer` additions: priority, job ids, `context_ref`, `assistant_prefix`, raw mode for
-    inference → model calls, embeddings, response metadata, `Queued`.
+  - `/weirdnet-agent/infer/2` beside `/1` (see [Inference protocol details](#inference-protocol-details)):
+    priority, `job_id` + `attempt`, `context_ref`, `assistant_prefix`, `Accepted.resume`, offsets on
+    deltas, reasoning and tool-call frames, `Queued` with a real priority queue, raw mode, embeddings,
+    caller peer and cert passed to `serve()` and `InferHost::open`. `RemoteModel`'s default stays
+    "give up once tokens have streamed"; resume is opt-in.
   - **`pool` module, app side** (decided 2026-11-19, replaces the earlier `weirdnet-pool` proposal):
     find inference nodes among linked devices, query and subscribe to the catalog
     (`/weirdnet-agent/catalog/1`), send prompts with streaming and cancel, fail over between inference
@@ -729,18 +802,23 @@ roles, no API keys, no HTTPS endpoint).
   - **`serve` host traits, inference side:** the server half of the catalog and infer protocols, so a
     coordinator (Ymir's, or another app's) plugs in its routing behind them.
   - **`context` module**: the conversation schema over `weirdnet-sync`, `context_ref`, prompt
-    assembly, checkpoints, storage trait and retention.
+    assembly, job checkpoints, storage trait and retention.
+  - `pool` and `context` are **cargo features, off by default**, so `weirdnet-sync`, `weirdnet-net` and
+    libp2p don't land on Morph, `weirdnet-model` and `weirdnet-mcp` unless they ask.
 - **`weirdnet-model`**: `hw` detection, tiered catalog with memory footprints, a sizing function.
-- **`weirdnet-device-link`, `weirdnet-relay`, `weirdnet-sync`**: move to `weirdnet-net` 0.8.
+- **`weirdnet-device-link`, `weirdnet-relay`**: releases on `weirdnet-net` 0.8, and a redeploy of the
+  public relay (gate for M3, M4 and B1).
+- **`weirdnet-sync`**: running on an app's `Node` (option B above) and local eviction / on-demand
+  working sets (before M5).
 
 ### New crates proposed (Weirdnet lead)
 
 | Crate | Holds |
 |---|---|
-| `weirdnet-backends` | the **model-node wrapper**: engine adapters for llama.cpp server, vLLM, Ray and llama.cpp RPC (launch, readiness, abort, slot save and restore, pinned builds), the local supervisor (swap groups, TTL, restarts, drain), wrapping a stock server by URL, and the `/weirdnet-backends/node/1` protocol (capability records, `Load`/`Unload`/`Drain`/`GroupUp`/`GroupDown`, health). It decides nothing cloud-wide. |
-| `weirdnet-openai` | the loopback-only OpenAI-compatible bridge (an app node) over the `weirdnet-agent` pool |
-| `weirdnet-semcache` | semantic cache: rules, embedded index, optional Redis backend, sharding across inference nodes |
-| `weirdnet-alerts` | alert rules, dedupe and recovery notices, push/SMTP/webhook sinks |
+| `weirdnet-backends` | the **model-node wrapper**: engine adapters for llama.cpp server, vLLM, Ray and llama.cpp RPC (launch, readiness, abort, slot save and restore, pinned builds), the local supervisor (swap groups, TTL, restarts, drain), wrapping a stock server by URL, and the `/weirdnet-backends/node/1` protocol behind a `node` feature (capability records, `Load`/`Unload`/`Drain`/`GroupUp`/`GroupDown`, health). Engine builds come through `weirdnet-model`'s download and consent. It decides nothing cloud-wide. |
+| `weirdnet-openai` | the loopback-only OpenAI-compatible bridge (an app node) over the `weirdnet-agent` pool: token on every endpoint (kept in the keyring), `Host` check, no CORS, `x-weirdnet-*` headers |
+| `weirdnet-semcache` | semantic cache: rules, a storage trait (the app owns the schema), optional Redis backend, sharding by model + key-context hash across inference nodes |
+| `weirdnet-alerts` | sinks (SMTP, webhook, push wake) and a health rule pack with dedupe and recovery notices, on `weirdnet-rules` |
 
 ### App crates (m3talsmith and this team)
 
@@ -760,8 +838,9 @@ All crates set `license = "BSD-3-Clause"`.
   user. Noise authenticates every stream end to end, relays included.
 - **Authorization** is one check on the serving node, per call: `Roster::check_caller` must say the
   caller is a linked device. Anything else is refused before `InferHost::serve` or a control handler
-  runs. There are no permission roles, memberships, invites or API keys. On top of that, model nodes
-  serve only callers advertising the inference role, and inference nodes answer `/ymir/coord/1` only
+  runs; `serve()` and `InferHost::open` get the authenticated peer and cert to do it. There are no
+  permission roles, memberships, invites or API keys. On top of that, as defence in depth only, model
+  nodes serve only callers advertising the inference role, and inference nodes answer `/ymir/coord/1` only
   from other inference nodes. Co-located roles use the same identity and the same check on the
   in-process path.
 - **Revocation:** unlinking a device in the roster cuts it off everywhere as soon as peers see the
@@ -876,6 +955,14 @@ has `[roles] app = true` and nothing else.
   `weirdnet_release.py taur X.Y.Z --dry-run` and then for real (as Morph does: GitHub, TAUR and Nix
   channels on Linux).
 - Repos are public, licensed BSD-3-Clause (`LICENSE`, same text and holder as Morph).
+- **Coordinated Weirdnet releases** (Weirdnet lead), in order:
+  1. `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8, then redeploy the public relay
+     (it must answer `/weirdnet/names/2`). Gates M3, M4 and B1.
+  2. `weirdnet-agent` 0.3 (`infer/2`, `pool`, `context`, caller identity). `weirdnet-model` 0.2.1 and
+     `weirdnet-mcp` 0.3.0 pin `weirdnet-agent =0.2.0`, so they are released against 0.3 in the same
+     round, and Morph moves with them (its `Cargo.toml` pins `weirdnet-agent =0.1.0` today, so Morph is
+     already behind and needs the bump anyway).
+  3. The new crates (`weirdnet-backends`, `-openai`, `-semcache`, `-alerts`) as each milestone needs them.
 
 ## Migration plan for server-a/server-b
 
@@ -1001,8 +1088,9 @@ The same shape Morph uses (`morph-core`, `morph-desktop` on GPUI, `morph-bridge`
   `history_page(...)`, `pair_offer()`, `pair_accept(link)`, and settings calls. Plain data structs
   cross (frb generates Dart classes); no Weirdnet types leak to Dart.
 - **Tokens cross as `StreamSink<ChatEvent>`** (the pattern `morph-bridge` uses for its control
-  events): `ChatEvent` is `Queued{position}`, `Started{node, model, standin}`, `Delta{text}`,
-  `Usage{...}`, `Done`, or `Error{kind, partial}`. Rust coalesces deltas every ~16 ms or 32 tokens
+  events): `ChatEvent` is `Queued{position}`, `Started{node, model, standin}`,
+  `Delta{offset, text}`, `Reasoning{offset, text}`, `ToolCall{...}`, `Resumed{node, offset}`,
+  `Usage{...}`, `Done`, or `Error{kind, partial}`, mirroring the `infer/2` frames. Rust coalesces deltas every ~16 ms or 32 tokens
   so the Dart isolate isn't flooded; backpressure is the coalescing, not dropped tokens.
 - **Cancel** from Dart calls `cancel(request_id)`, which drops the Weirdnet call (stream reset, the
   node aborts generation). Closing the Dart stream subscription does the same.
@@ -1042,6 +1130,9 @@ Every milestone ships its features in `bragi-core` for both shells; a shell lagg
 a bug, not a design difference. The shared test suite runs against `bragi-core`, and both shells
 run the same end-to-end scenario (pair, list models, chat, cancel, continue).
 
+Gate: B1 needs `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8 and the redeployed
+public relay, like M3 and M4.
+
 - **B1 Core and both shells:** `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
   Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
   Tests over `weirdnet-net` in-memory transports with a fake `InferHost`.
@@ -1056,6 +1147,14 @@ run the same end-to-end scenario (pair, list models, chat, cancel, continue).
 
 Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), published, then the Ymir side.
 
+**Dependencies on Weirdnet work:**
+- **Gate for M3, M4 and B1:** `weirdnet-device-link` and `weirdnet-relay` released on `weirdnet-net` 0.8
+  and the public relay redeployed (net 0.8 uses `/weirdnet/names/2`; the relay serves `/1`).
+- **Gate for M3:** `weirdnet-agent` 0.3 with `/weirdnet-agent/infer/2`, released with
+  `weirdnet-model`, `weirdnet-mcp` and Morph (see Releases).
+- **Gate for M5:** a `weirdnet-sync` design for local eviction and on-demand working sets; and, if
+  option B is chosen, sync running on an app's `Node`.
+
 - **M0 Design (this doc).** Repo, names, decisions and roles done (2026-11-19); Weirdnet lead review.
 - **M1 Single box, all three roles in one `ymird`.** `weirdnet-model` `hw` + sizing; `weirdnet-backends`
   llama.cpp adapter and supervisor (model role); a first coordinator with catalog and routing to the
@@ -1065,13 +1164,13 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M2 Model-node parity with server-a/server-b.** vLLM adapter (CUDA 13 on sm_121), wrapping a stock server,
   swap groups and idle unload, stand-in cold start, `weirdnet-alerts` (push, SMTP, network-degraded
   rule), packages and the release script.
-- **M3 Roles over Weirdnet.** The same protocols across devices: app → inference
+- **M3 Roles over Weirdnet** (gated, see above). The same protocols across devices: app → inference
   (`weirdnet-agent` pool, catalog, infer extensions) and inference → model (`/weirdnet-backends/node/1`,
   raw infer); `Roster::check_caller`; `ymirctl` and Jan on another machine through its own bridge.
-- **M4 Several model nodes.** Linking, capability records, the merged catalog, failover before the
+- **M4 Several model nodes** (gated: device-link and relay on net 0.8). Linking, capability records, the merged catalog, failover before the
   first token, drain.
-- **M5 Context sync and failover.** `weirdnet-agent` `context` over `weirdnet-sync` (net 0.8 release):
-  messages with streaming checkpoints, system prompts, attachments as content roots, retrieved
+- **M5 Context sync and failover** (gated: the `weirdnet-sync` eviction design). `weirdnet-agent`
+  `context` over `weirdnet-sync` 0.5: messages written at completion, job checkpoints, system prompts, attachments as content roots, retrieved
   context, prefix hints; inference-node working sets and pull-on-demand; encryption at rest;
   retention and tombstones; bridge ephemeral contexts. Mid-answer resume at both levels. Exit test:
   kill a model node mid-answer, then an inference node mid-answer; each reply continues with the full
@@ -1113,8 +1212,30 @@ m3talsmith answered the first round of open questions:
 11. **Roles are placed freely:** independent toggles per node, any combination on any device, any
     number of each; the protocol is the same local or remote, with an in-process fast path.
 
+## Review by the Weirdnet lead (2026-11-19)
+
+The Weirdnet lead reviewed the doc at `cd4fe63`. This revision applies it: Profiles copy `WEIRDNET`;
+two nodes per process for now; `infer/2` beside `/1` with opt-in resume and offset-based dedupe;
+reasoning and tool-call frames; caller identity in `serve()`/`open`; a real `Queued` queue; stall
+handling vs net's 30 s resume; feature-gated `pool`/`context`; the device-link/relay gate; the
+coordinated `weirdnet-agent` 0.3 release; `weirdnet-sync` facts (`/weirdnet/sync/2`, 112 KiB pages,
+16 MiB chunked values, already on net 0.8) and its eviction gap; alerts on `weirdnet-rules` with push
+as a wake only; backend downloads through `weirdnet-model`; the semcache storage trait and shard key;
+bridge hardening; who admits a device; and the job approval rule.
+
 ## Open questions for m3talsmith
 
-1. **Private link trust:** Ray and llama.cpp RPC have no auth. Is "direct cable or isolated VLAN
+1. **Seed on service nodes:** linking a device with `weirdnet-device-link` sends the identity seed,
+   and `SyncState::new` needs it, so every model and inference node would hold m3talsmith's root seed.
+   Is that acceptable, or should `weirdnet-sync` get a cert-only server link (Weirdnet work)?
+2. **Push server:** who runs the APNs/FCM push server for alert and job wake-ups (WeirdBrains' push
+   service per AGENTS.md, or self-hosted)?
+3. **Relay and device-link bump:** may the Weirdnet lead release `weirdnet-relay` and
+   `weirdnet-device-link` on `weirdnet-net` 0.8 and redeploy the public relay? (Gates M3, M4 and B1.)
+4. **Roster and sync group:** does Ymir share Morph's roster and sync group (same identity, one
+   device list), or get its own?
+5. **Nodes per process:** two `weirdnet-net` nodes per process for now (recommended), or wait for
+   `weirdnet-sync` to run on an app's node? See [Weirdnet nodes per process](#weirdnet-nodes-per-process).
+6. **Private link trust:** Ray and llama.cpp RPC have no auth. Is "direct cable or isolated VLAN
    only" acceptable, or do we need a tunnel (with the bandwidth cost)?
-2. **Updates:** package managers only, or `weirdnet-update` signed self-updates for the daemon?
+7. **Updates:** package managers only, or `weirdnet-update` signed self-updates for the daemon?
