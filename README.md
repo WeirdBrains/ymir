@@ -34,6 +34,9 @@ Ymir-specific app.
 ## Try it (M1, from source)
 
 Needs Rust 1.99 and a `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp).
+On an NVIDIA PC, take the release's `ubuntu-cuda-12.8-x64` build and unpack its matching `cudart-`
+archive into the same directory (no CUDA toolkit needed); llama.cpp offloads all layers that fit by
+default, so `node.toml` needs only `llamacpp = "system:/path/to/llama-server"`.
 
 ```sh
 cargo build --release -p ymird -p ymirctl
