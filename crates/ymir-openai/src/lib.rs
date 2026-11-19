@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use ymir_infer::{ChatRequest, Collected, Event, InferError, Pool};
+use ymir_infer::{ChatRequest, Collected, CompletionRequest, EmbedRequest, Event, InferError, Pool, Reply};
 
 /// Where the bridge listens and the token it requires.
 #[derive(Clone)]
@@ -46,6 +46,7 @@ struct Metrics {
     requests: AtomicU64,
     errors: AtomicU64,
     cache_hits: AtomicU64,
+    standins: AtomicU64,
 }
 
 struct AppState {
@@ -81,8 +82,8 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
-        .route("/v1/completions", post(not_yet))
-        .route("/v1/embeddings", post(not_yet))
+        .route("/v1/completions", post(completions))
+        .route("/v1/embeddings", post(embeddings))
         .route("/metrics", get(metrics))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(16 << 20))
@@ -136,17 +137,14 @@ async fn not_found() -> Response {
     error(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
 }
 
-async fn not_yet() -> Response {
-    error(StatusCode::NOT_IMPLEMENTED, "not_implemented", "not available yet (Ymir M1 serves /v1/models and /v1/chat/completions)")
-}
-
 async fn metrics(State(st): State<Arc<AppState>>) -> Response {
     let m = &st.metrics;
     let body = format!(
-        "# TYPE weirdnet_bridge_requests_total counter\nweirdnet_bridge_requests_total {}\n# TYPE weirdnet_bridge_errors_total counter\nweirdnet_bridge_errors_total {}\n# TYPE weirdnet_bridge_cache_hits_total counter\nweirdnet_bridge_cache_hits_total {}\n",
+        "# TYPE weirdnet_bridge_requests_total counter\nweirdnet_bridge_requests_total {}\n# TYPE weirdnet_bridge_errors_total counter\nweirdnet_bridge_errors_total {}\n# TYPE weirdnet_bridge_cache_hits_total counter\nweirdnet_bridge_cache_hits_total {}\n# TYPE weirdnet_bridge_standin_total counter\nweirdnet_bridge_standin_total {}\n",
         m.requests.load(Ordering::Relaxed),
         m.errors.load(Ordering::Relaxed),
-        m.cache_hits.load(Ordering::Relaxed)
+        m.cache_hits.load(Ordering::Relaxed),
+        m.standins.load(Ordering::Relaxed)
     );
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
@@ -172,19 +170,17 @@ async fn models(State(st): State<Arc<AppState>>) -> Response {
     }
 }
 
-async fn chat(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
-    let body: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &format!("invalid JSON: {e}")),
-    };
-    let (req, stream) = match ChatRequest::from_openai(body) {
-        Ok(r) => r,
-        Err(e) => return infer_error(&st, &e),
-    };
-    let reply = match st.pool.chat(req).await {
-        Ok(r) => r,
-        Err(e) => return infer_error(&st, &e),
-    };
+/// `x-wait: 1` asks to wait for the requested model instead of a stand-in.
+fn wants_wait(h: &HeaderMap) -> bool {
+    h.get("x-wait").and_then(|v| v.to_str().ok()).is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
+}
+
+fn json_body(body: &Bytes) -> Result<Value, String> {
+    serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))
+}
+
+/// `x-weirdnet-*` headers for a reply.
+fn reply_headers(st: &AppState, reply: &Reply) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(&reply.model) {
         headers.insert(HeaderName::from_static("x-weirdnet-model"), v);
@@ -194,14 +190,127 @@ async fn chat(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
         headers.insert(HeaderName::from_static("x-weirdnet-cache"), HeaderValue::from_static("hit"));
     }
     if let Some(v) = reply.standin.as_deref().and_then(|s| HeaderValue::from_str(s).ok()) {
+        st.metrics.standins.fetch_add(1, Ordering::Relaxed);
         headers.insert(HeaderName::from_static("x-weirdnet-standin"), v);
     }
+    headers
+}
+
+fn usage_json(u: Option<ymir_infer::Usage>) -> Value {
+    let u = u.unwrap_or_default();
+    json!({"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens, "total_tokens": u.prompt_tokens + u.completion_tokens})
+}
+
+async fn completions(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Response {
+    let body = match json_body(&body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e),
+    };
+    let (mut req, stream) = match CompletionRequest::from_openai(body) {
+        Ok(r) => r,
+        Err(e) => return infer_error(&st, &e),
+    };
+    req.wait_for_model |= wants_wait(&h);
+    let reply = match st.pool.complete(req).await {
+        Ok(r) => r,
+        Err(e) => return infer_error(&st, &e),
+    };
+    let headers = reply_headers(&st, &reply);
+    let id = format!("cmpl-{}", random_hex(12));
+    let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let model = reply.model.clone();
+    let standin = reply.standin.clone();
+    if !stream {
+        return match ymir_infer::collect(reply.events).await {
+            Ok(c) => {
+                let mut v = json!({
+                    "id": id, "object": "text_completion", "created": created, "model": model,
+                    "choices": [{"index": 0, "text": c.text, "finish_reason": c.finish_reason.as_deref().unwrap_or("stop"), "logprobs": null}],
+                    "usage": usage_json(c.usage),
+                });
+                if let Some(s) = standin {
+                    v["weirdnet"] = json!({"standin": s});
+                }
+                (headers, axum::Json(v)).into_response()
+            }
+            Err(e) => infer_error(&st, &e),
+        };
+    }
+    let chunk = move |text: &str, finish: Option<&str>, usage: Option<Value>| -> Result<SseEvent, Infallible> {
+        let mut v = json!({"id": id, "object": "text_completion", "created": created, "model": model, "choices": [{"index": 0, "text": text, "finish_reason": finish, "logprobs": null}]});
+        if let Some(u) = usage {
+            v["usage"] = u;
+        }
+        Ok(SseEvent::default().data(v.to_string()))
+    };
+    let body = reply.events.flat_map(move |ev| {
+        let out: Vec<Result<SseEvent, Infallible>> = match ev {
+            Ok(Event::Delta { text, .. }) => vec![chunk(&text, None, None)],
+            Ok(Event::Done { finish_reason, usage }) => {
+                vec![
+                    chunk("", Some(finish_reason.as_deref().unwrap_or("stop")), usage.map(|u| usage_json(Some(u)))),
+                    Ok(SseEvent::default().data("[DONE]")),
+                ]
+            }
+            Ok(_) => Vec::new(),
+            Err(e) => vec![Ok(SseEvent::default().data(json!({"error": {"message": e.to_string(), "type": "server_error"}}).to_string()))],
+        };
+        futures::stream::iter(out)
+    });
+    (headers, Sse::new(body).keep_alive(KeepAlive::default())).into_response()
+}
+
+async fn embeddings(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+    let body = match json_body(&body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e),
+    };
+    let req = match EmbedRequest::from_openai(body) {
+        Ok(r) => r,
+        Err(e) => return infer_error(&st, &e),
+    };
+    match st.pool.embed(req).await {
+        Ok(e) => {
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::from_str(&e.model) {
+                headers.insert(HeaderName::from_static("x-weirdnet-model"), v);
+            }
+            let data: Vec<Value> = e.vectors.iter().enumerate().map(|(i, v)| json!({"object": "embedding", "index": i, "embedding": v})).collect();
+            let body = json!({"object": "list", "model": e.model, "data": data, "usage": {"prompt_tokens": e.prompt_tokens, "total_tokens": e.prompt_tokens}});
+            (headers, axum::Json(body)).into_response()
+        }
+        Err(e) => infer_error(&st, &e),
+    }
+}
+
+async fn chat(State(st): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Response {
+    let body = match json_body(&body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", &e),
+    };
+    let (mut req, stream) = match ChatRequest::from_openai(body) {
+        Ok(r) => r,
+        Err(e) => return infer_error(&st, &e),
+    };
+    req.wait_for_model |= wants_wait(&h);
+    let reply = match st.pool.chat(req).await {
+        Ok(r) => r,
+        Err(e) => return infer_error(&st, &e),
+    };
+    let headers = reply_headers(&st, &reply);
+    let standin = reply.standin.clone();
     let id = format!("chatcmpl-{}", random_hex(12));
     let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let model = reply.model.clone();
     if !stream {
         return match ymir_infer::collect(reply.events).await {
-            Ok(c) => (headers, axum::Json(completion(&id, created, &model, &c))).into_response(),
+            Ok(c) => {
+                let mut v = completion(&id, created, &model, &c);
+                if let Some(s) = standin {
+                    v["weirdnet"] = json!({"standin": s});
+                }
+                (headers, axum::Json(v)).into_response()
+            }
             Err(e) => infer_error(&st, &e),
         };
     }
@@ -281,7 +390,16 @@ fn random_hex(bytes: usize) -> String {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use ymir_infer::{BoxFuture, CatalogModel, ModelState, Reply, Usage};
+    use ymir_infer::{BoxFuture, CatalogModel, Embeddings, ModelState, Reply, Usage};
+
+    fn hello() -> ymir_infer::EventStream {
+        let evs = vec![
+            Ok(Event::Delta { offset: 0, text: "Hel".into() }),
+            Ok(Event::Delta { offset: 3, text: "lo".into() }),
+            Ok(Event::Done { finish_reason: Some("stop".into()), usage: Some(Usage { prompt_tokens: 2, completion_tokens: 2 }) }),
+        ];
+        Box::pin(futures::stream::iter(evs))
+    }
 
     struct Fake;
 
@@ -294,12 +412,23 @@ mod tests {
                 if req.model.as_deref() == Some("nope") {
                     return Err(InferError::UnknownModel("nope".into()));
                 }
-                let evs = vec![
-                    Ok(Event::Delta { offset: 0, text: "Hel".into() }),
-                    Ok(Event::Delta { offset: 3, text: "lo".into() }),
-                    Ok(Event::Done { finish_reason: Some("stop".into()), usage: Some(Usage { prompt_tokens: 2, completion_tokens: 2 }) }),
-                ];
-                Ok(Reply { model: "m".into(), node: "n".into(), cache_hit: false, standin: None, events: Box::pin(futures::stream::iter(evs)) })
+                // "big" is cold: the stand-in answers unless the caller waits.
+                if req.model.as_deref() == Some("big") && !req.wait_for_model {
+                    return Ok(Reply { model: "small".into(), node: "n".into(), cache_hit: false, standin: Some("small".into()), events: hello() });
+                }
+                Ok(Reply { model: "m".into(), node: "n".into(), cache_hit: false, standin: None, events: hello() })
+            })
+        }
+        fn complete(&self, req: CompletionRequest) -> BoxFuture<'_, Result<Reply, InferError>> {
+            Box::pin(async move {
+                assert_eq!(req.prompt, "Once");
+                Ok(Reply { model: "m".into(), node: "n".into(), cache_hit: false, standin: None, events: hello() })
+            })
+        }
+        fn embed(&self, req: EmbedRequest) -> BoxFuture<'_, Result<Embeddings, InferError>> {
+            Box::pin(async move {
+                let vectors = req.input.iter().map(|s| vec![s.len() as f32, 0.5]).collect();
+                Ok(Embeddings { model: "e".into(), node: "n".into(), vectors, prompt_tokens: 3 })
             })
         }
     }
@@ -365,6 +494,59 @@ mod tests {
         let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"model": "nope", "messages": msg})).send().await.unwrap();
         assert_eq!(r.status(), 404);
         let r = c.post(&url).bearer_auth(TOKEN).body("{").send().await.unwrap();
+        assert_eq!(r.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn standin_is_flagged_and_x_wait_opts_out() {
+        let addr = start().await;
+        let c = reqwest::Client::new();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let body = json!({"model": "big", "messages": [{"role": "user", "content": "hi"}]});
+        let r = c.post(&url).bearer_auth(TOKEN).json(&body).send().await.unwrap();
+        assert_eq!(r.headers()["x-weirdnet-standin"], "small");
+        assert_eq!(r.headers()["x-weirdnet-model"], "small");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["weirdnet"]["standin"], "small");
+        let r = c.post(&url).bearer_auth(TOKEN).header("x-wait", "1").json(&body).send().await.unwrap();
+        assert!(r.headers().get("x-weirdnet-standin").is_none());
+        let m = c.get(format!("http://{addr}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
+        assert!(m.contains("weirdnet_bridge_standin_total 1"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn completions_and_embeddings() {
+        let addr = start().await;
+        let c = reqwest::Client::new();
+        let url = format!("http://{addr}/v1/completions");
+        let v: Value = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": "Once", "max_tokens": 4})).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["object"], "text_completion");
+        assert_eq!(v["choices"][0]["text"], "Hello");
+        assert_eq!(v["usage"]["total_tokens"], 4);
+        let text = c.post(&url).bearer_auth(TOKEN).json(&json!({"prompt": "Once", "stream": true})).send().await.unwrap().text().await.unwrap();
+        assert!(text.contains("\"text\":\"Hel\""), "{text}");
+        assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+        let v: Value = c
+            .post(format!("http://{addr}/v1/embeddings"))
+            .bearer_auth(TOKEN)
+            .json(&json!({"input": ["ab", "abcd"]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["object"], "list");
+        assert_eq!(v["data"][1]["index"], 1);
+        assert_eq!(v["data"][1]["embedding"][0], 4.0);
+        assert_eq!(v["usage"]["prompt_tokens"], 3);
+        let r = c
+            .post(format!("http://{addr}/v1/embeddings"))
+            .bearer_auth(TOKEN)
+            .json(&json!({"input": "x", "encoding_format": "base64"}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 400);
     }
 }
