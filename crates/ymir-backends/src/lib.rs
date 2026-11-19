@@ -6,6 +6,6 @@ mod engine;
 mod sse;
 mod supervisor;
 
-pub use engine::{EngineConfig, EngineKind, ModelLaunch, find_in_path};
+pub use engine::{EngineConfig, EngineKind, ModelLaunch, Wrap, find_in_path};
 pub use sse::{ChunkDecoder, SseParser};
-pub use supervisor::{ModelStatus, Supervisor, SupervisorOptions};
+pub use supervisor::{ModelStatus, Supervisor, SupervisorEvent, SupervisorOptions};

@@ -97,6 +97,62 @@ pub struct ModelLaunch {
     pub swap_group: Option<String>,
     pub embedding: bool,
     pub extra_args: Vec<String>,
+    /// Unload after this long without requests; `None` keeps it loaded.
+    #[serde(default, with = "opt_secs")]
+    pub idle_ttl: Option<Duration>,
+    /// Wrap a stock server already running on loopback (such as `vllm serve` or `llama-server`
+    /// started by hand) instead of starting an engine: Ymir only probes, advertises and forwards.
+    #[serde(default)]
+    pub wrap: Option<Wrap>,
+}
+
+/// A stock OpenAI-compatible server Ymir forwards to but doesn't own.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wrap {
+    /// Base URL without `/v1`, such as `http://127.0.0.1:8000`. Must be loopback.
+    pub url: String,
+    /// The server's API key, if it wants one (read from the environment or a file by the caller).
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for Wrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wrap").field("url", &self.url).field("api_key", &self.api_key.as_ref().map(|_| "<redacted>")).finish()
+    }
+}
+
+impl Wrap {
+    /// Only loopback URLs: the wrapped server is on this machine, reached without TLS.
+    pub fn check(&self) -> Result<(), String> {
+        let rest = self.url.strip_prefix("http://").ok_or_else(|| format!("wrap url {} must start with http:// (loopback only)", self.url))?;
+        let host = match rest.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(""),
+            None => rest.split(['/', ':']).next().unwrap_or(""),
+        };
+        if matches!(host, "127.0.0.1" | "localhost" | "::1") { Ok(()) } else { Err(format!("wrap url {} is not loopback", self.url)) }
+    }
+
+    pub fn base(&self) -> String {
+        self.url.trim_end_matches('/').trim_end_matches("/v1").to_string()
+    }
+}
+
+mod opt_secs {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => s.serialize_some(&d.as_secs()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        Ok(Option::<u64>::deserialize(d)?.map(Duration::from_secs))
+    }
 }
 
 impl ModelLaunch {
@@ -111,6 +167,8 @@ impl ModelLaunch {
             swap_group: None,
             embedding: false,
             extra_args: Vec::new(),
+            idle_ttl: None,
+            wrap: None,
         }
     }
 }
@@ -153,6 +211,18 @@ mod tests {
         assert!(a.windows(2).any(|w| w == ["--alias", "qwen3-8b"]));
         assert!(a.windows(2).any(|w| w == ["--parallel", "2"]));
         assert!(!a.iter().any(|x| x == "k"), "the key stays out of argv");
+    }
+
+    #[test]
+    fn wrap_is_loopback_only() {
+        let w = |u: &str| Wrap { url: u.into(), api_key: None }.check();
+        assert!(w("http://127.0.0.1:8000").is_ok());
+        assert!(w("http://localhost:8000/").is_ok());
+        assert!(w("http://[::1]:8000").is_ok());
+        assert!(w("https://127.0.0.1:8000").is_err());
+        assert!(w("http://10.0.0.2:8000").is_err());
+        assert!(w("http://127.0.0.1.evil:8000").is_err());
+        assert_eq!(Wrap { url: "http://127.0.0.1:8000/v1/".into(), api_key: None }.base(), "http://127.0.0.1:8000");
     }
 
     #[test]

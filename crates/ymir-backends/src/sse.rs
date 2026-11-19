@@ -72,6 +72,11 @@ impl ChunkDecoder {
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.finish_reason = Some(reason.to_string());
         }
+        // `/v1/completions` chunks carry `text` instead of a delta.
+        if let Some(text) = choice.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            out.push(Event::Delta { offset: self.offset, text: text.to_string() });
+            self.offset += text.len() as u64;
+        }
         let Some(delta) = choice.get("delta") else { return Ok(out) };
         if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str).filter(|t| !t.is_empty()) {
             out.push(Event::Reasoning { offset: self.reasoning_offset, text: text.to_string() });
@@ -135,6 +140,12 @@ mod tests {
             vec![Event::Done { finish_reason: Some("stop".into()), usage: Some(Usage { prompt_tokens: 3, completion_tokens: 2 }) }]
         );
         assert!(d.finish().is_none());
+    }
+
+    #[test]
+    fn completion_chunks() {
+        let mut d = ChunkDecoder::default();
+        assert_eq!(d.decode(r#"{"choices":[{"index":0,"text":"Once"}]}"#).unwrap(), vec![Event::Delta { offset: 0, text: "Once".into() }]);
     }
 
     #[test]
