@@ -1,7 +1,7 @@
 # Ymir design
 
-Date: 2026-11-19. Status: draft for m3talsmith's review; the first round of open questions was
-answered on 2026-11-19 (see [Decisions](#decisions-2026-11-19)). Nothing is built yet.
+Date: 2026-11-19. Status: design settled; every open question was answered on 2026-11-19 (see
+[Decisions](#decisions-2026-11-19)). Nothing is built yet.
 Reference build: m3talsmith's two GB10 servers (deployment configs and a plan snapshot are kept off-repo).
 This doc follows the collective `weirdnet-agents/AGENTS.md`.
 
@@ -212,16 +212,16 @@ apps share one Weirdnet network and use their own protocol names).
 
 The goal is one `weirdnet-net` `Node` per `ymird`. That isn't possible with released crates:
 `weirdnet_sync::start_node` starts its own `Node` on `SYNC_PROFILE` (weirdnet-sync 0.5, `src/net.rs`),
-so context sync can't yet ride an app's node. Two options:
+so context sync can't yet ride an app's node.
 
-- **A. Two nodes for now (recommended).** `ymird` (on inference nodes) and Bragi run their app node
-  and a sync node side by side under the same device identity. It works with what is published,
-  costs one extra set of connections, and doesn't block M5. Model nodes, which don't sync, have one.
-- **B. One node, after Weirdnet work.** `weirdnet-sync` learns to run its handler on an app's existing
-  `Node` (accepting `/weirdnet/sync/2` there). Cleaner, but it is new Weirdnet lead work and gates M5.
+**Decided 2026-11-19 (option A):** for now a `ymird` process (and Bragi) may run **two or more**
+`weirdnet-net` nodes under the same device identity: the app node, the sync node, and more if a
+component needs its own. It works with what is published, costs extra connections, and doesn't block
+M5. A model-only `ymird`, which doesn't sync, normally has one.
 
-We recommend A now and moving to B when `weirdnet-sync` supports it, with no protocol change. This
-is an open question for m3talsmith.
+**Later (option B):** when `weirdnet-sync` can run its handler on an app's existing `Node` (accepting
+`/weirdnet/sync/2` there; Weirdnet lead work), Ymir and Bragi move to one shared node per process,
+with no protocol change.
 
 ### Model node
 
@@ -627,6 +627,34 @@ can move:
   record their source conversation). Tombstones are garbage-collected by `weirdnet-sync`'s rules.
 - "Delete everything older than N days" is a pool policy setting applied on every device.
 
+### Shared roster and sync group with Morph (decided 2026-11-19)
+
+Ymir and Bragi share Morph's roster and sync group; there is no separate Ymir device list.
+
+- **Same devices, same admission.** One roster of m3talsmith's linked devices, one `weirdnet-device-link`
+  flow, one `Roster::check_caller`. A device linked for Morph is already a Ymir device and the other way
+  round; unlinking it anywhere removes it everywhere, and the sync epoch key rotates once for all.
+  Being in the roster doesn't make a device a Ymir node: its role toggles do.
+- **Own namespace.** Ymir records use their own sync types with a `ymir.` prefix (`ymir.conversation`,
+  `ymir.message`, `ymir.attachment`, `ymir.prefix_hint`, `ymir.job`, `ymir.policy`, `ymir.placement`),
+  next to Morph's (`bookmarks`, `history`, `chats` and the rest). `weirdnet-sync` keeps per-type options
+  (`SyncState::configure`: sealing and limits), and every Ymir type is sealed. Neither app reads or writes
+  the other's types; merging Morph's `chats` with `ymir.conversation` is a possible later change, not
+  part of this design.
+- **Opt-in per device.** Each device syncs only the types it enables (as Morph's type opt-ins already
+  work). Model nodes enable none; inference nodes enable the Ymir types and not Morph's, so a GPU server
+  never holds m3talsmith's bookmarks or browsing history; Bragi devices enable the Ymir types; a desktop
+  with both apps enables both sets.
+- **Size.** Ymir context can be far larger than Morph's data. Each device's context budget
+  (`context_disk_budget`) applies to `ymir.*` types only, and Morph's own data isn't counted against it.
+  Big payloads stay out of the op log as content roots.
+- **Retention and eviction.** Ymir's retention (24 h for bridge conversations, delete-older-than in the
+  pool policy) applies only to `ymir.*` records, and its tombstones only touch Ymir records. Local
+  eviction of Ymir context (once `weirdnet-sync` supports it, before M5) never evicts Morph records.
+- **Compatibility:** Morph pins `weirdnet-sync =0.4.0` (`/weirdnet/sync/1`) today, and Ymir uses 0.5
+  (`/weirdnet/sync/2`). A device running both apps needs Morph on 0.5 before they share one sync
+  group, so Morph's sync bump joins the coordinated release round.
+
 ### One store with Bragi
 
 Bragi's chat history **is** this context store: `bragi-core` reads and writes conversations through
@@ -741,6 +769,13 @@ The pool has one user, so fairness is between **devices** and between **priority
 
 ## Splitting models across nodes (big mode, generalized)
 
+**Opt-in, not the normal way to scale** (decided 2026-11-19). Cross-machine splitting needs a private
+link: a direct cable or an isolated VLAN, like the server-a/server-b ConnectX-7 cable. That is allowed, but most
+layouts won't have one, so it is off unless a pool policy marks a model `split` and the nodes report a
+private link. The normal way to scale is routing and replication across nodes: more model nodes, more
+replicas of popular models, and cloud-wide swapping. Ray and llama.cpp RPC never run over a LAN shared
+with other devices, Wi-Fi, a tailnet or relays.
+
 On server-a/server-b, `big-mode on` stopped llama-swap on both boxes, started a Ray head and worker over the
 ConnectX-7 link (NCCL over RoCE, Ray ports 23001 and 23100-23999) and served one big model with
 vLLM. Generalized as a **group job** decided by the scheduler (the lease-holding inference node) and run by model nodes:
@@ -804,7 +839,7 @@ hardware, not hard-coded per host).
 | `weirdnet-push` 0.1.0 | sealed 96-byte wake payloads, `ReplayGuard`, and the `server` feature's APNs and FCM senders, embedded in the inference node |
 | `weirdnet-rules` 0.1.0 | the rule engine under `weirdnet-alerts` |
 | `weirdnet-schemes`, `weirdnetctl` | registering `weirdnet-ymir://` and `weirdnet-bragi://` |
-| `weirdnet-update` | signed update metadata, if Ymir self-updates (open question) |
+| `weirdnet-update` | signed update metadata for `ymird` self-update (decision 14) |
 | `weirdnet-mcp` 0.3.0 | optional `ymirctl mcp` tools (status, load, chat) |
 | `weirdnet-relay` 0.5.0 | the public WeirdBrains relay and an optional own relay. Pins `weirdnet-net =0.4.0` and serves `/weirdnet/names/1`, while net 0.8 nodes use `/weirdnet/names/2`: needs a release on net 0.8 and a redeploy of the public relay (gates M3, M4 and B1). |
 
@@ -896,7 +931,7 @@ Decided 2026-11-19: for now, model and inference nodes get m3talsmith's root ide
 - **No network listeners besides Weirdnet.** The OpenAI bridge binds `127.0.0.1` only and can't be
   configured otherwise. Backend ports (llama-server, vLLM) bind to loopback. Ray workers and
   llama.cpp RPC servers for groups bind to the private-link address only; they have no auth of their
-  own, so the private link must be a direct cable or an isolated VLAN (open question below).
+  own, so the private link must be a direct cable or an isolated VLAN (decided 2026-11-19).
 - **Prompts, answers and context** cross only Noise streams, with sync pages sealed under the
   roster's key; at rest they are in encrypted databases. Nodes don't log prompt or answer text;
   metrics carry counts and timings only.
@@ -1019,11 +1054,13 @@ has `[roles] app = true` and nothing else.
 - Repos are public, licensed BSD-3-Clause (`LICENSE`, same text and holder as Morph).
 - **Coordinated Weirdnet releases** (Weirdnet lead), in order:
   1. `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8, then redeploy the public relay
-     (it must answer `/weirdnet/names/2`). Gates M3, M4 and B1.
+     (it must answer `/weirdnet/names/2`). Gates M3, M4 and B1. Approved 2026-11-19, in progress
+     (Weirdnet lead).
   2. `weirdnet-agent` 0.3 (`infer/2`, `pool`, `context`, caller identity). `weirdnet-model` 0.2.1 and
      `weirdnet-mcp` 0.3.0 pin `weirdnet-agent =0.2.0`, so they are released against 0.3 in the same
      round, and Morph moves with them (its `Cargo.toml` pins `weirdnet-agent =0.1.0` today, so Morph is
-     already behind and needs the bump anyway).
+     already behind and needs the bump anyway). Morph also moves from `weirdnet-sync` 0.4 to 0.5 so it
+     can share the sync group with Ymir.
   3. The new crates (`weirdnet-backends`, `-openai`, `-semcache`, `-alerts`) as each milestone needs them.
 
 ## Migration plan for server-a/server-b
@@ -1193,7 +1230,7 @@ a bug, not a design difference. The shared test suite runs against `bragi-core`,
 run the same end-to-end scenario (pair, list models, chat, cancel, continue).
 
 Gate: B1 needs `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8 and the redeployed
-public relay, like M3 and M4.
+public relay, like M3 and M4. Approved 2026-11-19; **in progress, owned by the Weirdnet lead.**
 
 - **B1 Core and both shells:** `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
   Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
@@ -1210,8 +1247,9 @@ public relay, like M3 and M4.
 Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), published, then the Ymir side.
 
 **Dependencies on Weirdnet work:**
-- **Gate for M3, M4 and B1:** `weirdnet-device-link` and `weirdnet-relay` released on `weirdnet-net` 0.8
-  and the public relay redeployed (net 0.8 uses `/weirdnet/names/2`; the relay serves `/1`).
+- **Gate for M3, M4 and B1 (approved 2026-11-19; in progress, owned by the Weirdnet lead):**
+  `weirdnet-device-link` and `weirdnet-relay` released on `weirdnet-net` 0.8 and the public relay
+  redeployed (net 0.8 uses `/weirdnet/names/2`; the relay serves `/1` today).
 - **Gate for M3:** `weirdnet-agent` 0.3 with `/weirdnet-agent/infer/2`, released with
   `weirdnet-model`, `weirdnet-mcp` and Morph (see Releases).
 - **Gate for M5:** a `weirdnet-sync` design for local eviction and on-demand working sets; and, if
@@ -1284,6 +1322,16 @@ m3talsmith answered the first round of open questions:
     and holds the APNs and FCM credentials m3talsmith provides.
 14. **Updates (resolved 2026-11-19):** both. Package managers first; signed self-update with rollback
     via `weirdnet-update`, off by default for package-manager installs unless the user opts in.
+15. **Nodes per process (resolved 2026-11-19):** option A. A process may run two or more Weirdnet
+    nodes for now (app node, sync node, more if needed); one shared node once `weirdnet-sync` can run
+    on an app's node.
+16. **Private link (resolved 2026-11-19):** Ray and llama.cpp RPC run only over a private link (direct
+    cable or isolated VLAN). Allowed but not expected: cross-machine splitting is opt-in, and routing
+    and replication across nodes is the normal way to scale.
+17. **Relay and device-link bump (resolved 2026-11-19):** approved. The Weirdnet lead moves both to
+    `weirdnet-net` 0.8 and redeploys the public relay; the M3/M4/B1 gate is in progress.
+18. **Roster (resolved 2026-11-19):** Ymir shares Morph's roster and sync group, with its own `ymir.*`
+    record types.
 
 ## Review by the Weirdnet lead (2026-11-19)
 
@@ -1298,14 +1346,5 @@ bridge hardening; who admits a device; and the job approval rule.
 
 ## Open questions for m3talsmith
 
-Resolved 2026-11-19: the root seed on service nodes (decision 12), the push server (13) and updates
-(14).
-
-1. **Nodes per process:** two `weirdnet-net` nodes per process for now (recommended), or wait for
-   `weirdnet-sync` to run on an app's node? See [Weirdnet nodes per process](#weirdnet-nodes-per-process).
-2. **Private link trust:** Ray and llama.cpp RPC have no auth. Is "direct cable or isolated VLAN
-   only" acceptable, or do we need a tunnel (with the bandwidth cost)?
-3. **Relay and device-link bump:** may the Weirdnet lead release `weirdnet-relay` and
-   `weirdnet-device-link` on `weirdnet-net` 0.8 and redeploy the public relay? (Gates M3, M4 and B1.)
-4. **Roster and sync group:** does Ymir share Morph's roster and sync group (same identity, one
-   device list), or get its own?
+None. All were resolved on 2026-11-19 (decisions 1-18 above). New questions found during the build
+go here.
