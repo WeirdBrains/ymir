@@ -16,7 +16,6 @@ serde_json.workspace = true
 tokio.workspace = true
 weirdnet-model.workspace = true
 ymir-core.workspace = true
-ymir-hw.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

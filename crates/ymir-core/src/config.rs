@@ -356,7 +356,7 @@ impl NodeConfig {
                         if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }.to_string_lossy().into_owned()
                     }
                     (Some(f), EngineKind::Vllm) => f.clone(),
-                    (None, _) => match ymir_hw::find(&m.id) {
+                    (None, _) => match weirdnet_model::hw::find(&m.id) {
                         Some(e) => weirdnet_model::ModelStore::new(&dir).path(&e.spec).to_string_lossy().into_owned(),
                         None => dir.join(format!("{}.gguf", m.id)).to_string_lossy().into_owned(),
                     },

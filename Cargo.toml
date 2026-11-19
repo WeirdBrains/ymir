@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ymir-hw",
     "crates/ymir-infer",
     "crates/ymir-backends",
     "crates/ymir-openai",
@@ -24,7 +23,6 @@ authors = ["Weird Brains"]
 [workspace.dependencies]
 # Crates in this workspace. The ones marked "to be extracted" in their README are generic and move
 # to weirdnet-* crates (Weirdnet lead); app crates depend on them only through these names.
-ymir-hw = { path = "crates/ymir-hw", version = "0.1.0" }
 ymir-infer = { path = "crates/ymir-infer", version = "0.1.0" }
 ymir-backends = { path = "crates/ymir-backends", version = "0.1.0" }
 ymir-openai = { path = "crates/ymir-openai", version = "0.1.0" }
@@ -35,7 +33,11 @@ ymird = { path = "crates/ymird", version = "0.1.0" }
 ymirctl = { path = "crates/ymirctl", version = "0.1.0" }
 
 # Published Weirdnet crates, used as they are.
-weirdnet-model = { version = "=0.2.1", default-features = false }
+weirdnet-agent = { version = "=0.4.0", features = ["pool", "serve"] }
+weirdnet-device-link = "=0.3.0"
+weirdnet-model = { version = "=0.4.0", default-features = false }
+weirdnet-net = "=0.8.0"
+weirdnet-sync = "=0.5.0"
 weirdnet-rules = "=0.1.0"
 
 anyhow = "1"

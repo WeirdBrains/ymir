@@ -19,7 +19,7 @@ async fn real_llama_server_streams_an_answer() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let paths = Paths::new(dir.path());
     let mut p = setup::propose(
-        ymir_hw::detect(),
+        weirdnet_model::hw::detect(),
         &SetupOptions { llama_server: Some(server), models: vec![gguf], bridge_port: Some(0), ..Default::default() },
     );
     p.config.model.local[0].context = Some(2048);

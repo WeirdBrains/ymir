@@ -1904,9 +1904,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-model"
-version = "0.2.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "949632453b9295fe95c55c626048bf8c70e2c593c91629a1c6dace8b5bc3c35e"
+checksum = "a34f22e34dd1029522eeefe3e4d152f0fcd2ff551b7153b0e75eecbfb58cc497"
 dependencies = [
  "dirs",
  "minijinja",
@@ -2154,19 +2154,9 @@ dependencies = [
  "weirdnet-model",
  "ymir-alerts",
  "ymir-backends",
- "ymir-hw",
  "ymir-infer",
  "ymir-openai",
  "ymir-semcache",
-]
-
-[[package]]
-name = "ymir-hw"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "weirdnet-model",
 ]
 
 [[package]]
@@ -2215,10 +2205,10 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "weirdnet-model",
  "ymir-alerts",
  "ymir-backends",
  "ymir-core",
- "ymir-hw",
  "ymir-infer",
  "ymirctl",
 ]
@@ -2234,7 +2224,6 @@ dependencies = [
  "tokio",
  "weirdnet-model",
  "ymir-core",
- "ymir-hw",
 ]
 
 [[package]]

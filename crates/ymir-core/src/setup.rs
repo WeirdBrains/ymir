@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
+use weirdnet_model::hw::{Budget, CatalogEntry, Hardware, Plan};
 use ymir_backends::find_in_path;
-use ymir_hw::{Budget, CatalogEntry, Hardware, Plan};
 
 use crate::config::{LocalModel, NodeConfig, Roles};
 
@@ -35,11 +35,15 @@ pub struct Proposal {
 }
 
 pub fn budget(hw: &Hardware, opts: &SetupOptions) -> Budget {
-    ymir_hw::budget(hw, opts.memory_budget.as_deref().and_then(ymir_hw::parse_size), opts.reserve.as_deref().and_then(ymir_hw::parse_size))
+    weirdnet_model::hw::budget(
+        hw,
+        opts.memory_budget.as_deref().and_then(weirdnet_model::hw::parse_size),
+        opts.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
+    )
 }
 
 pub fn propose(hw: Hardware, opts: &SetupOptions) -> Proposal {
-    let plan = ymir_hw::plan(&hw, budget(&hw, opts));
+    let plan = weirdnet_model::hw::plan(&hw, budget(&hw, opts));
     let mut cfg = NodeConfig::default();
     cfg.node.name = opts.name.clone().unwrap_or_else(hostname);
     cfg.roles = Roles::ALL;
@@ -120,7 +124,7 @@ pub fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ymir_hw::{GIB, parse_nvidia_smi};
+    use weirdnet_model::hw::{GIB, parse_nvidia_smi};
 
     fn nvidia_pc() -> Hardware {
         Hardware {

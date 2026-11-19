@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
+use weirdnet_model::hw::human_gib;
 use ymir_core::client::BridgeClient;
 use ymir_core::config::Roles;
 use ymir_core::control::{self, ControlRequest, ModelState, StatusReport};
 use ymir_core::setup::{self, SetupOptions};
 use ymir_core::{NodeConfig, Paths};
-use ymir_hw::human_gib;
 
 #[derive(Parser, Debug)]
 #[command(name = "ymirctl", version, about = "Ymir: a private cloud of LLM models on your own machines")]
@@ -202,8 +202,8 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
 }
 
 fn hw(out: &mut dyn Write, json: bool) -> Result<()> {
-    let hw = ymir_hw::detect();
-    let b = ymir_hw::budget(&hw, None, None);
+    let hw = weirdnet_model::hw::detect();
+    let b = weirdnet_model::hw::budget(&hw, None, None);
     if json {
         writeln!(out, "{}", serde_json::to_string_pretty(&json!({"hardware": hw, "budget": b}))?)?;
         return Ok(());
@@ -211,7 +211,7 @@ fn hw(out: &mut dyn Write, json: bool) -> Result<()> {
     print_hw(out, &hw, &b)
 }
 
-fn print_hw(out: &mut dyn Write, hw: &ymir_hw::Hardware, b: &ymir_hw::Budget) -> Result<()> {
+fn print_hw(out: &mut dyn Write, hw: &weirdnet_model::hw::Hardware, b: &weirdnet_model::hw::Budget) -> Result<()> {
     writeln!(out, "Machine: {} {}, {} CPU threads, {} RAM", hw.os, hw.arch, hw.cpu_threads, human_gib(hw.ram_bytes))?;
     if hw.gpus.is_empty() {
         writeln!(out, "Accelerator: none found (CPU only)")?;
@@ -253,7 +253,7 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
         models_dir: args.models_dir,
         bridge_port: args.port,
     };
-    let mut p = setup::propose(ymir_hw::detect(), &opts);
+    let mut p = setup::propose(weirdnet_model::hw::detect(), &opts);
     if let Some(r) = &args.roles {
         p.config.roles = Roles::parse(r)?;
     }
@@ -275,7 +275,7 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     }
     writeln!(out, "Models:")?;
     for m in &p.config.model.local {
-        let size = ymir_hw::find(&m.id).map(|e| format!(" ({})", weirdnet_model::human(e.spec.size))).unwrap_or_default();
+        let size = weirdnet_model::hw::find(&m.id).map(|e| format!(" ({})", weirdnet_model::human(e.spec.size))).unwrap_or_default();
         let missing = if p.to_download.iter().any(|e| e.spec.id == m.id) { ", not downloaded" } else { "" };
         writeln!(out, "  {} [{}]{size}{missing}", m.id, m.role.as_deref().unwrap_or("chat"))?;
     }
