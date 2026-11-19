@@ -6,6 +6,10 @@ conflict. Read it first. This file only adds Ymir-specific rules.
 - Ymir is an app. App crates are `ymir-*` (`ymir-core`, `ymird`, `ymirctl`) and hold only Ymir-specific
   code. Networking, auth, routing, scheduling, backends, caching, the OpenAI bridge and alerts belong
   in `weirdnet-*` crates (see `docs/DESIGN.md`, "Crates"). Never reimplement them here.
+- Ymir has three roles (model, inference, app) that are independent toggles in `node.toml` and run in
+  one `ymird`. Keep the protocols identical whether a peer is local or remote; the in-process path is
+  only a fast path. Apps never talk to model nodes directly.
+- Licensed BSD-3-Clause (`LICENSE`); every crate sets `license = "BSD-3-Clause"`.
 - Protocol ids are `/ymir/...` for app protocols. The URL scheme is `weirdnet-ymir://`, registered in
   `weirdnet-schemes`. Never use bare `weirdnet://`.
 - The reference deployment is m3talsmith's two GB10 servers (configs on the dev box in `the deployment config directory`).

@@ -4,28 +4,32 @@
 more over Weirdnet. The pool acts as one endpoint, and the models are spread across it.
 
 > Status: design only (2026-11-19). Nothing here runs yet. Read [docs/DESIGN.md](docs/DESIGN.md).
-> "Ymir" is a working name; see the naming options in the design doc.
 
 Ymir turns a computer with a decent GPU (a DGX Spark, a gaming PC, a Mac, a workstation, or a
-CPU-only box) into an LLM serving node with one command. Nodes join each other over
-[Weirdnet](https://net.weirdbrains.com) peer to peer, with no open HTTPS port, no reverse proxy
-and no shared API keys. Your Weirdnet identity and device roster decide who can use the pool.
-A local OpenAI-compatible bridge lets Jan, editors, scripts and agents use the whole pool as if
-it were one server on `localhost`.
+CPU-only box) into part of your own model cloud with one command. Machines join over
+[Weirdnet](https://net.weirdbrains.com) peer to peer by being linked to your Weirdnet identity:
+no open HTTPS port, no reverse proxy, no API keys. Only your own linked devices can use the pool.
 
-- Single node first: hardware detection, a backend that fits (llama.cpp everywhere, vLLM where it
-  is supported) and models sized to your VRAM or unified memory.
-- Grow when you want: invite a node or link one of your own devices. The pool balances requests
-  by load, places and replicates models, splits batch and agent jobs, and shares a semantic cache.
-- Models too big for one machine can be split across nodes (big mode, generalized).
-- Redis, Caddy, Tailscale and a second node are all optional.
+Three roles, placed freely (all on one box, or spread over any number of devices):
 
-The chat client, Bragi, has its own repo. Its desktop (GPUI) and phone (Flutter) apps work exactly
-the same way: both get their models from the Ymir nodes and send prompts across the cloud, through
-one shared Rust core. Only the UI shell differs.
+- **Model nodes** run the models (llama.cpp everywhere, vLLM where supported, or a stock server
+  wrapped), advertise what they have, and load or unload on command.
+- **Inference nodes** coordinate: one model catalog, load balancing, placement and cloud-wide model
+  swapping, automatic mid-answer failover, and conversation context synced with `weirdnet-sync`.
+  Run more than one for redundancy.
+- **App nodes** ask for models and send prompts: Bragi, `ymirctl`, the loopback-only OpenAI bridge
+  for Jan and scripts on `127.0.0.1`, or any `weirdnet-agent` app.
 
-Generic pieces live in `weirdnet-*` crates; this repo holds only the Ymir-specific app.
+Redis, Tailscale and a second machine are all optional. Models too big for one machine can be split
+across several (big mode, generalized).
+
+The chat client, **Bragi**, has its own repo. Its desktop (GPUI) and phone (Flutter) apps work exactly
+the same way: both get their models from the Ymir cloud and send prompts across it, through one
+shared Rust core. Only the UI shell differs.
+
+Generic pieces live in `weirdnet-*` crates (owned by the Weirdnet lead); this repo holds only the
+Ymir-specific app.
 
 ## License
 
-BSD-3-Clause (proposed; see the open questions in the design doc).
+BSD-3-Clause. See [LICENSE](LICENSE).
