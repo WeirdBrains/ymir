@@ -7,6 +7,8 @@ members = [
     "crates/ymir-openai",
     "crates/ymir-semcache",
     "crates/ymir-core",
+    "crates/ymird",
+    "crates/ymirctl",
 ]
 
 [workspace.package]
@@ -26,6 +28,8 @@ ymir-backends = { path = "crates/ymir-backends", version = "0.1.0" }
 ymir-openai = { path = "crates/ymir-openai", version = "0.1.0" }
 ymir-semcache = { path = "crates/ymir-semcache", version = "0.1.0" }
 ymir-core = { path = "crates/ymir-core", version = "0.1.0" }
+ymird = { path = "crates/ymird", version = "0.1.0" }
+ymirctl = { path = "crates/ymirctl", version = "0.1.0" }
 
 # Published Weirdnet crates, used as they are.
 weirdnet-model = { version = "=0.2.1", default-features = false }

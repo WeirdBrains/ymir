@@ -1,0 +1,21 @@
+[package]
+name = "ymird"
+description = "The Ymir daemon: runs the model, inference and app roles that node.toml turns on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ymir-core.workspace = true
+
+[lints]
+workspace = true
