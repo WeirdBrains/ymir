@@ -6,6 +6,7 @@ members = [
     "crates/ymir-backends",
     "crates/ymir-openai",
     "crates/ymir-semcache",
+    "crates/ymir-alerts",
     "crates/ymir-core",
     "crates/ymird",
     "crates/ymirctl",
@@ -28,19 +29,23 @@ ymir-infer = { path = "crates/ymir-infer", version = "0.1.0" }
 ymir-backends = { path = "crates/ymir-backends", version = "0.1.0" }
 ymir-openai = { path = "crates/ymir-openai", version = "0.1.0" }
 ymir-semcache = { path = "crates/ymir-semcache", version = "0.1.0" }
+ymir-alerts = { path = "crates/ymir-alerts", version = "0.1.0" }
 ymir-core = { path = "crates/ymir-core", version = "0.1.0" }
 ymird = { path = "crates/ymird", version = "0.1.0" }
 ymirctl = { path = "crates/ymirctl", version = "0.1.0" }
 
 # Published Weirdnet crates, used as they are.
 weirdnet-model = { version = "=0.2.1", default-features = false }
+weirdnet-rules = "=0.1.0"
 
 anyhow = "1"
 axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 futures = "0.3"
 getrandom = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "hostname"] }
 libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }

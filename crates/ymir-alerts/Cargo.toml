@@ -1,0 +1,29 @@
+[package]
+name = "ymir-alerts"
+description = "Node health alerts: weirdnet-rules rule packs, dedupe and recovery, SMTP, webhook and push sinks. To be extracted into weirdnet-alerts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+futures.workspace = true
+lettre.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+weirdnet-rules.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
