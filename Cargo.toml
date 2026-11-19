@@ -4,6 +4,7 @@ members = [
     "crates/ymir-hw",
     "crates/ymir-infer",
     "crates/ymir-backends",
+    "crates/ymir-openai",
     "crates/ymir-semcache",
 ]
 
