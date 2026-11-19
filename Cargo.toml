@@ -9,6 +9,7 @@ members = [
     "crates/ymir-core",
     "crates/ymird",
     "crates/ymirctl",
+    "crates/ymir-testkit",
 ]
 
 [workspace.package]

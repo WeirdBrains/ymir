@@ -1,0 +1,92 @@
+//! A stand-in for `llama-server`: same flags and endpoints, canned answers.
+//!
+//! Answers "Hello from <alias>! You said: <last user message>" word by word. `/health` says 503
+//! for `YMIR_MOCK_LOAD_MS` (default 200) after start, like a model loading.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use serde_json::{Value, json};
+
+struct Mock {
+    alias: String,
+    key: Option<String>,
+    ready_at: Instant,
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let host = flag("--host").unwrap_or_else(|| "127.0.0.1".into());
+    let port: u16 = flag("--port").and_then(|p| p.parse().ok()).unwrap_or(8080);
+    let alias = flag("--alias").or_else(|| flag("--model")).unwrap_or_else(|| "mock".into());
+    let load_ms = std::env::var("YMIR_MOCK_LOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    assert_eq!(host, "127.0.0.1", "engines must bind loopback only");
+    let st = Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), ready_at: Instant::now() + Duration::from_millis(load_ms) });
+    let app = Router::new().route("/health", get(health)).route("/v1/models", get(models)).route("/v1/chat/completions", post(chat)).with_state(st);
+    let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await.expect("bind");
+    eprintln!("mock engine listening on {host}:{port}");
+    axum::serve(listener, app).await.expect("serve");
+}
+
+async fn health(State(st): State<Arc<Mock>>) -> Response {
+    if Instant::now() < st.ready_at {
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({"error": {"message": "Loading model", "code": 503}}))).into_response();
+    }
+    axum::Json(json!({"status": "ok"})).into_response()
+}
+
+fn authorized(st: &Mock, headers: &HeaderMap) -> bool {
+    match &st.key {
+        None => true,
+        Some(k) => headers.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {k}")),
+    }
+}
+
+async fn models(State(st): State<Arc<Mock>>) -> Response {
+    axum::Json(json!({"object": "list", "data": [{"id": st.alias, "object": "model"}]})).into_response()
+}
+
+async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {
+    if !authorized(&st, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response();
+    }
+    if body["model"].as_str() != Some(st.alias.as_str()) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("unknown model {}", body["model"])}}))).into_response();
+    }
+    let said = body["messages"]
+        .as_array()
+        .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let answer = format!("Hello from {}! You said: {said}", st.alias);
+    let words: Vec<String> = answer.split_inclusive(' ').map(str::to_string).collect();
+    let n = words.len() as u64;
+    let alias = st.alias.clone();
+    let chunk = move |delta: Value, finish: Option<&str>| json!({"object": "chat.completion.chunk", "model": alias, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]});
+    let mut events: Vec<Value> = vec![chunk(json!({"role": "assistant", "content": null}), None)];
+    events.extend(words.into_iter().map(|w| chunk(json!({"content": w}), None)));
+    events.push(chunk(json!({}), Some("stop")));
+    events.push(
+        json!({"object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": n, "total_tokens": 5 + n}}),
+    );
+    let stream = futures::stream::unfold((events.into_iter(), false), |(mut it, done)| async move {
+        if done {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        match it.next() {
+            Some(v) => Some((Ok::<_, std::convert::Infallible>(Event::default().data(v.to_string())), (it, false))),
+            None => Some((Ok(Event::default().data("[DONE]")), (it, true))),
+        }
+    });
+    Sse::new(stream).into_response()
+}

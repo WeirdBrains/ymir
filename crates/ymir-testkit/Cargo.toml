@@ -1,0 +1,34 @@
+[package]
+name = "ymir-testkit"
+description = "Test support for Ymir: a mock llama-server and the end-to-end tests. Never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "ymir-mock-engine"
+path = "src/bin/ymir-mock-engine.rs"
+test = false
+
+[dependencies]
+axum.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+clap.workspace = true
+ymir-hw.workspace = true
+ymir-core.workspace = true
+ymirctl.workspace = true
+
+[lints]
+workspace = true
