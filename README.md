@@ -3,8 +3,9 @@
 **A cloud of LLM models: a private, self-hosted model cloud.** Start with one machine. Add
 more over Weirdnet. The pool acts as one endpoint, and the models are spread across it.
 
-> Status: M1 (2026-11-19): one box runs all three roles in one `ymird`. Roles over Weirdnet,
-> more machines and context sync come next. Read [docs/DESIGN.md](docs/DESIGN.md).
+> Status: M2 (2026-11-19): one box runs all three roles in one `ymird`, with llama.cpp and vLLM
+> (managed or a wrapped stock server), stand-in cold start, idle unload, crash backoff, alerts and a
+> user service. Roles over Weirdnet (M3), more machines and context sync come next. Read [docs/DESIGN.md](docs/DESIGN.md).
 
 Ymir turns a computer with a decent GPU (a DGX Spark, a gaming PC, a Mac, a workstation, or a
 CPU-only box) into part of your own model cloud with one command. Machines join over
@@ -31,7 +32,7 @@ shared Rust core. Only the UI shell differs.
 Generic pieces live in `weirdnet-*` crates (owned by the Weirdnet lead); this repo holds only the
 Ymir-specific app.
 
-## Try it (M1, from source)
+## Try it (from source)
 
 Needs Rust 1.99 and a `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp).
 On an NVIDIA PC, take the release's `ubuntu-cuda-12.8-x64` build and unpack its matching `cudart-`
@@ -48,13 +49,48 @@ ymirctl chat "Hello"                         # streams through the loopback brid
 ymirctl status                               # roles, models and their state
 ymirctl load <model> / ymirctl unload <model>
 ymirctl bridge token                         # API key for Jan: base URL http://127.0.0.1:8484/v1
+ymirctl service install                      # or `setup --service`: a systemd user unit / launchd agent
 ```
+
+The bridge serves `/v1/models`, `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`.
+While a big model loads, a stand-in can answer (flagged with `x-weirdnet-standin`; send
+`x-wait: true`, or `ymirctl chat --wait`, to wait for the real model). Some `node.toml` settings:
+
+```toml
+[[model.local]]
+id = "qwen3-8b"
+swap_group = "main"
+idle_ttl = "10m"                      # unload when idle
+
+[[model.local]]
+id = "smollm2-360m"
+role = "standin"                      # answers while the main model cold-starts
+
+[[model.local]]
+id = "qwen2.5-7b"
+backend = "vllm"
+wrap = "http://127.0.0.1:8000/v1"     # a stock server Ymir didn't start (loopback only)
+wrap_api_key = "env:VLLM_API_KEY"     # secrets are env: or file: references, never inline
+
+[inference.alerts]
+dry_run = true                        # log what would be sent
+[inference.alerts.smtp]
+server = "smtp.example.com"
+from = "Ymir <alerts@example.com>"
+to = ["you@example.com"]
+password = "file:/home/you/.config/ymir/smtp.pass"
+```
+
+A chat GGUF used for embeddings needs `args = ["--pooling", "mean"]` on llama-server.
+
+Linux packages (tar.gz, zip, .deb, and the `ymir-bin` TAUR package) are built with
+`scripts/package.py` from release binaries; see `release.toml` for the platform matrix.
 
 `YMIR_HOME` moves the config and state (default `~/.config/ymir`); `WEIRDNET_MODELS_DIR` moves the
 model files.
 
 Crates: `ymir-core`, `ymird`, `ymirctl` (the app), plus interim generic crates that move to
-`weirdnet-*` later: `ymir-hw`, `ymir-backends`, `ymir-openai`, `ymir-semcache`, `ymir-infer`.
+`weirdnet-*` later: `ymir-hw`, `ymir-backends`, `ymir-openai`, `ymir-semcache`, `ymir-infer`, `ymir-alerts`.
 
 ## License
 

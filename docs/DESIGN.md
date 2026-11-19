@@ -275,6 +275,12 @@ of `/1`: a 0.2 server would ignore `assistant_prefix` and generate the prefix ag
 and a 0.2 client fails on an unknown `Queued` frame. Servers serve `/1` and `/2` side by side; a
 client resumes only when the server's `Accepted` says `resume: true`.
 
+**Approved for M3 (2026-11-19):** `infer/2` is CBOR throughout (requests and every frame), while
+`infer/1` stays JSON as it is. `weirdnet-agent`'s core is transport-neutral: a `Caller` (the
+authenticated peer and its cert, or "local" for the in-process path) plus an `authorize` hook the
+host implements (Ymir's runs `Roster::check_caller`), so the same server code runs over Weirdnet and
+in process. Ymir moves from `ymir-infer`'s request types to agent's in M3.
+
 What `/2` adds:
 
 - request fields: `priority` (`interactive`, `batch`, `background`), a stable `job_id` plus an
@@ -829,23 +835,23 @@ hardware, not hard-coded per host).
 
 ## Crates
 
-### Existing, reused (versions as of 2026-11-19; all 0.x and unaudited)
+### Existing, reused (versions as of 2026-11-19, rechecked after M2; all 0.x and unaudited)
 
 | Crate | Used for |
 |---|---|
 | `weirdnet-net` 0.8.0 | node, streams, `serve_app`/`peer_apps`/`resolve_app`, key-only dialing, relays, hole punching, `content` for attachments and large inputs, `events`/`network_changed` |
 | `weirdnet-keys` 0.1.1 | node and user keys, sealing, storage keys |
-| `weirdnet-sync` 0.5.0 | device roster and `Roster::check_caller` (the only authorization), synced pool policy, and context replication (HLC, op log, LWW, OR-set, sealed pages, chunked values). Already on net 0.8. |
-| `weirdnet-device-link` 0.1.0 | linking a machine to m3talsmith's identity. Pins `weirdnet-net =0.4.0` and `weirdnet-keys =0.1.0`: needs a release on net 0.8 (gates M3, M4 and B1). |
-| `weirdnet-agent` 0.2.0 | `remote::infer` (`InferHost`, `Admission`, `RemoteModel`), `remote::task`, `ModelBackend`; gains `pool` and `context` (below) |
-| `weirdnet-model` 0.2.1 | catalog, consent-gated download, in-process llama.cpp, CPU checks |
+| `weirdnet-sync` 0.5.0 | device roster and `Roster::check_caller` (already in 0.5.0; the only authorization), synced pool policy, and context replication (HLC, op log, LWW, OR-set, sealed pages, chunked values). Already on net 0.8. |
+| `weirdnet-device-link` 0.3.0 | linking a machine to m3talsmith's identity. On `weirdnet-net =0.8.0` (the M3/M4/B1 gate's device-link half is released). |
+| `weirdnet-agent` 0.3.0 | `remote::infer` on `/weirdnet-agent/infer/1` (`InferHost`, `Admission`, `RemoteModel`), `remote::task`, `ModelBackend`. 0.4.0 adds `infer/2`, `pool` and `context` (below) and is the M3 gate. |
+| `weirdnet-model` 0.2.1 (Ymir M1/M2 pin; 0.3.0 is out on agent =0.3.0, 0.4.0 comes with agent 0.4.0) | catalog, consent-gated download, in-process llama.cpp, CPU checks |
 | `weirdnet-storage` 0.1.0 | encrypted local databases (context replicas, cache, metrics) |
 | `weirdnet-push` 0.1.0 | sealed 96-byte wake payloads, `ReplayGuard`, and the `server` feature's APNs and FCM senders, embedded in the inference node |
 | `weirdnet-rules` 0.1.0 | the rule engine under `weirdnet-alerts` |
 | `weirdnet-schemes`, `weirdnetctl` | registering `weirdnet-ymir://` and `weirdnet-bragi://` |
 | `weirdnet-update` | signed update metadata for `ymird` self-update (decision 14) |
-| `weirdnet-mcp` 0.3.0 | optional `ymirctl mcp` tools (status, load, chat) |
-| `weirdnet-relay` 0.5.0 | the public WeirdBrains relay and an optional own relay. Pins `weirdnet-net =0.4.0` and serves `/weirdnet/names/1`, while net 0.8 nodes use `/weirdnet/names/2`: needs a release on net 0.8 and a redeploy of the public relay (gates M3, M4 and B1). |
+| `weirdnet-mcp` 0.4.0 (on agent =0.3.0; 0.5.0 comes with agent 0.4.0) | optional `ymirctl mcp` tools (status, load, chat) |
+| `weirdnet-relay` 0.6.0 | the public WeirdBrains relay and an optional own relay. On `weirdnet-net =0.8.0`; the public relay runs 0.6.0 (weirdnet-relay `07f1162`). |
 
 No longer used by this design: `weirdnet-access`, `weirdnet-accounts` and `weirdnet-tls` (no
 roles, no API keys, no HTTPS endpoint).
@@ -900,10 +906,14 @@ a rename plus a dependency swap. All are `publish = false`.
 | Interim crate | To be extracted into | Holds |
 |---|---|---|
 | `ymir-hw` | `weirdnet-model` (`hw` module, tiered catalog, sizing) | detection (NVIDIA via `nvidia-smi`, AMD sysfs, Apple `sysctl`, `/proc/meminfo`; GB10 as unified), the usable budget, a tiered catalog of `weirdnet_model::ModelSpec`s with footprints, `plan()` |
-| `ymir-backends` | `weirdnet-backends` | llama-server and vLLM adapters, the local supervisor (load, readiness, drain, unload, swap groups, crash detection, logs), SSE decoding |
+| `ymir-backends` | `weirdnet-backends` (the Weirdnet lead extracts it into a new repo after M2) | llama-server and vLLM adapters, wrapping a stock server on loopback, the local supervisor (load, readiness, drain, unload, swap groups, idle TTL, crash backoff and crash loops, `SupervisorEvent`s, logs), chat/completions/embeddings forwarding, SSE decoding. M2 changes are done. |
 | `ymir-openai` | `weirdnet-openai` | the loopback-only bridge (token on every endpoint, `Host` check, no CORS, `x-weirdnet-*` headers) |
 | `ymir-semcache` | `weirdnet-semcache` | the `AnswerCache` seam and an exact-match placeholder |
-| `ymir-infer` | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits) | `ChatRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
+| `ymir-infer` | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits); Ymir moves to agent's request types in M3 | `ChatRequest`, `CompletionRequest`, `EmbedRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
+| `ymir-alerts` | `weirdnet-alerts` (the Weirdnet lead extracts it later) | observations, `weirdnet-rules` `RuleSpec`s with `fail`/`ok`/`event` actions, the server-a/server-b rule pack, hourly dedupe with recovery notices, SMTP (lettre), webhook, push (off) and log sinks with dry-run, route/disk/GPU probes |
+
+Also generic but small, in `ymir-core` for now: `service` (systemd user unit and launchd agent
+install) and `health` (feeding supervisor events and probes to the alerter).
 
 Trait seams that stay in `ymir-core` until their protocol exists: `ModelNode` (becomes the
 `/weirdnet-backends/node/1` client plus raw infer/2 in M3) and the control socket (the local transport
@@ -1078,12 +1088,11 @@ has `[roles] app = true` and nothing else.
 - Repos are public, licensed BSD-3-Clause (`LICENSE`, same text and holder as Morph).
 - **Coordinated Weirdnet releases** (Weirdnet lead), in order:
   1. `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8, then redeploy the public relay
-     (it must answer `/weirdnet/names/2`). Gates M3, M4 and B1. Approved 2026-11-19, in progress
-     (Weirdnet lead).
-  2. `weirdnet-agent` 0.3 (`infer/2`, `pool`, `context`, caller identity). `weirdnet-model` 0.2.1 and
-     `weirdnet-mcp` 0.3.0 pin `weirdnet-agent =0.2.0`, so they are released against 0.3 in the same
-     round, and Morph moves with them (its `Cargo.toml` pins `weirdnet-agent =0.1.0` today, so Morph is
-     already behind and needs the bump anyway; Morph Dev has a bump to agent 0.2 pending).
+     (it must answer `/weirdnet/names/2`). Gates M3, M4 and B1. Done: `weirdnet-device-link` 0.3.0 and `weirdnet-relay` 0.6.0, both on `weirdnet-net =0.8.0`, and the public relay runs 0.6.0.
+  2. `weirdnet-agent` 0.4.0 (`infer/2`, `pool`, `context`, caller identity), released with
+     `weirdnet-model` 0.4.0 and `weirdnet-mcp` 0.5.0, and Morph moves with them. `weirdnet-agent`
+     0.3.0 is already out on `infer/1`; Morph main (`5e7dbec`) pins `weirdnet-agent =0.3.0`,
+     `weirdnet-mcp =0.4.0` and `weirdnet-model =0.3.0`.
   3. The new crates (`weirdnet-backends`, `-openai`, `-semcache`, `-alerts`) as each milestone needs them.
 
 ## Migration plan for server-a/server-b
@@ -1253,7 +1262,7 @@ a bug, not a design difference. The shared test suite runs against `bragi-core`,
 run the same end-to-end scenario (pair, list models, chat, cancel, continue).
 
 Gate: B1 needs `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8 and the redeployed
-public relay, like M3 and M4. Approved 2026-11-19; **in progress, owned by the Weirdnet lead.**
+public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-link` 0.3.0 and `weirdnet-relay` 0.6.0, both on `weirdnet-net =0.8.0`, and the public relay runs 0.6.0.
 
 - **B1 Core and both shells:** `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
   Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
@@ -1270,11 +1279,12 @@ public relay, like M3 and M4. Approved 2026-11-19; **in progress, owned by the W
 Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), published, then the Ymir side.
 
 **Dependencies on Weirdnet work:**
-- **Gate for M3, M4 and B1 (approved 2026-11-19; in progress, owned by the Weirdnet lead):**
-  `weirdnet-device-link` and `weirdnet-relay` released on `weirdnet-net` 0.8 and the public relay
-  redeployed (net 0.8 uses `/weirdnet/names/2`; the relay serves `/1` today).
-- **Gate for M3:** `weirdnet-agent` 0.3 with `/weirdnet-agent/infer/2`, released with
-  `weirdnet-model`, `weirdnet-mcp` and Morph (see Releases).
+- **Gate for M3, M4 and B1 (approved 2026-11-19):** `weirdnet-device-link` and `weirdnet-relay`
+  released on `weirdnet-net` 0.8 and the public relay redeployed (net 0.8 uses `/weirdnet/names/2`).
+  Now released: `weirdnet-device-link` 0.3.0 and `weirdnet-relay` 0.6.0, both on `weirdnet-net =0.8.0`, and the public relay runs 0.6.0.
+- **Gate for M3:** `weirdnet-agent` 0.4.0 with `/weirdnet-agent/infer/2`, released with
+  `weirdnet-model` 0.4.0, `weirdnet-mcp` 0.5.0 and Morph (see Releases). `weirdnet-agent` 0.3.0 is
+  already out on `infer/1`.
 - **Gate for M5:** a `weirdnet-sync` design for local eviction and on-demand working sets; and, if
   option B is chosen, sync running on an app's `Node`.
 
@@ -1285,9 +1295,11 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   local model node (inference role); `weirdnet-openai` loopback bridge (app role); the in-process fast
   path between them; `ymirctl setup` and the quickstart on a Spark, an NVIDIA PC, a Mac and a CPU box;
   embedded `weirdnet-semcache`.
-- **M2 Model-node parity with server-a/server-b.** vLLM adapter (CUDA 13 on sm_121), wrapping a stock server,
+- **M2 Model-node parity with server-a/server-b** (built 2026-11-19; see [M2 status](#m2-status-built-2026-11-19)). vLLM adapter (CUDA 13 on sm_121), wrapping a stock server,
   swap groups and idle unload, stand-in cold start, `weirdnet-alerts` (push, SMTP, network-degraded
   rule), packages and the release script.
+- **Order after M2 (approved 2026-11-19):** M3, then Bragi's B1, then Ymir and Bragi milestones
+  alternate.
 - **M3 Roles over Weirdnet** (gated, see above). The same protocols across devices: app → inference
   (`weirdnet-agent` pool, catalog, infer extensions) and inference → model (`/weirdnet-backends/node/1`,
   raw infer); `Roster::check_caller`; `ymirctl` and Jan on another machine through its own bridge.
@@ -1360,6 +1372,74 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - Idle TTL, restart with backoff, stand-in cold start, alerts and push (M2 and later).
 - Windows: the control socket and process-group handling are Unix only.
 
+## M2 status (built 2026-11-19)
+
+**Works, on one box, in one `ymird`:**
+
+- **vLLM adapter**, managed and wrapped. Managed: the supervisor runs `vllm serve` on a random
+  loopback port with a per-process API key, waits for `/health`, streams, drains and stops it. Wrapped:
+  `wrap = "http://127.0.0.1:8000/v1"` attaches to a stock server Ymir didn't start (vLLM,
+  llama-server or anything OpenAI-compatible), loopback only, with an optional `wrap_api_key`
+  (`env:`/`file:` reference). Unload only detaches; Ymir never stops a wrapped server.
+  Tested on the dev box's NVIDIA GPU (sm_86) with vLLM 0.34.0 (torch 2.14.0+cu130) in a venv under
+  a scratch directory, `Qwen/Qwen2.5-0.5B-Instruct`, `--gpu-memory-utilization 0.5`: managed launch ready in
+  72.8 s, **176.6 tok/s** (256 tokens) and **183.1 tok/s** (512) streamed through the bridge; wrapped
+  stock server **172.2 tok/s**; GPU memory freed after unload.
+- **Swap groups and idle unload.** `idle_ttl = "10m"` per model; a reaper (every 2 s) unloads models
+  idle past their TTL with nothing in flight. Swap groups from M1 are unchanged.
+- **Crash handling.** A crash while serving restarts with backoff (1 s doubling to 60 s); five crashes
+  in ten minutes is a crash loop and the model stays down until an operator `ymirctl load` (forced,
+  clears the history). A load waits out a pending backoff instead of racing it.
+- **Stand-in cold start.** `standin = "<model>"`: when the requested model isn't warm and its
+  estimated load time (last measured load, else size/1 GB/s + 3 s) is over `standin_after` (10 s), the
+  stand-in answers now while the big model loads in the background. Replies are flagged:
+  `x-weirdnet-standin: <id>` header, `weirdnet.standin` in the body, `model` set to the stand-in, and
+  `weirdnet_bridge_standin_total` in `/metrics`. `x-wait: true` (or `ymirctl chat --wait`) waits for
+  the real model instead. The stand-in is skipped when loading would evict it (same swap group on the
+  same node). `standin_warm = true` loads it at start.
+- **`/v1/completions`** (plain and streaming `text_completion`) and **`/v1/embeddings`** (default
+  model: the first embedding model in the catalog). A chat GGUF used for embeddings needs
+  `args = ["--pooling", "mean"]` on llama-server (it refuses with pooling `none`); this isn't forced,
+  so real embedding models keep their own pooling.
+- **Alerts** (`ymir-alerts`, on `weirdnet-rules` 0.1.0 specs): the server-a/server-b rule pack (engine crash
+  loop, load failure, crash notices; network degraded when the default route is on Wi-Fi, no route;
+  disk free below 10 %; GPU at 85 °C or more), with recovery notices and an hourly repeat.
+  Sinks: log, SMTP (lettre; STARTTLS, TLS, or plain to loopback; password as `env:`/`file:`), webhook
+  (https, or http to loopback) and push (off: logs "would push" until `weirdnet-push` is embedded).
+  `dry_run = true` formats and logs without sending. `ymirctl status` lists failing alerts. All
+  tests use dry-run and in-memory sinks; nothing was ever sent.
+- **User service.** `ymirctl service install|uninstall|status` and `ymirctl setup --service` write a
+  systemd user unit (Linux) or a launchd agent (macOS, `com.weirdbrains.ymird`), with `--dry-run`,
+  `--no-start` and `--unit-dir`. `systemd-analyze --user verify` passes on the generated unit; nothing
+  was enabled on the dev box. Linger isn't changed; `status` says whether it's on.
+- **Packages** (`scripts/package.py`, built locally, not released): `ymir-0.1.0-{x86_64,aarch64}-unknown-linux-gnu.{tar.gz,zip}`,
+  `ymir_0.1.0-1_{amd64,arm64}.deb` and `ymir-bin-0.1.0-1-{x86_64,aarch64}.pkg.tar.zst` from the
+  TAUR recipe `packaging/arch/ymir-bin`, plus `SHA256SUMS`. Checked with `--version` (aarch64 under
+  qemu), `dpkg` metadata, `pacman -Qip` and namcap. `release.toml` declares the platform matrix for
+  the shared release script (vendored `weirdnet-project-helpers` 0.3.2); `validate` passes and
+  `taur-check 0.1.0` says "ready for TAUR". `ymird` and `ymirctl` also `cargo check` for
+  `x86_64-unknown-freebsd`.
+- Tests: 64 pass, 3 ignored (fmt and clippy clean). `ymir-testkit/tests/m2.rs` (7) covers the
+  stand-in, completions/embeddings/idle unload, wrapping a stock server, crash backoff and crash loop,
+  wrap refusals, deduped alerts and the user unit; `tests/real_vllm.rs` (ignored) runs managed and
+  wrapped vLLM for real.
+
+**Not done, stubbed or untested:**
+
+- **vLLM on the Spark (CUDA 13, sm_121) is untested.** server-a/server-b are live and weren't touched; only
+  sm_86 was run.
+- Packages: no `.rpm` (no `rpmbuild` or `nfpm` on the build box), no minisign signatures, the Nix
+  flake and the Homebrew formula are written but untested, no macOS or Windows builds. Windows can't
+  build yet: the control socket is a Unix socket. Linux binaries built on Arch need glibc 2.39, so
+  Debian 12 and Ubuntu 22.04 need an older-glibc release build.
+- Push is a stub sink; secrets from the OS keyring (`keyring:`) aren't supported yet.
+- The webhook's TLS path (hyper-rustls with ring) is built but only the loopback http path is tested.
+- Big-mode and Ray/RPC groups are M7; GPU temperature comes from `nvidia-smi` only.
+
+**`ymir-backends` M2 changes are done** and ready for the Weirdnet lead to extract into
+`weirdnet-backends`. Also generic and to be extracted later: `ymir-alerts` (→ `weirdnet-alerts`),
+and `ymir-core`'s `service` module (unit/agent install) if another app wants it.
+
 ## Decisions (2026-11-19)
 
 m3talsmith answered the first round of open questions:
@@ -1399,9 +1479,16 @@ m3talsmith answered the first round of open questions:
     cable or isolated VLAN). Allowed but not expected: cross-machine splitting is opt-in, and routing
     and replication across nodes is the normal way to scale.
 17. **Relay and device-link bump (resolved 2026-11-19):** approved. The Weirdnet lead moves both to
-    `weirdnet-net` 0.8 and redeploys the public relay; the M3/M4/B1 gate is in progress.
+    `weirdnet-net` 0.8 and redeploys the public relay. Done (device-link 0.3.0, relay 0.6.0).
 18. **Roster (resolved 2026-11-19):** Ymir shares Morph's roster and sync group, with its own `ymir.*`
     record types.
+19. **M3 wire format (approved 2026-11-19):** `infer/2` is CBOR throughout; `infer/1` stays JSON.
+20. **Agent core (approved 2026-11-19):** `weirdnet-agent`'s core is transport-neutral, a `Caller`
+    plus an `authorize` hook; Ymir moves to agent's request types in M3, and the M3 gate is
+    `weirdnet-agent` 0.4.0 (with `weirdnet-model` 0.4.0 and `weirdnet-mcp` 0.5.0).
+21. **Order (approved 2026-11-19):** M3, then B1, then Ymir and Bragi milestones alternate. Alerts
+    stay in `ymir-alerts` until the Weirdnet lead extracts them; `ymir-backends` moves to a new
+    `weirdnet-backends` repo after M2.
 
 ## Review by the Weirdnet lead (2026-11-19)
 
@@ -1409,12 +1496,21 @@ The Weirdnet lead reviewed the doc at `cd4fe63`. This revision applies it: Profi
 two nodes per process for now; `infer/2` beside `/1` with opt-in resume and offset-based dedupe;
 reasoning and tool-call frames; caller identity in `serve()`/`open`; a real `Queued` queue; stall
 handling vs net's 30 s resume; feature-gated `pool`/`context`; the device-link/relay gate; the
-coordinated `weirdnet-agent` 0.3 release; `weirdnet-sync` facts (`/weirdnet/sync/2`, 112 KiB pages,
+coordinated `weirdnet-agent` release (0.3 at the time; the `infer/2` release is now 0.4.0); `weirdnet-sync` facts (`/weirdnet/sync/2`, 112 KiB pages,
 16 MiB chunked values, already on net 0.8) and its eviction gap; alerts on `weirdnet-rules` with push
 as a wake only; backend downloads through `weirdnet-model`; the semcache storage trait and shard key;
 bridge hardening; who admits a device; and the job approval rule.
 
 ## Open questions for m3talsmith
 
-None. All were resolved on 2026-11-19 (decisions 1-18 above). New questions found during the build
-go here.
+The design questions were resolved on 2026-11-19 (decisions 1-21 above). Found while building M2:
+
+1. Install `rpmbuild` (or `nfpm`) and `minisign` on the build box, or build those in release CI?
+2. A release build on an older glibc (Debian 12 / Ubuntu 22.04 need glibc 2.36 / 2.35; local builds
+   need 2.39)?
+3. Windows: a named-pipe control transport before Windows packages, or leave Windows to M9?
+4. macOS builds and the Homebrew tap: which machine builds and tests them?
+5. Embeddings from a chat GGUF: keep `--pooling mean` as a documented setting, or have setup add it?
+6. On the dev box the default route is Wi-Fi, so the network-degraded alert fires there. Keep the rule
+   on for every node, or only on nodes with `alerts.enabled`?
+7. Enable linger and the user service on any machine (nothing is enabled now)?
