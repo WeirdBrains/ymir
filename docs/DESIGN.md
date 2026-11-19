@@ -651,9 +651,12 @@ Ymir and Bragi share Morph's roster and sync group; there is no separate Ymir de
 - **Retention and eviction.** Ymir's retention (24 h for bridge conversations, delete-older-than in the
   pool policy) applies only to `ymir.*` records, and its tombstones only touch Ymir records. Local
   eviction of Ymir context (once `weirdnet-sync` supports it, before M5) never evicts Morph records.
-- **Compatibility:** Morph pins `weirdnet-sync =0.4.0` (`/weirdnet/sync/1`) today, and Ymir uses 0.5
-  (`/weirdnet/sync/2`). A device running both apps needs Morph on 0.5 before they share one sync
-  group, so Morph's sync bump joins the coordinated release round.
+- **Revocation rules apply to Ymir types too:** `weirdnet-sync`'s per-type revocation rules cover
+  `ymir.*` records like Morph's, so ops written by a revoked device are voided.
+- **Compatibility:** Ymir needs **Morph v0.3 or later** to share a sync group. Morph main already pins
+  `weirdnet-sync =0.5.0` and `weirdnet-net =0.8.0` (since `857c3ea`) and ships that in v0.3; the
+  released Morph 0.2.x line stays on sync 0.2 / net 0.6 and can't talk to it. All of a user's devices
+  move to Morph v0.3 together.
 
 ### One store with Bragi
 
@@ -1059,8 +1062,7 @@ has `[roles] app = true` and nothing else.
   2. `weirdnet-agent` 0.3 (`infer/2`, `pool`, `context`, caller identity). `weirdnet-model` 0.2.1 and
      `weirdnet-mcp` 0.3.0 pin `weirdnet-agent =0.2.0`, so they are released against 0.3 in the same
      round, and Morph moves with them (its `Cargo.toml` pins `weirdnet-agent =0.1.0` today, so Morph is
-     already behind and needs the bump anyway). Morph also moves from `weirdnet-sync` 0.4 to 0.5 so it
-     can share the sync group with Ymir.
+     already behind and needs the bump anyway; Morph Dev has a bump to agent 0.2 pending).
   3. The new crates (`weirdnet-backends`, `-openai`, `-semcache`, `-alerts`) as each milestone needs them.
 
 ## Migration plan for server-a/server-b
