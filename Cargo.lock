@@ -5657,7 +5657,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "weirdnet-device-link",
  "weirdnet-model",
+ "weirdnet-net",
  "ymir-core",
 ]
 

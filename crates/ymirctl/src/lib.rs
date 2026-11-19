@@ -4,6 +4,8 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+pub mod pool;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
@@ -65,6 +67,11 @@ pub enum Cmd {
         /// The prompt; `-` reads it from stdin.
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
+    },
+    /// This node's place in your Weirdnet: link it, link other devices, revoke.
+    Pool {
+        #[command(subcommand)]
+        cmd: pool::PoolCmd,
     },
     /// The loopback bridge.
     Bridge {
@@ -189,6 +196,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
+        }
+        Cmd::Pool { cmd } => {
+            let cfg = load_cfg(&paths)?;
+            pool::run(&paths, &cfg, cmd, out, input).await
         }
         Cmd::Bridge { cmd: BridgeCmd::Token { rotate } } => {
             let t = if rotate { ymir_core::token::rotate(&paths)? } else { ymir_core::token::load_or_create(&paths)? };
@@ -408,6 +419,16 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
     }
     if !s.alerts.is_empty() {
         writeln!(out, "Alerts: {}", s.alerts.join(", "))?;
+    }
+    match &s.network {
+        Some(n) => {
+            let linked = n.devices.iter().filter(|d| d.active && !d.me).count();
+            writeln!(out, "Weirdnet: {} as {}, {} linked devices, {} connected", n.user, n.peer, linked, n.connected.len())?;
+            for a in &n.listening {
+                writeln!(out, "  listening {a}")?;
+            }
+        }
+        None => writeln!(out, "Weirdnet: off (link with `ymirctl pool link`)")?,
     }
     Ok(())
 }

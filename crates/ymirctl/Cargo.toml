@@ -14,7 +14,9 @@ anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+weirdnet-device-link.workspace = true
 weirdnet-model.workspace = true
+weirdnet-net.workspace = true
 ymir-core.workspace = true
 
 [dev-dependencies]

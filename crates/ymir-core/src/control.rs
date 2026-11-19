@@ -26,6 +26,14 @@ pub enum ControlRequest {
     Unload {
         model: String,
     },
+    /// A device this user just linked from here (`ymirctl pool add`) joins the roster.
+    PoolApprove {
+        cert: weirdnet_net::user::NodeCert,
+    },
+    /// Revoke a device (`ymirctl pool revoke`).
+    PoolRevoke {
+        peer: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +205,21 @@ impl ControlHandler {
                     Ok(on) if on.is_empty() => ControlResponse::ok(format!("{model} was not loaded")),
                     Ok(on) => ControlResponse::ok(format!("{model} unloaded on {}", on.join(", "))),
                     Err(e) => ControlResponse::err(e.to_string()),
+                }
+            }
+            ControlRequest::PoolApprove { cert } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                let label = cert.label.clone();
+                match m.approve(cert) {
+                    Ok(()) => ControlResponse::ok(format!("{label} is linked")),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::PoolRevoke { peer } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                match m.revoke(&peer) {
+                    Ok(c) => ControlResponse::ok(format!("{} ({}) is revoked", c.label, c.peer_id)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
                 }
             }
         }
