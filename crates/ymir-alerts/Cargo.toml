@@ -13,7 +13,13 @@ publish = false
 chrono.workspace = true
 futures.workspace = true
 lettre.workspace = true
-reqwest = { workspace = true, features = ["rustls-no-provider"] }
+# Webhooks go through hyper-rustls with ring (like lettre), not reqwest: turning on reqwest's
+# rustls feature would switch TLS on for every reqwest client in the workspace and pull in the
+# aws-lc C build, which doesn't cross-build for the BSDs.
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "webpki-tokio"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true

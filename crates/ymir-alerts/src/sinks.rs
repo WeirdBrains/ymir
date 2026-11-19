@@ -147,11 +147,16 @@ impl Sink for SmtpSink {
     }
 }
 
+type HttpClient = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    http_body_util::Full<hyper::body::Bytes>,
+>;
+
 /// POSTs alerts as JSON. In dry-run mode the payload is kept, not sent.
 pub struct WebhookSink {
     url: String,
     token: Option<String>,
-    http: reqwest::Client,
+    http: HttpClient,
     dry: Option<Mutex<Vec<serde_json::Value>>>,
 }
 
@@ -165,9 +170,13 @@ impl WebhookSink {
             (Some(src), false) => Some(resolve_secret(src).map_err(|e| format!("webhook token: {e}"))?),
             _ => None,
         };
-        // ring, like lettre, so no aws-lc C build (it doesn't cross-build for the BSDs).
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().map_err(|e| format!("webhook client: {e}"))?;
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_provider_and_webpki_roots(rustls::crypto::ring::default_provider())
+            .map_err(|e| format!("webhook tls: {e}"))?
+            .https_or_http()
+            .enable_http1()
+            .build();
+        let http = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build(https);
         Ok(Self { url: cfg.url.clone(), token, http, dry: dry_run.then(|| Mutex::new(Vec::new())) })
     }
 
@@ -202,11 +211,16 @@ impl Sink for WebhookSink {
                 dry.lock().unwrap_or_else(|e| e.into_inner()).push(body);
                 return Ok(());
             }
-            let mut req = self.http.post(&self.url).json(&body);
+            let bytes = serde_json::to_vec(&body).map_err(|e| format!("webhook body: {e}"))?;
+            let mut req = hyper::Request::post(&self.url).header(hyper::header::CONTENT_TYPE, "application/json");
             if let Some(t) = &self.token {
-                req = req.bearer_auth(t);
+                req = req.header(hyper::header::AUTHORIZATION, format!("Bearer {t}"));
             }
-            let resp = req.send().await.map_err(|e| format!("webhook {}: {e}", self.url))?;
+            let req = req.body(http_body_util::Full::new(hyper::body::Bytes::from(bytes))).map_err(|e| format!("webhook {}: {e}", self.url))?;
+            let resp = tokio::time::timeout(Duration::from_secs(15), self.http.request(req))
+                .await
+                .map_err(|_| format!("webhook {}: timed out", self.url))?
+                .map_err(|e| format!("webhook {}: {e}", self.url))?;
             if resp.status().is_success() { Ok(()) } else { Err(format!("webhook {}: {}", self.url, resp.status())) }
         })
     }
