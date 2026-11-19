@@ -1,7 +1,9 @@
 //! A stand-in for `llama-server`: same flags and endpoints, canned answers.
 //!
 //! Answers "Hello from <alias>! You said: <last user message>" word by word. `/health` says 503
-//! for `YMIR_MOCK_LOAD_MS` (default 200) after start, like a model loading.
+//! for `YMIR_MOCK_LOAD_MS` (default 200) after start, like a model loading. `/v1/completions`
+//! continues the prompt with " once upon a time"; `/v1/embeddings` returns
+//! `[chars, words, 1, 0]` per input.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,7 +32,13 @@ async fn main() {
     let load_ms = std::env::var("YMIR_MOCK_LOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     assert_eq!(host, "127.0.0.1", "engines must bind loopback only");
     let st = Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), ready_at: Instant::now() + Duration::from_millis(load_ms) });
-    let app = Router::new().route("/health", get(health)).route("/v1/models", get(models)).route("/v1/chat/completions", post(chat)).with_state(st);
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(chat))
+        .route("/v1/completions", post(completions))
+        .route("/v1/embeddings", post(embeddings))
+        .with_state(st);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await.expect("bind");
     eprintln!("mock engine listening on {host}:{port}");
     axum::serve(listener, app).await.expect("serve");
@@ -52,6 +60,64 @@ fn authorized(st: &Mock, headers: &HeaderMap) -> bool {
 
 async fn models(State(st): State<Arc<Mock>>) -> Response {
     axum::Json(json!({"object": "list", "data": [{"id": st.alias, "object": "model"}]})).into_response()
+}
+
+fn sse(events: Vec<Value>) -> Response {
+    let stream = futures::stream::unfold((events.into_iter(), false), |(mut it, done)| async move {
+        if done {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        match it.next() {
+            Some(v) => Some((Ok::<_, std::convert::Infallible>(Event::default().data(v.to_string())), (it, false))),
+            None => Some((Ok(Event::default().data("[DONE]")), (it, true))),
+        }
+    });
+    Sse::new(stream).into_response()
+}
+
+fn check(st: &Mock, headers: &HeaderMap, body: &Value) -> Option<Response> {
+    if !authorized(st, headers) {
+        return Some((StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response());
+    }
+    if body["model"].as_str() != Some(st.alias.as_str()) {
+        return Some(
+            (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("unknown model {}", body["model"])}}))).into_response(),
+        );
+    }
+    None
+}
+
+async fn completions(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {
+    if let Some(r) = check(&st, &headers, &body) {
+        return r;
+    }
+    let words = [" once", " upon", " a", " time"];
+    let alias = st.alias.clone();
+    let mut events: Vec<Value> = words
+        .iter()
+        .map(|w| json!({"object": "text_completion", "model": alias, "choices": [{"index": 0, "text": w, "finish_reason": null}]}))
+        .collect();
+    events.push(json!({"object": "text_completion", "model": alias, "choices": [{"index": 0, "text": "", "finish_reason": "length"}], "usage": {"prompt_tokens": 2, "completion_tokens": 4, "total_tokens": 6}}));
+    sse(events)
+}
+
+async fn embeddings(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {
+    if let Some(r) = check(&st, &headers, &body) {
+        return r;
+    }
+    let inputs: Vec<String> = match &body["input"] {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        _ => Vec::new(),
+    };
+    let data: Vec<Value> = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| json!({"object": "embedding", "index": i, "embedding": [s.chars().count() as f32, s.split_whitespace().count() as f32, 1.0, 0.0]}))
+        .collect();
+    axum::Json(json!({"object": "list", "model": st.alias, "data": data, "usage": {"prompt_tokens": inputs.len(), "total_tokens": inputs.len()}}))
+        .into_response()
 }
 
 async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {

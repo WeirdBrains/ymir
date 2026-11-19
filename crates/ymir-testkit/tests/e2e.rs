@@ -200,9 +200,11 @@ async fn openai_clients_and_the_cache() -> Result<()> {
     let metrics = http.get(format!("http://127.0.0.1:{port}/metrics")).bearer_auth(&token).send().await?.text().await?;
     assert!(metrics.contains("weirdnet_bridge_cache_hits_total 1"), "{metrics}");
 
-    // Not in M1 yet.
+    // No embedding model on this node: a clear 400, and chat models refuse to embed.
     let r = http.post(format!("{url}/embeddings")).bearer_auth(&token).json(&json!({"input": "x"})).send().await?;
-    assert_eq!(r.status(), 501);
+    assert_eq!(r.status(), 400);
+    let r = http.post(format!("{url}/embeddings")).bearer_auth(&token).json(&json!({"model": "alpha", "input": "x"})).send().await?;
+    assert_eq!(r.status(), 400);
     n.stop().await;
     Ok(())
 }
