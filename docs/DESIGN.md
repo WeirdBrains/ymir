@@ -1,7 +1,8 @@
 # Ymir design
 
 Date: 2026-11-19. Status: design settled; every open question was answered on 2026-11-19 (see
-[Decisions](#decisions-2026-11-19)). Nothing is built yet.
+[Decisions](#decisions-2026-11-19)). **M1 is built** (single box, all three roles in one `ymird`;
+see [M1 status](#m1-status-built-2026-11-19)).
 Reference build: m3talsmith's two GB10 servers (deployment configs and a plan snapshot are kept off-repo).
 This doc follows the collective `weirdnet-agents/AGENTS.md`.
 
@@ -888,6 +889,26 @@ roles, no API keys, no HTTPS endpoint).
 | `weirdnet-semcache` | semantic cache: rules, a storage trait (the app owns the schema), optional Redis backend, sharding by model + key-context hash across inference nodes |
 | `weirdnet-alerts` | sinks (SMTP, webhook, push wake) and a health rule pack with dedupe and recovery notices, on `weirdnet-rules` |
 
+### Interim crates in this repo (to be extracted)
+
+m3talsmith's rule for the build: no `weirdnet-*` crate is created or changed from this repo; the
+published ones are used as they are (`weirdnet-model` =0.2.1 for its catalog and consent-gated
+download). Generic code that M1 needs lives in separate, self-contained crates here, each marked
+"to be extracted" in its README and `Cargo.toml` description, with no Ymir types in it. Moving one is
+a rename plus a dependency swap. All are `publish = false`.
+
+| Interim crate | To be extracted into | Holds |
+|---|---|---|
+| `ymir-hw` | `weirdnet-model` (`hw` module, tiered catalog, sizing) | detection (NVIDIA via `nvidia-smi`, AMD sysfs, Apple `sysctl`, `/proc/meminfo`; GB10 as unified), the usable budget, a tiered catalog of `weirdnet_model::ModelSpec`s with footprints, `plan()` |
+| `ymir-backends` | `weirdnet-backends` | llama-server and vLLM adapters, the local supervisor (load, readiness, drain, unload, swap groups, crash detection, logs), SSE decoding |
+| `ymir-openai` | `weirdnet-openai` | the loopback-only bridge (token on every endpoint, `Host` check, no CORS, `x-weirdnet-*` headers) |
+| `ymir-semcache` | `weirdnet-semcache` | the `AnswerCache` seam and an exact-match placeholder |
+| `ymir-infer` | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits) | `ChatRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
+
+Trait seams that stay in `ymir-core` until their protocol exists: `ModelNode` (becomes the
+`/weirdnet-backends/node/1` client plus raw infer/2 in M3) and the control socket (the local transport
+of `/ymir/control/1`).
+
 ### App crates (m3talsmith and this team)
 
 - `ymir-core`: the **inference-node coordinator** (catalog, routing and load balancing, scheduler
@@ -1258,7 +1279,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   option B is chosen, sync running on an app's `Node`.
 
 - **M0 Design (this doc).** Repo, names, decisions and roles done (2026-11-19); Weirdnet lead review.
-- **M1 Single box, all three roles in one `ymird`.** `weirdnet-model` `hw` + sizing; `weirdnet-backends`
+- **M1 Single box, all three roles in one `ymird`** (built 2026-11-19; see
+  [M1 status](#m1-status-built-2026-11-19)). `weirdnet-model` `hw` + sizing; `weirdnet-backends`
   llama.cpp adapter and supervisor (model role); a first coordinator with catalog and routing to the
   local model node (inference role); `weirdnet-openai` loopback bridge (app role); the in-process fast
   path between them; `ymirctl setup` and the quickstart on a Spark, an NVIDIA PC, a Mac and a CPU box;
@@ -1291,6 +1313,52 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M10 Cert-only server link** (Weirdnet lead). `weirdnet-sync`/`weirdnet-device-link` give service
   nodes a node certificate and sync keys without the root seed; Ymir nodes re-link and wipe their seed
   copies; a node can then be revoked without rotating the root identity.
+
+## M1 status (built 2026-11-19)
+
+**Works, on one box, in one `ymird`:**
+
+- `ymirctl hw` and `ymirctl setup`: detect the hardware, compute the budget, propose a main model, a
+  stand-in and an embedding model (or serve your own GGUFs with `--model`), find `llama-server`, and
+  write `node.toml` with all three roles on plus a bridge token. `--download` fetches catalog models
+  through `weirdnet-model`'s consent gate (asks first; checks size and SHA-256).
+- Model role: the supervisor starts `llama-server` on a random loopback port with a per-process API
+  key passed by environment, waits for `/health`, streams answers, drains and stops it (SIGTERM to
+  its process group, SIGKILL after 10 s), enforces swap groups, notices crashes, and keeps per-model
+  logs in `state/logs/`. Engines die with `ymird` (`PR_SET_PDEATHSIG` on Linux).
+- Inference role: the merged catalog, routing to the least-loaded ready node, cold-start load on
+  first use, one reload and retry if the engine died before the first token, the embedded cache tee.
+- App role: the loopback bridge (`/v1/models`, `/v1/chat/completions` streaming and plain,
+  `/metrics`), and `ymirctl chat`, which goes through the bridge like any OpenAI client.
+- Admin: `ymirctl status`, `load`, `unload`, `models`, `bridge token [--rotate]` over the control
+  socket (`state/ymird.sock`, 0600 in a 0700 directory).
+- Tests: unit tests per crate; `ymir-testkit/tests/e2e.rs` runs setup → `ymird` → chat, swap
+  groups, unload/load, crash recovery, the cache and the bridge guards against a mock llama-server;
+  `tests/real_llama.rs` (ignored by default) runs the same path with a real `llama-server` and GGUF
+  (passes on the dev box with the b12532 CPU build and SmolLM2-135M).
+
+**How M1 differs from the milestone text above:**
+
+- The generic pieces are interim crates in this repo (table in [Crates](#interim-crates-in-this-repo-to-be-extracted)),
+  not `weirdnet-*` releases, by m3talsmith's rule for this build.
+- No Weirdnet networking yet: roles talk only through the in-process fast path (`Pool`,
+  `ModelNode`), which is the M3 boundary.
+- The quickstart ran on one NVIDIA PC (the dev box, NVIDIA GPU, with a CPU llama.cpp build). Not yet run
+  on a Spark, a Mac or a CPU-only box. `ymirctl setup` does not install or start a user service; it
+  prints the `ymird` command.
+- The semantic cache is an exact-match placeholder (deterministic requests only).
+
+**Stubbed or not yet built:**
+
+- Bridge token in `state/bridge.token` (0600) instead of the OS keyring.
+- `llamacpp = "managed"` has no pinned engine downloads yet; it uses `<home>/engines/llama.cpp/`
+  or `PATH`.
+- vLLM adapter: launch arguments and probes only; not run (no vLLM install was available).
+- Hardware: `nvidia-smi` instead of NVML; no Metal working-set query, Vulkan device query or
+  interconnect report.
+- `/v1/completions` and `/v1/embeddings` answer 501; no prefix-hash mapping onto synced contexts (M5).
+- Idle TTL, restart with backoff, stand-in cold start, alerts and push (M2 and later).
+- Windows: the control socket and process-group handling are Unix only.
 
 ## Decisions (2026-11-19)
 
