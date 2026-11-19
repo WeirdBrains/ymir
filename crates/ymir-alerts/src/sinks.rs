@@ -165,6 +165,8 @@ impl WebhookSink {
             (Some(src), false) => Some(resolve_secret(src).map_err(|e| format!("webhook token: {e}"))?),
             _ => None,
         };
+        // ring, like lettre, so no aws-lc C build (it doesn't cross-build for the BSDs).
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().map_err(|e| format!("webhook client: {e}"))?;
         Ok(Self { url: cfg.url.clone(), token, http, dry: dry_run.then(|| Mutex::new(Vec::new())) })
     }
