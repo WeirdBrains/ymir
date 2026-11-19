@@ -1300,7 +1300,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   rule), packages and the release script.
 - **Order after M2 (approved 2026-11-19):** M3, then Bragi's B1, then Ymir and Bragi milestones
   alternate.
-- **M3 Roles over Weirdnet** (gated, see above). The same protocols across devices: app → inference
+- **M3 Roles over Weirdnet** (built 2026-11-19; see [M3 status](#m3-status-built-2026-11-19)). The same protocols across devices: app → inference
   (`weirdnet-agent` pool, catalog, infer extensions) and inference → model (`/weirdnet-backends/node/1`,
   raw infer); `Roster::check_caller`; `ymirctl` and Jan on another machine through its own bridge.
 - **M4 Several model nodes** (gated: device-link and relay on net 0.8). Linking, capability records, the merged catalog, failover before the
@@ -1439,6 +1439,88 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 **`ymir-backends` M2 changes are done** and ready for the Weirdnet lead to extract into
 `weirdnet-backends`. Also generic and to be extracted later: `ymir-alerts` (→ `weirdnet-alerts`),
 and `ymir-core`'s `service` module (unit/agent install) if another app wants it.
+
+## M3 status (built 2026-11-19)
+
+Built on the published crates, unchanged: `weirdnet-agent` 0.4.0 (`infer/2`, `catalog/1`, `pool`,
+`RosterAuth`), `weirdnet-model` 0.4.0 (`hw`), `weirdnet-backends` 0.1.0 (`node` feature),
+`weirdnet-openai` 0.1.0, `weirdnet-semcache` 0.1.0, `weirdnet-net` 0.8, `weirdnet-sync` 0.5 and
+`weirdnet-device-link` 0.3.0. The interim crates `ymir-hw`, `ymir-backends`, `ymir-openai`,
+`ymir-semcache` and `ymir-infer` are gone; `ymir-alerts` stays until it is extracted.
+
+**Works:**
+
+- **One request type end to end.** The bridge parses OpenAI JSON into agent's `v2::Request`
+  (`weirdnet_openai::request::chat`); the pool, the inference role and model nodes all speak it, and
+  answers stream back as `Chunk`s. The local box uses the same path in process (`host::local_pool`, a
+  memory transport), so local and remote differ only in the transport.
+- **Inference role over Weirdnet** (`remote::serve`): `infer/2` and `catalog/1` (plus `infer/1` for
+  older agents) for the user's devices, with `RosterAuth` (`check_caller`): another user's node, or a
+  device with a valid cert that isn't in this roster, is refused. Admission is `[network] slots` and
+  `queue` (4 and 32); Busy answers `Retry-After: 1`. The catalog is fresh on every request and
+  republished when it changes.
+- **App role on another machine** (`remote::connect_pool`): an app-only `ymird` reaches the
+  inference nodes in its roster through agent's `Pool` (failover between inference nodes before the
+  first token), and serves its own loopback bridge, so `ymirctl` and Jan work there unchanged.
+- **Model role on another machine**: a model-only `ymird` serves `weirdnet-backends`' node protocol
+  (`NodeServer`, `/weirdnet-backends/node/1`, signed capability records, admission, hardware and
+  budget). Inference nodes find model nodes in the roster that announce `weirdnet-backends-node`,
+  follow their capability records, and route, load and unload through them (`RemoteModelNode`;
+  `ymirctl load` on the inference node loads on the remote box). Model nodes that lapse or are
+  revoked leave the catalog.
+- **Identity and roster** (`membership`, under `state/pool/`, 0700, secrets 0600): `ymirctl pool link`
+  shows a `weirdnet-ymir://link/…` code and takes the identity after the 6-digit check; `pool add
+  <code>` links another device from here; `pool devices`, `pool revoke <peer>`, and `pool init
+  --standalone` for a cloud of its own. With `ymird` running, add and revoke go through its control
+  socket. `ymirctl status` shows the Weirdnet identity, listeners and linked devices. Roster changes
+  spread by `weirdnet-sync` passes every 30 s; a device linked elsewhere is answered after the next
+  passes, and revocations stick.
+- **`[network]`** in node.toml: `enabled`, `port` (4848), `listen`, `mdns`, `discovery`, `relays`
+  (default: the Weird Brains relay), `peers` (`/ip4/…/tcp/…/p2p/PEER`; dialing grants nothing),
+  `slots`, `queue`. Weirdnet starts only when the node has an identity.
+- Tests: 41 pass, 3 ignored; fmt and clippy (`-D warnings`) are clean.
+  - `ymir-core/tests/remote.rs` (5): several devices in one process on the memory transport. They
+    cover chat with tools, unknown models, cache hits, the catalog, embeddings and revocation;
+    this box's in-process pool; strangers refused (wrong user, unknown device); failover between
+    inference nodes; and roster changes reaching other devices.
+  - `ymir-testkit/tests/m3.rs` (2): three `ymird`s over TCP on 127.0.0.1 (model-only,
+    inference-only, app-only; no mDNS, discovery or relays). The app bridge goes over Weirdnet to
+    inference, then over Weirdnet to the model node and the mock engine. It also covers a remote
+    `ymirctl load`, the cache across nodes, `ymirctl chat`, refusing a stranger's identity, and
+    cutting off a revoked device. `pool link` and `pool add` move an identity between two homes
+    through device-link on loopback.
+
+**Gaps and regressions (from the published crates; noted for the Weirdnet lead):**
+
+- **`/v1/completions` answers 501** (an M2 regression): agent 0.4's `v2::Request` has no raw prompt,
+  and the bridge has no completions route. Calling `Supervisor::complete` beside the bridge would
+  need a second HTTP server or a fork of its router, so it isn't done; the lead was asked for a raw
+  prompt in agent 0.4.1.
+- **Content arrays are text-only** (image parts are refused by the request parser).
+- **Streamed answers report the cache and the stand-in only in the final chunk**, not in headers.
+  `BridgeClient` (and so `ymirctl chat`) reads them from there.
+- **Embedding usage is always 0**; and `Pool::embed` folds node errors into `unavailable`, so a
+  missing embedding model or a chat model asked to embed is a 503 (it was a 400), with the reason in
+  the message.
+- **The answer cache is exact-match for temperature 0 only** (no tools, inline messages), per
+  `weirdnet-semcache`; other requests always go to a model.
+- **A box with the inference role doesn't also serve the model-node protocol**: `NodeServer` serves
+  `infer/2` itself, and a node can serve a protocol once. Its local models serve its own inference
+  role in process, and other inference nodes use them through it. A model-only box serves the node
+  protocol.
+- No `GroupWorkers` (group jobs answer Unsupported until M7).
+
+**Not done or untested:**
+
+- **Across real machines is untested.** All multi-node tests run on the dev box (memory transport
+  and loopback TCP). The laptop has Rust 1.99, but its load average was 17 on 8 GB, so a build
+  there would have been disruptive. server-a and server-b weren't touched.
+- **Linking m3talsmith's real identity needs him**: `ymirctl pool link` on a node, then the code opened
+  in Morph. Morph has to accept `weirdnet-ymir://link/…` codes (not checked against Morph here).
+- Seeds are kept in 0600 files, as decision 12 says, not in the OS keyring. M10's cert-only link
+  removes the seed copies.
+- Generic code that belongs in `weirdnet-sync`: the snapshot and merge-back around `pull_from` in
+  `membership` (Morph has its own copy).
 
 ## Decisions (2026-11-19)
 
