@@ -35,10 +35,27 @@ pub struct ChatRequest {
     pub priority: Priority,
     #[serde(default)]
     pub job_id: Option<String>,
+    /// Wait for the requested model even if it is cold, instead of a stand-in answering
+    /// (`wait_for_model: true` in the body, or the bridge's `x-wait: 1` header).
+    #[serde(default)]
+    pub wait_for_model: bool,
 }
 
 /// Keys the bridge and engines handle themselves rather than passing through.
-const OWN_KEYS: &[&str] = &["model", "messages", "stream", "stream_options", "n"];
+const OWN_KEYS: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "n", "wait_for_model"];
+
+fn take_common(obj: &mut Map<String, Value>) -> Result<(Option<String>, bool, bool), InferError> {
+    if obj.get("n").and_then(Value::as_u64).is_some_and(|n| n != 1) {
+        return Err(InferError::BadRequest("only n = 1 is supported".into()));
+    }
+    let model = obj.get("model").and_then(|m| m.as_str().map(str::to_string)).filter(|m| !m.is_empty());
+    let stream = obj.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let wait = obj.get("wait_for_model").and_then(Value::as_bool).unwrap_or(false);
+    for k in OWN_KEYS {
+        obj.remove(*k);
+    }
+    Ok((model, stream, wait))
+}
 
 impl ChatRequest {
     /// From an OpenAI `/v1/chat/completions` body. Returns the request and whether it asked to
@@ -49,15 +66,8 @@ impl ChatRequest {
             Some(Value::Array(m)) if !m.is_empty() => m,
             _ => return Err(InferError::BadRequest("`messages` must be a non-empty array".into())),
         };
-        if obj.get("n").and_then(Value::as_u64).is_some_and(|n| n != 1) {
-            return Err(InferError::BadRequest("only n = 1 is supported".into()));
-        }
-        let model = obj.remove("model").and_then(|m| m.as_str().map(str::to_string)).filter(|m| !m.is_empty());
-        let stream = obj.get("stream").and_then(Value::as_bool).unwrap_or(false);
-        for k in OWN_KEYS {
-            obj.remove(*k);
-        }
-        Ok((Self { model, messages, params: obj, priority: Priority::Interactive, job_id: None }, stream))
+        let (model, stream, wait_for_model) = take_common(&mut obj)?;
+        Ok((Self { model, messages, params: obj, priority: Priority::Interactive, job_id: None, wait_for_model }, stream))
     }
 
     /// A one-message request.
@@ -79,6 +89,74 @@ impl ChatRequest {
     pub fn deterministic(&self) -> bool {
         self.params.get("temperature").and_then(Value::as_f64) == Some(0.0) && !self.params.contains_key("tools")
     }
+}
+
+/// A raw text completion (`/v1/completions`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompletionRequest {
+    pub model: Option<String>,
+    pub prompt: String,
+    pub params: Map<String, Value>,
+    #[serde(default)]
+    pub wait_for_model: bool,
+}
+
+impl CompletionRequest {
+    /// From an OpenAI `/v1/completions` body: `prompt` is a string or a one-string array.
+    pub fn from_openai(body: Value) -> Result<(Self, bool), InferError> {
+        let Value::Object(mut obj) = body else { return Err(InferError::BadRequest("body must be a JSON object".into())) };
+        let prompt = match obj.remove("prompt") {
+            Some(Value::String(p)) => p,
+            Some(Value::Array(a)) if a.len() == 1 && a[0].is_string() => a[0].as_str().unwrap_or_default().to_string(),
+            _ => return Err(InferError::BadRequest("`prompt` must be a string (or an array of one string)".into())),
+        };
+        let (model, stream, wait_for_model) = take_common(&mut obj)?;
+        Ok((Self { model, prompt, params: obj, wait_for_model }, stream))
+    }
+
+    pub fn to_openai_stream(&self, model: &str) -> Value {
+        let mut obj = self.params.clone();
+        obj.insert("model".into(), model.into());
+        obj.insert("prompt".into(), self.prompt.clone().into());
+        obj.insert("stream".into(), true.into());
+        obj.insert("stream_options".into(), serde_json::json!({"include_usage": true}));
+        Value::Object(obj)
+    }
+}
+
+/// An embeddings request (`/v1/embeddings`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EmbedRequest {
+    pub model: Option<String>,
+    pub input: Vec<String>,
+}
+
+impl EmbedRequest {
+    pub fn from_openai(body: Value) -> Result<Self, InferError> {
+        let Value::Object(mut obj) = body else { return Err(InferError::BadRequest("body must be a JSON object".into())) };
+        let input = match obj.remove("input") {
+            Some(Value::String(s)) => vec![s],
+            Some(Value::Array(a)) if !a.is_empty() && a.iter().all(Value::is_string) => {
+                a.into_iter().filter_map(|v| v.as_str().map(str::to_string)).collect()
+            }
+            _ => return Err(InferError::BadRequest("`input` must be a string or a non-empty array of strings".into())),
+        };
+        if obj.get("encoding_format").and_then(Value::as_str).is_some_and(|f| f != "float") {
+            return Err(InferError::BadRequest("only encoding_format = \"float\" is supported".into()));
+        }
+        let (model, _, _) = take_common(&mut obj)?;
+        Ok(Self { model, input })
+    }
+}
+
+/// Embedding vectors, one per input, in order. (On infer/2 they travel as little-endian f32 byte
+/// strings.)
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Embeddings {
+    pub model: String,
+    pub node: String,
+    pub vectors: Vec<Vec<f32>>,
+    pub prompt_tokens: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +234,15 @@ pub struct Reply {
 pub trait Pool: Send + Sync {
     fn catalog(&self) -> BoxFuture<'_, Result<Vec<CatalogModel>, InferError>>;
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Reply, InferError>>;
+    /// A raw completion; same frames as chat.
+    fn complete(&self, req: CompletionRequest) -> BoxFuture<'_, Result<Reply, InferError>> {
+        let _ = req;
+        Box::pin(async { Err(InferError::Unavailable("completions are not supported by this pool".into())) })
+    }
+    fn embed(&self, req: EmbedRequest) -> BoxFuture<'_, Result<Embeddings, InferError>> {
+        let _ = req;
+        Box::pin(async { Err(InferError::Unavailable("embeddings are not supported by this pool".into())) })
+    }
 }
 
 /// A finished answer, collected from a stream.
@@ -220,6 +307,20 @@ mod tests {
         assert_eq!(body["model"], "alias");
         assert_eq!(body["stream"], true);
         assert_eq!(body["temperature"], 0);
+    }
+
+    #[test]
+    fn completions_and_embeddings() {
+        let (c, stream) = CompletionRequest::from_openai(json!({"model": "m", "prompt": ["Once"], "max_tokens": 5, "wait_for_model": true})).unwrap();
+        assert!(!stream && c.wait_for_model);
+        assert_eq!(c.prompt, "Once");
+        assert_eq!(c.to_openai_stream("m")["max_tokens"], 5);
+        assert!(CompletionRequest::from_openai(json!({"prompt": 3})).is_err());
+        let e = EmbedRequest::from_openai(json!({"model": "e", "input": ["a", "b"]})).unwrap();
+        assert_eq!(e.input, ["a", "b"]);
+        assert_eq!(EmbedRequest::from_openai(json!({"input": "x"})).unwrap().input, ["x"]);
+        assert!(EmbedRequest::from_openai(json!({"input": [1]})).is_err());
+        assert!(EmbedRequest::from_openai(json!({"input": "x", "encoding_format": "base64"})).is_err());
     }
 
     #[test]
