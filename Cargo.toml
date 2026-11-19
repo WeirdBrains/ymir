@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ymir-hw",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "BSD-3-Clause"
+repository = "https://github.com/WeirdBrains/ymir"
+authors = ["Weird Brains"]
+
+[workspace.dependencies]
+# Crates in this workspace. The ones marked "to be extracted" in their README are generic and move
+# to weirdnet-* crates (Weirdnet lead); app crates depend on them only through these names.
+ymir-hw = { path = "crates/ymir-hw", version = "0.1.0" }
+ymir-infer = { path = "crates/ymir-infer", version = "0.1.0" }
+ymir-backends = { path = "crates/ymir-backends", version = "0.1.0" }
+ymir-openai = { path = "crates/ymir-openai", version = "0.1.0" }
+ymir-semcache = { path = "crates/ymir-semcache", version = "0.1.0" }
+
+# Published Weirdnet crates, used as they are.
+weirdnet-model = { version = "=0.2.1", default-features = false }
+
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures = "0.3"
+getrandom = "0.3"
+libc = "0.2"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
