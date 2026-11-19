@@ -129,6 +129,16 @@ pub struct LocalModel {
     pub gpu_layers: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Unload after this long without requests: `600`, `30s`, `10m`, `2h`. Default: stay loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_ttl: Option<String>,
+    /// Serve through a stock OpenAI-compatible server already running on loopback (such as
+    /// `vllm serve` started by hand) instead of starting an engine: `http://127.0.0.1:8000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<String>,
+    /// Where the wrapped server's API key comes from: `env:NAME` or `file:/path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_api_key: Option<String>,
 }
 
 impl LocalModel {
@@ -145,9 +155,21 @@ pub struct InferenceSection {
     pub context_disk_budget: Option<String>,
     #[serde(default)]
     pub cache: CacheSection,
-    /// Alert sinks; read from M2 on.
-    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
-    pub alerts: toml::Table,
+    /// The cold-start stand-in; default the model with `role = "standin"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standin: Option<String>,
+    /// Answer with the stand-in only when the load is expected to take longer than this.
+    #[serde(default = "standin_after")]
+    pub standin_after: String,
+    /// Load the stand-in when the daemon starts, so it is warm for the first cold start.
+    #[serde(default = "yes")]
+    pub standin_warm: bool,
+    #[serde(default)]
+    pub alerts: ymir_alerts::AlertsConfig,
+}
+
+fn standin_after() -> String {
+    "10s".into()
 }
 
 fn yes() -> bool {
@@ -156,7 +178,15 @@ fn yes() -> bool {
 
 impl Default for InferenceSection {
     fn default() -> Self {
-        Self { scheduler_eligible: true, context_disk_budget: None, cache: CacheSection::default(), alerts: toml::Table::new() }
+        Self {
+            scheduler_eligible: true,
+            context_disk_budget: None,
+            cache: CacheSection::default(),
+            standin: None,
+            standin_after: standin_after(),
+            standin_warm: true,
+            alerts: ymir_alerts::AlertsConfig::default(),
+        }
     }
 }
 
@@ -253,6 +283,24 @@ impl NodeConfig {
             {
                 bail!("model `{}`: unknown backend `{b}` (llamacpp or vllm)", m.id);
             }
+            if let Some(t) = &m.idle_ttl {
+                parse_duration(t).with_context(|| format!("model `{}`: idle_ttl", m.id))?;
+            }
+            if let Some(url) = &m.wrap {
+                ymir_backends::Wrap { url: url.clone(), api_key: None }.check().map_err(|e| anyhow::anyhow!("model `{}`: {e}", m.id))?;
+            }
+            if let Some(src) = &m.wrap_api_key
+                && !(src.starts_with("env:") || src.starts_with("file:"))
+            {
+                bail!("model `{}`: wrap_api_key must be env:NAME or file:/path, not the key itself", m.id);
+            }
+        }
+        parse_duration(&self.inference.standin_after).context("inference.standin_after")?;
+        if let Some(s) = &self.inference.standin
+            && !self.model.local.iter().any(|m| &m.id == s)
+            && self.roles.model
+        {
+            bail!("inference.standin `{s}` is not one of this node's [[model.local]] models");
         }
         Ok(())
     }
@@ -264,6 +312,18 @@ impl NodeConfig {
     /// The main chat model: the first with `role = "main"`, else the first chat model.
     pub fn main_model(&self) -> Option<&LocalModel> {
         self.model.local.iter().find(|m| m.role.as_deref() == Some("main")).or_else(|| self.model.local.iter().find(|m| !m.is_embedding()))
+    }
+
+    /// The cold-start stand-in: `inference.standin`, else the model with `role = "standin"`.
+    pub fn standin(&self) -> Option<String> {
+        self.inference.standin.clone().or_else(|| self.model.local.iter().find(|m| m.role.as_deref() == Some("standin")).map(|m| m.id.clone()))
+    }
+
+    pub fn coordinator_options(&self) -> crate::coordinator::CoordinatorOptions {
+        crate::coordinator::CoordinatorOptions {
+            standin: self.standin(),
+            standin_after: parse_duration(&self.inference.standin_after).unwrap_or(std::time::Duration::from_secs(10)),
+        }
     }
 
     pub fn models_dir(&self) -> PathBuf {
@@ -308,10 +368,40 @@ impl NodeConfig {
                 l.swap_group.clone_from(&m.swap_group);
                 l.embedding = m.is_embedding();
                 l.extra_args.clone_from(&m.args);
+                l.idle_ttl = m.idle_ttl.as_deref().and_then(|t| parse_duration(t).ok());
+                l.wrap = m.wrap.as_ref().map(|url| ymir_backends::Wrap {
+                    url: url.clone(),
+                    api_key: m.wrap_api_key.as_deref().and_then(|src| match ymir_alerts::config::resolve_secret(src) {
+                        Ok(k) => Some(k),
+                        Err(e) => {
+                            tracing::warn!(model = %m.id, "wrap_api_key: {e}");
+                            None
+                        }
+                    }),
+                });
                 l
             })
             .collect()
     }
+}
+
+/// `600` (seconds), `30s`, `10m`, `2h` or `1d`.
+pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+    let s = s.trim();
+    let (num, unit) = s.find(|c: char| !c.is_ascii_digit() && c != '.').map_or((s, ""), |i| s.split_at(i));
+    let n: f64 = num.parse().with_context(|| format!("`{s}` is not a duration (like 30s, 10m, 2h)"))?;
+    let mult = match unit.trim() {
+        "" | "s" => 1.0,
+        "m" | "min" => 60.0,
+        "h" => 3600.0,
+        "d" => 86400.0,
+        "ms" => 0.001,
+        other => bail!("`{s}`: unknown unit `{other}` (s, m, h, d)"),
+    };
+    if !(n.is_finite() && n >= 0.0) {
+        bail!("`{s}` is not a duration");
+    }
+    Ok(std::time::Duration::from_secs_f64(n * mult))
 }
 
 /// `managed` looks in Ymir's engines dir, then `PATH`; `system:/path` uses that; `auto` (vLLM)
@@ -370,6 +460,57 @@ mod tests {
         assert_eq!(cfg.app.bridge.port, 8484);
         let back: NodeConfig = toml::from_str(&cfg.to_toml().unwrap()).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn m2_settings() {
+        let cfg: NodeConfig = toml::from_str(
+            r#"
+            [roles]
+            model = true
+            inference = true
+            [[model.local]]
+            id = "big"
+            swap_group = "main"
+            idle_ttl = "10m"
+            [[model.local]]
+            id = "small"
+            role = "standin"
+            [[model.local]]
+            id = "vl"
+            backend = "vllm"
+            wrap = "http://127.0.0.1:8000/v1"
+            wrap_api_key = "env:YMIR_TEST_UNSET_KEY"
+            [inference]
+            standin_after = "5s"
+            [inference.alerts]
+            dry_run = true
+            [inference.alerts.smtp]
+            server = "smtp.example.com"
+            from = "a@example.com"
+            to = ["b@example.com"]
+            "#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.standin().as_deref(), Some("small"));
+        assert_eq!(cfg.coordinator_options().standin_after, std::time::Duration::from_secs(5));
+        let l = cfg.launches();
+        assert_eq!(l[0].idle_ttl, Some(std::time::Duration::from_secs(600)));
+        assert_eq!(l[2].wrap.as_ref().unwrap().base(), "http://127.0.0.1:8000");
+        assert!(cfg.inference.alerts.dry_run);
+        let back: NodeConfig = toml::from_str(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back, cfg);
+
+        let mut bad = cfg.clone();
+        bad.model.local[2].wrap = Some("http://10.1.2.3:8000".into());
+        assert!(bad.validate().is_err(), "wrap must be loopback");
+        let mut bad = cfg.clone();
+        bad.model.local[2].wrap_api_key = Some("sk-123".into());
+        assert!(bad.validate().is_err(), "no inline keys");
+        assert_eq!(parse_duration("90").unwrap().as_secs(), 90);
+        assert_eq!(parse_duration("2h").unwrap().as_secs(), 7200);
+        assert!(parse_duration("soon").is_err());
     }
 
     #[test]

@@ -10,8 +10,10 @@ pub mod config;
 pub mod control;
 pub mod coordinator;
 pub mod daemon;
+pub mod health;
 pub mod model_node;
 pub mod paths;
+pub mod service;
 pub mod setup;
 pub mod token;
 

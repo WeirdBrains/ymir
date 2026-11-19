@@ -63,13 +63,51 @@ impl Daemon {
                 tracing::warn!("inference role without a local model role: remote model nodes come with roles over Weirdnet (M3)");
             }
             let cache: Arc<dyn AnswerCache> = if cfg.inference.cache.mode == "off" { Arc::new(NoCache) } else { Arc::new(ExactCache::new(256)) };
-            Some(Arc::new(Coordinator::new(nodes, main_model.clone(), cache)))
+            Some(Arc::new(Coordinator::with_options(nodes, main_model.clone(), cache, cfg.coordinator_options())))
         } else {
             None
         };
 
         let (stop, stop_rx) = watch::channel(false);
         let mut tasks = Vec::new();
+
+        // Idle unload.
+        if let Some(sup) = &supervisor {
+            tasks.push(sup.spawn_reaper(std::time::Duration::from_secs(2)));
+        }
+
+        // Keep the stand-in warm.
+        if let (Some(c), Some(standin), true) = (&coordinator, cfg.standin(), cfg.inference.standin_warm) {
+            let c = c.clone();
+            tasks.push(tokio::spawn(async move {
+                match c.load(&standin, None, false).await {
+                    Ok(on) => tracing::info!(model = %standin, node = %on, "stand-in warm"),
+                    Err(e) => tracing::warn!(model = %standin, "stand-in not warm: {e}"),
+                }
+            }));
+        }
+
+        let mut alerter = None;
+        // Alerts: engine events and health probes, on the inference role (which aggregates
+        // health), or on a lone model node for its own engines.
+        if (roles.inference || roles.model) && cfg.inference.alerts.enabled {
+            match cfg.inference.alerts.alerter(&name) {
+                Ok(a) => {
+                    let a = Arc::new(a);
+                    alerter = Some(a.clone());
+                    let mut disks = cfg.inference.alerts.disks.clone();
+                    if disks.is_empty() {
+                        disks.push(paths.home.clone());
+                        if roles.model {
+                            disks.push(cfg.models_dir());
+                        }
+                    }
+                    let every = std::time::Duration::from_secs(cfg.inference.alerts.probe_secs.max(5));
+                    tasks.push(tokio::spawn(crate::health::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
+                }
+                Err(e) => tracing::error!("alerts are off: {e}"),
+            }
+        }
 
         // App role: the loopback bridge over the in-process pool.
         let mut bridge_addr = None;
@@ -104,6 +142,7 @@ impl Daemon {
             main_model,
             coordinator: coordinator.clone(),
             model_node,
+            alerter,
         });
         tasks.push(tokio::spawn(control::serve(listener, handler, stop_rx)));
         tracing::info!(node = %name, roles = ?roles.names(), "ymird started");

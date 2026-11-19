@@ -20,6 +20,8 @@ pub struct ChatOutcome {
     pub text: String,
     pub finish_reason: Option<String>,
     pub cache_hit: bool,
+    /// The stand-in that answered while the requested model loads.
+    pub standin: Option<String>,
 }
 
 impl BridgeClient {
@@ -75,6 +77,7 @@ impl BridgeClient {
         let mut out = ChatOutcome {
             model: r.headers().get("x-weirdnet-model").and_then(|v| v.to_str().ok()).map(str::to_string),
             cache_hit: r.headers().get("x-weirdnet-cache").is_some_and(|v| v == "hit"),
+            standin: r.headers().get("x-weirdnet-standin").and_then(|v| v.to_str().ok()).map(str::to_string),
             ..Default::default()
         };
         let mut parser = SseParser::default();

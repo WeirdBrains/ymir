@@ -59,6 +59,9 @@ pub enum Cmd {
         temperature: Option<f64>,
         #[arg(long)]
         max_tokens: Option<u64>,
+        /// Wait for the model to load instead of taking a stand-in's answer.
+        #[arg(long)]
+        wait: bool,
         /// The prompt; `-` reads it from stdin.
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
@@ -67,6 +70,46 @@ pub enum Cmd {
     Bridge {
         #[command(subcommand)]
         cmd: BridgeCmd,
+    },
+    /// Run ymird as a user-level service (systemd --user on Linux, a launchd agent on macOS).
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+}
+
+#[derive(clap::Args, Debug, Default, Clone)]
+pub struct ServiceArgs {
+    /// Write the unit here instead of the user-service directory (never starts it).
+    #[arg(long)]
+    pub unit_dir: Option<PathBuf>,
+    /// Print what would happen; change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceCmd {
+    /// Write the user service, then enable and start it.
+    Install {
+        #[command(flatten)]
+        args: ServiceArgs,
+        /// Write it but don't enable or start it.
+        #[arg(long)]
+        no_start: bool,
+        /// The ymird binary (default: next to ymirctl, else on PATH).
+        #[arg(long)]
+        ymird: Option<PathBuf>,
+    },
+    /// Stop, disable and remove the user service.
+    Uninstall {
+        #[command(flatten)]
+        args: ServiceArgs,
+    },
+    /// Is it installed and running?
+    Status {
+        #[command(flatten)]
+        args: ServiceArgs,
     },
 }
 
@@ -120,6 +163,18 @@ pub struct SetupArgs {
     /// Print the proposal and write nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// Also install and start ymird as a user service.
+    #[arg(long)]
+    pub service: bool,
+    /// With --service: write the unit here instead (never starts it).
+    #[arg(long, requires = "service")]
+    pub unit_dir: Option<PathBuf>,
+    /// With --service: write the unit but don't start it.
+    #[arg(long, requires = "service")]
+    pub no_start: bool,
+    /// With --service: the ymird binary (default: next to ymirctl, else on PATH).
+    #[arg(long, requires = "service")]
+    pub ymird: Option<PathBuf>,
 }
 
 pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<()> {
@@ -130,9 +185,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Status { json } => status(&paths, out, json).await,
         Cmd::Models => models(&paths, out).await,
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
+        Cmd::Service { cmd } => service_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
-        Cmd::Chat { model, system, temperature, max_tokens, prompt } => {
-            chat(&paths, out, input, model, system, temperature, max_tokens, prompt).await
+        Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
+            chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
         }
         Cmd::Bridge { cmd: BridgeCmd::Token { rotate } } => {
             let t = if rotate { ymir_core::token::rotate(&paths)? } else { ymir_core::token::load_or_create(&paths)? };
@@ -267,9 +323,42 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
             p.to_download.iter().map(|e| e.spec.id.as_str()).collect::<Vec<_>>().join(", ")
         )?;
     }
-    writeln!(out, "Next: run `ymird`, then `ymirctl chat \"Hello\"`.")?;
+    if args.service {
+        let opts = ymir_core::service::InstallOptions { dir: args.unit_dir.clone(), start: !args.no_start, dry_run: false };
+        for line in ymir_core::service::install(&service_spec(paths, args.ymird.clone())?, &opts)? {
+            writeln!(out, "{line}")?;
+        }
+        writeln!(out, "Next: `ymirctl status`, then `ymirctl chat \"Hello\"`.")?;
+    } else {
+        writeln!(out, "Next: run `ymird` (or `ymirctl service install`), then `ymirctl chat \"Hello\"`.")?;
+    }
     if p.config.roles.app {
         writeln!(out, "OpenAI clients (Jan): base URL http://127.0.0.1:{}/v1, API key from `ymirctl bridge token`.", p.config.app.bridge.port)?;
+    }
+    Ok(())
+}
+
+fn service_spec(paths: &Paths, ymird: Option<PathBuf>) -> Result<ymir_core::service::ServiceSpec> {
+    let ymird = ymird.or_else(ymir_core::service::find_ymird).context("ymird not found next to ymirctl or on PATH; pass --ymird")?;
+    let ymird = std::fs::canonicalize(&ymird).unwrap_or(ymird);
+    let home = std::fs::canonicalize(&paths.home).unwrap_or_else(|_| paths.home.clone());
+    Ok(ymir_core::service::ServiceSpec { ymird, home })
+}
+
+fn service_cmd(paths: &Paths, out: &mut dyn Write, cmd: ServiceCmd) -> Result<()> {
+    use ymir_core::service;
+    let lines = match cmd {
+        ServiceCmd::Install { args, no_start, ymird } => {
+            if !paths.config().exists() && !args.dry_run {
+                bail!("{} does not exist; run `ymirctl setup` first", paths.config().display());
+            }
+            service::install(&service_spec(paths, ymird)?, &service::InstallOptions { dir: args.unit_dir, start: !no_start, dry_run: args.dry_run })?
+        }
+        ServiceCmd::Uninstall { args } => service::uninstall(args.unit_dir.as_deref(), args.dry_run)?,
+        ServiceCmd::Status { args } => service::status(args.unit_dir.as_deref())?,
+    };
+    for l in lines {
+        writeln!(out, "{l}")?;
     }
     Ok(())
 }
@@ -305,7 +394,20 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
             ModelState::Failed(why) => format!("failed: {why}"),
             other => format!("{other:?}").to_lowercase(),
         };
-        writeln!(out, "  {:<24} {:<10} {:<9} on {} ({}, {} in flight)", m.id, m.purpose, state, m.node, m.engine.name(), m.in_flight)?;
+        let mut extra = String::new();
+        if m.wrapped {
+            extra.push_str(", wrapped");
+        }
+        if let Some(s) = m.last_load_secs {
+            extra.push_str(&format!(", loads in {s:.1}s"));
+        }
+        if m.crashes > 0 {
+            extra.push_str(&format!(", {} crashes", m.crashes));
+        }
+        writeln!(out, "  {:<24} {:<10} {:<9} on {} ({}, {} in flight{extra})", m.id, m.purpose, state, m.node, m.engine.name(), m.in_flight)?;
+    }
+    if !s.alerts.is_empty() {
+        writeln!(out, "Alerts: {}", s.alerts.join(", "))?;
     }
     Ok(())
 }
@@ -350,6 +452,7 @@ async fn chat(
     system: Option<String>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
+    wait: bool,
     prompt: Vec<String>,
 ) -> Result<()> {
     let text = if prompt == ["-"] {
@@ -371,6 +474,9 @@ async fn chat(
     if let Some(n) = max_tokens {
         extra.insert("max_tokens".into(), Value::from(n));
     }
+    if wait {
+        extra.insert("wait_for_model".into(), Value::Bool(true));
+    }
     let client = bridge(paths).await?;
     let mut io_err = None;
     let outcome = client
@@ -386,6 +492,9 @@ async fn chat(
     writeln!(out)?;
     if outcome.cache_hit {
         writeln!(out, "(cached)")?;
+    }
+    if let Some(s) = &outcome.standin {
+        writeln!(out, "(answered by the stand-in {s} while the model loads)")?;
     }
     Ok(())
 }

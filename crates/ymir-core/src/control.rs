@@ -17,6 +17,7 @@ use crate::{Coordinator, LocalModelNode, ModelNode};
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
     Status,
+    /// An operator's load: also clears a crash loop.
     Load {
         model: String,
         #[serde(default)]
@@ -38,6 +39,14 @@ pub struct NodeModel {
     pub purpose: String,
     /// The engine process, while one runs.
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub last_load_secs: Option<f32>,
+    /// A stock server Ymir forwards to but doesn't own.
+    #[serde(default)]
+    pub wrapped: bool,
+    /// Engine crashes in the current window.
+    #[serde(default)]
+    pub crashes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +59,9 @@ pub struct StatusReport {
     pub bridge_port: Option<u16>,
     pub main_model: Option<String>,
     pub models: Vec<NodeModel>,
+    /// Alert keys currently failing.
+    #[serde(default)]
+    pub alerts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +90,7 @@ pub struct ControlHandler {
     pub main_model: Option<String>,
     pub coordinator: Option<Arc<Coordinator>>,
     pub model_node: Option<Arc<LocalModelNode>>,
+    pub alerter: Option<Arc<ymir_alerts::Alerter>>,
 }
 
 impl ControlHandler {
@@ -105,6 +118,9 @@ impl ControlHandler {
                             swap_group: s.swap_group,
                             purpose: if s.embedding { "embedding".into() } else { "chat".into() },
                             pid: s.pid,
+                            last_load_secs: s.last_load_secs,
+                            wrapped: s.wrapped,
+                            crashes: s.crashes,
                         })
                     })
                     .collect();
@@ -119,13 +135,14 @@ impl ControlHandler {
                         bridge_port: self.bridge_port,
                         main_model: self.main_model.clone(),
                         models,
+                        alerts: self.alerter.as_ref().map(|a| a.failing()).unwrap_or_default(),
                     }),
                 }
             }
             ControlRequest::Load { model, node } => {
                 let result = match (&self.coordinator, &self.model_node) {
-                    (Some(c), _) => c.load(&model, node.as_deref()).await,
-                    (None, Some(n)) => n.load(&model).await.map(|_| n.name().to_string()),
+                    (Some(c), _) => c.load(&model, node.as_deref(), true).await,
+                    (None, Some(n)) => n.load(&model, true).await.map(|_| n.name().to_string()),
                     (None, None) => return ControlResponse::err("this node runs neither the inference nor the model role"),
                 };
                 match result {
