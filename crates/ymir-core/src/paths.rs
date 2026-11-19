@@ -38,6 +38,11 @@ impl Paths {
         self.state().join("bridge.token")
     }
 
+    /// This device's Weirdnet identity and roster (mode 0700, secrets 0600).
+    pub fn pool(&self) -> PathBuf {
+        self.state().join("pool")
+    }
+
     pub fn logs(&self) -> PathBuf {
         self.state().join("logs")
     }

@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use ymir_backends::SseParser;
+use weirdnet_backends::SseParser;
 
 use crate::{NodeConfig, Paths};
 
@@ -98,6 +98,15 @@ impl BridgeClient {
                 }
                 if let Some(f) = choice["finish_reason"].as_str() {
                     out.finish_reason = Some(f.to_string());
+                }
+                // On a stream the bridge says on the last chunk whether the cache or a stand-in
+                // answered.
+                let w = &v["weirdnet"];
+                if w["cache_hit"].as_bool() == Some(true) {
+                    out.cache_hit = true;
+                }
+                if let Some(s) = w["standin"].as_str() {
+                    out.standin = Some(s.to_string());
                 }
             }
         }

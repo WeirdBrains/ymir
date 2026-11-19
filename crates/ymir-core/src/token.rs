@@ -27,7 +27,7 @@ pub fn load(paths: &Paths) -> std::io::Result<Option<String>> {
 /// Writes a new token (a running bridge keeps the old one until restarted).
 pub fn rotate(paths: &Paths) -> std::io::Result<String> {
     paths.ensure_state()?;
-    let token = ymir_openai::new_token();
+    let token = weirdnet_openai::new_token();
     let tmp = paths.token().with_extension("tmp");
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);

@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
+use weirdnet_backends::find_in_path;
 use weirdnet_model::hw::{Budget, CatalogEntry, Hardware, Plan};
-use ymir_backends::find_in_path;
 
 use crate::config::{LocalModel, NodeConfig, Roles};
 

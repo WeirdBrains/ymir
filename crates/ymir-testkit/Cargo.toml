@@ -26,11 +26,14 @@ libc.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 clap.workspace = true
+weirdnet-agent.workspace = true
+weirdnet-backends.workspace = true
 weirdnet-model.workspace = true
+weirdnet-net.workspace = true
+weirdnet-openai.workspace = true
+weirdnet-sync.workspace = true
 ymir-alerts.workspace = true
-ymir-backends.workspace = true
 ymir-core.workspace = true
-ymir-infer.workspace = true
 ymirctl.workspace = true
 
 [lints]

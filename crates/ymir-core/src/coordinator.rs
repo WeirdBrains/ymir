@@ -1,16 +1,19 @@
-//! The inference role: catalog and routing over model nodes (so far, the local one).
+//! The inference role: catalog and routing over model nodes, the answer cache and the
+//! cold-start stand-in. It speaks `weirdnet-agent` infer/2 requests end to end; [`crate::host`]
+//! serves it as an `InferHost`.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio_stream::wrappers::ReceiverStream;
-use ymir_backends::ModelStatus;
-use ymir_infer::{
-    BoxFuture, CatalogModel, ChatRequest, CompletionRequest, EmbedRequest, Embeddings, Event, EventStream, InferError, ModelState, Pool, Reply,
-};
-use ymir_semcache::AnswerCache;
+use weirdnet_agent::remote::RemoteError;
+use weirdnet_agent::remote::catalog::{CatalogModel as AgentModel, ModelState as AgentState, Purpose};
+use weirdnet_agent::remote::infer::v2::{Finish, Request, Usage};
+use weirdnet_agent::{CancelToken, ToolCall};
+use weirdnet_backends::error::{bad_request, engine_error, unavailable, unknown_model};
+use weirdnet_backends::{Chunk, ModelState, ModelStatus, ToolCalls};
+use weirdnet_semcache::{AnswerCache, CachedAnswer};
 
 use crate::ModelNode;
 
@@ -29,10 +32,47 @@ impl Default for CoordinatorOptions {
     }
 }
 
-/// Catalog, routing, cold-start loading and stand-ins. Placement, the scheduler lease and resume
-/// come in later milestones; the shape stays: apps call [`Pool`], this calls [`ModelNode`]s.
+/// One model in the merged catalog, with its state on every node that has it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogRow {
+    pub id: String,
+    pub nodes: Vec<(String, ModelState)>,
+    pub embedding: bool,
+}
+
+impl CatalogRow {
+    pub fn ready(&self) -> bool {
+        self.nodes.iter().any(|(_, s)| *s == ModelState::Ready)
+    }
+}
+
+/// Where an answer streams: infer/2's `Output`, or an infer/1 turn being collected.
+pub trait Sink: Send + Sync {
+    fn text(&self, t: String);
+    fn reasoning(&self, t: String);
+    fn tool_call(&self, c: ToolCall);
+    fn usage(&self, u: Usage);
+}
+
+impl Sink for weirdnet_agent::remote::infer::v2::Output {
+    fn text(&self, t: String) {
+        weirdnet_agent::remote::infer::v2::Output::text(self, t)
+    }
+    fn reasoning(&self, t: String) {
+        weirdnet_agent::remote::infer::v2::Output::reasoning(self, t)
+    }
+    fn tool_call(&self, c: ToolCall) {
+        weirdnet_agent::remote::infer::v2::Output::tool_call(self, c)
+    }
+    fn usage(&self, u: Usage) {
+        weirdnet_agent::remote::infer::v2::Output::usage(self, u)
+    }
+}
+
+/// Catalog, routing, cold-start loading, stand-ins and the answer cache. Model nodes come and
+/// go (remote ones as they appear among the user's devices).
 pub struct Coordinator {
-    nodes: Vec<Arc<dyn ModelNode>>,
+    nodes: RwLock<Vec<Arc<dyn ModelNode>>>,
     main: Option<String>,
     cache: Arc<dyn AnswerCache>,
     opts: CoordinatorOptions,
@@ -48,18 +88,19 @@ struct Target {
 }
 
 /// A chat request's route, decided without waiting: a cached answer, or a model node and the
-/// model that answers there (the stand-in while the requested model loads). [`Coordinator::run_chat`]
-/// then loads the model if it is still cold and streams the answer. The split lets the infer/2
-/// host name the answering model in `Accepted` before anything streams.
+/// model that answers there (the stand-in while the requested model loads). [`Coordinator::run`]
+/// then loads the model if it is still cold and streams the answer. The split lets infer/2 name
+/// the answering model in `Accepted` before anything streams.
 pub struct Prepared {
     /// The model that answers (the stand-in when [`Prepared::standin`] is set).
     pub model: String,
     pub standin: Option<String>,
+    raw: bool,
     route: Route,
 }
 
 enum Route {
-    Cached(Vec<Event>),
+    Cached(CachedAnswer),
     Node { node: Arc<dyn ModelNode>, cold: bool },
 }
 
@@ -69,52 +110,95 @@ impl Prepared {
     }
 }
 
+fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Coordinator {
     pub fn new(nodes: Vec<Arc<dyn ModelNode>>, main: Option<String>, cache: Arc<dyn AnswerCache>) -> Self {
         Self::with_options(nodes, main, cache, CoordinatorOptions::default())
     }
 
     pub fn with_options(nodes: Vec<Arc<dyn ModelNode>>, main: Option<String>, cache: Arc<dyn AnswerCache>, opts: CoordinatorOptions) -> Self {
-        Self { nodes, main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())) }
+        Self { nodes: RwLock::new(nodes), main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())) }
     }
 
-    pub fn nodes(&self) -> &[Arc<dyn ModelNode>] {
-        &self.nodes
+    pub fn nodes(&self) -> Vec<Arc<dyn ModelNode>> {
+        read(&self.nodes).clone()
+    }
+
+    /// Adds a model node (replacing one of the same name).
+    pub fn add_node(&self, node: Arc<dyn ModelNode>) {
+        let mut nodes = self.nodes.write().unwrap_or_else(|e| e.into_inner());
+        nodes.retain(|n| n.name() != node.name());
+        nodes.push(node);
+    }
+
+    pub fn remove_node(&self, name: &str) -> bool {
+        let mut nodes = self.nodes.write().unwrap_or_else(|e| e.into_inner());
+        let before = nodes.len();
+        nodes.retain(|n| n.name() != name);
+        nodes.len() != before
     }
 
     pub fn options(&self) -> &CoordinatorOptions {
         &self.opts
     }
 
-    fn node(&self, name: &str) -> Option<&Arc<dyn ModelNode>> {
-        self.nodes.iter().find(|n| n.name() == name)
+    pub fn main_model(&self) -> Option<&str> {
+        self.main.as_deref()
+    }
+
+    fn node(&self, name: &str) -> Option<Arc<dyn ModelNode>> {
+        read(&self.nodes).iter().find(|n| n.name() == name).cloned()
     }
 
     /// The pool catalog: every model on every node, with its state there.
-    pub fn merged_catalog(&self) -> Vec<CatalogModel> {
-        let mut by_id: BTreeMap<String, CatalogModel> = BTreeMap::new();
-        for node in &self.nodes {
+    pub fn merged_catalog(&self) -> Vec<CatalogRow> {
+        let mut by_id: BTreeMap<String, CatalogRow> = BTreeMap::new();
+        for node in self.nodes() {
             for s in node.status() {
-                let row = by_id.entry(s.id.clone()).or_insert_with(|| CatalogModel {
-                    id: s.id.clone(),
-                    nodes: Vec::new(),
-                    purpose: if s.embedding { "embedding".into() } else { "chat".into() },
-                });
+                let row = by_id.entry(s.id.clone()).or_insert_with(|| CatalogRow { id: s.id.clone(), nodes: Vec::new(), embedding: s.embedding });
                 row.nodes.push((node.name().to_string(), s.state.clone()));
             }
         }
         by_id.into_values().collect()
     }
 
+    /// The merged catalog as catalog/1 entries; chat models name the stand-in.
+    pub fn agent_catalog(&self) -> Vec<AgentModel> {
+        let standin = self.opts.standin.as_deref();
+        self.merged_catalog()
+            .iter()
+            .map(|m| {
+                let states: Vec<&ModelState> = m.nodes.iter().map(|(_, s)| s).collect();
+                let state = if states.contains(&&ModelState::Ready) {
+                    AgentState::Warm
+                } else if states.contains(&&ModelState::Loading) {
+                    AgentState::Loading
+                } else {
+                    AgentState::Loadable
+                };
+                let purpose = if m.embedding { Purpose::Embedding } else { Purpose::Chat };
+                let ready = states.iter().filter(|s| ***s == ModelState::Ready).count() as u32;
+                let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready);
+                if !m.embedding {
+                    c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
+                }
+                c
+            })
+            .collect()
+    }
+
     /// Picks a node for `model`: a ready one with the fewest requests in flight, else the first
     /// node that has it (it gets loaded). `embedding` says which kind of model the caller wants.
-    fn pick(&self, model: &str, embedding: bool) -> Result<(Arc<dyn ModelNode>, ModelStatus), InferError> {
+    fn pick(&self, model: &str, embedding: bool) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
         let mut best: Option<(Arc<dyn ModelNode>, ModelStatus)> = None;
         let mut fallback = None;
-        for node in &self.nodes {
+        for node in self.nodes() {
             if let Some(s) = node.status().into_iter().find(|s| s.id == model) {
                 if s.embedding != embedding {
-                    return Err(InferError::BadRequest(if s.embedding {
+                    return Err(bad_request(if s.embedding {
                         format!("{model} is an embedding model; use /v1/embeddings")
                     } else {
                         format!("{model} is not an embedding model")
@@ -126,7 +210,7 @@ impl Coordinator {
                 fallback.get_or_insert_with(|| (node.clone(), s));
             }
         }
-        best.or(fallback).ok_or_else(|| InferError::UnknownModel(model.into()))
+        best.or(fallback).ok_or_else(|| unknown_model(model))
     }
 
     /// How long loading this model will take: the last measured load, else a guess from its file
@@ -144,9 +228,9 @@ impl Coordinator {
     }
 
     /// Loads `model` on a node that has it (or `node`). `force` clears a crash loop.
-    pub async fn load(&self, model: &str, node: Option<&str>, force: bool) -> Result<String, InferError> {
+    pub async fn load(&self, model: &str, node: Option<&str>, force: bool) -> Result<String, RemoteError> {
         let n = match node {
-            Some(name) => self.node(name).cloned().ok_or_else(|| InferError::Unavailable(format!("no model node `{name}`")))?,
+            Some(name) => self.node(name).ok_or_else(|| unavailable(format!("no model node `{name}`")))?,
             None => {
                 let embedding = self.is_embedding(model)?;
                 self.pick(model, embedding)?.0
@@ -156,15 +240,15 @@ impl Coordinator {
         Ok(n.name().to_string())
     }
 
-    fn is_embedding(&self, model: &str) -> Result<bool, InferError> {
-        self.nodes.iter().flat_map(|n| n.status()).find(|s| s.id == model).map(|s| s.embedding).ok_or_else(|| InferError::UnknownModel(model.into()))
+    fn is_embedding(&self, model: &str) -> Result<bool, RemoteError> {
+        self.nodes().iter().flat_map(|n| n.status()).find(|s| s.id == model).map(|s| s.embedding).ok_or_else(|| unknown_model(model))
     }
 
     /// Unloads `model` everywhere it is resident.
-    pub async fn unload(&self, model: &str) -> Result<Vec<String>, InferError> {
+    pub async fn unload(&self, model: &str) -> Result<Vec<String>, RemoteError> {
         let mut done = Vec::new();
         let mut known = false;
-        for node in &self.nodes {
+        for node in self.nodes() {
             if let Some(s) = node.status().into_iter().find(|s| s.id == model) {
                 known = true;
                 if s.state != ModelState::Unloaded {
@@ -174,23 +258,21 @@ impl Coordinator {
             }
         }
         if !known {
-            return Err(InferError::UnknownModel(model.into()));
+            return Err(unknown_model(model));
         }
         Ok(done)
     }
 
-    fn resolve(&self, model: Option<&str>) -> Result<String, InferError> {
+    fn resolve(&self, model: Option<&str>) -> Result<String, RemoteError> {
         match model {
-            None | Some("default") | Some("ymir") => {
-                self.main.clone().ok_or_else(|| InferError::BadRequest("no model given and this pool has no main model".into()))
-            }
+            None | Some("default") | Some("ymir") => self.main.clone().ok_or_else(|| bad_request("no model given and this pool has no main model")),
             Some(m) => Ok(m.to_string()),
         }
     }
 
-    /// Picks the node for a chat or completion without waiting: a ready one, or the stand-in
-    /// (whose model then loads in the background), or a cold node (`true`: load it first).
-    fn choose(&self, model: &str, wait: bool) -> Result<(Target, bool), InferError> {
+    /// Picks the node for a chat without waiting: a ready one, or the stand-in (whose model then
+    /// loads in the background), or a cold node (`true`: load it first).
+    fn choose(&self, model: &str, wait: bool) -> Result<(Target, bool), RemoteError> {
         let (node, status) = self.pick(model, false)?;
         if status.state == ModelState::Ready {
             return Ok((Target { node, model: model.into(), standin: None }, false));
@@ -202,25 +284,17 @@ impl Coordinator {
         Ok((Target { node, model: model.into(), standin: None }, true))
     }
 
-    /// [`Coordinator::choose`], then loads a cold model.
-    async fn target(&self, model: &str, wait: bool) -> Result<Target, InferError> {
-        let (t, cold) = self.choose(model, wait)?;
-        if cold {
-            tracing::info!(model = %t.model, node = t.node.name(), "cold start: loading");
-            t.node.load(&t.model, false).await?;
-        }
-        Ok(t)
-    }
-
-    /// Decides where a chat goes (see [`Prepared`]). `raw` (infer/2 raw mode) skips the cache
-    /// and the stand-in.
-    pub fn prepare_chat(&self, req: &ChatRequest, raw: bool) -> Result<Prepared, InferError> {
+    /// Decides where a chat goes (see [`Prepared`]). `raw` requests skip the cache and the
+    /// stand-in.
+    pub fn prepare(&self, req: &Request) -> Result<Prepared, RemoteError> {
         let model = self.resolve(req.model.as_deref())?;
-        if !raw && let Some(events) = self.cache.get(&model, req) {
-            return Ok(Prepared { model, standin: None, route: Route::Cached(events) });
+        if !req.raw
+            && let Some(hit) = self.cache.get(&model, req)
+        {
+            return Ok(Prepared { model, standin: None, raw: false, route: Route::Cached(hit) });
         }
-        let (t, cold) = self.choose(&model, req.wait_for_model || raw)?;
-        Ok(Prepared { model: t.model, standin: t.standin, route: Route::Node { node: t.node, cold } })
+        let (t, cold) = self.choose(&model, req.wait_for_model || req.raw)?;
+        Ok(Prepared { model: t.model, standin: t.standin, raw: req.raw, route: Route::Node { node: t.node, cold } })
     }
 
     /// The stand-in, when policy allows it for this cold `model` on `node`.
@@ -230,10 +304,10 @@ impl Coordinator {
         if estimate <= self.opts.standin_after {
             return None;
         }
-        for n in &self.nodes {
+        for n in self.nodes() {
             let Some(s) = n.status().into_iter().find(|s| s.id == standin) else { continue };
             // Loading the model would unload a stand-in in its swap group on the same node.
-            let evicted = Arc::ptr_eq(n, node) && s.swap_group.is_some() && s.swap_group == status.swap_group;
+            let evicted = Arc::ptr_eq(&n, node) && s.swap_group.is_some() && s.swap_group == status.swap_group;
             if s.state == ModelState::Ready && !s.embedding && !evicted {
                 tracing::info!(model = %model, standin, estimate_secs = estimate.as_secs_f32(), "cold start: answering with the stand-in");
                 return Some(Target { node: n.clone(), model: standin.into(), standin: Some(standin.into()) });
@@ -255,129 +329,128 @@ impl Coordinator {
         });
     }
 
-    async fn route(&self, req: ChatRequest) -> Result<Reply, InferError> {
-        let p = self.prepare_chat(&req, false)?;
-        self.run_chat(p, req).await
-    }
-
-    /// Streams the answer for a [`Prepared`] route, loading a cold model first.
-    pub async fn run_chat(&self, p: Prepared, req: ChatRequest) -> Result<Reply, InferError> {
+    /// Streams the answer for a [`Prepared`] route into `out`, loading a cold model first.
+    /// Finished answers are cached under the model that produced them.
+    pub async fn run(&self, p: Prepared, req: &Request, out: &dyn Sink, cancel: &CancelToken) -> Result<Finish, RemoteError> {
         let (node, cold) = match p.route {
-            Route::Cached(events) => {
-                return Ok(Reply {
-                    model: p.model,
-                    node: "cache".into(),
-                    cache_hit: true,
-                    standin: None,
-                    events: Box::pin(futures::stream::iter(events.into_iter().map(Ok))),
-                });
-            }
+            Route::Cached(hit) => return Ok(replay(hit, out)),
             Route::Node { node, cold } => (node, cold),
         };
         if cold {
             tracing::info!(model = %p.model, node = node.name(), "cold start: loading");
-            node.load(&p.model, false).await?;
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
+                r = node.load(&p.model, false) => r?,
+            }
         }
-        let t = Target { node, model: p.model, standin: p.standin };
-        let events = match t.node.chat(&t.model, &req).await {
+        let mut routed = req.clone();
+        routed.model = Some(p.model.clone());
+        let stream = match node.chat(&p.model, &routed).await {
             Ok(s) => s,
             // The engine died between the pick and the request. Nothing has streamed yet, so a
             // reload and one retry is safe.
-            Err(InferError::Unavailable(why)) => {
-                tracing::warn!(model = %t.model, "{why}; reloading once");
-                t.node.load(&t.model, false).await?;
-                t.node.chat(&t.model, &req).await?
+            Err(RemoteError::Unavailable { message }) => {
+                tracing::warn!(model = %p.model, "{message}; reloading once");
+                node.load(&p.model, false).await?;
+                node.chat(&p.model, &routed).await?
             }
             Err(e) => return Err(e),
         };
-        // Tee the stream into the cache (under the model that actually answered).
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let cache = self.cache.clone();
-        let cache_model = t.model.clone();
-        tokio::spawn(async move {
-            let mut events = events;
-            let mut seen: Vec<Event> = Vec::new();
-            while let Some(ev) = events.next().await {
-                if let Ok(e) = &ev {
-                    seen.push(e.clone());
+        let mut stream = stream;
+        let mut calls = ToolCalls::default();
+        let mut answer = CachedAnswer::new(p.model.clone(), "", "stop");
+        loop {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
+                n = stream.next() => n,
+            };
+            match next.ok_or_else(|| engine_error("engine stream ended early"))?? {
+                Chunk::Text(t) => {
+                    answer.text.push_str(&t);
+                    out.text(t);
                 }
-                let failed = ev.is_err();
-                if tx.send(ev).await.is_err() || failed {
-                    return;
+                Chunk::Reasoning(t) => {
+                    answer.reasoning.push_str(&t);
+                    out.reasoning(t);
                 }
+                Chunk::ToolCall { index, id, name, arguments } => calls.push(index, id, name, &arguments),
+                Chunk::Done { finish_reason, usage } => {
+                    let had_calls = !calls.is_empty();
+                    for c in calls.finish() {
+                        answer.tool_calls.push(c.clone());
+                        out.tool_call(c);
+                    }
+                    let reason = finish_reason.unwrap_or_else(|| if had_calls { "tool_calls".into() } else { "stop".into() });
+                    let mut f = Finish::new(reason.clone());
+                    if let Some(u) = usage {
+                        out.usage(u);
+                        f = f.with_usage(u);
+                    }
+                    f.meta.served_by = Some(node.name().to_string());
+                    f.meta.standin = p.standin.clone();
+                    answer.finish_reason = Some(reason);
+                    answer.usage = usage;
+                    if !p.raw && answer.complete() {
+                        self.cache.put(&p.model, req, &answer);
+                    }
+                    return Ok(f);
+                }
+                other => tracing::debug!(?other, "engine chunk this version does not use"),
             }
-            cache.put(&cache_model, &req, seen);
-        });
-        Ok(Reply { model: t.model, node: t.node.name().to_string(), cache_hit: false, standin: t.standin, events: Box::pin(ReceiverStream::new(rx)) })
-    }
-
-    async fn route_completion(&self, req: CompletionRequest) -> Result<Reply, InferError> {
-        let model = self.resolve(req.model.as_deref())?;
-        let t = self.target(&model, req.wait_for_model).await?;
-        let events: EventStream = match t.node.complete(&t.model, &req).await {
-            Ok(s) => s,
-            Err(InferError::Unavailable(why)) => {
-                tracing::warn!(model = %t.model, "{why}; reloading once");
-                t.node.load(&t.model, false).await?;
-                t.node.complete(&t.model, &req).await?
-            }
-            Err(e) => return Err(e),
-        };
-        Ok(Reply { model: t.model, node: t.node.name().to_string(), cache_hit: false, standin: t.standin, events })
+        }
     }
 
     /// The embedding model a request means (`None`/`default`: the first one in the catalog).
-    pub fn resolve_embedding(&self, model: Option<&str>) -> Result<String, InferError> {
+    pub fn resolve_embedding(&self, model: Option<&str>) -> Result<String, RemoteError> {
         match model {
             None | Some("default") | Some("ymir") => self
                 .merged_catalog()
                 .into_iter()
-                .find(|m| m.purpose == "embedding")
+                .find(|m| m.embedding)
                 .map(|m| m.id)
-                .ok_or_else(|| InferError::BadRequest("no model given and this pool has no embedding model".into())),
+                .ok_or_else(|| bad_request("no model given and this pool has no embedding model")),
             Some(m) => Ok(m.to_string()),
         }
     }
 
-    /// Embeds with the model a request means.
-    pub async fn embed_with(&self, req: EmbedRequest) -> Result<Embeddings, InferError> {
-        self.route_embed(req).await
-    }
-
-    async fn route_embed(&self, req: EmbedRequest) -> Result<Embeddings, InferError> {
-        let model = self.resolve_embedding(req.model.as_deref())?;
-        let (node, status) = self.pick(&model, true)?;
+    /// Embeds with `model`, loading it first if it is cold. Returns the vectors, the prompt
+    /// tokens and the node that answered.
+    pub async fn embed(&self, model: &str, input: &[String]) -> Result<(Vec<Vec<f32>>, u64, String), RemoteError> {
+        let (node, status) = self.pick(model, true)?;
         if status.state != ModelState::Ready {
             tracing::info!(model = %model, node = node.name(), "cold start: loading");
-            node.load(&model, false).await?;
+            node.load(model, false).await?;
         }
-        let (vectors, prompt_tokens) = match node.embed(&model, &req.input).await {
+        let (vectors, tokens) = match node.embed(model, input).await {
             Ok(v) => v,
-            Err(InferError::Unavailable(why)) => {
-                tracing::warn!(model = %model, "{why}; reloading once");
-                node.load(&model, false).await?;
-                node.embed(&model, &req.input).await?
+            Err(RemoteError::Unavailable { message }) => {
+                tracing::warn!(model = %model, "{message}; reloading once");
+                node.load(model, false).await?;
+                node.embed(model, input).await?
             }
             Err(e) => return Err(e),
         };
-        Ok(Embeddings { model, node: node.name().to_string(), vectors, prompt_tokens })
+        Ok((vectors, tokens, node.name().to_string()))
     }
 }
 
-impl Pool for Coordinator {
-    fn catalog(&self) -> BoxFuture<'_, Result<Vec<CatalogModel>, InferError>> {
-        Box::pin(async move { Ok(self.merged_catalog()) })
+/// A cached answer, replayed.
+fn replay(hit: CachedAnswer, out: &dyn Sink) -> Finish {
+    if !hit.reasoning.is_empty() {
+        out.reasoning(hit.reasoning.clone());
     }
-
-    fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Reply, InferError>> {
-        Box::pin(self.route(req))
+    if !hit.text.is_empty() {
+        out.text(hit.text.clone());
     }
-
-    fn complete(&self, req: CompletionRequest) -> BoxFuture<'_, Result<Reply, InferError>> {
-        Box::pin(self.route_completion(req))
+    for c in &hit.tool_calls {
+        out.tool_call(c.clone());
     }
-
-    fn embed(&self, req: EmbedRequest) -> BoxFuture<'_, Result<Embeddings, InferError>> {
-        Box::pin(self.route_embed(req))
+    let mut f = Finish::new(hit.finish_reason.clone().unwrap_or_else(|| "stop".into()));
+    if let Some(u) = hit.usage {
+        out.usage(u);
+        f = f.with_usage(u);
     }
+    f.meta.cache_hit = true;
+    f.meta.served_by = Some("cache".into());
+    f
 }

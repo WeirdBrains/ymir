@@ -905,11 +905,11 @@ a rename plus a dependency swap. All are `publish = false`.
 
 | Interim crate | To be extracted into | Holds |
 |---|---|---|
-| `ymir-hw` | `weirdnet-model` (`hw` module, tiered catalog, sizing) | detection (NVIDIA via `nvidia-smi`, AMD sysfs, Apple `sysctl`, `/proc/meminfo`; GB10 as unified), the usable budget, a tiered catalog of `weirdnet_model::ModelSpec`s with footprints, `plan()` |
-| `ymir-backends` | `weirdnet-backends` (the Weirdnet lead extracts it into a new repo after M2) | llama-server and vLLM adapters, wrapping a stock server on loopback, the local supervisor (load, readiness, drain, unload, swap groups, idle TTL, crash backoff and crash loops, `SupervisorEvent`s, logs), chat/completions/embeddings forwarding, SSE decoding. M2 changes are done. |
-| `ymir-openai` | `weirdnet-openai` | the loopback-only bridge (token on every endpoint, `Host` check, no CORS, `x-weirdnet-*` headers) |
-| `ymir-semcache` | `weirdnet-semcache` | the `AnswerCache` seam and an exact-match placeholder |
-| `ymir-infer` | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits); Ymir moves to agent's request types in M3 | `ChatRequest`, `CompletionRequest`, `EmbedRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
+| `ymir-hw` (retired in M3: now `weirdnet-model` 0.4 `hw`) | `weirdnet-model` (`hw` module, tiered catalog, sizing) | detection (NVIDIA via `nvidia-smi`, AMD sysfs, Apple `sysctl`, `/proc/meminfo`; GB10 as unified), the usable budget, a tiered catalog of `weirdnet_model::ModelSpec`s with footprints, `plan()` |
+| `ymir-backends` (retired in M3: now `weirdnet-backends` 0.1.0) | `weirdnet-backends` (the Weirdnet lead extracts it into a new repo after M2) | llama-server and vLLM adapters, wrapping a stock server on loopback, the local supervisor (load, readiness, drain, unload, swap groups, idle TTL, crash backoff and crash loops, `SupervisorEvent`s, logs), chat/completions/embeddings forwarding, SSE decoding. M2 changes are done. |
+| `ymir-openai` (retired in M3: now `weirdnet-openai` 0.1.0) | `weirdnet-openai` | the loopback-only bridge (token on every endpoint, `Host` check, no CORS, `x-weirdnet-*` headers) |
+| `ymir-semcache` (retired in M3: now `weirdnet-semcache` 0.1.0) | `weirdnet-semcache` | the `AnswerCache` seam and an exact-match placeholder |
+| `ymir-infer` (retired in M3: now `weirdnet-agent` 0.4 request types) | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits); Ymir moves to agent's request types in M3 | `ChatRequest`, `CompletionRequest`, `EmbedRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
 | `ymir-alerts` | `weirdnet-alerts` (the Weirdnet lead extracts it later) | observations, `weirdnet-rules` `RuleSpec`s with `fail`/`ok`/`event` actions, the server-a/server-b rule pack, hourly dedupe with recovery notices, SMTP (lettre), webhook, push (off) and log sinks with dry-run, route/disk/GPU probes |
 
 Also generic but small, in `ymir-core` for now: `service` (systemd user unit and launchd agent

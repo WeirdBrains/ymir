@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use ymir_backends::EngineKind;
-pub use ymir_infer::ModelState;
+use weirdnet_backends::EngineKind;
+pub use weirdnet_backends::ModelState;
 
 use crate::{Coordinator, LocalModelNode, ModelNode};
 
@@ -62,6 +62,28 @@ pub struct StatusReport {
     /// Alert keys currently failing.
     #[serde(default)]
     pub alerts: Vec<String>,
+    /// This device on Weirdnet, once it has an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkStatus {
+    pub peer: String,
+    pub user: String,
+    pub listening: Vec<String>,
+    pub connected: Vec<String>,
+    pub devices: Vec<Device>,
+}
+
+/// A device in the user's roster.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Device {
+    pub peer: String,
+    pub label: String,
+    pub active: bool,
+    /// This device.
+    pub me: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,12 +113,26 @@ pub struct ControlHandler {
     pub coordinator: Option<Arc<Coordinator>>,
     pub model_node: Option<Arc<LocalModelNode>>,
     pub alerter: Option<Arc<ymir_alerts::Alerter>>,
+    pub network: Option<(Arc<crate::membership::Membership>, Arc<crate::membership::SyncNode>)>,
 }
 
 impl ControlHandler {
+    fn network_status(&self) -> Option<NetworkStatus> {
+        let (m, node) = self.network.as_ref()?;
+        let st = node.status();
+        let me = m.peer_id().to_string();
+        let devices = m
+            .roster()
+            .certs
+            .iter()
+            .map(|c| Device { peer: c.peer_id.clone(), label: c.label.clone(), active: c.active(), me: c.peer_id == me })
+            .collect();
+        Some(NetworkStatus { peer: me, user: m.user_id(), listening: st.listening, connected: st.connected, devices })
+    }
+
     fn nodes(&self) -> Vec<Arc<dyn ModelNode>> {
         match (&self.coordinator, &self.model_node) {
-            (Some(c), _) => c.nodes().to_vec(),
+            (Some(c), _) => c.nodes(),
             (None, Some(n)) => vec![n.clone() as Arc<dyn ModelNode>],
             (None, None) => Vec::new(),
         }
@@ -136,6 +172,7 @@ impl ControlHandler {
                         main_model: self.main_model.clone(),
                         models,
                         alerts: self.alerter.as_ref().map(|a| a.failing()).unwrap_or_default(),
+                        network: self.network_status(),
                     }),
                 }
             }

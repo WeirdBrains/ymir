@@ -6,10 +6,12 @@ conflict. Read it first. This file only adds Ymir-specific rules.
 - Ymir is an app. App crates are `ymir-*` (`ymir-core`, `ymird`, `ymirctl`) and hold only Ymir-specific
   code. Networking, auth, routing, scheduling, backends, caching, the OpenAI bridge and alerts belong
   in `weirdnet-*` crates (see `docs/DESIGN.md`, "Crates"). Never reimplement them here.
-- Until the Weirdnet lead extracts them, generic code lives in the interim crates `ymir-backends`,
-  `ymir-openai`, `ymir-semcache`, `ymir-alerts` and `ymir-infer`, each marked "to be extracted into
-  weirdnet-<name>" (`ymir-hw` moved into `weirdnet-model` 0.4 as `hw`). Keep them free of Ymir types. Never create or modify a `weirdnet-*` crate from this
-  repo; use the published ones as they are.
+- Until the Weirdnet lead extracts it, generic alerting code lives in the interim crate
+  `ymir-alerts`, marked "to be extracted into weirdnet-alerts". Keep it free of Ymir types. The
+  other interim crates are retired: `ymir-hw` became `weirdnet-model`'s `hw`, `ymir-backends`,
+  `ymir-openai` and `ymir-semcache` became `weirdnet-backends`, `weirdnet-openai` and
+  `weirdnet-semcache`, and `ymir-infer` gave way to `weirdnet-agent`'s request types. Never create
+  or modify a `weirdnet-*` crate from this repo; use the published ones as they are.
 - Ymir has three roles (model, inference, app) that are independent toggles in `node.toml` and run in
   one `ymird`. Keep the protocols identical whether a peer is local or remote; the in-process path is
   only a fast path. Apps never talk to model nodes directly.

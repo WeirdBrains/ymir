@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use ymir_backends::{EngineConfig, EngineKind, ModelLaunch, find_in_path};
+use weirdnet_backends::{EngineConfig, EngineKind, ModelLaunch, find_in_path};
 
 use crate::Paths;
 
@@ -14,15 +14,121 @@ pub struct NodeConfig {
     pub node: NodeSection,
     #[serde(default)]
     pub roles: Roles,
-    /// Weirdnet settings; read from M3 on (roles over Weirdnet).
-    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
-    pub network: toml::Table,
+    /// Weirdnet: how the roles reach the user's other devices (M3).
+    #[serde(default, skip_serializing_if = "NetworkSection::is_default")]
+    pub network: NetworkSection,
     #[serde(default)]
     pub model: ModelSection,
     #[serde(default)]
     pub inference: InferenceSection,
     #[serde(default)]
     pub app: AppSection,
+}
+
+/// `[network]`. Weirdnet runs once this node has an identity (`ymirctl pool init`, or a link
+/// from another device); these settings say how it is reached.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkSection {
+    /// Turn Weirdnet off even with an identity.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// TCP and QUIC port on all addresses; 0 picks a free one.
+    #[serde(default = "network_port")]
+    pub port: u16,
+    /// Listen on exactly these addresses instead (such as `/ip4/127.0.0.1/tcp/0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<Vec<String>>,
+    /// Find the user's devices on the local network.
+    #[serde(default = "yes")]
+    pub mdns: bool,
+    /// Peer discovery (mDNS and the DHT). Off: only `peers` and the relays.
+    #[serde(default = "yes")]
+    pub discovery: bool,
+    /// Relays to be reachable through behind NAT. Default: the Weird Brains relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relays: Option<Vec<String>>,
+    /// Devices to dial directly: `/ip4/…/tcp/…/p2p/PEER` (a peer id is required). Adding one
+    /// grants nothing; the roster decides who is answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+    /// Requests the inference role runs at once for other devices, and how many may wait.
+    #[serde(default = "slots")]
+    pub slots: usize,
+    #[serde(default = "queue")]
+    pub queue: usize,
+}
+
+fn network_port() -> u16 {
+    4848
+}
+
+fn slots() -> usize {
+    4
+}
+
+fn queue() -> usize {
+    32
+}
+
+impl Default for NetworkSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: network_port(),
+            listen: None,
+            mdns: true,
+            discovery: true,
+            relays: None,
+            peers: Vec::new(),
+            slots: slots(),
+            queue: queue(),
+        }
+    }
+}
+
+impl NetworkSection {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `peers` as peer ids and addresses.
+    pub fn hints(&self) -> Result<Vec<(weirdnet_net::PeerId, Vec<weirdnet_net::Multiaddr>)>> {
+        let mut out: Vec<(weirdnet_net::PeerId, Vec<weirdnet_net::Multiaddr>)> = Vec::new();
+        for p in &self.peers {
+            let hint = weirdnet_net::PeerHint::from_addr(p).map_err(|e| anyhow::anyhow!("network.peers `{p}`: {e}"))?;
+            let id: weirdnet_net::PeerId = hint.peer_id.parse().map_err(|e| anyhow::anyhow!("network.peers `{p}`: {e}"))?;
+            let addrs: Vec<weirdnet_net::Multiaddr> = hint.addrs.iter().filter_map(|a| a.parse().ok()).collect();
+            match out.iter_mut().find(|(i, _)| *i == id) {
+                Some((_, a)) => a.extend(addrs),
+                None => out.push((id, addrs)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The Weirdnet node settings.
+    pub fn node_config(&self, label: &str) -> Result<weirdnet_net::NodeConfig> {
+        let mut c = weirdnet_sync::node_config(false);
+        c.listen = match &self.listen {
+            Some(l) => l.iter().map(|a| a.parse().map_err(|e| anyhow::anyhow!("network.listen `{a}`: {e}"))).collect::<Result<_>>()?,
+            None => weirdnet_net::NodeConfig::default_listen(self.port),
+        };
+        c.mdns = self.mdns;
+        c.discovery = if self.discovery { weirdnet_net::DiscoveryMode::Enabled } else { weirdnet_net::DiscoveryMode::Disabled };
+        let relays: Vec<String> = match &self.relays {
+            Some(r) => r.clone(),
+            None => weirdnet_device_link::KNOWN_RELAYS.iter().map(|s| s.to_string()).collect(),
+        };
+        c.relays = relays.iter().map(|r| r.parse().map_err(|e| anyhow::anyhow!("network.relays `{r}`: {e}"))).collect::<Result<_>>()?;
+        c.peers = self
+            .peers
+            .iter()
+            .map(|p| weirdnet_net::PeerHint::from_addr(p).map_err(|e| anyhow::anyhow!("network.peers `{p}`: {e}")))
+            .collect::<Result<_>>()?;
+        c.label = label.to_string();
+        c.version = format!("ymir/{}", env!("CARGO_PKG_VERSION"));
+        Ok(c)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -287,7 +393,7 @@ impl NodeConfig {
                 parse_duration(t).with_context(|| format!("model `{}`: idle_ttl", m.id))?;
             }
             if let Some(url) = &m.wrap {
-                ymir_backends::Wrap { url: url.clone(), api_key: None }.check().map_err(|e| anyhow::anyhow!("model `{}`: {e}", m.id))?;
+                weirdnet_backends::Wrap { url: url.clone(), api_key: None }.check().map_err(|e| anyhow::anyhow!("model `{}`: {e}", m.id))?;
             }
             if let Some(src) = &m.wrap_api_key
                 && !(src.starts_with("env:") || src.starts_with("file:"))
@@ -296,6 +402,7 @@ impl NodeConfig {
             }
         }
         parse_duration(&self.inference.standin_after).context("inference.standin_after")?;
+        self.network.hints()?;
         if let Some(s) = &self.inference.standin
             && !self.model.local.iter().any(|m| &m.id == s)
             && self.roles.model
@@ -355,7 +462,7 @@ impl NodeConfig {
                         let p = Path::new(f);
                         if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }.to_string_lossy().into_owned()
                     }
-                    (Some(f), EngineKind::Vllm) => f.clone(),
+                    (Some(f), _) => f.clone(),
                     (None, _) => match weirdnet_model::hw::find(&m.id) {
                         Some(e) => weirdnet_model::ModelStore::new(&dir).path(&e.spec).to_string_lossy().into_owned(),
                         None => dir.join(format!("{}.gguf", m.id)).to_string_lossy().into_owned(),
@@ -369,7 +476,7 @@ impl NodeConfig {
                 l.embedding = m.is_embedding();
                 l.extra_args.clone_from(&m.args);
                 l.idle_ttl = m.idle_ttl.as_deref().and_then(|t| parse_duration(t).ok());
-                l.wrap = m.wrap.as_ref().map(|url| ymir_backends::Wrap {
+                l.wrap = m.wrap.as_ref().map(|url| weirdnet_backends::Wrap {
                     url: url.clone(),
                     api_key: m.wrap_api_key.as_deref().and_then(|src| match ymir_alerts::config::resolve_secret(src) {
                         Ok(k) => Some(k),

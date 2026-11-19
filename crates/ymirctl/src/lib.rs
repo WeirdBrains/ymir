@@ -427,7 +427,12 @@ async fn bridge(paths: &Paths) -> Result<BridgeClient> {
 async fn models(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     let v = bridge(paths).await?.models().await?;
     for m in v["data"].as_array().into_iter().flatten() {
-        let ready = if m["weirdnet"]["ready"].as_bool() == Some(true) { "ready" } else { "on disk" };
+        let ready = match m["weirdnet"]["state"].as_str() {
+            Some("warm") => "ready",
+            Some("busy") => "ready (busy)",
+            Some("loading") => "loading",
+            _ => "on disk",
+        };
         writeln!(out, "{:<24} {:<10} {}", m["id"].as_str().unwrap_or("?"), m["weirdnet"]["purpose"].as_str().unwrap_or(""), ready)?;
     }
     Ok(())

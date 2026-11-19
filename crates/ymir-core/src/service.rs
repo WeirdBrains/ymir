@@ -114,7 +114,11 @@ pub fn render(spec: &ServiceSpec) -> Result<String> {
 /// `ymird` next to the running executable, else on `PATH`.
 pub fn find_ymird() -> Option<PathBuf> {
     let exe = if cfg!(windows) { "ymird.exe" } else { "ymird" };
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(exe))).filter(|p| p.is_file()).or_else(|| ymir_backends::find_in_path(exe))
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(exe)))
+        .filter(|p| p.is_file())
+        .or_else(|| weirdnet_backends::find_in_path(exe))
 }
 
 #[derive(Debug, Clone, Default)]

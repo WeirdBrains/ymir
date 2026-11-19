@@ -9,11 +9,10 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde_json::json;
-use ymir_backends::{EngineConfig, EngineKind, ModelLaunch, Supervisor, SupervisorOptions, Wrap};
-use ymir_infer::{ChatRequest, Event};
+use weirdnet_backends::{Chunk, EngineConfig, EngineKind, ModelLaunch, Supervisor, SupervisorOptions, Wrap};
 
 async fn ask(sup: &Supervisor, id: &str, max_tokens: u64) -> (String, u64, Duration) {
-    let (req, _) = ChatRequest::from_openai(json!({
+    let (req, _) = weirdnet_openai::request::chat(json!({
         "messages": [{"role": "user", "content": "Write a long story about a lighthouse keeper."}],
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -24,8 +23,8 @@ async fn ask(sup: &Supervisor, id: &str, max_tokens: u64) -> (String, u64, Durat
     let (mut text, mut tokens) = (String::new(), 0);
     while let Some(ev) = s.next().await {
         match ev.unwrap() {
-            Event::Delta { text: t, .. } => text.push_str(&t),
-            Event::Done { usage, .. } => tokens = usage.map(|u| u.completion_tokens).unwrap_or(0),
+            Chunk::Text(t) => text.push_str(&t),
+            Chunk::Done { usage, .. } => tokens = usage.map(|u| u.completion_tokens).unwrap_or(0),
             _ => {}
         }
     }

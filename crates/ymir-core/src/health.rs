@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, watch};
+use weirdnet_backends::{Supervisor, SupervisorEvent};
 use ymir_alerts::{Alerter, Observation, probe};
-use ymir_backends::{Supervisor, SupervisorEvent};
 
 /// An engine event as an alert observation: `engine.<kind>` with the event's fields.
 pub fn engine_observation(ev: &SupervisorEvent) -> Observation {

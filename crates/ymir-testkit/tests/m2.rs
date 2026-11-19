@@ -1,5 +1,5 @@
 //! M2: model-node parity with server-a/server-b. Idle unload, crash backoff and crash loops, the stand-in
-//! cold start, /v1/completions and /v1/embeddings, wrapping a stock server, alerts, and the user
+//! cold start, /v1/embeddings (and /v1/completions' 501), wrapping a stock server, alerts, and the user
 //! service, all against the mock engine in temp dirs.
 
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::Parser as _;
 use serde_json::{Value, json};
-use ymir_backends::{EngineConfig, EngineKind, ModelLaunch, Supervisor, SupervisorEvent, SupervisorOptions, Wrap};
+use weirdnet_backends::{EngineConfig, EngineKind, ModelLaunch, Supervisor, SupervisorEvent, SupervisorOptions, Wrap};
 use ymir_core::control::{self, ControlRequest, ModelState, NodeModel};
 use ymir_core::{Daemon, NodeConfig, Paths};
 
@@ -146,19 +146,17 @@ async fn standin_answers_while_the_big_model_loads() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn completions_embeddings_and_idle_unload() -> Result<()> {
+async fn embeddings_and_idle_unload() -> Result<()> {
     let n = node(
         "[[model.local]]\nid = \"big\"\nfile = \"big.gguf\"\nidle_ttl = \"1s\"\n[[model.local]]\nid = \"emb\"\nfile = \"emb.gguf\"\nrole = \"embedding\"\n",
         "standin_warm = false\n",
     )
     .await?;
-    let v: Value = n.post("completions", json!({"model": "big", "prompt": "Tell me", "max_tokens": 4}), false).await?.json().await?;
-    assert_eq!(v["object"], "text_completion");
-    assert_eq!(v["choices"][0]["text"], " once upon a time");
-    assert_eq!(v["usage"]["total_tokens"], 6);
-    let text = n.post("completions", json!({"model": "big", "prompt": "Tell me", "stream": true}), false).await?.text().await?;
-    assert!(text.contains("\"text\":\" upon\""), "{text}");
-    assert!(text.trim_end().ends_with("data: [DONE]"));
+    // Raw completions are not in infer/2 yet (weirdnet-openai answers 501 until agent 0.4.1
+    // carries a raw prompt); M2 served them. See DESIGN.md, M3 status.
+    let r = n.post("completions", json!({"model": "big", "prompt": "Tell me", "max_tokens": 4}), false).await?;
+    assert_eq!(r.status(), 501);
+    ctl(&n.paths.home, &["load", "big"]).await?;
 
     let v: Value = n.post("embeddings", json!({"input": ["two words", "x"]}), false).await?.json().await?;
     assert_eq!(v["model"], "emb");

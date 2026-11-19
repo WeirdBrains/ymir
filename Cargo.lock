@@ -3997,6 +3997,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4381,7 +4391,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5063,6 +5073,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "weirdnet-backends"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d02badfb45c9bb3150b4678c8bf7b8717742174b65f810a0cf5ff7069e0a7124"
+dependencies = [
+ "async-trait",
+ "futures",
+ "getrandom 0.3.4",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "weirdnet-agent",
+ "weirdnet-model",
+ "weirdnet-net",
+ "weirdnet-sync",
+]
+
+[[package]]
 name = "weirdnet-device-link"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5152,6 +5185,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "weirdnet-openai"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65ecff7ad65f385305d69209de79668ed5769448ccb59c884725e08c64fda704"
+dependencies = [
+ "axum",
+ "futures",
+ "getrandom 0.3.4",
+ "serde_json",
+ "tokio",
+ "weirdnet-agent",
+]
+
+[[package]]
 name = "weirdnet-rules"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5161,6 +5208,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "weirdnet-semcache"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b9478908353f2396bf5fbed5cf3ca0a9f53ebedc60853537de91c0cd17ba806"
+dependencies = [
+ "serde",
+ "sha2 0.10.9",
+ "weirdnet-agent",
 ]
 
 [[package]]
@@ -5538,23 +5596,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ymir-backends"
-version = "0.1.0"
-dependencies = [
- "futures",
- "getrandom 0.3.4",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tracing",
- "ymir-infer",
-]
-
-[[package]]
 name = "ymir-core"
 version = "0.1.0"
 dependencies = [
@@ -5573,48 +5614,14 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "weirdnet-agent",
+ "weirdnet-backends",
  "weirdnet-device-link",
  "weirdnet-model",
  "weirdnet-net",
+ "weirdnet-openai",
+ "weirdnet-semcache",
  "weirdnet-sync",
  "ymir-alerts",
- "ymir-backends",
- "ymir-infer",
- "ymir-openai",
- "ymir-semcache",
-]
-
-[[package]]
-name = "ymir-infer"
-version = "0.1.0"
-dependencies = [
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "ymir-openai"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures",
- "getrandom 0.3.4",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
- "ymir-infer",
-]
-
-[[package]]
-name = "ymir-semcache"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "ymir-infer",
 ]
 
 [[package]]
@@ -5630,11 +5637,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "weirdnet-agent",
+ "weirdnet-backends",
  "weirdnet-model",
+ "weirdnet-net",
+ "weirdnet-openai",
+ "weirdnet-sync",
  "ymir-alerts",
- "ymir-backends",
  "ymir-core",
- "ymir-infer",
  "ymirctl",
 ]
 

@@ -24,15 +24,14 @@ tokio-stream.workspace = true
 toml.workspace = true
 tracing.workspace = true
 weirdnet-agent.workspace = true
+weirdnet-backends.workspace = true
 weirdnet-device-link.workspace = true
 weirdnet-model.workspace = true
 weirdnet-net.workspace = true
+weirdnet-openai.workspace = true
+weirdnet-semcache.workspace = true
 weirdnet-sync.workspace = true
 ymir-alerts.workspace = true
-ymir-backends.workspace = true
-ymir-infer.workspace = true
-ymir-openai.workspace = true
-ymir-semcache.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
