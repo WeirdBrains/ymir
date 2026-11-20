@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use clap::Parser as _;
 use serde_json::{Value, json};
+use weirdnet_agent::pool::NetDialer;
+use weirdnet_net::{Keypair, Multiaddr, WEIRDNET};
+use weirdnet_sync::Roster;
 use weirdnet_update::envelope::Domain;
 use weirdnet_update::manifest::{FullPackage, Labels, PackageFormat};
 use weirdnet_update::{Delegation, FileEntry, Root, Signed, SigningKey, Timestamp, UpdateKind, UpdateManifest};
@@ -264,5 +267,66 @@ async fn ymirctl_updates_stage_a_signed_bundle_and_start_it_on_trial() -> Result
     ymir_core::update::commit_if_on_trial(&Paths::new(&home));
     let st = ctl(&home, &["update", "status"]).await?;
     assert!(st.contains("good release: m9-test") && st.contains("pinned"), "{st}");
+    Ok(())
+}
+
+/// What `pool link` does, without the network: `from` certifies a new node for `to`.
+fn prelink(from: &Membership, to: &Home, label: &str) {
+    let key = Keypair::generate_ed25519();
+    let mut seed = from.seed().unwrap().0;
+    let user = Keypair::ed25519_from_bytes(&mut seed).unwrap();
+    let cert = Roster::self_certify(&WEIRDNET, &user, &key.public().to_peer_id().to_string(), label, 1).unwrap();
+    from.approve(cert.clone()).unwrap();
+    Membership::adopt(&to.paths.pool(), key, &from.seed().unwrap().0, cert, &from.link_settings()).unwrap();
+}
+
+/// Whether a device linked as `label` can open the model node at `model`.
+async fn reaches_model_node(h: &Home, model: &str, model_peer: &str) -> Result<(), String> {
+    let m = Membership::open(&h.paths.pool()).unwrap().unwrap();
+    let node = std::sync::Arc::new(
+        weirdnet_sync::start_node(m.node_key().clone(), NodeConfig::load(&h.paths.config()).unwrap().network.node_config("test").unwrap(), m.state())
+            .unwrap(),
+    );
+    let dialer = NetDialer::new(node.clone());
+    let addr: Multiaddr = model.split("/p2p/").next().unwrap().parse().unwrap();
+    dialer.hint(model_peer.parse().unwrap(), vec![addr]);
+    let opts = ymir_core::remote::RemoteOptions { find_wait: Duration::from_secs(2), accept_timeout: Duration::from_secs(5) };
+    let r = ymir_core::remote::RemoteModelNode::connect(std::sync::Arc::new(dialer), model_peer, &m, &opts).await;
+    r.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// One model node, one device linked as "inf" and one as "app", every device the same user's.
+async fn role_scenario(callers: bool) -> Result<(Result<(), String>, Result<(), String>)> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    let model_h = home(root, "model", "model", &[], &["alpha"])?;
+    if callers {
+        let toml = std::fs::read_to_string(model_h.paths.config())?;
+        std::fs::write(model_h.paths.config(), toml.replace("[model]\n", "[model]\ncallers = [\"inf\"]\n"))?;
+    }
+    let first = Membership::create(&model_h.paths.pool(), "model")?;
+    let (inf_h, app_h) = (home(root, "inf", "inference", &[], &[])?, home(root, "app", "app", &[], &[])?);
+    prelink(&first, &inf_h, "inf");
+    prelink(&first, &app_h, "app");
+    drop(first);
+    let model = start(&model_h).await?;
+    let s = control::request(&model_h.paths.socket(), &ControlRequest::Status).await?.status.unwrap().network.expect("on Weirdnet");
+    let a = s.listening.iter().find(|a| a.starts_with("/ip4/127.0.0.1/tcp/")).expect("a loopback listener").clone();
+    let inf = reaches_model_node(&inf_h, &a, &s.peer).await;
+    let app = reaches_model_node(&app_h, &a, &s.peer).await;
+    model.shutdown().await;
+    Ok((inf, app))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_model_node_with_callers_refuses_an_app_device() -> Result<()> {
+    // Without `callers`, any linked device gets in, an app included (the default, and the gap).
+    let (inf, app) = role_scenario(false).await?;
+    assert!(inf.is_ok() && app.is_ok(), "default: inf {inf:?}, app {app:?}");
+    // With `callers = ["inf"]` only the inference node does.
+    let (inf, app) = role_scenario(true).await?;
+    assert!(inf.is_ok(), "the inference node is admitted: {inf:?}");
+    let e = app.expect_err("an app device must be refused by the model node");
+    assert!(e.contains("not-an-allowed-caller"), "{e}");
     Ok(())
 }

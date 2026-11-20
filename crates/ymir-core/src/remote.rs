@@ -23,7 +23,7 @@ use weirdnet_agent::CancelToken;
 use weirdnet_agent::pool::{EventSink, LinkedNodes, NetDialer, Pool, PoolEvent, PoolOptions, encode_cert};
 use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
-use weirdnet_agent::remote::{Authorize, Dialer, RemoteError};
+use weirdnet_agent::remote::{Authorize, Caller, Dialer, RemoteError};
 use weirdnet_agent::serve::{RosterAuth, Server, Serving};
 use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer, NodeServerOptions, NodeService, Update, Verifier};
 use weirdnet_backends::{Chunk, ChunkStream, ModelHost, ModelStatus, RawInferDialer, Supervisor};
@@ -41,6 +41,23 @@ pub type Hints = Vec<(PeerId, Vec<Multiaddr>)>;
 /// Only the user's linked devices.
 pub fn roster_auth(m: &Membership) -> Arc<dyn Authorize> {
     Arc::new(RosterAuth::new(&WEIRDNET, m.user_key(), m.roster_view()))
+}
+
+/// Linked devices, narrowed to `allow` (peer ids or roster labels) when it is not empty: a model node
+/// serves the inference nodes, not every device of the user's (an app must go through an inference
+/// node and its cache, batch caps and fairness). Revoked and unlinked devices stay refused either way.
+pub fn role_auth(m: &Membership, allow: &[String]) -> Arc<dyn Authorize> {
+    let base = roster_auth(m);
+    if allow.is_empty() {
+        return base;
+    }
+    let allow = allow.to_vec();
+    let roster = m.roster_view();
+    Arc::new(move |caller: &Caller| {
+        base.authorize(caller)?;
+        let label = roster().get(&caller.peer).map(|c| c.label.clone());
+        if allow.iter().any(|a| *a == caller.peer || Some(a) == label.as_ref()) { Ok(()) } else { Err(RemoteError::refused("not-an-allowed-caller")) }
+    })
 }
 
 /// Serves the inference role on `node`: infer/1, infer/2 and catalog/1 to the user's linked
@@ -110,8 +127,9 @@ pub fn serve_model(
     hardware: Option<(weirdnet_model::hw::Hardware, weirdnet_model::hw::Budget)>,
     combined: bool,
     workers: Option<Arc<dyn weirdnet_backends::node::GroupWorkers>>,
+    callers: &[String],
 ) -> Result<(NodeServer, Arc<NodeService>), RemoteError> {
-    let auth = roster_auth(m);
+    let auth = role_auth(m, callers);
     let host = Arc::new(ModelHost::new(supervisor, auth.clone()));
     let mut service = NodeService::new(host, m.node_key().clone(), Some(m.our_cert()), auth).with_admission(slots.max(1), queue);
     if let Some((hw, budget)) = hardware {

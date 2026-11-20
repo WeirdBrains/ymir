@@ -195,6 +195,11 @@ pub struct ModelSection {
     /// Optional private-link address for group jobs (M7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_link: Option<String>,
+    /// Which linked devices may use this model node: peer ids or roster labels (the name given when
+    /// the device was linked). Empty (the default) means any linked device, an app included; set it to
+    /// the inference nodes (`callers = ["inf"]`) so apps must go through them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
     /// `managed` | `system:/path/to/llama-server` | `off`.
     #[serde(default = "managed")]
     pub llamacpp: String,
@@ -232,6 +237,7 @@ impl Default for ModelSection {
             memory_budget: auto(),
             reserve: None,
             private_link: None,
+            callers: Vec::new(),
             llamacpp: managed(),
             rpc_server: managed(),
             rpc_args: Vec::new(),

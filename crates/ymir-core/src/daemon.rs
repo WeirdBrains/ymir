@@ -207,8 +207,12 @@ impl Daemon {
                     Some((hw, budget)),
                     coordinator.is_some(),
                     group_workers.clone().map(|w| w as Arc<dyn weirdnet_backends::node::GroupWorkers>),
+                    &cfg.model.callers,
                 )
                 .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
+                if cfg.model.callers.is_empty() {
+                    tracing::warn!("model role: any linked device may use this node, apps included; set [model] callers to the inference nodes");
+                }
                 if let Some(n) = &model_node {
                     n.attach_host(service.host().clone());
                 }
