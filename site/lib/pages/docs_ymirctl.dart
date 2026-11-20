@@ -54,7 +54,7 @@ token. It refuses to overwrite an existing <code>node.toml</code> unless you pas
 <tr><td><code>--yes</code></td><td>Answer yes to the download prompts.</td></tr>
 <tr><td><code>--force</code></td><td>Replace an existing <code>node.toml</code>.</td></tr>
 <tr><td><code>--dry-run</code></td><td>Print the proposal and write nothing.</td></tr>
-<tr><td><code>--service</code></td><td>Also install and start <code>ymird</code> as a user service (see <a href="#services">Services</a>).</td></tr>
+<tr><td><code>--service</code></td><td>Also install and start <code>ymird</code> as a user service: systemd on Linux, launchd on macOS, a logon task on Windows (see <a href="#services">Services</a>). With <code>--dry-run</code>, also print the service it would write.</td></tr>
 <tr><td><code>--unit-dir DIR</code>, <code>--no-start</code>, <code>--ymird PATH</code></td><td>Only with <code>--service</code>: write the unit file into DIR and never start it; write it but do not start it; use this <code>ymird</code> binary.</td></tr>
 </tbody></table>
 <pre><code># a workstation with a GPU: see the plan, then do it and start the service
@@ -193,24 +193,63 @@ The <a href="${deployment}#jan">deployment guide</a> walks through it, including
 machines over HTTPS.</p>
 
 <h2 id="services">Run as a service</h2>
-<p><code>ymirctl service</code> manages a <em>user-level</em> service: <code>systemd --user</code> on Linux, a launchd agent
-on macOS. It runs as you, with your <code>YMIR_HOME</code>.</p>
+<p><code>ymirctl service</code> runs <code>ymird</code> in the background, the same way on every OS. By default it is a
+<em>user-level</em> service that runs as you, with your <code>YMIR_HOME</code>, and needs no root or admin rights:</p>
+<table>
+<tr><th>OS</th><th>What <code>service install</code> sets up</th><th>Log</th></tr>
+<tr><td>Linux</td><td>a systemd user unit, <code>~/.config/systemd/user/ymird.service</code> (restarts on failure)</td><td><code>journalctl --user -u ymird</code></td></tr>
+<tr><td>macOS</td><td>a launchd agent, <code>~/Library/LaunchAgents/com.weirdbrains.ymird.plist</code> (starts at login, restarted if it fails)</td><td><code>state/logs/ymird.log</code> in the node folder</td></tr>
+<tr><td>Windows</td><td>a Task Scheduler task, <code>\Ymir\ymird</code>, that starts <code>ymird</code> at logon with no console window and restarts it after a failure</td><td><code>state\logs\ymird.log</code> in the node folder</td></tr>
+</table>
 <ul>
-<li><code>service install</code>: write the unit, then enable and start it. <code>ymirctl setup</code> must have run first.
+<li><code>service install</code>: write the service, then enable and start it. <code>ymirctl setup</code> must have run first.
 Flags: <code>--ymird PATH</code> (default: next to <code>ymirctl</code>, else on <code>PATH</code>),
 <code>--no-start</code> (write it only), <code>--managed-updates</code> (start through <code>ymirctl update boot</code>,
-so a staged update gets a trial and a rollback), <code>--unit-dir DIR</code> (write the unit there and never start it),
-<code>--dry-run</code> (print what would happen).</li>
-<li><code>service status</code>: is it installed and running? Takes <code>--unit-dir</code> and <code>--dry-run</code>.</li>
-<li><code>service uninstall</code>: stop, disable and remove it. Takes <code>--unit-dir</code> and <code>--dry-run</code>.</li>
+so a staged update gets a trial and a rollback), <code>--unit-dir DIR</code> (write the file there and never register or
+start it), <code>--dry-run</code> (print the file and the commands, change nothing).</li>
+<li><code>service start</code> and <code>service stop</code>: start it, or stop it cleanly with its engines. A stopped
+service starts again at the next login or boot; <code>uninstall</code> removes it for good.</li>
+<li><code>service status</code>: is it installed, what does the service manager say, and does <code>ymird</code> answer?</li>
+<li><code>service uninstall</code>: stop, disable and remove it.</li>
 </ul>
+<p>All of them take <code>--dry-run</code>, <code>--unit-dir DIR</code> and <code>--system</code>.</p>
 <pre><code>ymirctl service install --dry-run
 ymirctl service install --managed-updates
+ymirctl service stop &amp;&amp; ymirctl service start
 ymirctl service status</code></pre>
+<p><strong>Linux:</strong> run <code>loginctl enable-linger $USER</code> once, or the user service stops when you log out
+and only starts when you log in. <strong>macOS:</strong> the agent runs in your login session; to run without anyone
+logged in, use <code>--system</code>. <strong>Windows:</strong> the task runs while you are logged on; for a machine that
+should serve from boot, use <code>--system</code>.</p>
+
+<h3 id="system-service">A machine service (<code>--system</code>)</h3>
+<p>With <code>--system</code>, run as root (<code>sudo</code>) or from an elevated prompt on Windows, <code>ymirctl service</code>
+manages the machine's service instead. Its node folder defaults to <code>/var/lib/ymir</code> (Linux),
+<code>/Library/Application Support/Ymir</code> (macOS) or <code>%ProgramData%\Ymir</code> (Windows); pass
+<code>--home</code> for another.</p>
+<ul>
+<li><strong>Linux:</strong> a system unit, <code>/etc/systemd/system/ymird.service</code>, with <code>User=</code> set to
+<code>--run-as USER</code> (default: the user who ran <code>sudo</code>; never root). The node folder is handed to that account.</li>
+<li><strong>macOS:</strong> a launchd daemon, <code>/Library/LaunchDaemons/com.weirdbrains.ymird.plist</code>, with
+<code>UserName</code> set the same way, so it starts at boot.</li>
+<li><strong>Windows:</strong> the Windows service <code>ymird</code> (display name "Ymir node"), started at boot, running as its
+own virtual account <code>NT SERVICE\ymird</code> (no password). The node folder gets a protected ACL for SYSTEM,
+Administrators and that account only. Stopping it (<code>service stop --system</code>, <code>sc stop ymird</code> or the
+Services app) shuts <code>ymird</code> and its engines down cleanly; after a crash it restarts in 60 seconds. The
+Windows installer registers the same service.</li>
+</ul>
+<pre><code># Linux or macOS
+sudo ymirctl --home /var/lib/ymir setup --download --yes
+sudo ymirctl service install --system --run-as ymir
+
+# Windows, in an elevated PowerShell
+ymirctl --home "$env:ProgramData\Ymir" setup --download --yes
+ymirctl service install --system
+ymirctl service status --system</code></pre>
 
 <h3 id="other-account">Using ymirctl with a service that runs as another account</h3>
-<p><code>ymirctl service</code> does not write system-wide services. For a server you can run <code>ymird</code> from your
-own system unit under a dedicated account, for example <code>ymir</code>, with its folder at <code>/var/lib/ymir</code>.
+<p>A system service (<code>--system</code>, or your own system unit) runs <code>ymird</code> under a dedicated account,
+for example <code>ymir</code>, with its folder at <code>/var/lib/ymir</code>.
 Start the daemon with <code>ymird --home /var/lib/ymir</code> (or <code>YMIR_HOME=/var/lib/ymir</code> in the unit).
 Then every <code>ymirctl</code> command must point at the same folder <em>and</em> run as that account, because
 <code>state/</code> is private to it (mode 0700) and holds the control socket and token:</p>
@@ -222,6 +261,11 @@ sudo -u ymir ymirctl --home /var/lib/ymir load gemma4-e4b</code></pre>
 To avoid typing it each time, set an alias such as
 <code>alias yctl='sudo -u ymir env YMIR_HOME=/var/lib/ymir ymirctl'</code>. Root can read the folder too, but then files
 it creates (a new token, a new <code>node.toml</code>) would be owned by root, so use the service account.</p>
+<p><strong>Windows:</strong> <code>ymirctl</code> reaches <code>ymird</code> over a local named pipe derived from the node
+folder, so pass the same <code>--home</code>. For the Windows service, run it from an elevated prompt: only the service
+account, SYSTEM and Administrators can use its pipe and read its token.</p>
+<pre><code>ymirctl --home "$env:ProgramData\Ymir" status
+ymirctl --home "$env:ProgramData\Ymir" bridge token</code></pre>
 
 <h2 id="updates">Updates</h2>
 <p><code>ymirctl update</code> installs signed releases with a trial period and automatic rollback, without a package

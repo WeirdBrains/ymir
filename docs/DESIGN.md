@@ -1036,8 +1036,9 @@ a rename plus a dependency swap. All are `publish = false`.
 | `ymir-infer` (retired in M3: now `weirdnet-agent` 0.4 request types) | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits); Ymir moves to agent's request types in M3 | `ChatRequest`, `CompletionRequest`, `EmbedRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
 | `ymir-alerts` (retired after M3: now `weirdnet-alerts` 0.1.0) | `weirdnet-alerts` | observations, `weirdnet-rules` `RuleSpec`s with `fail`/`ok`/`event` actions, the server-a/server-b rule pack, hourly dedupe with recovery notices, SMTP (lettre), webhook, push (off) and log sinks with dry-run, route/disk/GPU probes |
 
-Also generic but small, in `ymir-core` for now: `service` (systemd user unit and launchd agent
-install) and `engine` (finding the llama.cpp build shipped next to the executable, for
+Also generic but small, in `ymir-core` for now: `service` (systemd units, launchd agents and
+daemons, the Windows logon task and `sc.exe` service registration, as testable plans; a candidate for a
+`weirdnet-*` service crate, noted for the Weirdnet lead) and `engine` (finding the llama.cpp build shipped next to the executable, for
 `weirdnet-backends`). `health` moved to `weirdnet_alerts::engine`.
 
 Trait seams that stay in `ymir-core` until their protocol exists: `ModelNode` (becomes the
@@ -1178,11 +1179,41 @@ has `[roles] app = true` and nothing else.
 - **Android and iOS: opt out for `ymird`** with the reason "a serving daemon can't run in the
   background on mobile (iOS forbids it; Android needs a foreground service and thermals make it
   impractical)". Phones are clients through Bragi.
-- **User-level by default** (systemd user unit with lingering, launchd agent); `--system` for headless
-  servers where it is genuinely system-level.
+- **User-level by default** (systemd user unit with lingering, launchd agent, Windows logon task);
+  `--system` for headless servers where it is genuinely system-level. See
+  [Running as a service](#running-as-a-service).
 - Prebuilt binaries only; installing never needs Rust. Release files are signed with minisign.
 - **llama.cpp is bundled** in every release file, in two variants (`ymir`: CPU and Vulkan, Metal on
   macOS; `ymir-cuda`: CUDA 13 and its runtime). See [The bundled engine](#the-bundled-engine-decided-2026-11-20).
+
+### Running as a service
+
+`ymirctl service install|start|stop|status|uninstall` (and `setup --service`) run `ymird` in the
+background. `ymir_core::service` builds each action as a plan (files to write, commands to run) for an
+explicit OS, so the unit, plist, task XML and command lines are unit-tested on every OS, and CI runs a
+real install, chat, stop, start and uninstall on macOS and Windows.
+
+| | User level (default) | `--system` |
+|---|---|---|
+| Linux | systemd user unit, `Restart=on-failure`; lingering keeps it up after logout | system unit with `User=` (`--run-as`, never root), node folder `/var/lib/ymir` |
+| macOS | launchd agent in `gui/<uid>`, `RunAtLoad`, `KeepAlive` on failure, log in `state/logs/ymird.log` | launchd daemon with `UserName`, node folder `/Library/Application Support/Ymir` |
+| Windows | Task Scheduler task `\Ymir\ymird`: logon trigger for this user, `conhost.exe --headless` (no console window), no time limit, restart on failure, runs on battery, `--log-file` | service `ymird` as `NT SERVICE\ymird` (SID type unrestricted), auto start, restart after 60 s (also on an error exit), node folder `%ProgramData%\Ymir` with a protected DACL for SYSTEM, Administrators and the service account |
+
+How `ymird` stops cleanly, engines included: SIGTERM (systemd, launchd); the service control
+manager's stop, shutdown and preshutdown (`ymird --windows-service`, through the `windows-service`
+crate); console close, logoff and shutdown events; and a `shutdown` request on the local control
+transport, which `ymirctl service stop` sends to a Windows task before `schtasks /End` (a task can
+only be ended hard). On Windows the control transport is a local-only named pipe,
+`\\.\pipe\ymird-<FNV-1a of the socket path>`, whose default DACL lets only its owner, SYSTEM and
+Administrators write; `ymirctl` must use the same `--home`, elevated for the Windows service.
+
+The WiX 7 MSI (`packaging/windows/ymir.wxs`, built by `make-installer.ps1` from the release zip) is
+per machine: Program Files\Ymir, the system `PATH`, the `ymird` service registered for manual start
+(it needs a `node.toml` first; `ymirctl service install --system` then sets it to start at boot) and
+`%ProgramData%\Ymir` with the ACL above, kept on uninstall. An upgrade restarts the service if it was
+running. `YmirSetup-VERSION.exe` is a WiX bundle that installs the MSI for the machine's architecture.
+User-level Windows installs use the zip and `ymirctl setup --service`. Not yet: code signing for the
+installers and binaries, and `--managed-updates` for the Windows service.
 
 ### Updates (decided 2026-11-19: both)
 
@@ -1448,7 +1479,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   server-a/server-b reproduced as a group job.
 - **M8 server-a/server-b migration** (steps above, each approved by m3talsmith).
 - **M9 Breadth and hardening.** Self-update via `weirdnet-update` with rollback; push via the
-  embedded `weirdnet-push` senders (once its Weirdnet front end exists); Windows service, BSD packages, a security review of the roster check,
+  embedded `weirdnet-push` senders (once its Weirdnet front end exists); Windows service (done
+  2026-11-20, see [Running as a service](#running-as-a-service)), BSD packages, a security review of the roster check,
   role boundaries and backend ports, 1.0 criteria.
 - **M10 Cert-only server link** (Weirdnet lead). `weirdnet-sync`/`weirdnet-device-link` give service
   nodes a node certificate and sync keys without the root seed; Ymir nodes re-link and wipe their seed

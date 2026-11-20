@@ -67,12 +67,27 @@ ymirctl setup --model /path/to/model.gguf    # your own GGUF; repeat --model, th
 </ul>
 <p>A single box keeps all three. For a GPU server that only runs models, use <code>ymirctl setup --roles model</code>
 and let another device run the inference role.</p>
-<p><strong>Run it as a service.</strong> <code>ymirctl service install</code> writes a user service (systemd
-<code>--user</code> on Linux, a launchd agent on macOS), then enables and starts it. <code>setup --service</code> does
-setup and this in one go. <code>ymirctl service status</code> says whether it is running and
-<code>ymirctl service uninstall</code> removes it. Add <code>--no-start</code> to write the unit without starting it,
-and <code>--dry-run</code> to see what would happen. To keep a systemd user service running after you log out, run
-<code>loginctl enable-linger $USER</code>.</p>
+<p><strong>Run it as a service.</strong> <code>ymirctl service install</code> sets up a user service and starts it:
+a systemd user unit on Linux, a launchd agent on macOS (<code>~/Library/LaunchAgents/com.weirdbrains.ymird.plist</code>),
+or on Windows a logon task (<code>\Ymir\ymird</code>) that runs <code>ymird</code> without a console window.
+<code>setup --service</code> does setup and this in one go. <code>ymirctl service stop</code> and
+<code>service start</code> stop it cleanly and start it again, <code>service status</code> says whether it is running and
+<code>service uninstall</code> removes it. Add <code>--no-start</code> to write it without starting it, and
+<code>--dry-run</code> to see what would happen. To keep a systemd user service running after you log out, run
+<code>loginctl enable-linger $USER</code>. For a server that should run from boot with nobody logged in, add
+<code>--system</code> (root, or an elevated prompt on Windows): a system unit, a launchd daemon, or the Windows service
+<code>ymird</code> running as <code>NT SERVICE\ymird</code>. The <a href="${ymirctl}#services">ymirctl guide</a> has the
+details for each OS.</p>
+<p><strong>macOS.</strong> Unpack the <code>zip</code> or <code>tar.gz</code> for your Mac (Apple Silicon builds use
+Metal), put <code>bin/</code> on your <code>PATH</code>, then run the same <code>ymirctl setup --download --yes --service</code>.
+The log is <code>~/.config/ymir/state/logs/ymird.log</code>.</p>
+<p><strong>Windows.</strong> Either unpack the <code>zip</code> (user level: <code>ymird.exe</code>, <code>ymirctl.exe</code>
+and <code>llama.cpp\</code> side by side) and run <code>ymirctl setup --download --yes --service</code>, or run
+<code>YmirSetup-VERSION.exe</code> (or the <code>.msi</code>), which installs to Program Files, adds Ymir to
+<code>PATH</code> and registers the Windows service, not yet started. Then, in an elevated PowerShell:</p>
+<pre><code>ymirctl --home "$env:ProgramData\Ymir" setup --download --yes
+ymirctl --home "$env:ProgramData\Ymir" service install --system   # start at boot, and start now</code></pre>
+<p>The installers are not code-signed yet, so Windows SmartScreen asks before running them.</p>
 <p><strong>Check.</strong></p>
 <pre><code>ymirctl status          # roles, models and their state
 ymirctl models          # the pool's merged model list

@@ -15,6 +15,9 @@ All notable changes to Ymir are listed here. The format follows
 - Stand-in answers, flagged, while a large model loads.
 - Health alerts by email, webhook and log, including the default route on Wi-Fi.
 - User-level service install (systemd user unit, launchd agent).
+- `ymird` runs on Windows, as a logon task (user level) or as the Windows service `NT SERVICE\ymird` (`--system`).
+- `ymirctl service start` and `stop`, and `--system` for a systemd system unit or launchd daemon.
+- Windows MSI and `YmirSetup` installers that register the Windows service.
 - Linux tar.gz, zip, deb and pkg.tar.zst packages, a TAUR recipe and a Nix flake.
 - llama.cpp bundled in every release file, used by `ymirctl setup` by default: `ymir` (CPU and Vulkan) and `ymir-cuda` (CUDA 13 with its runtime).
 - rpm packages, a release workflow for Linux, macOS and Windows, and a smoke test that runs a real model from an unpacked archive.
