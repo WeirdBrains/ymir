@@ -31,7 +31,7 @@ weirdnet-net.workspace = true
 weirdnet-openai.workspace = true
 weirdnet-semcache.workspace = true
 weirdnet-sync.workspace = true
-ymir-alerts.workspace = true
+weirdnet-alerts.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

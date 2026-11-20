@@ -155,18 +155,25 @@ impl Daemon {
                 );
                 tasks.push(d);
                 tracing::info!("inference role: serving the user's devices on Weirdnet");
-            } else if let Some(sup) = &supervisor {
+            }
+            if roles.model
+                && let Some(sup) = &supervisor
+            {
                 let hw = weirdnet_model::hw::detect();
                 let budget = weirdnet_model::hw::budget(
                     &hw,
                     weirdnet_model::hw::parse_size(&cfg.model.memory_budget),
                     cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
                 );
-                let (server, service) = remote::serve_model(&net.node, sup.clone(), &net.membership, 4, 32, Some((hw, budget)))
-                    .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
+                let (server, service) =
+                    remote::serve_model(&net.node, sup.clone(), &net.membership, 4, 32, Some((hw, budget)), coordinator.is_some())
+                        .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));
-                tracing::info!("model role: serving the user's inference nodes on Weirdnet");
+                tracing::info!(
+                    "model role: serving the user's inference nodes on Weirdnet{}",
+                    if coordinator.is_some() { " (alongside the inference role)" } else { "" }
+                );
             }
         }
 
@@ -190,7 +197,7 @@ impl Daemon {
         if (roles.inference || roles.model) && cfg.inference.alerts.enabled {
             match cfg.inference.alerts.alerter(&name) {
                 Ok(a) => {
-                    let a = Arc::new(a);
+                    let a = Arc::new(a.with_product("ymir"));
                     alerter = Some(a.clone());
                     let mut disks = cfg.inference.alerts.disks.clone();
                     if disks.is_empty() {
@@ -200,7 +207,7 @@ impl Daemon {
                         }
                     }
                     let every = std::time::Duration::from_secs(cfg.inference.alerts.probe_secs.max(5));
-                    tasks.push(tokio::spawn(crate::health::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
+                    tasks.push(tokio::spawn(weirdnet_alerts::engine::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
                 }
                 Err(e) => tracing::error!("alerts are off: {e}"),
             }

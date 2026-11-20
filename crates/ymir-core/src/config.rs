@@ -271,7 +271,7 @@ pub struct InferenceSection {
     #[serde(default = "yes")]
     pub standin_warm: bool,
     #[serde(default)]
-    pub alerts: ymir_alerts::AlertsConfig,
+    pub alerts: weirdnet_alerts::AlertsConfig,
 }
 
 fn standin_after() -> String {
@@ -291,7 +291,7 @@ impl Default for InferenceSection {
             standin: None,
             standin_after: standin_after(),
             standin_warm: true,
-            alerts: ymir_alerts::AlertsConfig::default(),
+            alerts: weirdnet_alerts::AlertsConfig::default(),
         }
     }
 }
@@ -478,7 +478,7 @@ impl NodeConfig {
                 l.idle_ttl = m.idle_ttl.as_deref().and_then(|t| parse_duration(t).ok());
                 l.wrap = m.wrap.as_ref().map(|url| weirdnet_backends::Wrap {
                     url: url.clone(),
-                    api_key: m.wrap_api_key.as_deref().and_then(|src| match ymir_alerts::config::resolve_secret(src) {
+                    api_key: m.wrap_api_key.as_deref().and_then(|src| match weirdnet_alerts::config::resolve_secret(src) {
                         Ok(k) => Some(k),
                         Err(e) => {
                             tracing::warn!(model = %m.id, "wrap_api_key: {e}");

@@ -661,7 +661,8 @@ Ymir and Bragi share Morph's roster and sync group; there is no separate Ymir de
 - **Revocation rules apply to Ymir types too:** `weirdnet-sync`'s per-type revocation rules cover
   `ymir.*` records like Morph's, so ops written by a revoked device are voided.
 - **Compatibility:** Ymir needs **Morph v0.3 or later** to share a sync group. Morph main already pins
-  `weirdnet-sync =0.5.0` and `weirdnet-net =0.8.0` (since `857c3ea`) and ships that in v0.3; the
+  `weirdnet-sync =0.5.0` and `weirdnet-net =0.8.0` (since `857c3ea`; and `weirdnet-agent =0.4.0`,
+  `weirdnet-model =0.4.0`, `weirdnet-mcp =0.5.0` since `6206257`) and ships that in v0.3; the
   released Morph 0.2.x line stays on sync 0.2 / net 0.6 and can't talk to it. All of a user's devices
   move to Morph v0.3 together.
 
@@ -910,10 +911,10 @@ a rename plus a dependency swap. All are `publish = false`.
 | `ymir-openai` (retired in M3: now `weirdnet-openai` 0.1.0) | `weirdnet-openai` | the loopback-only bridge (token on every endpoint, `Host` check, no CORS, `x-weirdnet-*` headers) |
 | `ymir-semcache` (retired in M3: now `weirdnet-semcache` 0.1.0) | `weirdnet-semcache` | the `AnswerCache` seam and an exact-match placeholder |
 | `ymir-infer` (retired in M3: now `weirdnet-agent` 0.4 request types) | `weirdnet-agent` (infer/2 frames, `pool`, serve host traits); Ymir moves to agent's request types in M3 | `ChatRequest`, `CompletionRequest`, `EmbedRequest`, `Event` (offsets, reasoning, tool calls, `Queued`), `Pool`, `CatalogModel` |
-| `ymir-alerts` | `weirdnet-alerts` (the Weirdnet lead extracts it later) | observations, `weirdnet-rules` `RuleSpec`s with `fail`/`ok`/`event` actions, the server-a/server-b rule pack, hourly dedupe with recovery notices, SMTP (lettre), webhook, push (off) and log sinks with dry-run, route/disk/GPU probes |
+| `ymir-alerts` (retired after M3: now `weirdnet-alerts` 0.1.0) | `weirdnet-alerts` | observations, `weirdnet-rules` `RuleSpec`s with `fail`/`ok`/`event` actions, the server-a/server-b rule pack, hourly dedupe with recovery notices, SMTP (lettre), webhook, push (off) and log sinks with dry-run, route/disk/GPU probes |
 
 Also generic but small, in `ymir-core` for now: `service` (systemd user unit and launchd agent
-install) and `health` (feeding supervisor events and probes to the alerter).
+install). `health` moved to `weirdnet_alerts::engine`.
 
 Trait seams that stay in `ymir-core` until their protocol exists: `ModelNode` (becomes the
 `/weirdnet-backends/node/1` client plus raw infer/2 in M3) and the control socket (the local transport
@@ -1090,9 +1091,10 @@ has `[roles] app = true` and nothing else.
   1. `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8, then redeploy the public relay
      (it must answer `/weirdnet/names/2`). Gates M3, M4 and B1. Done: `weirdnet-device-link` 0.3.0 and `weirdnet-relay` 0.6.0, both on `weirdnet-net =0.8.0`, and the public relay runs 0.6.0.
   2. `weirdnet-agent` 0.4.0 (`infer/2`, `pool`, `context`, caller identity), released with
-     `weirdnet-model` 0.4.0 and `weirdnet-mcp` 0.5.0, and Morph moves with them. `weirdnet-agent`
-     0.3.0 is already out on `infer/1`; Morph main (`5e7dbec`) pins `weirdnet-agent =0.3.0`,
-     `weirdnet-mcp =0.4.0` and `weirdnet-model =0.3.0`.
+     `weirdnet-model` 0.4.0 and `weirdnet-mcp` 0.5.0, and Morph moves with them. Done: all three
+     are out, and Morph main pins `weirdnet-agent =0.4.0`, `weirdnet-model =0.4.0` and
+     `weirdnet-mcp =0.5.0` (since `6206257`; it serves `infer/2` beside `infer/1`).
+     `weirdnet-model` 0.4.1 and `weirdnet-agent` 0.4.1 followed.
   3. The new crates (`weirdnet-backends`, `-openai`, `-semcache`, `-alerts`) as each milestone needs them.
 
 ## Migration plan for server-a/server-b
@@ -1264,7 +1266,7 @@ run the same end-to-end scenario (pair, list models, chat, cancel, continue).
 Gate: B1 needs `weirdnet-device-link` and `weirdnet-relay` on `weirdnet-net` 0.8 and the redeployed
 public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-link` 0.3.0 and `weirdnet-relay` 0.6.0, both on `weirdnet-net =0.8.0`, and the public relay runs 0.6.0.
 
-- **B1 Core and both shells:** `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
+- **B1 Core and both shells** (built 2026-11-19; see [B1 status](#b1-status-built-2026-11-19)): `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
   Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
   Tests over `weirdnet-net` in-memory transports with a fake `InferHost`.
 - **B2 Pool client:** multi-node catalog, routing via the `weirdnet-agent` pool, retries,
@@ -1283,8 +1285,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   released on `weirdnet-net` 0.8 and the public relay redeployed (net 0.8 uses `/weirdnet/names/2`).
   Now released: `weirdnet-device-link` 0.3.0 and `weirdnet-relay` 0.6.0, both on `weirdnet-net =0.8.0`, and the public relay runs 0.6.0.
 - **Gate for M3:** `weirdnet-agent` 0.4.0 with `/weirdnet-agent/infer/2`, released with
-  `weirdnet-model` 0.4.0, `weirdnet-mcp` 0.5.0 and Morph (see Releases). `weirdnet-agent` 0.3.0 is
-  already out on `infer/1`.
+  `weirdnet-model` 0.4.0, `weirdnet-mcp` 0.5.0 and Morph (see Releases). Done: Morph main is on
+  agent `=0.4.0`, model `=0.4.0` and mcp `=0.5.0` (`6206257`).
 - **Gate for M5:** a `weirdnet-sync` design for local eviction and on-demand working sets; and, if
   option B is chosen, sync running on an app's `Node`.
 
@@ -1368,7 +1370,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - vLLM adapter: launch arguments and probes only; not run (no vLLM install was available).
 - Hardware: `nvidia-smi` instead of NVML; no Metal working-set query, Vulkan device query or
   interconnect report.
-- `/v1/completions` and `/v1/embeddings` answer 501; no prefix-hash mapping onto synced contexts (M5).
+- No prefix-hash mapping onto synced contexts (M5).
 - Idle TTL, restart with backoff, stand-in cold start, alerts and push (M2 and later).
 - Windows: the control socket and process-group handling are Unix only.
 
@@ -1437,16 +1439,17 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - Big-mode and Ray/RPC groups are M7; GPU temperature comes from `nvidia-smi` only.
 
 **`ymir-backends` M2 changes are done** and ready for the Weirdnet lead to extract into
-`weirdnet-backends`. Also generic and to be extracted later: `ymir-alerts` (→ `weirdnet-alerts`),
-and `ymir-core`'s `service` module (unit/agent install) if another app wants it.
+`weirdnet-backends`. Also generic and to be extracted later: `ymir-core`'s `service` module (unit/agent install) if another app wants it.
 
 ## M3 status (built 2026-11-19)
 
-Built on the published crates, unchanged: `weirdnet-agent` 0.4.0 (`infer/2`, `catalog/1`, `pool`,
-`RosterAuth`), `weirdnet-model` 0.4.0 (`hw`), `weirdnet-backends` 0.1.0 (`node` feature),
-`weirdnet-openai` 0.1.0, `weirdnet-semcache` 0.1.0, `weirdnet-net` 0.8, `weirdnet-sync` 0.5 and
-`weirdnet-device-link` 0.3.0. The interim crates `ymir-hw`, `ymir-backends`, `ymir-openai`,
-`ymir-semcache` and `ymir-infer` are gone; `ymir-alerts` stays until it is extracted.
+Built on the published crates, unchanged, now on their patch releases (caret ranges, no `=` pins):
+`weirdnet-agent` 0.4.1 (`infer/2`, `catalog/1`, `pool`, `RosterAuth`, raw prompts), `weirdnet-model`
+0.4.2 (`hw`), `weirdnet-backends` 0.1.1 (`node` feature), `weirdnet-openai` 0.1.1,
+`weirdnet-semcache` 0.1.1, `weirdnet-alerts` 0.1.0 (`backends` feature), `weirdnet-net` 0.8,
+`weirdnet-sync` 0.5.1 and `weirdnet-device-link` 0.3.0. The interim crates `ymir-hw`, `ymir-backends`, `ymir-openai`,
+`ymir-semcache`, `ymir-infer` and `ymir-alerts` are gone (alerts subjects keep `[ymir <host>]` through
+`.with_product("ymir")`; push is behind weirdnet-alerts' `push` feature, which Ymir doesn't enable).
 
 **Works:**
 
@@ -1478,36 +1481,39 @@ Built on the published crates, unchanged: `weirdnet-agent` 0.4.0 (`infer/2`, `ca
 - **`[network]`** in node.toml: `enabled`, `port` (4848), `listen`, `mdns`, `discovery`, `relays`
   (default: the Weird Brains relay), `peers` (`/ip4/…/tcp/…/p2p/PEER`; dialing grants nothing),
   `slots`, `queue`. Weirdnet starts only when the node has an identity.
-- Tests: 41 pass, 3 ignored; fmt and clippy (`-D warnings`) are clean.
+- Tests: 32 pass, 3 ignored (the 9 `ymir-alerts` tests now live in `weirdnet-alerts`); fmt and clippy (`-D warnings`) are clean.
   - `ymir-core/tests/remote.rs` (5): several devices in one process on the memory transport. They
     cover chat with tools, unknown models, cache hits, the catalog, embeddings and revocation;
     this box's in-process pool; strangers refused (wrong user, unknown device); failover between
     inference nodes; and roster changes reaching other devices.
-  - `ymir-testkit/tests/m3.rs` (2): three `ymird`s over TCP on 127.0.0.1 (model-only,
+  - `ymir-testkit/tests/m3.rs` (3): a combined node (model and inference roles on one box) serving
+    both, with a second inference node using its model role; and three `ymird`s over TCP on 127.0.0.1 (model-only,
     inference-only, app-only; no mDNS, discovery or relays). The app bridge goes over Weirdnet to
     inference, then over Weirdnet to the model node and the mock engine. It also covers a remote
     `ymirctl load`, the cache across nodes, `ymirctl chat`, refusing a stranger's identity, and
     cutting off a revoked device. `pool link` and `pool add` move an identity between two homes
     through device-link on loopback.
 
-**Gaps and regressions (from the published crates; noted for the Weirdnet lead):**
+**M3 gaps closed by the patch releases (agent 0.4.1, backends/openai/semcache 0.1.1):**
+`/v1/completions` works again (agent's raw `Input::Prompt`; the 501 and its tests are gone, the M2
+completions tests are back), streamed answers carry `x-weirdnet-cache` early, embedding usage is
+real, and an embeddings `BadRequest` is a 400 again (client errors pass through the pool without
+failover; a stranger's catalog request now fails with `Refused("wrong-user")`, not `Unavailable`).
+A box with both the inference and model roles now serves both: `NodeServer::start_with(...
+.with_legacy_infer2(false))` leaves `infer/2` to the inference role, and the inference node's
+pool of model nodes dials through `RawInferDialer` (raw inference on
+`/weirdnet-backends/infer/1`, falling back to `infer/2` for nodes on backends 0.1.0). The
+membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merge_back`).
 
-- **`/v1/completions` answers 501** (an M2 regression): agent 0.4's `v2::Request` has no raw prompt,
-  and the bridge has no completions route. Calling `Supervisor::complete` beside the bridge would
-  need a second HTTP server or a fork of its router, so it isn't done; the lead was asked for a raw
-  prompt in agent 0.4.1.
-- **Content arrays are text-only** (image parts are refused by the request parser).
-- **Streamed answers report the cache and the stand-in only in the final chunk**, not in headers.
-  `BridgeClient` (and so `ymirctl chat`) reads them from there.
-- **Embedding usage is always 0**; and `Pool::embed` folds node errors into `unavailable`, so a
-  missing embedding model or a chat model asked to embed is a 503 (it was a 400), with the reason in
-  the message.
+**Open gaps (upstream, parked for M9): `weirdnet-openai` #1 and #2, `weirdnet-agent` #1 and
+`weirdnet-backends` #1.**
+
+- **Content arrays are text-only** (image parts are refused by the request parser), and unknown
+  OpenAI parameters are dropped.
+- **Streamed answers report the stand-in in the final chunk**; `BridgeClient` reads it there.
+- `Busy` always answers `Retry-After: 1`; Windows kills the engine outright; vLLM is Linux only.
 - **The answer cache is exact-match for temperature 0 only** (no tools, inline messages), per
   `weirdnet-semcache`; other requests always go to a model.
-- **A box with the inference role doesn't also serve the model-node protocol**: `NodeServer` serves
-  `infer/2` itself, and a node can serve a protocol once. Its local models serve its own inference
-  role in process, and other inference nodes use them through it. A model-only box serves the node
-  protocol.
 - No `GroupWorkers` (group jobs answer Unsupported until M7).
 
 **Not done or untested:**
@@ -1516,11 +1522,89 @@ Built on the published crates, unchanged: `weirdnet-agent` 0.4.0 (`infer/2`, `ca
   and loopback TCP). The laptop has Rust 1.99, but its load average was 17 on 8 GB, so a build
   there would have been disruptive. server-a and server-b weren't touched.
 - **Linking m3talsmith's real identity needs him**: `ymirctl pool link` on a node, then the code opened
-  in Morph. Morph has to accept `weirdnet-ymir://link/…` codes (not checked against Morph here).
+  in Morph. Morph main now accepts `weirdnet-ymir://link/…` codes (Identity → Add device), and `pool add`
+  takes Morph's `weirdnet-morph://link/` codes too (same payload). The signed roster label reads
+  "Ymir on <name>" (the device-link hint). Linking the real identity still waits for m3talsmith.
 - Seeds are kept in 0600 files, as decision 12 says, not in the OS keyring. M10's cert-only link
   removes the seed copies.
-- Generic code that belongs in `weirdnet-sync`: the snapshot and merge-back around `pull_from` in
-  `membership` (Morph has its own copy).
+- **Flaky upstream roster propagation (found on the dev box):** `ymir-core/tests/remote.rs`
+  `roster_changes_reach_other_devices` fails about half the runs, on the pre-bump versions too: when
+  an app device links a third device, the inference node's pass against the app can finish with no
+  error and still not learn the new cert (a pass that gets `needs-admission`/`unknown-key`
+  first), and four rounds don't always fix it. For the Weirdnet lead (`weirdnet-sync`).
+
+## B1 status (built 2026-11-19)
+
+Bragi lives in its own public repo, [`WeirdBrains/bragi`](https://github.com/WeirdBrains/bragi)
+(BSD-3-Clause), on `weirdnet-agent` 0.4.1 (pool client and types), `weirdnet-device-link =0.3.0`,
+`weirdnet-sync` 0.5.1 and `weirdnet-net =0.8.0`. Nothing is released or published to a store.
+
+**What works, in both shells:** pair, list models, chat, stop, continue, and history.
+
+- **`bragi-core`** holds all of it. Pairing goes through `weirdnet-device-link` with
+  `weirdnet-bragi://` codes and the 6-digit check. Bragi either shows a code for an already-linked
+  device, or as a linked device it opens another device's code. The catalog comes from one node:
+  the `Pool` catalog watch, chat models only, warm first. Chat streams through `Pool::infer` as
+  offset-addressed deltas, coalesced every 16 ms. Stop cancels the request and keeps the partial
+  answer. Continue picks up a stopped or cut-off answer (see the gaps). History is local JSON, one
+  file per conversation, with atomic writes. Lifecycle covers pause, resume and network changes.
+  `bragi_core::demo` is an in-process inference node with a test identity: a fake `InferHost`, a
+  `CatalogFeed` with two chat models and one embedding model, served by `serve::Server` over the
+  memory transport. It runs the tests and both shells' demo profile.
+- **`bragi-desktop`** is the GPUI shell, Linux only, frameless with in-app controls (close only
+  under tiling window managers). It has a pairing card with a QR code and the check code, model
+  chips, history, a "link a device" field, and streaming bubbles with Stop and Continue. `--demo`
+  runs it against the demo node. `--scenario` plays the shared scenario through the view's own
+  actions and exits 0 only if the continued answer is exactly the full answer.
+- **`bragi-bridge`** is the flutter_rust_bridge 2.13 API, built by the Native Assets hook. The
+  **Flutter app** (Android) has the same screens over a thin controller; all behaviour stays in
+  the core. `BRAGI_DEMO=true` selects the demo profile.
+
+**Tests:**
+
+- `cargo test --workspace` passes 16 tests: `bragi-core` has 3 unit tests and 3 scenario tests
+  (the full scenario with a restart into history, codes that differ link nothing, and a stranger
+  refused while a linked device links another), and `bragi-desktop` has 10 (9 for the text field
+  copied from Morph, plus delta placement).
+- `flutter test` passes 2 tests: the scenario through the real bridge and core, and delta
+  placement.
+- `cargo clippy --workspace --all-targets -D warnings` and `flutter analyze` are clean.
+- Both shells were also played end to end in virtual workspaces only. The desktop ran in Xvfb with
+  `env -i` and a private `XDG_RUNTIME_DIR` (`scripts/desktop-scenario.sh`). Android ran on a
+  windowless emulator with a throwaway AVD, a private adb port and `-wipe-data`
+  (`scripts/android-scenario.sh`). Each saved 8 screenshots, and both passed.
+
+**Builds (the dev box):**
+
+- The desktop debug binary builds (it isn't packaged yet).
+- The demo APK (debug, x86_64, 57 MB) builds and runs on the emulator.
+- The release APK (arm64, real network, debug-key signed, 13 MB) was built earlier on agent 0.4.0 and not
+  rebuilt after the 0.4.1 bump; the demo debug APK was rebuilt on 0.4.1 and passed the emulator scenario.
+
+**Gaps (for the Weirdnet lead where generic):**
+
+- **`Pool::infer` can't continue from a caller-supplied prefix.** It splices node offsets onto an
+  empty buffer, so a prefix gives a gap error, or `NoResume` from a node that doesn't resume.
+  Continue therefore sends the partial answer plus an instruction turn ("continue from exactly
+  where it stopped") and keeps the offsets running on the client. That's exact on the demo node,
+  but a real model may rephrase the seam. Asked for: a prefix-aware `Pool::infer`, or a
+  `Prefix` passthrough.
+- **Copies of generic code:**
+  - the identity store (`bragi-core/src/identity.rs`, a copy of Ymir's `membership`) belongs in
+    `weirdnet-sync`
+  - the GPUI `TextField`/`TextInput` (from Morph) belongs in a shared `weirdnet-*` UI crate
+  - the Android `ndk-context` init (`bragi-bridge/src/android.rs`, from Morph) belongs in
+    `weirdnet-net`
+  - `third_party/libp2p-swarm` (Morph's patch relaxing the wasm-only `js-sys` pin so GPUI resolves)
+    goes away when libp2p or `weirdnet-net` moves on
+- **Not in B1:** a multi-node catalog and failover (B2), synced history (B4), Android
+  `weirdnet-bragi://` intent handling and a QR scanner (codes are pasted for now), a copy button
+  for the code on desktop, and a release signing key.
+- **Untested against a real Ymir node or across machines.** Every run used the demo node over the
+  memory transport. A run with Ymir's mock engine on a second machine comes with the first
+  cross-machine Ymir test.
+- **Android screenshot artifacts:** `adb input` leaves the keyboard up, and Gboard autocorrects the
+  first word ("What" becomes "Chat"). These come from the harness, not the app.
 
 ## Decisions (2026-11-19)
 

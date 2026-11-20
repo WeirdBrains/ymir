@@ -5,7 +5,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use weirdnet_agent::remote::RemoteError;
-use weirdnet_agent::remote::infer::v2::Request;
+use weirdnet_agent::remote::infer::v2::{Input, Request};
 use weirdnet_backends::error::unavailable;
 use weirdnet_backends::{ChunkStream, EngineKind, ModelStatus, Supervisor};
 
@@ -82,7 +82,18 @@ impl ModelNode for LocalModelNode {
     }
 
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
-        Box::pin(self.supervisor.chat(model, req))
+        Box::pin(async move {
+            // A raw prompt (`/v1/completions`) goes to the engine's completions route, with the
+            // assistant prefix (a resume) appended to the prompt.
+            if let Input::Prompt(prompt) = &req.input {
+                let mut prompt = prompt.clone();
+                if let Some(p) = &req.assistant_prefix {
+                    prompt.push_str(&p.text);
+                }
+                return self.supervisor.complete(model, &prompt, &req.sampling, req.seed).await;
+            }
+            self.supervisor.chat(model, req).await
+        })
     }
 
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {

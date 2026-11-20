@@ -11,7 +11,6 @@ pub mod config;
 pub mod control;
 pub mod coordinator;
 pub mod daemon;
-pub mod health;
 pub mod host;
 pub mod membership;
 pub mod model_node;

@@ -1,5 +1,5 @@
 //! M2: model-node parity with server-a/server-b. Idle unload, crash backoff and crash loops, the stand-in
-//! cold start, /v1/embeddings (and /v1/completions' 501), wrapping a stock server, alerts, and the user
+//! cold start, /v1/completions and /v1/embeddings, wrapping a stock server, alerts, and the user
 //! service, all against the mock engine in temp dirs.
 
 use std::path::Path;
@@ -146,22 +146,26 @@ async fn standin_answers_while_the_big_model_loads() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embeddings_and_idle_unload() -> Result<()> {
+async fn completions_embeddings_and_idle_unload() -> Result<()> {
     let n = node(
         "[[model.local]]\nid = \"big\"\nfile = \"big.gguf\"\nidle_ttl = \"1s\"\n[[model.local]]\nid = \"emb\"\nfile = \"emb.gguf\"\nrole = \"embedding\"\n",
         "standin_warm = false\n",
     )
     .await?;
-    // Raw completions are not in infer/2 yet (weirdnet-openai answers 501 until agent 0.4.1
-    // carries a raw prompt); M2 served them. See DESIGN.md, M3 status.
-    let r = n.post("completions", json!({"model": "big", "prompt": "Tell me", "max_tokens": 4}), false).await?;
-    assert_eq!(r.status(), 501);
+    let v: Value = n.post("completions", json!({"model": "big", "prompt": "Tell me", "max_tokens": 4}), false).await?.json().await?;
+    assert_eq!(v["object"], "text_completion");
+    assert_eq!(v["choices"][0]["text"], " once upon a time");
+    assert_eq!(v["usage"]["total_tokens"], 6);
+    let text = n.post("completions", json!({"model": "big", "prompt": "Tell me", "stream": true}), false).await?.text().await?;
+    assert!(text.contains("\"text\":\" upon\""), "{text}");
+    assert!(text.trim_end().ends_with("data: [DONE]"));
     ctl(&n.paths.home, &["load", "big"]).await?;
 
     let v: Value = n.post("embeddings", json!({"input": ["two words", "x"]}), false).await?.json().await?;
     assert_eq!(v["model"], "emb");
     assert_eq!(v["data"][0]["embedding"], json!([9.0, 2.0, 1.0, 0.0]));
     assert_eq!(v["data"][1]["index"], 1);
+    assert!(v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) > 0, "embedding usage is real: {v}");
     let r = n.post("chat/completions", json!({"model": "emb", "messages": [{"role": "user", "content": "x"}]}), false).await?;
     assert_eq!(r.status(), 400, "embedding models don't chat");
 
@@ -293,9 +297,9 @@ async fn wrap_refuses_non_loopback_and_reports_a_dead_server() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn engine_failures_raise_deduped_alerts() -> Result<()> {
     use std::sync::Arc;
-    use ymir_alerts::{Alerter, MemorySink, rules};
+    use weirdnet_alerts::{Alerter, MemorySink, rules};
     let mem = Arc::new(MemorySink::default());
-    let alerter = Arc::new(Alerter::new("m2e2e", rules::default_rules(&rules::Thresholds::default()), vec![mem.clone()]));
+    let alerter = Arc::new(Alerter::new("m2e2e", rules::default_rules(&rules::Thresholds::default()), vec![mem.clone()]).with_product("ymir"));
     let dir = tempfile::tempdir()?;
     let gguf = dir.path().join("m.gguf");
     std::fs::write(&gguf, b"GGUF mock")?;
@@ -305,7 +309,7 @@ async fn engine_failures_raise_deduped_alerts() -> Result<()> {
         SupervisorOptions::default(),
     );
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let mon = tokio::spawn(ymir_core::health::monitor(alerter.clone(), Some(sup.clone()), Vec::new(), Duration::from_secs(3600), stop_rx));
+    let mon = tokio::spawn(weirdnet_alerts::engine::monitor(alerter.clone(), Some(sup.clone()), Vec::new(), Duration::from_secs(3600), stop_rx));
     tokio::time::sleep(Duration::from_millis(100)).await;
     let _ = sup.load("m").await;
     let _ = sup.load("m").await;

@@ -5057,9 +5057,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f0b5d0935a5307d8b395a8c0fa6d663c6663aca88fdc2c355e7e1edef85e69a"
+checksum = "721259c9004e32b394356e9ef4cc4f81cfccd33f359abdf98ee3c5682b095828"
 dependencies = [
  "async-trait",
  "cbor4ii",
@@ -5073,10 +5073,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "weirdnet-backends"
+name = "weirdnet-alerts"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d02badfb45c9bb3150b4678c8bf7b8717742174b65f810a0cf5ff7069e0a7124"
+checksum = "1017ee9add1fbaee7047bd415009b4d44c2b655fe743f6d2a91adef51e5fd214"
+dependencies = [
+ "chrono",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "lettre",
+ "libc",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "weirdnet-backends",
+ "weirdnet-rules",
+]
+
+[[package]]
+name = "weirdnet-backends"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c790e79c4139c7099133a333ce9880dea8c9e249e325872deb888cd85d2b763"
 dependencies = [
  "async-trait",
  "futures",
@@ -5142,9 +5165,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-model"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a34f22e34dd1029522eeefe3e4d152f0fcd2ff551b7153b0e75eecbfb58cc497"
+checksum = "5925f53f5ddd277ff5a042ff3aad3e91a8710736a6c23c09c81328673ef4803e"
 dependencies = [
  "dirs",
  "minijinja",
@@ -5186,9 +5209,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-openai"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65ecff7ad65f385305d69209de79668ed5769448ccb59c884725e08c64fda704"
+checksum = "33f4813c6eeee24e6e46ce9c35dd1644556e071df31bc89a9843db1536bbe536"
 dependencies = [
  "axum",
  "futures",
@@ -5212,9 +5235,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-semcache"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b9478908353f2396bf5fbed5cf3ca0a9f53ebedc60853537de91c0cd17ba806"
+checksum = "41966a9455d70462eca450044f24843cbaac264f429464c030dd8f1b6c57a8db"
 dependencies = [
  "serde",
  "sha2 0.10.9",
@@ -5223,9 +5246,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-sync"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb6db4cba2b3c37138746b82e15b9ee58d413bac842dc0431d9dc8f9fb8cb45b"
+checksum = "cbf856d3524dffaa5be3641e6dcef5606c12febd74085dad58151edd61dd673f"
 dependencies = [
  "blake3",
  "cbor4ii",
@@ -5574,28 +5597,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
 
 [[package]]
-name = "ymir-alerts"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "futures",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "lettre",
- "libc",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "weirdnet-rules",
-]
-
-[[package]]
 name = "ymir-core"
 version = "0.1.0"
 dependencies = [
@@ -5614,6 +5615,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "weirdnet-agent",
+ "weirdnet-alerts",
  "weirdnet-backends",
  "weirdnet-device-link",
  "weirdnet-model",
@@ -5621,7 +5623,6 @@ dependencies = [
  "weirdnet-openai",
  "weirdnet-semcache",
  "weirdnet-sync",
- "ymir-alerts",
 ]
 
 [[package]]
@@ -5638,12 +5639,12 @@ dependencies = [
  "tempfile",
  "tokio",
  "weirdnet-agent",
+ "weirdnet-alerts",
  "weirdnet-backends",
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",
  "weirdnet-sync",
- "ymir-alerts",
  "ymir-core",
  "ymirctl",
 ]

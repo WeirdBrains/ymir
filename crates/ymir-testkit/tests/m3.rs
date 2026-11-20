@@ -216,6 +216,56 @@ async fn roles_on_three_daemons_over_weirdnet() -> Result<()> {
     Ok(())
 }
 
+/// One box with both the inference and the model role serves infer/2 to apps (inference role) and
+/// the model-node protocol (model role, raw inference on its own protocol id) at the same time.
+/// A second, inference-only node uses the combined box's model role over that protocol.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_combined_node_serves_both_roles() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+
+    let comb_h = home(root, "comb", "model inference", &[])?;
+    let first = Membership::create(&comb_h.paths.pool(), "comb")?;
+    let inf_tmp = home(root, "inf", "inference", &[])?;
+    let inf_m = prelink(&first, &inf_tmp, "inf");
+    let app_tmp = home(root, "app", "app", &[])?;
+    let app_m = prelink(&inf_m, &app_tmp, "app");
+    let direct_tmp = home(root, "direct", "app", &[])?;
+    let direct_m = prelink(&first, &direct_tmp, "direct");
+    drop((first, inf_m, app_m, direct_m));
+
+    let comb = start(&comb_h).await?;
+    let comb_addr = addr(&comb_h).await?;
+    let inf_h = home(root, "inf", "inference", std::slice::from_ref(&comb_addr))?;
+    let inf = start(&inf_h).await?;
+    let inf_addr = addr(&inf_h).await?;
+    let app_h = home(root, "app", "app", std::slice::from_ref(&inf_addr))?;
+    let app = start(&app_h).await?;
+    let direct_h = home(root, "direct", "app", std::slice::from_ref(&comb_addr))?;
+    let direct = start(&direct_h).await?;
+
+    // An app straight on the combined box: its inference role (infer/2) answers from its own model.
+    let v = until_ok(30, async || chat(&direct, &direct_h, "to the combined box").await).await?;
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello from alpha! You said: to the combined box");
+
+    // An app on the inference-only node: that node dials the combined box's model role.
+    let v = until_ok(30, async || chat(&app, &app_h, "through the second node").await).await?;
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello from alpha! You said: through the second node");
+    let loaded = until_ok(20, async || {
+        let r = control::request(&inf_h.paths.socket(), &ControlRequest::Status).await?;
+        let on = r.status.is_some_and(|s| s.models.iter().any(|m| m.id == "alpha"));
+        Ok((if on { 200 } else { 503 }, json!(null)))
+    })
+    .await;
+    assert!(loaded.is_ok(), "the second node sees the combined box's model");
+
+    direct.shutdown().await;
+    app.shutdown().await;
+    inf.shutdown().await;
+    comb.shutdown().await;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pool_link_and_add_move_the_identity() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -238,18 +288,21 @@ async fn pool_link_and_add_move_the_identity() -> Result<()> {
             assert!(Instant::now() < deadline, "no code shown: {}", shown.text());
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
-        ctl(&old.home, &["pool", "add", &code, "--yes"]).await
+        // Morph's scheme carries the same payload, and `pool add` takes it.
+        let morph = code.replacen("weirdnet-ymir://", "weirdnet-morph://", 1);
+        ctl(&old.home, &["pool", "add", &morph, "--yes"]).await
     };
     let (linked, added) = tokio::join!(link, add);
     let added = added?;
     linked?;
-    assert!(added.contains("the code is") && added.contains("Linked new"), "{added}");
-    assert!(shown.text().contains("Linked as new"), "{}", shown.text());
+    assert!(added.contains("the code is") && added.contains("Linked Ymir on new"), "{added}");
+    assert!(shown.text().contains("Linked as Ymir on new"), "{}", shown.text());
 
     let a = Membership::open(&old.paths.pool())?.unwrap();
     let b = Membership::open(&new.paths.pool())?.unwrap();
     assert_eq!(a.user_id(), b.user_id());
-    assert!(a.roster().active().any(|c| c.peer_id == b.peer_id().to_string()));
+    // The signed roster label is the hint: "Ymir on <name>".
+    assert!(a.roster().active().any(|c| c.peer_id == b.peer_id().to_string() && c.label == "Ymir on new"));
     assert!(b.roster().active().any(|c| c.peer_id == a.peer_id().to_string()));
     // Linking twice is refused.
     assert!(ctl(&new.home, &["pool", "link"]).await.is_err());

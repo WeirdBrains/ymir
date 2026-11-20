@@ -147,12 +147,18 @@ impl EmbedBackend for Embedder {
     }
 
     async fn embed(&self, input: &str, cancel: &CancelToken) -> Result<Vec<f32>, RemoteError> {
+        Ok(self.embed_counted(input, cancel).await?.0)
+    }
+
+    /// The engine's prompt-token count rides along, so the bridge reports real embedding usage.
+    async fn embed_counted(&self, input: &str, cancel: &CancelToken) -> Result<(Vec<f32>, Option<u64>), RemoteError> {
         let input = [input.to_string()];
-        let (vectors, _, _) = tokio::select! {
+        let (vectors, tokens, _) = tokio::select! {
             _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
             e = self.coord.embed(&self.model, &input) => e?,
         };
-        vectors.into_iter().next().ok_or_else(|| engine_error("the engine returned no vector"))
+        let vector = vectors.into_iter().next().ok_or_else(|| engine_error("the engine returned no vector"))?;
+        Ok((vector, Some(tokens)))
     }
 }
 

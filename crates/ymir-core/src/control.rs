@@ -120,7 +120,7 @@ pub struct ControlHandler {
     pub main_model: Option<String>,
     pub coordinator: Option<Arc<Coordinator>>,
     pub model_node: Option<Arc<LocalModelNode>>,
-    pub alerter: Option<Arc<ymir_alerts::Alerter>>,
+    pub alerter: Option<Arc<weirdnet_alerts::Alerter>>,
     pub network: Option<(Arc<crate::membership::Membership>, Arc<crate::membership::SyncNode>)>,
 }
 

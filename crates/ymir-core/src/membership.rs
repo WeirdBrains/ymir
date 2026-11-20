@@ -10,8 +10,7 @@
 //! this node. Ymir has no synced record types yet (context sync is M5), so a pass carries the
 //! roster and the key chain only.
 //!
-//! Generic, and like Morph's own copy: the snapshot and merge-back around [`weirdnet_sync::pull_from`]
-//! belong in `weirdnet-sync` (noted for the Weirdnet lead).
+//! The pull itself (snapshot, pull, merge back) is `weirdnet_sync::pull_from_shared`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -267,46 +266,19 @@ impl Membership {
         for cert in peers {
             let Ok(peer) = PeerId::from_str(&cert.peer_id) else { continue };
             let a = addrs(&cert);
-            // Pull into a copy: our handler needs the live state to answer the peer, which may
-            // be pulling from us at the same moment.
-            let mut work = snapshot(&self.lock());
-            match weirdnet_sync::pull_from(&mut work, node, peer, &a, SYNC_TYPE) {
-                Ok(_) => reached += 1,
-                Err(e) => tracing::debug!(peer = %cert.peer_id, "sync pass: {e}"),
+            // Pulls into a snapshot and merges it back, so our handler can answer a peer pulling
+            // from us at the same moment.
+            let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, SYNC_TYPE);
+            match &out.error {
+                None => reached += 1,
+                Some(e) => tracing::debug!(peer = %cert.peer_id, applied = out.applied, "sync pass: {e}"),
             }
-            merge_back(&mut self.lock(), &work);
         }
         if let Err(e) = self.save() {
             tracing::warn!("saving the roster: {e}");
         }
         reached
     }
-}
-
-fn snapshot(st: &SyncState) -> SyncState {
-    SyncState {
-        seed: st.seed.clone(),
-        user_id: st.user_id.clone(),
-        user_key: st.user_key.clone(),
-        our_cert: st.our_cert.clone(),
-        our_node: st.our_node.clone(),
-        types: st.types.clone(),
-        roster: st.roster.clone(),
-        log: st.log.clone(),
-        clock: st.clock.clone(),
-        device: st.device.clone(),
-        keys: st.keys.clone(),
-        auto_first_rotation: st.auto_first_rotation,
-        records: st.records.clone(),
-    }
-}
-
-/// Roster changes (a revocation is never undone) and the keys a rotation brought.
-fn merge_back(st: &mut SyncState, work: &SyncState) {
-    let key = st.user_key.clone();
-    st.roster.merge(&work.roster, &key, &WEIRDNET);
-    st.take_keys_from(work);
-    st.refresh_keys();
 }
 
 #[cfg(test)]

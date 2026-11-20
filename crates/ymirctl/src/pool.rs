@@ -13,8 +13,26 @@ use ymir_core::control::{self, ControlRequest};
 use ymir_core::membership::{Membership, SYNC_TYPE};
 use ymir_core::{NodeConfig, Paths};
 
-/// The link scheme Ymir shows and reads (`weirdnet-ymir://link/…`). Never bare `weirdnet://`.
+/// The link scheme Ymir shows (`weirdnet-ymir://link/…`). Never bare `weirdnet://`.
 pub const SCHEME: &str = "weirdnet-ymir://";
+
+/// Morph's scheme. Its codes carry the same payload, so `pool add` takes them too.
+pub const MORPH_SCHEME: &str = "weirdnet-morph://";
+
+/// Reads a pasted code as a Ymir one: a `weirdnet-morph://link/` code is the same payload under
+/// Morph's scheme. Anything else is left for the link check to refuse.
+pub fn normalize_link(code: &str) -> String {
+    let code = code.trim();
+    match code.strip_prefix(MORPH_SCHEME) {
+        Some(rest) if rest.starts_with("link/") => format!("{SCHEME}{rest}"),
+        _ => code.to_string(),
+    }
+}
+
+/// The device-link hint, which becomes the label in the signed roster: "Ymir on <name>".
+pub fn link_hint(cfg: &NodeConfig) -> String {
+    format!("Ymir on {}", label(cfg))
+}
 
 #[derive(Subcommand, Debug)]
 pub enum PoolCmd {
@@ -22,7 +40,7 @@ pub enum PoolCmd {
     Link,
     /// Link another device from this one: paste the code it shows.
     Add {
-        /// The `weirdnet-ymir://` code the other device shows.
+        /// The `weirdnet-ymir://` (or Morph's `weirdnet-morph://`) code the other device shows.
         link: String,
         /// The name the other device gets for this user.
         #[arg(long, default_value = "Ymir")]
@@ -92,8 +110,8 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 bail!("this node is already linked ({}); see `ymirctl pool devices`", dir.display());
             }
             let node_key = Keypair::generate_ed25519();
-            let host = HostNode::start(SCHEME, node_key.clone(), link_config(cfg)?, &label(cfg)).map_err(|e| anyhow!("{e}"))?;
-            writeln!(out, "On a device that is already in your Weirdnet (Morph: Linked devices → Add, or `ymirctl pool add`), open:")?;
+            let host = HostNode::start(SCHEME, node_key.clone(), link_config(cfg)?, &link_hint(cfg)).map_err(|e| anyhow!("{e}"))?;
+            writeln!(out, "On a device that is already in your Weirdnet (Morph: Identity → Add device, or `ymirctl pool add`), open:")?;
             writeln!(out, "\n  {}\n", host.link())?;
             writeln!(out, "The code is good for two minutes.")?;
             out.flush()?;
@@ -129,6 +147,7 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
         PoolCmd::Add { link, profile_name, yes } => {
             let m = Membership::open(&dir)?.context("this node is not linked yet; run `ymirctl pool link` or `ymirctl pool init`")?;
             let net = link_config(cfg)?;
+            let link = normalize_link(&link);
             let mut pairing = tokio::task::spawn_blocking(move || Pairing::start(SCHEME, &link, net)).await?.map_err(|e| anyhow!("{e}"))?;
             writeln!(out, "Pairing with {}: the code is {}", pairing.device(), pairing.sas())?;
             if !yes && !read(out, input, "Does the other device show the same code? [y/N] ")? {
@@ -181,5 +200,28 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn morph_codes_read_as_ymir_codes() {
+        assert_eq!(normalize_link("  weirdnet-morph://link/abc \n"), "weirdnet-ymir://link/abc");
+        assert_eq!(normalize_link("weirdnet-ymir://link/abc"), "weirdnet-ymir://link/abc");
+        // Only link codes convert; the rest fails the link check as before.
+        assert_eq!(normalize_link("weirdnet-morph://invite/abc"), "weirdnet-morph://invite/abc");
+        assert_eq!(normalize_link("weirdnet://link/abc"), "weirdnet://link/abc");
+    }
+
+    #[test]
+    fn the_hint_reads_ymir_on_the_node_name() {
+        let mut cfg = NodeConfig::default();
+        cfg.node.name = "the dev box".into();
+        assert_eq!(link_hint(&cfg), "Ymir on the dev box");
+        cfg.node.name.clear();
+        assert_eq!(link_hint(&cfg), "Ymir on ymir");
     }
 }

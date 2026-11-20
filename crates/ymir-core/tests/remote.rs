@@ -201,7 +201,10 @@ async fn strangers_are_refused() {
     let r = pool.infer(user("hi"), &NoEvents, &CancelToken::new()).await;
     let e = r.err().unwrap().error;
     assert!(e.to_string().contains("wrong-user"), "{e}");
-    assert!(matches!(pool.catalog().await, Err(RemoteError::Unavailable { message }) if message.contains("wrong-user")));
+    assert!(
+        matches!(pool.catalog().await, Err(RemoteError::Refused { message }) if message.contains("wrong-user")),
+        "client errors pass through the pool (agent 0.4.1)"
+    );
 
     // And with no certificate at all: an unknown device.
     let dialer = NetDialer::new(stranger.node.clone());

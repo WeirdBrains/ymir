@@ -32,7 +32,7 @@ weirdnet-model.workspace = true
 weirdnet-net.workspace = true
 weirdnet-openai.workspace = true
 weirdnet-sync.workspace = true
-ymir-alerts.workspace = true
+weirdnet-alerts.workspace = true
 ymir-core.workspace = true
 ymirctl.workspace = true
 

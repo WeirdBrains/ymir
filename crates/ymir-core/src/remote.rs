@@ -25,8 +25,8 @@ use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Dialer, RemoteError};
 use weirdnet_agent::serve::{RosterAuth, Server, Serving};
-use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer, NodeService, Update, Verifier};
-use weirdnet_backends::{Chunk, ChunkStream, ModelHost, ModelStatus, Supervisor};
+use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer, NodeServerOptions, NodeService, Update, Verifier};
+use weirdnet_backends::{Chunk, ChunkStream, ModelHost, ModelStatus, RawInferDialer, Supervisor};
 use weirdnet_net::{Multiaddr, PeerId, WEIRDNET};
 
 use crate::coordinator::Coordinator;
@@ -86,9 +86,10 @@ pub fn connect_pool(node: Arc<SyncNode>, m: &Membership, hints: &[(PeerId, Vec<M
     Pool::new(Arc::new(d), nodes).with_options(po)
 }
 
-/// Serves the model role on `node` over node/1 and raw infer/2, to the user's devices. Only for
-/// a box without the inference role: an inference node uses its own models in process (and
-/// already serves infer/2 itself).
+/// Serves the model role on `node` over node/1 and raw inference (`/weirdnet-backends/infer/1`),
+/// to the user's devices. On a box that also has the inference role (`combined`), the model
+/// role leaves `/weirdnet-agent/infer/2` to the inference role, so one box serves both. The
+/// inference role uses its own models in process.
 /// `hardware` goes into the capability record (for placement).
 pub fn serve_model(
     node: &Arc<SyncNode>,
@@ -97,6 +98,7 @@ pub fn serve_model(
     slots: usize,
     queue: usize,
     hardware: Option<(weirdnet_model::hw::Hardware, weirdnet_model::hw::Budget)>,
+    combined: bool,
 ) -> Result<(NodeServer, Arc<NodeService>), RemoteError> {
     let auth = roster_auth(m);
     let host = Arc::new(ModelHost::new(supervisor, auth.clone()));
@@ -105,7 +107,7 @@ pub fn serve_model(
         service = service.with_hardware(hw, budget);
     }
     let service = Arc::new(service);
-    let server = NodeServer::start(node, service.clone())?;
+    let server = NodeServer::start_with(node, service.clone(), NodeServerOptions::default().with_legacy_infer2(!combined))?;
     Ok((server, service))
 }
 
@@ -151,7 +153,9 @@ impl RemoteModelNode {
             }
         });
         let po = PoolOptions::default().with_cert(cert).with_accept_timeout(opts.accept_timeout).with_infer_v1_fallback(false);
-        let pool = Pool::new(dialer, vec![peer.to_string()]).with_options(po);
+        // Raw inference goes to the model node's own protocol id, falling back to infer/2 for a node
+        // on backends 0.1.0.
+        let pool = Pool::new(Arc::new(RawInferDialer::new(dialer)), vec![peer.to_string()]).with_options(po);
         Ok(Self { peer: peer.to_string(), client, pool, record, follow })
     }
 

@@ -89,9 +89,8 @@ Linux packages (tar.gz, zip, .deb, and the `ymir-bin` TAUR package) are built wi
 `YMIR_HOME` moves the config and state (default `~/.config/ymir`); `WEIRDNET_MODELS_DIR` moves the
 model files.
 
-Crates: `ymir-core`, `ymird`, `ymirctl` (the app), `ymir-testkit` (tests), plus `ymir-alerts`, an
-interim generic crate that moves to `weirdnet-alerts` later. Backends, the OpenAI bridge, the answer
-cache, hardware detection and the request types come from the published `weirdnet-*` crates.
+Crates: `ymir-core`, `ymird`, `ymirctl` (the app), `ymir-testkit` (tests). Backends, the OpenAI bridge, the answer
+cache, alerts, hardware detection and the request types come from the published `weirdnet-*` crates.
 
 ## License
 
