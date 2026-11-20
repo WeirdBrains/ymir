@@ -2033,6 +2033,36 @@ apk, debug-signed, demo mode). Screenshots: `~/bragi-shots/b4/` on the dev box.
   The demo node now pulls too (`DemoNode::sync_with`). Real devices run sync passes and are not affected.
 - **No merge of two devices editing one message** beyond last-writer-wins per record, and no retention or expiry yet.
 
+## B5 status (in progress 2026-11-20)
+
+Attachments and agent mode are built on both shells. BSD support is written but could not be built here.
+
+**Built and run:**
+
+- **Text attachments.** `bragi-core::attach`: a text file up to 256 KiB, up to 5 per message, is inlined into the prompt as
+  a fenced block and kept (name and text) with the message in history, so a reopened chat still shows it. Binary
+  and larger files are refused with a reason, because `infer/2` carries text only. Desktop: a path box and chips; Flutter:
+  the system file picker and chips (the demo build adds a sample file instead of opening the picker).
+- **Agent mode.** `Core::send_agent` runs a task on a node over `weirdnet-agent`'s `remote::task` (task/1). Tool calls
+  and their outcome are logged on the message, a tool that needs approval shows a card (allow once, allow for this task,
+  deny) in both shells, and stopping at a card cancels the task. A node that runs no tasks says so. The demo node hosts a
+  small notes tool so the scenarios can run it.
+- **Tests.** `bragi-core/tests/breadth.rs`: attachment reaches the model and stays with the message; a task asks, is allowed
+  and runs its tool on the node; a declined card stops the tool and stopping at a card cancels; a node without tasks says so.
+  Both scenarios gained attach and agent steps (desktop 14 to 18, Android 14 to 17).
+- **m5 flake (Ymir).** Not a load timing issue but a race: the mock engine's word delay is a process-wide env var and the
+  tests in `m5.rs` set it in parallel, so one test could speed up another's answer so it finished before the node was killed.
+  Fixed by making the tests that set it take turns (`73e740e`).
+
+**Not built or not verified, and why:**
+
+- **BSDs: not built or run.** GPUI's Linux platform covers FreeBSD (so GhostBSD), but a cross build from Linux fails in
+  `aws-lc-sys` (no FreeBSD sysroot). A manual `freebsd` job is in `platforms.yml` (VM build and tests) and has never run. OpenBSD and
+  DragonFly are not GPUI targets.
+- **Real nodes do not serve `task/1` yet**, so agent mode is only run against the demo node; against a Ymir node it
+  reports that tasks are not offered.
+- Attachments are text only (no images, PDFs or binary), and the Flutter file picker was only exercised in its scripted demo path.
+
 ## Decisions (2026-11-19)
 
 m3talsmith answered the first round of open questions:
