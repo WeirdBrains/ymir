@@ -2171,11 +2171,11 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 | Packages for Linux, macOS and Windows, plus BSD where GPUI/Rust allow | tarball and service files only; nothing signed |
 | A review by someone other than the author | the review above is the author's |
 
-## M10 status (not built: waits on the Weirdnet lead, checked 2026-11-20)
+## M10 status (design approved 2026-11-20; Ymir builds it once the Weirdnet lead's releases are out)
 
-M10 is Weirdnet-lead work in `weirdnet-sync` and `weirdnet-device-link`, and neither published crate has it
-(`weirdnet-sync` 0.6.0 and `weirdnet-device-link` 0.3.0: no cert-only mode, no mention of one in the sources, and no
-open issue for it). Ymir cannot do it alone: making a node run without the seed means changing what `SyncState` takes and
+m3talsmith approved the M10 design on 2026-11-20. The Weirdnet lead is releasing `weirdnet-sync` 0.7.0, `weirdnet-device-link` 0.4.0,
+`weirdnet-agent` 0.4.4, `weirdnet-backends` 0.1.2 and `weirdnet-update` 0.2.1 (and a majority-vote lease as sync 0.8.0 after M10). Until
+they are on crates.io the published crates (`weirdnet-sync` 0.6.0, `weirdnet-device-link` 0.3.0) have no cert-only mode. Ymir cannot do it alone: making a node run without the seed means changing what `SyncState` takes and
 what a device link sends. Nothing was built or faked here, so every service node still holds the root seed in a 0600 file.
 
 **Where the seed is used today (read from `weirdnet-sync` 0.6.0 and Ymir), so the ask is concrete:**
@@ -2189,7 +2189,7 @@ what a device link sends. Nothing was built or faked here, so every service node
 - **Verifying.** `RosterAuth`, `check_caller` and the capability verifier use only the user's *public* key, which `SyncState`
   already stores as `user_key`. So serving, sync and the roster check do not need the seed.
 
-**Ask for the Weirdnet lead (draft, not filed):**
+**The approved ask (what the releases carry):**
 
 1. `weirdnet-device-link`: a link kind that sends the user public key, a node certificate and the sync keys for the listed types
    at the current epoch, and no seed (`Pairing::send_with` takes `&seed` today).
@@ -2202,7 +2202,7 @@ what a device link sends. Nothing was built or faked here, so every service node
 `Membership::seed()` and `revoke()` fail on a cert-only node, `ymirctl pool link --cert-only` for model and inference nodes, and a
 migration that re-links existing nodes and then overwrites and deletes their `seed` files. A test would link a node cert-only,
 show it serves and syncs, show `revoke`/`approve` refused there, revoke it from the seed holder, and show the root identity unchanged.
-None of that is written, because there is no API to write it against.
+None of that is written yet, because the API is not published.
 
 ## Decisions (2026-11-19)
 
