@@ -2098,7 +2098,11 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 - *Roster check:* infer/1, infer/2, catalog/1, node/1 and now task/1 all authorize through `RosterAuth` before anything is
   read; capability records must carry the user's certificate. Covered by existing tests for strangers and revocation
   (`ymir-core/tests/remote.rs`, `m3.rs`) and the new task tests. Nothing admits a device that is not in the user's roster.
-- *Role boundaries:* **not enforced by the transport.** A model node authorizes any linked device, so an app device can dial it
+- *Role boundaries (guard added after the first review pass):* `[model] callers = ["inf"]` narrows a model node to the named linked devices
+  (peer ids or roster labels) through Ymir's own `Authorize`; `m9.rs` shows an app device refused and the inference node admitted, and
+  that with no `callers` an app still gets in (the default, kept for compatibility; the daemon logs a warning). Labels are chosen when a
+  device is linked, so the guard is only as good as that naming; the transport still carries no role. Original finding:
+  **not enforced by the transport.** A model node authorizes any linked device, so an app device can dial it
   directly and skip the inference node's cache, batch caps and fairness. It cannot reach anything outside the user's own
   devices, so this is a bypass of Ymir's scheduling, not of confidentiality (read from the code; not demonstrated). Fixing it needs the
   caller's role in the authorization decision (upstream request below).
@@ -2155,6 +2159,39 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 | Signed releases from the real org root, installed by `ymirctl update` and rolled back when broken | mechanism built and tested with test keys; no real keys, no release |
 | Packages for Linux, macOS and Windows, plus BSD where GPUI/Rust allow | tarball and service files only; nothing signed |
 | A review by someone other than the author | the review above is the author's |
+
+## M10 status (not built: waits on the Weirdnet lead, checked 2026-11-20)
+
+M10 is Weirdnet-lead work in `weirdnet-sync` and `weirdnet-device-link`, and neither published crate has it
+(`weirdnet-sync` 0.6.0 and `weirdnet-device-link` 0.3.0: no cert-only mode, no mention of one in the sources, and no
+open issue for it). Ymir cannot do it alone: making a node run without the seed means changing what `SyncState` takes and
+what a device link sends. Nothing was built or faked here, so every service node still holds the root seed in a 0600 file.
+
+**Where the seed is used today (read from `weirdnet-sync` 0.6.0 and Ymir), so the ask is concrete:**
+
+- **Sealing sync traffic without a rotated key.** `sync_key(seed, user_id, type, epoch)` is an HKDF of the seed; `net.rs`
+  seals and opens envelopes under it whenever no rotated epoch key is held, and for "you are behind" refusals. A service node
+  would need a per-type sync key (or a key delivered at link time, sealed to its device key), not the seed.
+- **Admitting and revoking devices.** `Roster::self_certify`, `approve` and `revoke` need the user's private key (Ymir's
+  `Membership::revoke` derives it from the seed; `ymirctl pool link` sends the seed). Only a device that may admit others
+  needs this; a service node never should.
+- **Verifying.** `RosterAuth`, `check_caller` and the capability verifier use only the user's *public* key, which `SyncState`
+  already stores as `user_key`. So serving, sync and the roster check do not need the seed.
+
+**Ask for the Weirdnet lead (draft, not filed):**
+
+1. `weirdnet-device-link`: a link kind that sends the user public key, a node certificate and the sync keys for the listed types
+   at the current epoch, and no seed (`Pairing::send_with` takes `&seed` today).
+2. `weirdnet-sync`: `SyncState::new` taking either the seed or a cert-only credential, with every seed use above served by the
+   per-type keys; `approve`/`revoke` refuse on a cert-only state; rotation keeps working through device keys.
+3. A way for a seed holder to revoke one cert-only node without rotating the root identity, and for the revoked node's keys
+   to stop working (an epoch rotation, as for any revoked device).
+
+**Ymir side, ready when that lands:** `Membership::adopt` and `build` take the seed from the link (switch to the credential),
+`Membership::seed()` and `revoke()` fail on a cert-only node, `ymirctl pool link --cert-only` for model and inference nodes, and a
+migration that re-links existing nodes and then overwrites and deletes their `seed` files. A test would link a node cert-only,
+show it serves and syncs, show `revoke`/`approve` refused there, revoke it from the seed holder, and show the root identity unchanged.
+None of that is written, because there is no API to write it against.
 
 ## Decisions (2026-11-19)
 

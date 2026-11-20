@@ -98,7 +98,7 @@ Weirdnet crates: none new.
 
 ## M9 Breadth and hardening (In progress)
 
-Built: self-update with rollback on weirdnet-update (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, and a security review with checks that run. Not built: push wake-ups, the Windows service, BSD packages, a bundle fetcher. The four upstream issues are still open.
+Built: self-update with rollback on weirdnet-update (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, and a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Not built: push wake-ups, the Windows service, BSD packages, a bundle fetcher. The four upstream issues are still open.
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 
@@ -112,9 +112,10 @@ Known gaps:
 
 ## M10 Cert-only server link (Planned)
 
-Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity.
+Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. Not built: it needs a cert-only mode in weirdnet-sync and weirdnet-device-link, which the published crates do not have.
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
 
 Known gaps:
-- Needs Weirdnet changes first.
+- Blocked on the Weirdnet lead: no cert-only link in weirdnet-sync 0.6.0 or weirdnet-device-link 0.3.0, and no issue open for it. The ask is written up in DESIGN.md (where the seed is used, what a link must send instead).
+- Until then every model and inference node holds the root seed in a 0600 file.
