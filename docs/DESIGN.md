@@ -2171,11 +2171,11 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 | Packages for Linux, macOS and Windows, plus BSD where GPUI/Rust allow | tarball and service files only; nothing signed |
 | A review by someone other than the author | the review above is the author's |
 
-## M10 status (design approved 2026-11-20; Ymir builds it once the Weirdnet lead's releases are out)
+## M10 status (design approved 2026-11-20; most crates published, Ymir wiring waits on update 0.2.1 and the lead's notes)
 
-m3talsmith approved the M10 design on 2026-11-20. The Weirdnet lead is releasing `weirdnet-sync` 0.7.0, `weirdnet-device-link` 0.4.0,
-`weirdnet-agent` 0.4.4, `weirdnet-backends` 0.1.2 and `weirdnet-update` 0.2.1 (and a majority-vote lease as sync 0.8.0 after M10). Until
-they are on crates.io the published crates (`weirdnet-sync` 0.6.0, `weirdnet-device-link` 0.3.0) have no cert-only mode. Ymir cannot do it alone: making a node run without the seed means changing what `SyncState` takes and
+m3talsmith approved the M10 design on 2026-11-20. The Weirdnet lead has published (and is still verifying) `weirdnet-sync` 0.7.0, `weirdnet-device-link` 0.4.0,
+`weirdnet-agent` 0.4.4, `weirdnet-backends` 0.1.2 and `weirdnet-update` 0.2.1 (and a majority-vote lease as sync 0.8.0 after M10); `weirdnet-update` 0.2.1 and the adoption notes come later, and Ymir
+wires M10 up after that. Ymir still builds on the older crates, which have no cert-only mode. Ymir cannot do it alone: making a node run without the seed means changing what `SyncState` takes and
 what a device link sends. Nothing was built or faked here, so every service node still holds the root seed in a 0600 file.
 
 **Where the seed is used today (read from `weirdnet-sync` 0.6.0 and Ymir), so the ask is concrete:**

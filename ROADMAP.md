@@ -112,10 +112,10 @@ Known gaps:
 
 ## M10 Cert-only server link (Planned)
 
-Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. m3talsmith approved the design on 2026-11-20. The Weirdnet lead is releasing weirdnet-sync 0.7.0, weirdnet-device-link 0.4.0, weirdnet-agent 0.4.4, weirdnet-backends 0.1.2 and weirdnet-update 0.2.1, and Ymir builds M10 once those are out. A majority-vote lease follows as weirdnet-sync 0.8.0 after M10.
+Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. m3talsmith approved the design on 2026-11-20. Most of the crates are now published (weirdnet-sync 0.7.0, weirdnet-device-link 0.4.0, weirdnet-agent 0.4.4, weirdnet-backends 0.1.2); the Weirdnet lead is still verifying them, and weirdnet-update 0.2.1 and the adoption notes come later. Ymir wires M10 up after that. A majority-vote lease follows as weirdnet-sync 0.8.0 after M10.
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
 
 Known gaps:
-- Waiting on the Weirdnet lead's releases (sync 0.7.0, device-link 0.4.0, agent 0.4.4, backends 0.1.2, update 0.2.1); the published crates (sync 0.6.0, device-link 0.3.0) have no cert-only link yet. The design and what Ymir changes are in DESIGN.md.
+- Waiting on the Weirdnet lead: sync 0.7.0, device-link 0.4.0, agent 0.4.4 and backends 0.1.2 are published but still being verified; update 0.2.1 and the adoption notes are not out. Ymir uses sync 0.5.2 and device-link 0.3.0 today, which have no cert-only link. The design and what Ymir changes are in DESIGN.md.
 - Until then every model and inference node holds the root seed in a 0600 file.
