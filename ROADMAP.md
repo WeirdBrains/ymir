@@ -19,16 +19,16 @@ One machine runs the model, inference and app roles in a single `ymird`. It dete
 Weirdnet crates: `weirdnet-model`, `weirdnet-backends`, `weirdnet-openai`, `weirdnet-semcache`.
 
 Known gaps:
-- The quickstart has run on one NVIDIA PC only. A Spark, a Mac and a CPU-only box are not tried yet.
+- The quickstart has run on one NVIDIA PC only. A unified-memory box, a Mac and a CPU-only box are not tried yet.
 
-## M2 Model-node parity with server-a and server-b (Done)
+## M2 Model-node parity with existing llama-swap servers (Done)
 
 vLLM as a second engine (managed, or wrapping a server that is already running), idle unload, restart with backoff after a crash, a small stand-in model that answers while a big one loads, alerts, a user service and Linux packages.
 
 Weirdnet crates: `weirdnet-backends`, `weirdnet-alerts`, `weirdnet-model`.
 
 Known gaps:
-- vLLM is tested on an NVIDIA GPU only, not on the Spark's newer GPU.
+- vLLM is tested on one NVIDIA GPU only, not on newer or unified-memory hardware.
 - Nothing is released yet: no rpm, no signatures, no macOS or Windows builds.
 - Alerts have only run in dry-run, so nothing real was ever sent.
 
@@ -50,7 +50,7 @@ More than one model node in the pool: linking devices, each node advertising wha
 Weirdnet crates: `weirdnet-device-link`, `weirdnet-relay`, `weirdnet-net`, `weirdnet-agent`, `weirdnet-backends`.
 
 Known gaps:
-- The cross-machine run on the laptop did not happen (the machine was busy). Every multi-node test ran on one computer.
+- The cross-machine run did not happen. Every multi-node test ran on one computer.
 - Routing is ready node first, then fewest requests in flight. It does not yet weigh hardware, speed or warm prompts.
 
 ## M5 Context sync and failover (Done)
@@ -79,20 +79,20 @@ Known gaps:
 
 ## M7 Split models (In progress)
 
-A model too big for one machine is split across several (vLLM with Ray, or llama.cpp RPC), reproducing the big mode on the two DGX Sparks. The llama.cpp RPC path is built and tested on one machine over loopback, with a real model: opt-in pool policy, private-link-only planning, group up and down, teardown on member loss.
+A model too big for one machine is split across several (vLLM with Ray, or llama.cpp RPC), reproducing the big mode on two large-memory machines. The llama.cpp RPC path is built and tested on one machine over loopback, with a real model: opt-in pool policy, private-link-only planning, group up and down, teardown on member loss.
 
 Weirdnet crates: `weirdnet-backends`.
 
 Known gaps:
-- vLLM/Ray (tensor parallel over RoCE) groups are not built: they need the DGX Sparks, which were off limits.
-- The big mode has not been reproduced as a group job on server-a and server-b; that needs m3talsmith's go-ahead.
+- vLLM/Ray (tensor parallel over RoCE) groups are not built: they need two machines with fast links, which were off limits.
+- The big mode has not been reproduced as a group job on real servers; that needs m3talsmith's go-ahead.
 - Capability records carry no link information, so private links, ports and memory are declared in the pool policy and link speed is not measured (upstream request).
 - A crashed worker on another node is noticed only when that node leaves the pool or a request fails; alerts for a lost group are logged, not delivered.
 - A group is started by the operator (ymirctl group up); placement and leases wait on sync 0.7.0.
 
-## M8 Move server-a and server-b onto Ymir (Planned)
+## M8 Move existing servers onto Ymir (Planned)
 
-The two DGX Sparks that serve models today move to Ymir, one step at a time, with the owner approving each step.
+The servers that serve models today move to Ymir, one step at a time, with the owner approving each step.
 
 Weirdnet crates: none new.
 

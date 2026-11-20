@@ -4,7 +4,7 @@ import '../components/layout.dart';
 
 const _html = '''
 <p>Ymir detects what a machine has (<code>ymirctl hw</code>) and works out a model budget. These are the design's
-tiers. They are planning targets: so far the setup has run on one NVIDIA PC (an NVIDIA GPU), and vLLM has run on that
+tiers. They are planning targets: so far the setup has run on one NVIDIA PC, and vLLM has run on that
 card only.</p>
 <table>
 <thead><tr><th>Tier</th><th>Hardware</th><th>What you get</th></tr></thead>
@@ -13,7 +13,7 @@ card only.</p>
 <tr><td>Entry GPU</td><td>NVIDIA with 8 GB VRAM (Turing or newer), AMD RDNA2+ with 8 GB, or Apple Silicon with 16 GB</td><td>llama.cpp GPU offload with a small chat model plus a 7 to 9B Q4 model.</td></tr>
 <tr><td>Comfortable</td><td>16 to 24 GB VRAM, or a 32 to 64 GB Mac</td><td>A 27 to 35B Q4 model plus a small stand-in and an embedding model.</td></tr>
 <tr><td>vLLM</td><td>Linux, NVIDIA Ampere or newer (24 GB+), or AMD Instinct / RDNA3 on the ROCm list</td><td>vLLM as an extra backend: higher concurrency and FP8 or NVFP4 checkpoints. Linux only.</td></tr>
-<tr><td>DGX Spark</td><td>GB10, 128 GB unified memory</td><td>The target for the server-a/server-b setup on one box. vLLM on the Spark's GPU is untested so far.</td></tr>
+<tr><td>DGX Spark</td><td>GB10, 128 GB unified memory</td><td>A large-memory single-box target. vLLM on the Spark's GPU is untested so far.</td></tr>
 </tbody></table>
 <h2 id="backends">Backends</h2>
 <ul>
