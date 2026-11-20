@@ -1,0 +1,244 @@
+# Checks every push and pull request: format, lints and tests on Linux, and on macOS and Windows
+# the same plus ymird as a real background service (crates/ymir-core/src/service.rs):
+# - macOS: `ymirctl setup --service` loads a launchd agent; stop, start and uninstall it.
+# - Windows: the logon task (user level), then `ymirctl service install --system` (the Windows
+#   service, NT SERVICE\ymird), then the WiX MSI and YmirSetup exe built, installed and removed.
+# Each service answers a chat through the mock engine, and after a stop no engine is left running.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The service smoke tests' bridge port (a fixed one, so ymirctl chat finds it).
+  YMIR_CI_PORT: "18484"
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: setup --service --dry-run
+        run: |
+          cargo build --locked --bin ymird --bin ymirctl --bin ymir-mock-engine
+          printf 'GGUF mock' > "$RUNNER_TEMP/tiny.gguf"
+          target/debug/ymirctl --home "$RUNNER_TEMP/ymir" setup --name ci --llama-server target/debug/ymir-mock-engine \
+            --model "$RUNNER_TEMP/tiny.gguf" --service --dry-run | tee out.txt
+          grep -q 'would write .*ymird.service' out.txt
+          grep -q 'would run: systemctl --user enable ymird.service' out.txt
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked -p ymir-core -p ymirctl -p ymird --all-targets -- -D warnings
+      - run: cargo test --locked -p ymir-core -p ymirctl -p ymird
+      - run: cargo test --locked -p ymir-testkit --test service_stop
+      - name: Build
+        run: cargo build --locked --bin ymird --bin ymirctl --bin ymir-mock-engine
+      - name: launchd agent (setup --service, stop, start, uninstall)
+        run: |
+          set -euxo pipefail
+          B="$PWD/target/debug"
+          export YMIR_HOME="$RUNNER_TEMP/ymir"
+          printf 'GGUF mock' > "$RUNNER_TEMP/tiny.gguf"
+          setup() { "$B/ymirctl" setup --name ci --llama-server "$B/ymir-mock-engine" --model "$RUNNER_TEMP/tiny.gguf" --port "$YMIR_CI_PORT" "$@"; }
+          setup --service --dry-run | tee out.txt
+          grep -q "would write $HOME/Library/LaunchAgents/com.weirdbrains.ymird.plist" out.txt
+          grep -q "would run: launchctl bootstrap gui/$(id -u) " out.txt
+          setup --service
+          plutil -lint "$HOME/Library/LaunchAgents/com.weirdbrains.ymird.plist"
+          up() { for i in $(seq 60); do "$B/ymirctl" service status | grep -q 'ymird: answering' && return 0; sleep 1; done; return 1; }
+          down() { for i in $(seq 60); do "$B/ymirctl" service status | grep -q 'ymird: not answering' && return 0; sleep 1; done; return 1; }
+          up
+          "$B/ymirctl" service status | tee status.txt
+          grep -q 'launchd: running' status.txt
+          "$B/ymirctl" chat "hi" | tee chat.txt
+          grep -q 'You said: hi' chat.txt
+          pgrep -f ymir-mock-engine
+          "$B/ymirctl" service stop
+          down
+          sleep 2
+          if pgrep -f ymir-mock-engine; then echo "an engine outlived ymird"; exit 1; fi
+          "$B/ymirctl" service start
+          up
+          "$B/ymirctl" service uninstall
+          down
+          test ! -e "$HOME/Library/LaunchAgents/com.weirdbrains.ymird.plist"
+          grep -q 'ymird stopped' "$YMIR_HOME/state/logs/ymird.log"
+      - name: Service log
+        if: always()
+        run: cat "$RUNNER_TEMP/ymir/state/logs/ymird.log" || true
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked -p ymir-core -p ymirctl -p ymird --all-targets -- -D warnings
+      - run: cargo test --locked -p ymir-core -p ymirctl -p ymird
+      - run: cargo test --locked -p ymir-testkit --test service_stop
+      - name: Build
+        run: cargo build --locked --bin ymird --bin ymirctl --bin ymir-mock-engine
+
+      - name: Logon task (setup --service, stop, start, uninstall)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $B = Join-Path $PWD "target\debug"
+          $env:YMIR_HOME = Join-Path $env:RUNNER_TEMP "ymir"
+          $gguf = Join-Path $env:RUNNER_TEMP "tiny.gguf"
+          Set-Content -Path $gguf -Value "GGUF mock" -NoNewline
+          function ctl { & "$B\ymirctl.exe" @args; if ($LASTEXITCODE -ne 0) { throw "ymirctl $args failed ($LASTEXITCODE)" } }
+          function setup { ctl setup --name ci --llama-server "$B\ymir-mock-engine.exe" --model $gguf --port $env:YMIR_CI_PORT @args }
+          function wait-for([string]$want) { for ($i = 0; $i -lt 60; $i++) { if ((ctl service status) -match $want) { return }; Start-Sleep 1 }; throw "timed out waiting for '$want'" }
+          $dry = setup --service --dry-run | Out-String; $dry
+          if ($dry -notmatch 'would run: schtasks /Create /TN \\Ymir\\ymird') { throw "dry run: no schtasks /Create" }
+          setup --service
+          wait-for "ymird: answering"
+          ctl service status
+          schtasks /Query /TN "\Ymir\ymird" /V /FO LIST
+          $chat = ctl chat "hi" | Out-String; $chat
+          if ($chat -notmatch "You said: hi") { throw "no answer through the task's ymird" }
+          if (-not (Get-Process ymir-mock-engine -ErrorAction SilentlyContinue)) { throw "the engine isn't running" }
+          ctl service stop
+          wait-for "ymird: not answering"
+          Start-Sleep 2
+          if (Get-Process ymir-mock-engine -ErrorAction SilentlyContinue) { throw "an engine outlived ymird" }
+          if (Get-Process ymird -ErrorAction SilentlyContinue) { throw "ymird is still running" }
+          ctl service start
+          wait-for "ymird: answering"
+          ctl service uninstall
+          wait-for "ymird: not answering"
+          schtasks /Query /TN "\Ymir\ymird" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "the task is still registered" }
+          $global:LASTEXITCODE = 0
+          if (-not (Select-String -Path "$env:YMIR_HOME\state\logs\ymird.log" -Pattern "ymird stopped" -Quiet)) { throw "no clean stop in the log" }
+
+      - name: Windows service (service install --system, stop, uninstall)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The service account reads its binaries from Program Files, as an install would.
+          $bin = "C:\Program Files\YmirCI"
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          Copy-Item target\debug\ymird.exe, target\debug\ymirctl.exe, target\debug\ymir-mock-engine.exe $bin
+          $ctlExe = Join-Path $bin "ymirctl.exe"
+          $home_ = Join-Path $env:ProgramData "YmirCI"
+          $gguf = Join-Path $env:ProgramData "ymir-ci-tiny.gguf"
+          Set-Content -Path $gguf -Value "GGUF mock" -NoNewline
+          function ctl { & $ctlExe --home $home_ @args; if ($LASTEXITCODE -ne 0) { throw "ymirctl $args failed ($LASTEXITCODE)" } }
+          function wait-for([string]$want) { for ($i = 0; $i -lt 60; $i++) { if ((ctl service status --system) -match $want) { return }; Start-Sleep 1 }; throw "timed out waiting for '$want'" }
+          ctl setup --name ci-system --llama-server (Join-Path $bin "ymir-mock-engine.exe") --model $gguf --port $env:YMIR_CI_PORT
+          ctl service install --system --dry-run
+          ctl service install --system
+          wait-for "service ymird: running"
+          sc.exe qc ymird
+          $qc = sc.exe qc ymird | Out-String
+          if ($qc -notmatch "NT SERVICE\\ymird") { throw "the service doesn't run as NT SERVICE\ymird" }
+          $chat = ctl chat "hi" | Out-String; $chat
+          if ($chat -notmatch "You said: hi") { throw "no answer through the Windows service" }
+          ctl service stop --system
+          wait-for "service ymird: stopped"
+          Start-Sleep 2
+          if (Get-Process ymir-mock-engine -ErrorAction SilentlyContinue) { throw "an engine outlived the service" }
+          if (-not (Select-String -Path "$home_\state\logs\ymird.log" -Pattern "ymird stopped" -Quiet)) { throw "no clean stop in the service log" }
+          ctl service uninstall --system
+          sc.exe query ymird
+          if ($LASTEXITCODE -eq 0) { throw "the service is still registered" }
+          $global:LASTEXITCODE = 0
+
+      # WiX 7 is used under the Open Source Maintenance Fee EULA v1.1, accepted for WeirdBrains
+      # projects on 2026-11-12; every wix command passes -acceptEula wix7.
+      - name: Install pinned WiX 7.0.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/wixtoolset/wix/releases/download/v7.0.1/wix-cli-x64.msi"
+          $expected = "93673c89ab33b1fd3f07ad5e609b7cae694bd716b2914259b61a41c02303b64c"
+          $msi = Join-Path $env:RUNNER_TEMP "wix-cli-x64.msi"
+          Invoke-WebRequest -Uri $url -OutFile $msi
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $msi).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "WiX MSI hash mismatch: $actual != $expected" }
+          $p = Start-Process msiexec.exe -ArgumentList @("/i", "`"$msi`"", "/qn", "/norestart") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "WiX install failed: $($p.ExitCode)" }
+          $wixBin = "C:\Program Files\WiX Toolset v7.0\bin"
+          & (Join-Path $wixBin "wix.exe") extension add -acceptEula wix7 -g WixToolset.UI.wixext/7.0.1 WixToolset.Util.wixext/7.0.1 WixToolset.BootstrapperApplications.wixext/7.0.1
+          if ($LASTEXITCODE -ne 0) { throw "wix extension add failed: $LASTEXITCODE" }
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+
+      - name: MSI and YmirSetup exe (build, install, run the service, uninstall)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $rel = Join-Path $env:RUNNER_TEMP "release"
+          New-Item -ItemType Directory -Force $rel | Out-Null
+          Copy-Item target\debug\ymird.exe, target\debug\ymirctl.exe, LICENSE, README.md $rel
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq "ymird" | Select-Object -ExpandProperty version
+          powershell -File packaging\windows\make-installer.ps1 -ReleaseDir $rel -Version $version -Arch x64 -OutDir installers
+          if ($LASTEXITCODE -ne 0) { throw "MSI build failed" }
+          $msi = (Resolve-Path "installers\ymir-$version-x64.msi").Path
+          powershell -File packaging\windows\make-installer.ps1 -Setup -MsiX64 $msi -Version $version -OutDir installers
+          if ($LASTEXITCODE -ne 0) { throw "YmirSetup build failed" }
+          if (!(Test-Path "installers\YmirSetup-$version.exe")) { throw "no YmirSetup exe" }
+
+          $p = Start-Process msiexec.exe -ArgumentList @("/i", "`"$msi`"", "/qn", "/norestart", "/l*v", "`"$env:RUNNER_TEMP\msi-install.log`"") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "MSI install failed: $($p.ExitCode)" }
+          $installed = "C:\Program Files\Ymir"
+          $ctlExe = Join-Path $installed "ymirctl.exe"
+          if (!(Test-Path $ctlExe)) { throw "ymirctl.exe was not installed" }
+          $qc = sc.exe qc ymird | Out-String; $qc
+          if ($qc -notmatch "NT SERVICE\\ymird" -or $qc -notmatch "DEMAND_START") { throw "the MSI's service isn't NT SERVICE\ymird, manual start" }
+          $acl = (Get-Acl (Join-Path $env:ProgramData "Ymir")).Access | Out-String; $acl
+          if ($acl -notmatch "NT SERVICE\\ymird") { throw "%ProgramData%\Ymir has no ACL entry for the service" }
+
+          $home_ = Join-Path $env:ProgramData "Ymir"
+          Copy-Item target\debug\ymir-mock-engine.exe $home_
+          $gguf = Join-Path $home_ "tiny.gguf"
+          Set-Content -Path $gguf -Value "GGUF mock" -NoNewline
+          function ctl { & $ctlExe --home $home_ @args; if ($LASTEXITCODE -ne 0) { throw "ymirctl $args failed ($LASTEXITCODE)" } }
+          ctl setup --name ci-msi --llama-server (Join-Path $home_ "ymir-mock-engine.exe") --model $gguf --port $env:YMIR_CI_PORT
+          ctl service install --system
+          for ($i = 0; $i -lt 60; $i++) { if ((ctl service status --system) -match "service ymird: running") { break }; Start-Sleep 1 }
+          $chat = ctl chat "hi" | Out-String; $chat
+          if ($chat -notmatch "You said: hi") { throw "no answer through the MSI's service" }
+
+          $p = Start-Process msiexec.exe -ArgumentList @("/x", "`"$msi`"", "/qn", "/norestart") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "MSI uninstall failed: $($p.ExitCode)" }
+          sc.exe query ymird
+          if ($LASTEXITCODE -eq 0) { throw "the service is still registered after uninstall" }
+          $global:LASTEXITCODE = 0
+          if (Get-Process ymir-mock-engine -ErrorAction SilentlyContinue) { throw "an engine outlived the uninstall" }
+          if (Test-Path (Join-Path $installed "ymird.exe")) { throw "ymird.exe is still installed" }
+
+      - name: Service logs
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($f in @("$env:RUNNER_TEMP\ymir\state\logs\ymird.log", "$env:ProgramData\YmirCI\state\logs\ymird.log", "$env:ProgramData\Ymir\state\logs\ymird.log")) {
+            if (Test-Path $f) { Write-Host "== $f"; Get-Content $f -Tail 60 }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-installers
+          path: installers/
+          if-no-files-found: ignore
