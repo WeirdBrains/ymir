@@ -43,7 +43,8 @@ jobs:
         run: cargo test --locked -p ymir-testkit --test engine_shim
       - name: setup --dry-run picks ${{ matrix.backend }}
         run: |
-          ctl() { target/debug/ymirctl --home "$RUNNER_TEMP/home" "$@"; }
+          # Hosted runners have 7 GiB; give setup room for a chat model as on a real Mac.
+          ctl() { target/debug/ymirctl --home "$RUNNER_TEMP/home" "$@" --memory-budget 6GiB --reserve 1GiB; }
           out=$(ctl setup --dry-run --name ci)
           echo "$out"
           if [ "${{ matrix.backend }}" = mlx ]; then
@@ -67,12 +68,18 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Build
         run: cargo build --release --locked -p ymird -p ymirctl
-      - name: setup --download installs mlx-lm and the MLX weights
+      - name: setup --download installs mlx-lm
         run: |
-          target/release/ymirctl --home "$RUNNER_TEMP/home" setup --name ci --download --yes \
+          # A budget no catalog chat model fits: setup still installs MLX-LM (and the embedding GGUF).
+          target/release/ymirctl --home "$RUNNER_TEMP/home" setup --name ci --download --yes --backend mlx \
             --memory-budget 1GiB --models-dir "$RUNNER_TEMP/models" --port 18484
-          cat "$RUNNER_TEMP/home/node.toml"
           test -x "$RUNNER_TEMP/home/engines/mlx/bin/mlx_lm.server"
+      - name: SmolLM2 135M on MLX as the main model
+        run: |
+          # The smallest catalog model with MLX weights (148 MB), pinned as in ymir_core::mlx.
+          "$RUNNER_TEMP/home/engines/mlx/bin/python" -c "from huggingface_hub import snapshot_download as d; d('mlx-community/SmolLM2-135M-Instruct-8bit', revision='0f0d9b8218915bc34d401e1a340b8c049d300d5e', local_dir='$RUNNER_TEMP/models/mlx/SmolLM2-135M-Instruct-8bit')"
+          printf '\n[[model.local]]\nid = "smollm2-135m"\nbackend = "mlx"\nrole = "main"\ncontext = 2048\n' >> "$RUNNER_TEMP/home/node.toml"
+          cat "$RUNNER_TEMP/home/node.toml"
       - name: Chat through ymird
         run: |
           target/release/ymird --home "$RUNNER_TEMP/home" > "$RUNNER_TEMP/ymird.log" 2>&1 &
