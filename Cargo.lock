@@ -5638,6 +5638,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
  "weirdnet-agent",
  "weirdnet-alerts",
  "weirdnet-backends",
