@@ -1,0 +1,100 @@
+# The roadmap, one source of truth. `site/tool/gen_roadmap.py` renders it to ROADMAP.md and to
+# the site's Roadmap page (site/lib/content/roadmap.dart). Keep it consistent with docs/DESIGN.md
+# ("Milestones (Ymir)" and the status sections); update both in the same change.
+#
+# status: "done" | "in-progress" | "planned"
+
+[project]
+name = "Ymir"
+updated = "2026-11-19"
+intro = "Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from docs/DESIGN.md."
+design = "https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md"
+unpublished = ["weirdnet-push"]   # planned crates with no crates.io page yet
+
+[[milestone]]
+id = "M1"
+title = "One box, three roles in one daemon"
+status = "done"
+summary = "One machine runs the model, inference and app roles in a single `ymird`. It detects the hardware, picks models that fit, runs llama.cpp, and serves an OpenAI-compatible endpoint on loopback so Jan and scripts work. `ymirctl setup` writes the config."
+crates = ["weirdnet-model", "weirdnet-backends", "weirdnet-openai", "weirdnet-semcache"]
+gaps = ["The quickstart has run on one NVIDIA PC only. A Spark, a Mac and a CPU-only box are not tried yet."]
+
+[[milestone]]
+id = "M2"
+title = "Model-node parity with server-a and server-b"
+status = "done"
+summary = "vLLM as a second engine (managed, or wrapping a server that is already running), idle unload, restart with backoff after a crash, a small stand-in model that answers while a big one loads, alerts, a user service and Linux packages."
+crates = ["weirdnet-backends", "weirdnet-alerts", "weirdnet-model"]
+gaps = [
+  "vLLM is tested on an NVIDIA GPU only, not on the Spark's newer GPU.",
+  "Nothing is released yet: no rpm, no signatures, no macOS or Windows builds.",
+  "Alerts have only run in dry-run, so nothing real was ever sent.",
+]
+
+[[milestone]]
+id = "M3"
+title = "Roles over Weirdnet"
+status = "done"
+summary = "The same three roles talk across devices over Weirdnet. An app node reaches inference nodes, inference nodes drive model nodes, and only devices in your own roster are let in. `ymirctl` and Jan work on another machine through that machine's own loopback endpoint."
+crates = ["weirdnet-agent", "weirdnet-net", "weirdnet-sync", "weirdnet-device-link", "weirdnet-backends", "weirdnet-model"]
+gaps = [
+  "Nothing is tested across real machines yet. Every multi-node test ran on one computer (in-memory and loopback).",
+  "Linking the owner's real Weirdnet identity is still to do.",
+  "One roster-sync test fails about half the time, a known upstream issue.",
+]
+
+[[milestone]]
+id = "M4"
+title = "Several model nodes"
+status = "in-progress"
+summary = "More than one model node in the pool: linking devices, each node advertising what it can run, one combined model list, failover before the first token, and draining a node before maintenance."
+crates = ["weirdnet-device-link", "weirdnet-relay", "weirdnet-net", "weirdnet-agent", "weirdnet-backends"]
+gaps = []
+
+[[milestone]]
+id = "M5"
+title = "Context sync and failover"
+status = "planned"
+summary = "Conversations are kept in sync across inference nodes, so a reply can resume mid-answer after a model node or an inference node dies, with the full context and no repeated text."
+crates = ["weirdnet-agent", "weirdnet-sync"]
+gaps = ["Waits on a `weirdnet-sync` design for local eviction and working sets."]
+
+[[milestone]]
+id = "M6"
+title = "Workload spreading"
+status = "planned"
+summary = "Load balancing across replicas, moving models around the cloud, fair sharing between devices, priority classes, batch jobs, a shared answer cache, and several inference nodes active at once."
+crates = ["weirdnet-agent", "weirdnet-backends", "weirdnet-semcache"]
+gaps = []
+
+[[milestone]]
+id = "M7"
+title = "Split models"
+status = "planned"
+summary = "A model too big for one machine is split across several (vLLM with Ray, or llama.cpp RPC), reproducing the big mode on the two DGX Sparks."
+crates = ["weirdnet-backends"]
+gaps = []
+
+[[milestone]]
+id = "M8"
+title = "Move server-a and server-b onto Ymir"
+status = "planned"
+summary = "The two DGX Sparks that serve models today move to Ymir, one step at a time, with the owner approving each step."
+crates = []
+gaps = []
+
+[[milestone]]
+id = "M9"
+title = "Breadth and hardening"
+status = "planned"
+summary = "Self-update with rollback, push wake-ups, a Windows service, BSD packages, a security review, and the 1.0 criteria. The open issues parked from M3 are handled here."
+crates = ["weirdnet-update", "weirdnet-push", "weirdnet-agent"]
+gaps = ["`weirdnet-push` is planned and does not exist yet."]
+
+[[milestone]]
+id = "M10"
+title = "Cert-only server link"
+status = "planned"
+summary = "Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity."
+crates = ["weirdnet-sync", "weirdnet-device-link"]
+gaps = ["Needs Weirdnet changes first."]
