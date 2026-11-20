@@ -47,6 +47,8 @@ struct Scripted {
     chats: AtomicUsize,
     loads: AtomicUsize,
     load_fails: AtomicBool,
+    /// Milliseconds a chat takes to start answering.
+    delay_ms: AtomicUsize,
 }
 
 impl Scripted {
@@ -60,6 +62,7 @@ impl Scripted {
             chats: AtomicUsize::new(0),
             loads: AtomicUsize::new(0),
             load_fails: AtomicBool::new(false),
+            delay_ms: AtomicUsize::new(0),
         })
     }
     fn set(&self, m: Mode) {
@@ -94,6 +97,10 @@ impl ModelNode for Scripted {
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
         Box::pin(async move {
             self.chats.fetch_add(1, Ordering::SeqCst);
+            let delay = self.delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+            }
             let mode = *self.mode.lock().unwrap();
             let text = format!("{} says {}", self.name, model);
             let prefix = req.assistant_prefix.as_ref().map(|p| p.text.clone());
@@ -384,4 +391,36 @@ async fn a_request_with_a_prefix_continues_it_and_skips_the_cache() {
     r.unwrap();
     assert_eq!(full, SENTENCE, "the plain request got a whole answer");
     assert_eq!(b.chats.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn replicas_share_a_burst_and_a_slow_one_gets_less() {
+    let nodes: Vec<_> = ["a", "b", "c"].iter().map(|n| Scripted::new(n, &[("alpha", false, READY)])).collect();
+    for n in &nodes {
+        n.delay_ms.store(40, Ordering::SeqCst);
+    }
+    let c = Arc::new(coordinator(&nodes.iter().collect::<Vec<_>>()));
+    for _ in 0..6 {
+        let waves: Vec<_> = (0..10).map(|_| ask(&c, "alpha")).collect();
+        for r in futures::future::join_all(waves).await {
+            r.unwrap();
+        }
+    }
+    let got: Vec<usize> = nodes.iter().map(|n| n.chats.load(Ordering::SeqCst)).collect();
+    assert_eq!(got.iter().sum::<usize>(), 60);
+    assert!(got.iter().all(|&g| g >= 10), "every replica takes a fair share of a burst: {got:?}");
+
+    // One replica turns slow: after it has been measured, it takes clearly less than the others.
+    nodes[0].delay_ms.store(400, Ordering::SeqCst);
+    for n in &nodes {
+        n.chats.store(0, Ordering::SeqCst);
+    }
+    for _ in 0..8 {
+        let wave: Vec<_> = (0..6).map(|_| ask(&c, "alpha")).collect();
+        for r in futures::future::join_all(wave).await {
+            r.unwrap();
+        }
+    }
+    let got: Vec<usize> = nodes.iter().map(|n| n.chats.load(Ordering::SeqCst)).collect();
+    assert!(got[0] < got[1] && got[0] < got[2], "the slow replica gets the least: {got:?}");
 }

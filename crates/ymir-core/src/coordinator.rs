@@ -36,6 +36,7 @@ use weirdnet_backends::{Chunk, ModelState, ModelStatus, ToolCalls};
 use weirdnet_semcache::{AnswerCache, CachedAnswer};
 
 use crate::ModelNode;
+use crate::balance::{Balancer, Candidate};
 
 /// Cold-start policy.
 #[derive(Debug, Clone)]
@@ -130,6 +131,8 @@ pub struct Coordinator {
     loading: Arc<Mutex<HashSet<String>>>,
     /// Requests running now (not cache hits).
     running: Arc<AtomicUsize>,
+    /// Chooses among replicas (M6).
+    balance: Balancer,
 }
 
 /// Where a request goes.
@@ -172,7 +175,7 @@ impl Coordinator {
     }
 
     pub fn with_options(nodes: Vec<Arc<dyn ModelNode>>, main: Option<String>, cache: Arc<dyn AnswerCache>, opts: CoordinatorOptions) -> Self {
-        Self { nodes: RwLock::new(nodes), main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())), running: Arc::new(AtomicUsize::new(0)) }
+        Self { nodes: RwLock::new(nodes), main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())), running: Arc::new(AtomicUsize::new(0)), balance: Balancer::new() }
     }
 
     /// Whether some node serving `model` can continue an answer from a prefix (what a resume
@@ -201,6 +204,7 @@ impl Coordinator {
         let mut nodes = self.nodes.write().unwrap_or_else(|e| e.into_inner());
         let before = nodes.len();
         nodes.retain(|n| n.name() != name);
+        self.balance.forget(name);
         nodes.len() != before
     }
 
@@ -262,11 +266,12 @@ impl Coordinator {
             .collect()
     }
 
-    /// Picks a node for `model`: a ready one with the fewest requests in flight, else the first
-    /// node that has it (it gets loaded). `embedding` says which kind of model the caller wants.
-    /// Draining nodes and the ones in `exclude` (already tried for this request) are skipped.
+    /// Picks a node for `model`: among the ready ones, the cheaper of two random candidates by
+    /// predicted completion time ([`Balancer`]); else the first node that has it (it gets
+    /// loaded). `embedding` says which kind of model the caller wants. Draining nodes and the
+    /// ones in `exclude` (already tried for this request) are skipped.
     fn pick(&self, model: &str, embedding: bool, exclude: &HashSet<String>) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
-        let mut best: Option<(Arc<dyn ModelNode>, ModelStatus)> = None;
+        let mut ready: Vec<(Arc<dyn ModelNode>, ModelStatus)> = Vec::new();
         let mut fallback = None;
         let mut known = false;
         let mut draining = false;
@@ -287,12 +292,17 @@ impl Coordinator {
                 if exclude.contains(node.name()) {
                     continue;
                 }
-                if s.state == ModelState::Ready && best.as_ref().is_none_or(|(_, b)| s.in_flight < b.in_flight) {
-                    best = Some((node.clone(), s.clone()));
+                if s.state == ModelState::Ready {
+                    ready.push((node.clone(), s.clone()));
                 }
                 fallback.get_or_insert_with(|| (node.clone(), s));
             }
         }
+        let cands: Vec<Candidate> = ready
+            .iter()
+            .map(|(n, s)| Candidate { node: n.name().to_string(), local: n.local(), reported: s.in_flight, slots: s.slots.map_or(1, |x| x as usize), cold: None })
+            .collect();
+        let best = self.balance.choose(model, &cands).map(|i| ready.swap_remove(i));
         match best.or(fallback) {
             Some(found) => Ok(found),
             None if known && draining && exclude.is_empty() => Err(unavailable(format!("{model} is only on nodes that are draining"))),
@@ -463,8 +473,10 @@ impl Coordinator {
         let mut shown = String::new();
         let mut resumes = 0u32;
         loop {
+            let dispatch = self.balance.begin(node.name(), &p.model);
             let (err, sent) = match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw, &mut shown).await {
                 Ok(mut f) => {
+                    dispatch.finish();
                     if resumes > 0 {
                         f.meta.resumed_from = Some(req.assistant_prefix.as_ref().map_or(0, |p| p.text.chars().count() as u64));
                     }
@@ -472,6 +484,10 @@ impl Coordinator {
                 }
                 Err(e) => e,
             };
+            drop(dispatch);
+            if matches!(err, RemoteError::Busy) {
+                self.balance.busy(node.name());
+            }
             // Text is out: move on only by resuming from it, on a node that continues a prefix.
             if (sent && (resumes >= MAX_RESUMES || p.raw)) || !retryable(&err) || cancel.is_cancelled() {
                 return Err(err);
