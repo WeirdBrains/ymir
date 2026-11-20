@@ -41,7 +41,7 @@ token. It refuses to overwrite an existing <code>node.toml</code> unless you pas
 <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
 <tbody>
 <tr><td><code>--name NAME</code></td><td>The node's name in the pool.</td></tr>
-<tr><td><code>--llama-server PATH</code></td><td>Use this <code>llama-server</code> binary (default: look on <code>PATH</code>).</td></tr>
+<tr><td><code>--llama-server PATH</code></td><td>Use this external <code>llama-server</code> instead of the llama.cpp shipped with Ymir (the default).</td></tr>
 <tr><td><code>--model PATH</code></td><td>Serve this GGUF file instead of catalog models. Repeat for more; the first is the main model.</td></tr>
 <tr><td><code>--catalog</code></td><td>With <code>--model</code>, also propose catalog models.</td></tr>
 <tr><td><code>--memory-budget SIZE</code></td><td>Memory models may use, such as <code>10GiB</code> (default: automatic).</td></tr>
