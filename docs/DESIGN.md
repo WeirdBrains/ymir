@@ -1620,6 +1620,10 @@ nodes and sync among them. On published crates only: `weirdnet-agent` 0.4.2, `we
   needs 0.4.2 (0.4.1 failed with "characters missing" on a request that carries a prefix at the
   start). A model node that goes quiet is given up on after 5 to 12 s (the asker's pool waits 15 s or more),
   so the inference node moves first.
+- **Cold loads keep the asker waiting, not timing out.** A request that waits for its model to load
+  (`x-wait`, or no stand-in) gets an empty `Meta` frame every 5 s while the load runs, so the asker's
+  stall timer (15 to 25 s) doesn't give up on a vLLM load that takes a minute or more. Before this, such
+  a request ended with a stall error after 25 s while the model went on loading.
 - **Resume at the inference level.** The inference host now says `resume: true`, so an app's pool whose
   inference node dies mid-answer continues on the other one, from the text it already shows. It is
   also what `continue_final_message` needs: the bridge continues the last assistant message through

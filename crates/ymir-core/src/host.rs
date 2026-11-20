@@ -152,6 +152,9 @@ impl Sink for Tee<'_> {
     fn usage(&self, u: Usage) {
         self.out.usage(u);
     }
+    fn alive(&self) {
+        self.out.alive();
+    }
 }
 
 #[async_trait]

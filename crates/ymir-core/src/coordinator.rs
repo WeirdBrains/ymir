@@ -99,12 +99,18 @@ fn retryable(e: &RemoteError) -> bool {
     )
 }
 
+/// How often a request waiting on a cold load tells its asker it is still alive.
+pub const LOAD_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Where an answer streams: infer/2's `Output`, or an infer/1 turn being collected.
 pub trait Sink: Send + Sync {
     fn text(&self, t: String);
     fn reasoning(&self, t: String);
     fn tool_call(&self, c: ToolCall);
     fn usage(&self, u: Usage);
+    /// Nothing to show yet, but the answer is still coming (a cold load). Over infer/2 this is a
+    /// `Meta` frame, which resets the asker's stall timer so a long load isn't taken for a dead node.
+    fn alive(&self) {}
 }
 
 impl Sink for weirdnet_agent::remote::infer::v2::Output {
@@ -119,6 +125,9 @@ impl Sink for weirdnet_agent::remote::infer::v2::Output {
     }
     fn usage(&self, u: Usage) {
         weirdnet_agent::remote::infer::v2::Output::usage(self, u)
+    }
+    fn alive(&self) {
+        self.meta(weirdnet_agent::remote::infer::v2::Meta::default())
     }
 }
 
@@ -572,9 +581,20 @@ impl Coordinator {
     ) -> Result<Finish, (RemoteError, bool)> {
         if cold {
             tracing::info!(model = %model, node = node.name(), "cold start: loading");
-            tokio::select! {
-                _ = cancel.cancelled() => return Err((RemoteError::Cancelled, false)),
-                r = node.load(model, false) => r.map_err(|e| (e, false))?,
+            // A load can take minutes (vLLM); tell the asker it's still on, well inside its
+            // stall timeout (15-25 s), or it gives up on this node mid-load.
+            let load = node.load(model, false);
+            tokio::pin!(load);
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + LOAD_KEEPALIVE, LOAD_KEEPALIVE);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err((RemoteError::Cancelled, false)),
+                    r = &mut load => {
+                        r.map_err(|e| (e, false))?;
+                        break;
+                    }
+                    _ = tick.tick() => out.alive(),
+                }
             }
         }
         let mut routed = req.clone();
