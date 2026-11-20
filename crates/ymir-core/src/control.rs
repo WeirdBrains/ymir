@@ -26,6 +26,12 @@ pub enum ControlRequest {
     Unload {
         model: String,
     },
+    /// Stop sending a model node new requests (it finishes what it has), or resume it.
+    Drain {
+        node: String,
+        #[serde(default = "yes")]
+        on: bool,
+    },
     /// A device this user just linked from here (`ymirctl pool add`) joins the roster.
     PoolApprove {
         cert: weirdnet_net::user::NodeCert,
@@ -34,6 +40,23 @@ pub enum ControlRequest {
     PoolRevoke {
         peer: String,
     },
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// A model node, for `ymirctl nodes`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeSummary {
+    pub name: String,
+    /// This box's own model role.
+    #[serde(default)]
+    pub local: bool,
+    pub draining: bool,
+    pub models: usize,
+    pub ready: usize,
+    pub in_flight: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +90,9 @@ pub struct StatusReport {
     pub bridge_port: Option<u16>,
     pub main_model: Option<String>,
     pub models: Vec<NodeModel>,
+    /// The model nodes the inference role routes to (this box's own and the user's other devices').
+    #[serde(default)]
+    pub nodes: Vec<NodeSummary>,
     /// Alert keys currently failing.
     #[serde(default)]
     pub alerts: Vec<String>,
@@ -168,6 +194,21 @@ impl ControlHandler {
                         })
                     })
                     .collect();
+                let nodes = self
+                    .nodes()
+                    .iter()
+                    .map(|n| {
+                        let st = n.status();
+                        NodeSummary {
+                            name: n.name().to_string(),
+                            local: self.model_node.as_ref().is_some_and(|l| l.name() == n.name()),
+                            draining: n.draining(),
+                            models: st.len(),
+                            ready: st.iter().filter(|s| s.state == ModelState::Ready).count(),
+                            in_flight: st.iter().map(|s| s.in_flight).sum(),
+                        }
+                    })
+                    .collect();
                 ControlResponse {
                     ok: true,
                     message: None,
@@ -179,6 +220,7 @@ impl ControlHandler {
                         bridge_port: self.bridge_port,
                         main_model: self.main_model.clone(),
                         models,
+                        nodes,
                         alerts: self.alerter.as_ref().map(|a| a.failing()).unwrap_or_default(),
                         network: self.network_status(),
                     }),
@@ -205,6 +247,15 @@ impl ControlHandler {
                     Ok(on) if on.is_empty() => ControlResponse::ok(format!("{model} was not loaded")),
                     Ok(on) => ControlResponse::ok(format!("{model} unloaded on {}", on.join(", "))),
                     Err(e) => ControlResponse::err(e.to_string()),
+                }
+            }
+            ControlRequest::Drain { node, on } => {
+                let n = self.nodes().into_iter().find(|n| n.name() == node);
+                let Some(n) = n else { return ControlResponse::err(format!("no model node `{node}` (see `ymirctl nodes`)")) };
+                match n.drain(on).await {
+                    Ok(()) if on => ControlResponse::ok(format!("{node} is drained: no new requests, nothing in flight")),
+                    Ok(()) => ControlResponse::ok(format!("{node} takes requests again")),
+                    Err(e) => ControlResponse::err(format!("{node}: {e}")),
                 }
             }
             ControlRequest::PoolApprove { cert } => {

@@ -50,6 +50,15 @@ pub enum Cmd {
     },
     /// Unload a model everywhere it is loaded.
     Unload { model: String },
+    /// The model nodes the pool routes to.
+    Nodes,
+    /// Stop sending a model node new requests; it finishes what it has. `--resume` undoes it.
+    Drain {
+        /// The node's name (see `ymirctl nodes`).
+        node: String,
+        #[arg(long)]
+        resume: bool,
+    },
     /// Ask the pool something and stream the answer.
     Chat {
         /// Model id (default: the main model).
@@ -194,6 +203,8 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
         Cmd::Service { cmd } => service_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
+        Cmd::Nodes => nodes(&paths, out).await,
+        Cmd::Drain { node, resume } => admin(&paths, out, ControlRequest::Drain { node, on: !resume }).await,
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
         }
@@ -417,6 +428,10 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
         }
         writeln!(out, "  {:<24} {:<10} {:<9} on {} ({}, {} in flight{extra})", m.id, m.purpose, state, m.node, m.engine.name(), m.in_flight)?;
     }
+    if s.nodes.len() > 1 || s.nodes.iter().any(|n| !n.local) {
+        writeln!(out, "Model nodes:")?;
+        write_nodes(out, &s.nodes)?;
+    }
     if !s.alerts.is_empty() {
         writeln!(out, "Alerts: {}", s.alerts.join(", "))?;
     }
@@ -431,6 +446,24 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
         None => writeln!(out, "Weirdnet: off (link with `ymirctl pool link`)")?,
     }
     Ok(())
+}
+
+fn write_nodes(out: &mut dyn Write, nodes: &[control::NodeSummary]) -> Result<()> {
+    for n in nodes {
+        let state = if n.draining { "draining" } else { "serving" };
+        let here = if n.local { " (this box)" } else { "" };
+        writeln!(out, "  {:<24} {:<9} {} of {} models ready, {} in flight{here}", n.name, state, n.ready, n.models, n.in_flight)?;
+    }
+    Ok(())
+}
+
+async fn nodes(paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    let r = control::request(&paths.socket(), &ControlRequest::Status).await?;
+    let s = r.status.context(r.message.unwrap_or_else(|| "no status".into()))?;
+    if s.nodes.is_empty() {
+        writeln!(out, "No model nodes (this node has neither the inference nor the model role).")?;
+    }
+    write_nodes(out, &s.nodes)
 }
 
 async fn bridge(paths: &Paths) -> Result<BridgeClient> {

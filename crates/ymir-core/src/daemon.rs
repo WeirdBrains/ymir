@@ -168,6 +168,9 @@ impl Daemon {
                 let (server, service) =
                     remote::serve_model(&net.node, sup.clone(), &net.membership, 4, 32, Some((hw, budget)), coordinator.is_some())
                         .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
+                if let Some(n) = &model_node {
+                    n.attach_host(service.host().clone());
+                }
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));
                 tracing::info!(

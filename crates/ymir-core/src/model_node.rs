@@ -3,11 +3,14 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::infer::v2::{Input, Request};
 use weirdnet_backends::error::unavailable;
-use weirdnet_backends::{ChunkStream, EngineKind, ModelStatus, Supervisor};
+use weirdnet_backends::{ChunkStream, EngineKind, ModelHost, ModelStatus, Supervisor};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -28,6 +31,14 @@ pub trait ModelNode: Send + Sync {
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>>;
     /// Embeds `input` with loaded embedding `model`.
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>>;
+    /// Whether the node is draining: it finishes what it has and takes no new requests.
+    fn draining(&self) -> bool {
+        false
+    }
+    /// Starts draining (waiting for requests under way) or resumes.
+    fn drain<'a>(&'a self, _on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node can't drain".into() }) })
+    }
 }
 
 /// The model role on this machine: a thin wrapper over the supervisor.
@@ -35,7 +46,13 @@ pub struct LocalModelNode {
     name: String,
     supervisor: Supervisor,
     sources: Vec<(String, EngineKind, String, bool)>,
+    draining: AtomicBool,
+    /// The model-node service on Weirdnet, when this box serves one: draining here drains it too.
+    service_host: Mutex<Option<Arc<ModelHost>>>,
 }
+
+/// How long a drain waits for requests under way.
+const DRAIN_WAIT: Duration = Duration::from_secs(60);
 
 impl LocalModelNode {
     pub fn new(name: impl Into<String>, supervisor: Supervisor, launches: &[weirdnet_backends::ModelLaunch]) -> Self {
@@ -43,7 +60,16 @@ impl LocalModelNode {
             name: name.into(),
             supervisor,
             sources: launches.iter().map(|l| (l.id.clone(), l.engine, l.source.clone(), l.wrap.is_some())).collect(),
+            draining: AtomicBool::new(false),
+            service_host: Mutex::new(None),
         }
+    }
+
+    /// Ties this node's drain state to the host that serves the model-node protocol (the
+    /// service's `Drain` and this node's `drain` then agree).
+    pub fn attach_host(&self, host: Arc<ModelHost>) {
+        host.set_draining(self.draining.load(Ordering::SeqCst));
+        *self.service_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(host);
     }
 
     pub fn supervisor(&self) -> &Supervisor {
@@ -98,5 +124,28 @@ impl ModelNode for LocalModelNode {
 
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {
         Box::pin(self.supervisor.embed(model, input))
+    }
+
+    fn draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.draining.store(on, Ordering::SeqCst);
+            if let Some(h) = self.service_host.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                h.set_draining(on);
+            }
+            if on {
+                let deadline = Instant::now() + DRAIN_WAIT;
+                while self.supervisor.in_flight() > 0 {
+                    if Instant::now() >= deadline {
+                        return Err(RemoteError::Timeout);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+            Ok(())
+        })
     }
 }

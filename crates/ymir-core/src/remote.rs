@@ -187,6 +187,21 @@ impl ModelNode for RemoteModelNode {
         Box::pin(self.client.unload(&self.peer, model))
     }
 
+    fn draining(&self) -> bool {
+        self.record().is_some_and(|c| c.draining)
+    }
+
+    fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.client.drain(&self.peer, on).await?;
+            // The record catches up with the next update; take the flag now so routing agrees.
+            if let Some(c) = self.record.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                c.draining = on;
+            }
+            Ok(())
+        })
+    }
+
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
         Box::pin(async move {
             let mut r = req.clone();
