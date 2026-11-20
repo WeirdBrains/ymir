@@ -1,7 +1,7 @@
 //! Conversations kept by the inference nodes and synced among the user's devices (M5).
 //!
 //! A conversation is a set of sealed `weirdnet-sync` records of the type
-//! [`CONTEXT_TYPE`](crate::membership::CONTEXT_TYPE):
+//! `CONTEXT_TYPE` (in [`membership`](crate::membership)):
 //!
 //! - `{conversation}/meta`: title, system prompt, model, and the deleted flag (a tombstone), as one
 //!   last-writer-wins register;

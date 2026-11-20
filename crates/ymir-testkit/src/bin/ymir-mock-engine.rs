@@ -1,6 +1,6 @@
 //! A stand-in for `llama-server`: same flags and endpoints, canned answers.
 //!
-//! Answers "Hello from <alias>! You said: <last user message>" word by word. `/health` says 503
+//! Answers "Hello from `<alias>`! You said: `<last user message>`" word by word. `/health` says 503
 //! for `YMIR_MOCK_LOAD_MS` (default 200) after start, like a model loading. `/v1/completions`
 //! continues the prompt with " once upon a time"; `/v1/embeddings` returns
 //! `[chars, words, 1, 0]` per input.

@@ -13,10 +13,10 @@ struct Args {
     /// Config and state directory (default ~/.config/ymir).
     #[arg(long, env = "YMIR_HOME")]
     home: Option<PathBuf>,
-    /// Config file (default <home>/node.toml).
+    /// Config file (default `<home>/node.toml`).
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Override [roles], such as `model,inference,app` or `app`.
+    /// Override `[roles]`, such as `model,inference,app` or `app`.
     #[arg(long)]
     roles: Option<String>,
 }

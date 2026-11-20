@@ -650,7 +650,7 @@ impl crate::Coordinator {
         lost
     }
 
-    /// Runs [`Coordinator::check_groups`] every `every`.
+    /// Runs [`check_groups`](crate::coordinator::Coordinator::check_groups) every `every`.
     pub fn spawn_group_watch(self: &Arc<Self>, every: Duration) -> tokio::task::JoinHandle<()> {
         let me = Arc::downgrade(self);
         tokio::spawn(async move {

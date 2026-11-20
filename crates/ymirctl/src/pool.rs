@@ -29,7 +29,7 @@ pub fn normalize_link(code: &str) -> String {
     }
 }
 
-/// The device-link hint, which becomes the label in the signed roster: "Ymir on <name>".
+/// The device-link hint, which becomes the label in the signed roster: "Ymir on `<name>`".
 pub fn link_hint(cfg: &NodeConfig) -> String {
     format!("Ymir on {}", label(cfg))
 }
