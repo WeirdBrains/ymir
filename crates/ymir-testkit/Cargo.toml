@@ -14,6 +14,11 @@ name = "ymir-mock-engine"
 path = "src/bin/ymir-mock-engine.rs"
 test = false
 
+[features]
+# The M5 mid-answer failover tests, which need a weirdnet-agent newer than 0.4.1 (see
+# ymir-core's `agent-prefix`). Run them with a local `[patch]` to the lead's main.
+agent-prefix = ["ymir-core/agent-prefix"]
+
 [dependencies]
 axum.workspace = true
 futures.workspace = true

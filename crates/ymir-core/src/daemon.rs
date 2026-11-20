@@ -146,8 +146,15 @@ impl Daemon {
         if let Some(net) = &network {
             tasks.push(net.sync_loop(std::time::Duration::from_secs(cfg.network.sync_secs.max(1)), stop_rx.clone()));
             if let Some(c) = &coordinator {
-                let (server, feed) = remote::serve(&net.node, c.clone(), &net.membership, net.hints.clone(), context.clone(), host::admission(cfg.network.slots, cfg.network.queue))
-                    .map_err(|e| anyhow!("serving the inference role on Weirdnet: {e}"))?;
+                let (server, feed) = remote::serve(
+                    &net.node,
+                    c.clone(),
+                    &net.membership,
+                    net.hints.clone(),
+                    context.clone(),
+                    host::admission(cfg.network.slots, cfg.network.queue),
+                )
+                .map_err(|e| anyhow!("serving the inference role on Weirdnet: {e}"))?;
                 serving.push(Box::new(server));
                 serving.push(Box::new(feed));
                 let d = remote::discover_model_nodes(
@@ -287,6 +294,10 @@ impl Daemon {
         drop(self.serving);
         if let Some(net) = self.network {
             drop(net.membership);
+            // Requests still running hold the node (through the model nodes they route to), so
+            // ask it to stop whether or not this is the last holder: connections close now, and
+            // an asker whose answer was under way sees the node go and resumes elsewhere.
+            net.node.halt();
             if let Ok(node) = Arc::try_unwrap(net.node) {
                 let _ = tokio::task::spawn_blocking(move || node.stop()).await;
             }

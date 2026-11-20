@@ -35,6 +35,10 @@ pub trait ModelNode: Send + Sync {
     fn draining(&self) -> bool {
         false
     }
+    /// Whether a request carrying an `assistant_prefix` (an answer to continue) works here.
+    fn resumes(&self) -> bool {
+        true
+    }
     /// Starts draining (waiting for requests under way) or resumes.
     fn drain<'a>(&'a self, _on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async { Err(RemoteError::Unsupported { message: "this node can't drain".into() }) })

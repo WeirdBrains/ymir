@@ -171,6 +171,9 @@ pub struct ChatResult {
     pub model: String,
     /// How many times the answer moved to another inference node mid-answer.
     pub resumes: usize,
+    /// What happened on the way, in order: `accepted <node>` and `resumed <node> at <offset>`.
+    #[serde(default)]
+    pub path: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -342,7 +345,11 @@ impl ControlHandler {
                 let mut r = ControlResponse::ok(format!("{} conversation(s)", all.len()));
                 r.conversations = all
                     .into_iter()
-                    .map(|c| ConversationView { title: c.meta.title.clone(), messages: c.messages.into_iter().map(|m| (m.role, m.text)).collect(), id: c.id })
+                    .map(|c| ConversationView {
+                        title: c.meta.title.clone(),
+                        messages: c.messages.into_iter().map(|m| (m.role, m.text)).collect(),
+                        id: c.id,
+                    })
                     .collect();
                 r
             }
@@ -360,14 +367,30 @@ impl ControlHandler {
                 if let Err(e) = store.append(&conversation, "user", &text, None, None) {
                     return ControlResponse::err(format!("{e:#}"));
                 }
-                let mut request = weirdnet_agent::remote::infer::v2::Request::context(weirdnet_agent::remote::infer::v2::ContextRef::new(&conversation, None));
+                let mut request =
+                    weirdnet_agent::remote::infer::v2::Request::context(weirdnet_agent::remote::infer::v2::ContextRef::new(&conversation, None));
                 if let Some(m) = model {
                     request = request.with_model(m);
                 }
-                match pool.infer(request, &weirdnet_agent::pool::NoEvents, &weirdnet_agent::CancelToken::new()).await {
+                // Count the times the answer moved to another inference node.
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let result = pool.infer(request, &tx, &weirdnet_agent::CancelToken::new()).await;
+                drop(tx);
+                let (mut resumes, mut path) = (0, Vec::new());
+                while let Some(e) = rx.recv().await {
+                    match e {
+                        weirdnet_agent::pool::PoolEvent::Accepted { node, .. } => path.push(format!("accepted {node}")),
+                        weirdnet_agent::pool::PoolEvent::Resumed { node, offset } => {
+                            resumes += 1;
+                            path.push(format!("resumed {node} at {offset}"));
+                        }
+                        _ => {}
+                    }
+                }
+                match result {
                     Ok(a) => {
                         let mut r = ControlResponse::ok("answered");
-                        r.chat = Some(ChatResult { text: a.text, node: a.node, model: a.model, resumes: a.meta.resumes.len() });
+                        r.chat = Some(ChatResult { text: a.text, node: a.node, model: a.model, resumes, path });
                         r
                     }
                     Err(i) => ControlResponse::err(format!("{} (after {} characters)", i.error, i.partial.text.chars().count())),

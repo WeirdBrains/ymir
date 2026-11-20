@@ -3,6 +3,7 @@
 //! serves it as an `InferHost`.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -10,6 +11,22 @@ use futures::StreamExt;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::catalog::{CatalogModel as AgentModel, ModelState as AgentState, Purpose};
 use weirdnet_agent::remote::infer::v2::{Finish, Prefix, Request, Usage};
+
+/// Counts a request in flight while it lives.
+struct Running(Arc<AtomicUsize>);
+
+impl Running {
+    fn start(n: &Arc<AtomicUsize>) -> Self {
+        n.fetch_add(1, Ordering::SeqCst);
+        Self(n.clone())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Times one answer may move to another model node after text has gone out.
 const MAX_RESUMES: u32 = 2;
@@ -111,6 +128,8 @@ pub struct Coordinator {
     opts: CoordinatorOptions,
     /// Background loads started for stand-in answers, so a burst of requests starts one load.
     loading: Arc<Mutex<HashSet<String>>>,
+    /// Requests running now (not cache hits).
+    running: Arc<AtomicUsize>,
 }
 
 /// Where a request goes.
@@ -153,7 +172,18 @@ impl Coordinator {
     }
 
     pub fn with_options(nodes: Vec<Arc<dyn ModelNode>>, main: Option<String>, cache: Arc<dyn AnswerCache>, opts: CoordinatorOptions) -> Self {
-        Self { nodes: RwLock::new(nodes), main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())) }
+        Self { nodes: RwLock::new(nodes), main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())), running: Arc::new(AtomicUsize::new(0)) }
+    }
+
+    /// Whether some node serving `model` can continue an answer from a prefix (what a resume
+    /// on this node needs).
+    pub fn can_resume(&self, model: &str) -> bool {
+        self.nodes().iter().any(|n| n.resumes() && n.status().iter().any(|s| s.id == model))
+    }
+
+    /// Requests this node is answering now.
+    pub fn in_flight(&self) -> usize {
+        self.running.load(Ordering::SeqCst)
     }
 
     pub fn nodes(&self) -> Vec<Arc<dyn ModelNode>> {
@@ -425,6 +455,7 @@ impl Coordinator {
             Route::Cached(hit) => return Ok(replay(hit, out)),
             Route::Node { node, cold } => (node, cold),
         };
+        let _running = Running::start(&self.running);
         let mut tried: HashSet<String> = HashSet::new();
         let mut reloaded = false;
         // What this answer has streamed so far (after any prefix the asker sent), and how many
@@ -447,6 +478,12 @@ impl Coordinator {
             }
             if sent {
                 resumes += 1;
+                // Only a node that continues a prefix can take the rest of this answer.
+                for n in self.nodes() {
+                    if !n.resumes() {
+                        tried.insert(n.name().to_string());
+                    }
+                }
             }
             tried.insert(node.name().to_string());
             match self.pick(&p.model, false, &tried) {

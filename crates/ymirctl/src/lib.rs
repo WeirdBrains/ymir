@@ -537,6 +537,9 @@ async fn context_cmd(paths: &Paths, out: &mut dyn Write, cmd: ContextCmd) -> Res
         writeln!(out, "{}", c.text)?;
         let moved = if c.resumes > 0 { format!(", moved {} time(s) mid-answer", c.resumes) } else { String::new() };
         writeln!(out, "# {} via {}{moved}", c.model, c.node)?;
+        for step in &c.path {
+            writeln!(out, "#   {step}")?;
+        }
     } else if !r.conversations.is_empty() {
         for c in r.conversations {
             writeln!(out, "{}  {}  ({} messages)", c.id, if c.title.is_empty() { "-" } else { &c.title }, c.messages.len())?;

@@ -9,6 +9,12 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[features]
+# Continue an answer on a model node over Weirdnet (M5 failover after the first token). Needs a
+# `weirdnet-agent` newer than 0.4.1 (its `Pool::infer` fix for requests that carry an
+# `assistant_prefix`); without it only this box's own model role continues an answer.
+agent-prefix = []
+
 [dependencies]
 async-trait.workspace = true
 anyhow.workspace = true

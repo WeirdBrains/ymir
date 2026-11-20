@@ -29,8 +29,8 @@ use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer
 use weirdnet_backends::{Chunk, ChunkStream, ModelHost, ModelStatus, RawInferDialer, Supervisor};
 use weirdnet_net::{Multiaddr, PeerId, WEIRDNET};
 
-use crate::coordinator::Coordinator;
 use crate::context::ContextStore;
+use crate::coordinator::Coordinator;
 use crate::host::{ContextAccess, ContextSync, InferenceHost, LiveCatalog, catalog_feed};
 use crate::membership::{Membership, SyncNode};
 use crate::model_node::{BoxFuture, Embedded, ModelNode};
@@ -55,7 +55,7 @@ pub fn serve(
 ) -> Result<(Server, Arc<LiveCatalog>), RemoteError> {
     let auth = roster_auth(m);
     let feed = catalog_feed(coord.clone(), auth.clone(), Duration::from_secs(1));
-    let access = store.map(|store| ContextAccess { store, sync: Some(ContextSync { membership: m.clone(), node: node.clone(), hints }) });
+    let access = store.map(|store| ContextAccess { store, sync: Some(ContextSync { membership: m.clone(), node: Arc::downgrade(node), hints }) });
     let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth).with_context(access));
     let server = Server::start(node, Serving { infer: Some((host, admission)), catalog: Some(feed.clone()), announce: true })?;
     Ok((server, feed))
@@ -207,6 +207,14 @@ impl ModelNode for RemoteModelNode {
 
     fn draining(&self) -> bool {
         self.record().is_some_and(|c| c.draining)
+    }
+
+    /// Continuing an answer on a model node over Weirdnet goes through `weirdnet-agent`'s
+    /// `Pool::infer`, which in 0.4.1 fails ("characters of the answer are missing") when a request
+    /// carries a prefix on its first attempt. The fix is unreleased, so this is off until the
+    /// `agent-prefix` feature says the agent has it (then it needs nothing else).
+    fn resumes(&self) -> bool {
+        cfg!(feature = "agent-prefix")
     }
 
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {

@@ -134,7 +134,15 @@ async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body):
         .unwrap_or("")
         .to_string();
     let answer = format!("Hello from {}! You said: {said}", st.alias);
+    // A trailing assistant message is a prefix to continue (llama.cpp prefill), as a resume
+    // sends: only what comes after it streams.
+    let prefix = body["messages"].as_array().and_then(|m| m.last()).filter(|m| m["role"] == "assistant").and_then(|m| m["content"].as_str());
+    let answer = match prefix {
+        Some(p) => answer.strip_prefix(p).unwrap_or(&answer).to_string(),
+        None => answer,
+    };
     let words: Vec<String> = answer.split_inclusive(' ').map(str::to_string).collect();
+    let word_ms: u64 = std::env::var("YMIR_MOCK_WORD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
     let n = words.len() as u64;
     let alias = st.alias.clone();
     let chunk = move |delta: Value, finish: Option<&str>| json!({"object": "chat.completion.chunk", "model": alias, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]});
@@ -144,11 +152,11 @@ async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body):
     events.push(
         json!({"object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": n, "total_tokens": 5 + n}}),
     );
-    let stream = futures::stream::unfold((events.into_iter(), false), |(mut it, done)| async move {
+    let stream = futures::stream::unfold((events.into_iter(), false), move |(mut it, done)| async move {
         if done {
             return None;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(word_ms)).await;
         match it.next() {
             Some(v) => Some((Ok::<_, std::convert::Infallible>(Event::default().data(v.to_string())), (it, false))),
             None => Some((Ok(Event::default().data("[DONE]")), (it, true))),

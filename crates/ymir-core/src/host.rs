@@ -40,7 +40,8 @@ pub struct ContextAccess {
 #[derive(Clone)]
 pub struct ContextSync {
     pub membership: Arc<Membership>,
-    pub node: Arc<SyncNode>,
+    /// Weak, so a request still running after the daemon stops can't keep the Weirdnet node alive.
+    pub node: std::sync::Weak<SyncNode>,
     pub hints: crate::remote::Hints,
 }
 
@@ -53,12 +54,19 @@ impl ContextAccess {
         {
             let (sync, peer) = (sync.clone(), caller.peer.clone());
             let addrs: Vec<_> = sync.hints.iter().filter(|(p, _)| p.to_string() == peer).flat_map(|(_, a)| a.clone()).collect();
-            let pulled = tokio::task::spawn_blocking(move || sync.membership.pull_context(&sync.node, &peer, &addrs)).await.unwrap_or(false);
+            let pulled =
+                tokio::task::spawn_blocking(move || sync.node.upgrade().is_some_and(|node| sync.membership.pull_context(&node, &peer, &addrs)))
+                    .await
+                    .unwrap_or(false);
             tracing::debug!(conversation = %r.conversation, pulled, "context: pulled from the caller");
         }
-        let conv = self.store.load(&r.conversation).ok_or_else(|| RemoteError::unavailable(format!("conversation {} is not on this node (yet)", r.conversation)))?;
-        conv.prompt(r.head.as_deref())
-            .ok_or_else(|| RemoteError::unavailable(format!("conversation {} has no message {} here (yet)", r.conversation, r.head.as_deref().unwrap_or("?"))))
+        let conv = self
+            .store
+            .load(&r.conversation)
+            .ok_or_else(|| RemoteError::unavailable(format!("conversation {} is not on this node (yet)", r.conversation)))?;
+        conv.prompt(r.head.as_deref()).ok_or_else(|| {
+            RemoteError::unavailable(format!("conversation {} has no message {} here (yet)", r.conversation, r.head.as_deref().unwrap_or("?")))
+        })
     }
 }
 
@@ -151,7 +159,7 @@ impl InferBackend for RoutedBackend {
     /// Continues an `assistant_prefix`: the model nodes' engines do (llama.cpp prefill, vLLM
     /// `continue_final_message`), so an asker whose answer was cut off can resume here.
     fn resumes(&self) -> bool {
-        true
+        self.coord.can_resume(&self.name)
     }
 
     async fn infer(&self, request: &v2::Request, out: &Output, cancel: &CancelToken) -> Result<Finish, RemoteError> {
