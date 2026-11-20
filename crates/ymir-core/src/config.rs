@@ -195,9 +195,9 @@ pub struct ModelSection {
     /// Optional private-link address for group jobs (M7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_link: Option<String>,
-    /// Which linked devices may use this model node: peer ids or roster labels (the name given when
-    /// the device was linked). Empty (the default) means any linked device, an app included; set it to
-    /// the inference nodes (`callers = ["inf"]`) so apps must go through them.
+    /// Which linked devices may use this model node, by peer id (the certificate signature covers the
+    /// peer id; a roster label is not signed, so labels are rejected). Empty (the default) means any
+    /// linked device, an app included; set it to the inference nodes' peer ids so apps must go through them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
     /// `managed` | `system:/path/to/llama-server` | `off`.
@@ -449,6 +449,14 @@ impl NodeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        for c in &self.model.callers {
+            if c.parse::<weirdnet_net::PeerId>().is_err() {
+                bail!(
+                    "[model] callers: `{c}` is not a peer id. Roster labels are not covered by the certificate signature, so they \
+                     are no longer accepted; list the device's peer id instead (replace the label with the peer id of that linked device, as the pool's device list shows it)"
+                );
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for m in &self.model.local {
             if m.id.is_empty() || m.id.contains(char::is_whitespace) {

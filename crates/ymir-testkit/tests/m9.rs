@@ -300,15 +300,17 @@ async fn role_scenario(callers: bool) -> Result<(Result<(), String>, Result<(), 
     let tmp = tempfile::tempdir()?;
     let root = tmp.path();
     let model_h = home(root, "model", "model", &[], &["alpha"])?;
-    if callers {
-        let toml = std::fs::read_to_string(model_h.paths.config())?;
-        std::fs::write(model_h.paths.config(), toml.replace("[model]\n", "[model]\ncallers = [\"inf\"]\n"))?;
-    }
     let first = Membership::create(&model_h.paths.pool(), "model")?;
     let (inf_h, app_h) = (home(root, "inf", "inference", &[], &[])?, home(root, "app", "app", &[], &[])?);
     prelink(&first, &inf_h, "inf");
     prelink(&first, &app_h, "app");
     drop(first);
+    if callers {
+        // By peer id: the label is not signed, the peer id is.
+        let inf_peer = Membership::open(&inf_h.paths.pool())?.unwrap().peer_id().to_string();
+        let toml = std::fs::read_to_string(model_h.paths.config())?;
+        std::fs::write(model_h.paths.config(), toml.replace("[model]\n", &format!("[model]\ncallers = [\"{inf_peer}\"]\n")))?;
+    }
     let model = start(&model_h).await?;
     let s = control::request(&model_h.paths.socket(), &ControlRequest::Status).await?.status.unwrap().network.expect("on Weirdnet");
     let a = s.listening.iter().find(|a| a.starts_with("/ip4/127.0.0.1/tcp/")).expect("a loopback listener").clone();
@@ -323,10 +325,73 @@ async fn a_model_node_with_callers_refuses_an_app_device() -> Result<()> {
     // Without `callers`, any linked device gets in, an app included (the default, and the gap).
     let (inf, app) = role_scenario(false).await?;
     assert!(inf.is_ok() && app.is_ok(), "default: inf {inf:?}, app {app:?}");
-    // With `callers = ["inf"]` only the inference node does.
+    // With `callers = [<the inference node's peer id>]` only the inference node does.
     let (inf, app) = role_scenario(true).await?;
     assert!(inf.is_ok(), "the inference node is admitted: {inf:?}");
     let e = app.expect_err("an app device must be refused by the model node");
     assert!(e.contains("not-an-allowed-caller"), "{e}");
+    Ok(())
+}
+
+#[test]
+fn callers_must_be_peer_ids_not_labels() {
+    let mut cfg = NodeConfig::default();
+    cfg.model.callers = vec!["inf".into()];
+    let e = cfg.validate().expect_err("a label is not accepted").to_string();
+    assert!(e.contains("not a peer id") && e.contains("not covered by the certificate signature"), "{e}");
+    cfg.model.callers = vec![Keypair::generate_ed25519().public().to_peer_id().to_string()];
+    cfg.validate().expect("a peer id is");
+}
+
+/// `weirdnet-backends` 0.1.1's Verifier ignores the roster, so Ymir checks it: a model node whose cert
+/// is revoked is refused on connect and, once connected, on every later request and record read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_model_node_is_refused_on_connect_and_on_each_request() -> Result<()> {
+    use weirdnet_agent::remote::infer::v2::Request;
+    use ymir_core::model_node::ModelNode;
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    let model_h = home(root, "model", "model", &[], &["alpha"])?;
+    let first = Membership::create(&model_h.paths.pool(), "model")?;
+    let inf_h = home(root, "inf", "inference", &[], &[])?;
+    prelink(&first, &inf_h, "inf");
+    drop(first);
+    let model = start(&model_h).await?;
+    let s = control::request(&model_h.paths.socket(), &ControlRequest::Status).await?.status.unwrap().network.expect("on Weirdnet");
+    let a: Multiaddr =
+        s.listening.iter().find(|a| a.starts_with("/ip4/127.0.0.1/tcp/")).expect("a loopback listener").split("/p2p/").next().unwrap().parse()?;
+
+    let m = Membership::open(&inf_h.paths.pool())?.unwrap();
+    let node = std::sync::Arc::new(weirdnet_sync::start_node(
+        m.node_key().clone(),
+        NodeConfig::load(&inf_h.paths.config())?.network.node_config("test")?,
+        m.state(),
+    )?);
+    let dialer = NetDialer::new(node.clone());
+    dialer.hint(s.peer.parse()?, vec![a]);
+    let dialer = std::sync::Arc::new(dialer);
+    let opts = ymir_core::remote::RemoteOptions { find_wait: Duration::from_secs(2), accept_timeout: Duration::from_secs(5) };
+
+    // Connected and answering while the node is on the roster.
+    let rn = ymir_core::remote::RemoteModelNode::connect(dialer.clone(), &s.peer, &m, &opts).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    assert!(rn.alive());
+    assert!(rn.load("alpha", false).await.is_ok() || rn.record().is_some());
+
+    // Revoked: the old cert would still verify, but the node is dropped everywhere.
+    m.revoke(&s.peer)?;
+    assert!(rn.record().is_none() && !rn.alive(), "the record is withdrawn");
+    for e in [
+        rn.load("alpha", false).await.err(),
+        rn.unload("alpha").await.err(),
+        rn.drain(true).await.err(),
+        rn.chat("alpha", &Request::messages(vec![weirdnet_agent::Message::user("hi")])).await.err(),
+        rn.embed("alpha", &["x".to_string()]).await.err(),
+    ] {
+        let e = e.expect("a request to a revoked model node is refused").to_string();
+        assert!(e.contains("model-node-not-in-roster"), "{e}");
+    }
+    let again = ymir_core::remote::RemoteModelNode::connect(dialer, &s.peer, &m, &opts).await.err().expect("connect refused").to_string();
+    assert!(again.contains("model-node-not-in-roster"), "{again}");
+    model.shutdown().await;
     Ok(())
 }

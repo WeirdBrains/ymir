@@ -2100,14 +2100,23 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 - *Roster check:* infer/1, infer/2, catalog/1, node/1 and now task/1 all authorize through `RosterAuth` before anything is
   read; capability records must carry the user's certificate. Covered by existing tests for strangers and revocation
   (`ymir-core/tests/remote.rs`, `m3.rs`) and the new task tests. Nothing admits a device that is not in the user's roster.
-- *Role boundaries (guard added after the first review pass):* `[model] callers = ["inf"]` narrows a model node to the named linked devices
-  (peer ids or roster labels) through Ymir's own `Authorize`; `m9.rs` shows an app device refused and the inference node admitted, and
-  that with no `callers` an app still gets in (the default, kept for compatibility; the daemon logs a warning). Labels are chosen when a
-  device is linked, so the guard is only as good as that naming; the transport still carries no role. Original finding:
+- *Role boundaries (guard added after the first review pass, tightened in the second):* `[model] callers = ["<peer id>"]` narrows a model
+  node to the named linked devices through Ymir's own `Authorize`; `m9.rs` shows an app device refused and the inference node admitted, and
+  that with no `callers` an app still gets in (the default, kept for compatibility; the daemon logs a warning). **Peer ids only:** a
+  `NodeCert` label is not covered by the cert signature, so a label is a weak identity. Config validation rejects a label entry with an
+  error that says to use the peer id (`callers_must_be_peer_ids_not_labels`), and a non-peer-id entry matches nothing at the check either.
+  There is no cert fingerprint in the published crates to offer as a second form. The transport still carries no role. Original finding:
   **not enforced by the transport.** A model node authorizes any linked device, so an app device can dial it
   directly and skip the inference node's cache, batch caps and fairness. It cannot reach anything outside the user's own
   devices, so this is a bypass of Ymir's scheduling, not of confidentiality (read from the code; not demonstrated). Fixing it needs the
-  caller's role in the authorization decision (upstream request below).
+  caller's role in the authorization decision (upstream request below). **Becomes an upstream check in `weirdnet-agent` 0.4.4**; the
+  peer-id guard stays as defence in depth.
+- *Revoked model nodes (second review pass):* `weirdnet-backends` 0.1.1's `Verifier` checks a capability record's cert signature but
+  not the roster, so a revoked model node's old cert still verified and `RemoteModelNode` trusted it. Ymir now refuses a model node that
+  is revoked or missing from the active roster on connect, on every request (load, unload, drain, group up and down, chat, embed), on
+  every capability record update (the record is dropped and the follower stops) and on every read of the record, so the next catalog
+  refresh and routing pass see it gone (`a_revoked_model_node_is_refused_on_connect_and_on_each_request` in `m9.rs`). **Becomes an
+  upstream check in `weirdnet-backends` 0.1.2 (`Verifier::with_roster`)**; the Ymir check stays as defence in depth.
 - *Backend ports:* engines bind `127.0.0.1` (`--host 127.0.0.1` in `weirdnet-backends`; the test checks the live sockets) and
   each launch gets a random API key (`LLAMA_API_KEY` or `VLLM_API_KEY`, in the environment), which Ymir sends as a bearer token. The bridge is loopback with a
   token on every endpoint and a `Host` check. Another local user on the same box can still connect to a port but not use it

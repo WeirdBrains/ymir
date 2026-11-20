@@ -43,20 +43,20 @@ pub fn roster_auth(m: &Membership) -> Arc<dyn Authorize> {
     Arc::new(RosterAuth::new(&WEIRDNET, m.user_key(), m.roster_view()))
 }
 
-/// Linked devices, narrowed to `allow` (peer ids or roster labels) when it is not empty: a model node
-/// serves the inference nodes, not every device of the user's (an app must go through an inference
-/// node and its cache, batch caps and fairness). Revoked and unlinked devices stay refused either way.
+/// Linked devices, narrowed to `allow` (peer ids only) when it is not empty: a model node serves the
+/// inference nodes, not every device of the user's (an app must go through an inference node and its
+/// cache, batch caps and fairness). Revoked and unlinked devices stay refused either way. Only the peer
+/// id is matched: it is covered by the certificate signature, while a roster label is not (so a label
+/// can be changed without breaking the cert). An entry that is not a peer id matches nothing.
 pub fn role_auth(m: &Membership, allow: &[String]) -> Arc<dyn Authorize> {
     let base = roster_auth(m);
     if allow.is_empty() {
         return base;
     }
     let allow = allow.to_vec();
-    let roster = m.roster_view();
     Arc::new(move |caller: &Caller| {
         base.authorize(caller)?;
-        let label = roster().get(&caller.peer).map(|c| c.label.clone());
-        if allow.iter().any(|a| *a == caller.peer || Some(a) == label.as_ref()) { Ok(()) } else { Err(RemoteError::refused("not-an-allowed-caller")) }
+        if allow.contains(&caller.peer) { Ok(()) } else { Err(RemoteError::refused("not-an-allowed-caller")) }
     })
 }
 
@@ -150,6 +150,7 @@ pub struct RemoteModelNode {
     pool: Pool,
     record: Arc<RwLock<Option<Capability>>>,
     follow: tokio::task::JoinHandle<()>,
+    roster: Arc<dyn Fn() -> weirdnet_sync::Roster + Send + Sync>,
 }
 
 impl Drop for RemoteModelNode {
@@ -158,19 +159,39 @@ impl Drop for RemoteModelNode {
     }
 }
 
+/// Whether `peer` holds an active (unrevoked) cert in the user's roster. `weirdnet-backends` 0.1.1's
+/// `Verifier` checks the cert's signature but not the roster, so a revoked model node's old cert
+/// still verifies; this closes that until the `Verifier` does (0.1.2).
+fn on_roster(roster: &dyn Fn() -> weirdnet_sync::Roster, peer: &str) -> Result<(), RemoteError> {
+    if roster().get(peer).is_some_and(|c| c.active()) { Ok(()) } else { Err(RemoteError::refused("model-node-not-in-roster")) }
+}
+
 impl RemoteModelNode {
+    /// Refused unless the node is on the active roster now (checked on connect, on every request and
+    /// on every record update).
+    fn permitted(&self) -> Result<(), RemoteError> {
+        on_roster(&*self.roster, &self.peer)
+    }
+
     /// Reads `peer`'s capability record, then follows it.
     pub async fn connect(dialer: Arc<dyn Dialer>, peer: &str, m: &Membership, opts: &RemoteOptions) -> Result<Self, RemoteError> {
+        let roster = m.roster_view();
+        on_roster(&*roster, peer)?;
         let cert = Some(encode_cert(&m.our_cert()));
         let client = Arc::new(NodeClient::new(dialer.clone(), Verifier::new(&WEIRDNET, m.user_key())).with_cert(cert.clone()));
         let first = tokio::time::timeout(opts.accept_timeout, client.record(peer)).await.unwrap_or(Err(RemoteError::Timeout))?;
         let record = Arc::new(RwLock::new(Some(first)));
-        let (c, p, r) = (client.clone(), peer.to_string(), record.clone());
+        let (c, p, r, rv) = (client.clone(), peer.to_string(), record.clone(), roster.clone());
         let follow = tokio::spawn(async move {
             loop {
                 match c.subscribe(&p).await {
                     Ok(mut sub) => {
                         while let Some(u) = sub.next().await {
+                            // A revoked node's records are dropped, not applied.
+                            if on_roster(&*rv, &p).is_err() {
+                                *r.write().unwrap_or_else(|e| e.into_inner()) = None;
+                                break;
+                            }
                             match u {
                                 Ok(Update::Record(cap)) => *r.write().unwrap_or_else(|e| e.into_inner()) = Some(*cap),
                                 Ok(Update::Withdrawn) => *r.write().unwrap_or_else(|e| e.into_inner()) = None,
@@ -201,11 +222,12 @@ impl RemoteModelNode {
         // Raw inference goes to the model node's own protocol id, falling back to infer/2 for a node
         // on backends 0.1.0.
         let pool = Pool::new(Arc::new(RawInferDialer::new(dialer)), vec![peer.to_string()]).with_options(po);
-        Ok(Self { peer: peer.to_string(), client, pool, record, follow })
+        Ok(Self { peer: peer.to_string(), client, pool, record, follow, roster })
     }
 
     /// The node's record, while it is current.
     pub fn record(&self) -> Option<Capability> {
+        self.permitted().ok()?;
         let now = weirdnet_net::now_ms();
         self.record.read().unwrap_or_else(|e| e.into_inner()).clone().filter(|c| c.expires_ms > now)
     }
@@ -225,11 +247,17 @@ impl ModelNode for RemoteModelNode {
     }
 
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
-        Box::pin(self.client.load(&self.peer, model, force))
+        Box::pin(async move {
+            self.permitted()?;
+            self.client.load(&self.peer, model, force).await
+        })
     }
 
     fn unload<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
-        Box::pin(self.client.unload(&self.peer, model))
+        Box::pin(async move {
+            self.permitted()?;
+            self.client.unload(&self.peer, model).await
+        })
     }
 
     fn draining(&self) -> bool {
@@ -241,11 +269,17 @@ impl ModelNode for RemoteModelNode {
     }
 
     fn group_up<'a>(&'a self, plan: &'a weirdnet_backends::node::GroupPlan) -> BoxFuture<'a, Result<(), RemoteError>> {
-        Box::pin(self.client.group_up(&self.peer, plan.clone()))
+        Box::pin(async move {
+            self.permitted()?;
+            self.client.group_up(&self.peer, plan.clone()).await
+        })
     }
 
     fn group_down<'a>(&'a self, group: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
-        Box::pin(self.client.group_down(&self.peer, group))
+        Box::pin(async move {
+            self.permitted()?;
+            self.client.group_down(&self.peer, group).await
+        })
     }
 
     /// A model node continues an assistant prefix (llama.cpp prefill, vLLM `continue_final_message`),
@@ -256,6 +290,7 @@ impl ModelNode for RemoteModelNode {
 
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
+            self.permitted()?;
             self.client.drain(&self.peer, on).await?;
             // The record catches up with the next update; take the flag now so routing agrees.
             if let Some(c) = self.record.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -267,6 +302,7 @@ impl ModelNode for RemoteModelNode {
 
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
         Box::pin(async move {
+            self.permitted()?;
             let mut r = req.clone();
             r.model = Some(model.to_string());
             let (tx, rx) = mpsc::unbounded_channel::<PoolEvent>();
@@ -282,6 +318,7 @@ impl ModelNode for RemoteModelNode {
 
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {
         Box::pin(async move {
+            self.permitted()?;
             let e = self.pool.embed(EmbedRequest::new(input.to_vec()).with_model(model), &CancelToken::new()).await?;
             Ok((e.vectors, e.usage.map_or(0, |u| u.prompt_tokens)))
         })
