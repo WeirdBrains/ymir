@@ -159,7 +159,7 @@ async fn run(
         }
     }
     let asked = cards.asked.into_inner().unwrap();
-    (r.map(|o| o), [asked, tools].concat())
+    (r, [asked, tools].concat())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
