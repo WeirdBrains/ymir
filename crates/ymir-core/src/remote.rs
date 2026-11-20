@@ -136,23 +136,28 @@ impl RemoteModelNode {
         let (c, p, r) = (client.clone(), peer.to_string(), record.clone());
         let follow = tokio::spawn(async move {
             loop {
-                if let Ok(mut sub) = c.subscribe(&p).await {
-                    while let Some(u) = sub.next().await {
-                        match u {
-                            Ok(Update::Record(cap)) => *r.write().unwrap_or_else(|e| e.into_inner()) = Some(*cap),
-                            Ok(Update::Withdrawn) => *r.write().unwrap_or_else(|e| e.into_inner()) = None,
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::debug!(peer = %p, "model node records: {e}");
-                                break;
+                match c.subscribe(&p).await {
+                    Ok(mut sub) => {
+                        while let Some(u) = sub.next().await {
+                            match u {
+                                Ok(Update::Record(cap)) => *r.write().unwrap_or_else(|e| e.into_inner()) = Some(*cap),
+                                Ok(Update::Withdrawn) => *r.write().unwrap_or_else(|e| e.into_inner()) = None,
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::debug!(peer = %p, "model node records: {e}");
+                                    break;
+                                }
                             }
                         }
                     }
+                    // Can't reach the node again: drop its record now (rather than when it lapses,
+                    // up to 90 s later) so routing and discovery stop counting on it. It comes
+                    // back with its next record if it returns.
+                    Err(e) => {
+                        tracing::debug!(peer = %p, "model node unreachable: {e}");
+                        *r.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
                 }
-                // The record stream ended or couldn't start: the node is gone or unreachable. Drop
-                // its record now (rather than when it lapses, up to 90 s later) so routing and
-                // discovery stop counting on it; it comes back with its next record.
-                *r.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         });
@@ -224,7 +229,7 @@ impl ModelNode for RemoteModelNode {
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {
         Box::pin(async move {
             let e = self.pool.embed(EmbedRequest::new(input.to_vec()).with_model(model), &CancelToken::new()).await?;
-            Ok((e.vectors, 0))
+            Ok((e.vectors, e.usage.map_or(0, |u| u.prompt_tokens)))
         })
     }
 }

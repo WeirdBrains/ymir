@@ -1305,8 +1305,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M3 Roles over Weirdnet** (built 2026-11-19; see [M3 status](#m3-status-built-2026-11-19)). The same protocols across devices: app → inference
   (`weirdnet-agent` pool, catalog, infer extensions) and inference → model (`/weirdnet-backends/node/1`,
   raw infer); `Roster::check_caller`; `ymirctl` and Jan on another machine through its own bridge.
-- **M4 Several model nodes** (gated: device-link and relay on net 0.8). Linking, capability records, the merged catalog, failover before the
-  first token, drain.
+- **M4 Several model nodes** (built 2026-11-19; see [M4 status](#m4-status-built-2026-11-19)). Linking, capability records, the merged
+  catalog, failover before the first token, drain.
 - **M5 Context sync and failover** (gated: the `weirdnet-sync` eviction design). `weirdnet-agent`
   `context` over `weirdnet-sync` 0.5: messages written at completion, job checkpoints, system prompts, attachments as content roots, retrieved
   context, prefix hints; inference-node working sets and pull-on-demand; encryption at rest;
@@ -1481,7 +1481,7 @@ Built on the published crates, unchanged, now on their patch releases (caret ran
 - **`[network]`** in node.toml: `enabled`, `port` (4848), `listen`, `mdns`, `discovery`, `relays`
   (default: the Weird Brains relay), `peers` (`/ip4/…/tcp/…/p2p/PEER`; dialing grants nothing),
   `slots`, `queue`. Weirdnet starts only when the node has an identity.
-- Tests: 32 pass, 3 ignored (the 9 `ymir-alerts` tests now live in `weirdnet-alerts`); fmt and clippy (`-D warnings`) are clean.
+- Tests (M3 count; M4 below): 32 pass, 3 ignored (the 9 `ymir-alerts` tests now live in `weirdnet-alerts`); fmt and clippy (`-D warnings`) are clean.
   - `ymir-core/tests/remote.rs` (5): several devices in one process on the memory transport. They
     cover chat with tools, unknown models, cache hits, the catalog, embeddings and revocation;
     this box's in-process pool; strangers refused (wrong user, unknown device); failover between
@@ -1532,6 +1532,77 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
   an app device links a third device, the inference node's pass against the app can finish with no
   error and still not learn the new cert (a pass that gets `needs-admission`/`unknown-key`
   first), and four rounds don't always fix it. For the Weirdnet lead (`weirdnet-sync`).
+
+## M4 status (built 2026-11-19)
+
+Several model nodes behind one inference role. Linking, capability records and the merged catalog
+were already in place from M3 (every model node is a linked device that announces
+`/weirdnet-backends/node/1`; the inference node follows each node's signed capability record with
+`NodeClient`). M4 adds routing that survives a node going wrong, drain, and the commands to see it.
+
+- **Merged catalog.** `Coordinator::merged_catalog` joins every node's models by id; a row lists
+  each node and its state, and which of those are draining. `catalog/1` reports a model as warm,
+  loading or loadable from nodes that take new requests only, with `replicas` the number of ready
+  ones. Nodes may hold different models; one model on several nodes is one catalog entry.
+- **Routing.** A ready node with the fewest requests in flight; otherwise the first node that has
+  the model (it loads there). Draining nodes and nodes already tried for this request are skipped.
+  A model that exists only on draining nodes answers `unavailable` ("only on nodes that are
+  draining"), never a silent hang.
+- **Failover before the first token.** `Coordinator::run` tries one node at a time. If the node
+  fails before anything has streamed (unreachable, busy, refused, engine unavailable, stream broke
+  before the first chunk, cold load failed, stalled, timed out), the request moves to the next node that has the
+  model. If no other node has it and the failure was `Unavailable`, it reloads on the same node once
+  (an engine that just died). Once a token is out, the error goes to the asker and the app's pool
+  resumes from what it received (M5 does the same thing across inference nodes). `BadRequest`,
+  `Unsupported` and cancels never move. Embeddings fail over the same way.
+- **Drain.** `ModelNode::drain(on)` and `draining()`. For a remote node it sends the node's own
+  `Drain` command (the node refuses new raw infer and loads, waits for requests under way, and its
+  capability record says `draining`); for this box's model role it flags the local node and the
+  service's `ModelHost`, so a combined node drains for other inference nodes too. `ymirctl drain
+  NODE [--resume]`, run against any inference node; `ymirctl nodes` (and the "Model nodes" block of
+  `ymirctl status`) lists nodes as serving or draining with ready/total models and in-flight.
+- **Nodes joining and leaving.** Discovery adds devices that announce the model-node app and drops
+  ones whose records lapse. New: when a node's record stream ends and it can't be reached again, its
+  record is dropped at once, instead of staying until it expires (90 s), so a dead node leaves the
+  list and the catalog within one discovery round (about 10 s) and the router stops trying it.
+  Revoking a device removes it as before.
+
+Tests:
+
+- `ymir-core/tests/nodes.rs` (7, one process, scripted nodes): merged catalog with different model
+  sets and routing by model; a dead node fails over before the first token (and both dead returns
+  the error); a cold load that fails moves on; no move after the first token or for a bad request;
+  drain skips a node, hides it from `catalog/1` and resumes; nodes join, are replaced by name and leave;
+  embeddings fail over and respect drain. Remote embeddings now report real prompt tokens (the pool's
+  answer carries `usage` since agent 0.4.1; Ymir was returning 0).
+- `ymir-testkit/tests/m4.rs` (1, five daemons on loopback with the mock engine): two model nodes with
+  different model sets (server-a: alpha; server-b: alpha, beta) behind one inference node, an app node, and a third model
+  node (gamma) that joins later. Checks the merged catalog through `ymirctl models`; beta served only
+  by server-b; `ymirctl drain server-a` sends every alpha request to server-b and `ymirctl nodes` shows it draining, then
+  resume; server-a is shut down and alpha requests still succeed from server-b (whether or not the dead node was
+  tried first), and server-a leaves `ymirctl nodes`; m3 joins and answers gamma.
+  The test retries a `needs-admission` refusal for up to 100 s (observed: the inference node refuses the app for
+  tens of seconds after the first requests, and it clears after a roster pass): that is the upstream roster flake
+  below, which shows up here as the app or a model node not yet admitted. It retries nothing else.
+
+For the Weirdnet lead (generic, so it belongs in `weirdnet-*`; Ymir carries its own versions until then):
+
+- **`weirdnet-backends`: a routing/failover helper over several `NodeClient` records.** The pick
+  (ready, fewest in flight, skip draining and already-tried), the retryable-error set and the
+  failover-before-first-chunk loop are not Ymir-specific. A `NodePool` next to `NodeClient` would let
+  any app do this.
+- **`weirdnet-backends`: drop a node from a `NodeClient` follower when it can't be reached,** instead
+  of holding the last record until `expires_ms`. Ymir does this in `RemoteModelNode::connect`.
+- **`weirdnet-sync`: the roster flake** (above) now also shows in M4: a daemon pair's first calls
+  after linking can get `needs-admission` for several seconds.
+
+Totals after M4: 39 pass, 1 fail (the known flaky `roster_changes_reach_other_devices`), 3 ignored; fmt and
+clippy (`-D warnings`) clean. M4 added 8 tests (7 in-process, 1 five-daemon).
+
+Gaps: no capability-aware placement beyond "ready, then fewest in flight" (no hardware, speed or
+warm-prefix scoring; that is M6/M7); drain on a remote node needs
+that node to run the model role of this version or later (an older node answers `unsupported`); the
+laptop cross-machine run did not happen (it was busy when tried).
 
 ## B1 status (built 2026-11-19)
 
@@ -1603,8 +1674,12 @@ Bragi lives in its own public repo, [`WeirdBrains/bragi`](https://github.com/Wei
 - **Untested against a real Ymir node or across machines.** Every run used the demo node over the
   memory transport. A run with Ymir's mock engine on a second machine comes with the first
   cross-machine Ymir test.
-- **Android screenshot artifacts:** `adb input` leaves the keyboard up, and Gboard autocorrects the
-  first word ("What" becomes "Chat"). These come from the harness, not the app.
+- **Android screenshot artifacts:** `adb input` leaves the keyboard up (harness, not the app). Gboard
+  also autocorrected the first typed word ("What" became "Chat"; the chat title took it from the prompt).
+  That was the keyboard, not the scenario's typing: the text field handed the app what the keyboard
+  committed. Fixed in the scripted demo build only (`BRAGI_DEMO`): the prompt field sets
+  `autocorrect: false` and `enableSuggestions: false`. Real builds keep the keyboard's own settings.
+  The Android screenshot set was retaken and `android-05-answer.png` reads "What does Bragi do?".
 
 ## Decisions (2026-11-19)
 

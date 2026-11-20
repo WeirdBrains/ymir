@@ -119,22 +119,33 @@ async fn until_ok(secs: u64, mut f: impl AsyncFnMut() -> Result<(u16, Value)>) -
 
 fn futures_nodes(h: &Home) -> String {
     let h = h.home.clone();
-    std::thread::spawn(move || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(ctl(&h, &["nodes"])).unwrap_or_default())
-        .join()
-        .unwrap_or_default()
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(ctl(&h, &["nodes"])).unwrap_or_default()
+    })
+    .join()
+    .unwrap_or_default()
 }
 
 async fn peer_of(h: &Home) -> Result<String> {
     Ok(control::request(&h.paths.socket(), &ControlRequest::Status).await?.status.unwrap().network.expect("on Weirdnet").peer)
 }
 
-/// Asks `model` through the app and returns which model node answered.
+/// Asks `model` through the app and returns which model node answered. A `needs-admission`
+/// refusal is the upstream roster-propagation flake (see DESIGN.md, "Flaky upstream roster
+/// propagation"): the device just linked isn't admitted everywhere yet, so this retries those
+/// for up to 100 s (it clears on its own after a roster pass) and fails on anything else.
 async fn served_by(d: &Daemon, h: &Home, model: &str, text: &str) -> Result<String> {
-    let (status, v) = chat_model(d, h, model, text).await?;
-    if status != 200 {
-        bail!("{model}: {status} {v}");
+    let deadline = Instant::now() + Duration::from_secs(100);
+    loop {
+        let (status, v) = chat_model(d, h, model, text).await?;
+        if status == 200 {
+            return Ok(v["weirdnet"]["served_by"].as_str().unwrap_or("?").to_string());
+        }
+        if !v.to_string().contains("needs-admission") || Instant::now() > deadline {
+            bail!("{model}: {status} {v}");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    Ok(v["weirdnet"]["served_by"].as_str().unwrap_or("?").to_string())
 }
 
 /// Retries `f` until it is true or `secs` pass.
@@ -193,14 +204,19 @@ async fn several_model_nodes_on_separate_daemons() -> Result<()> {
         until_ok(30, async || chat_model(&app, &app_h, "beta", &format!("beta {i}")).await).await?;
     }
     assert_eq!(served_by(&app, &app_h, "beta", "again").await?, p2);
-    let first_alpha = served_by(&app, &app_h, "alpha", "which node?").await.map_err(|e| anyhow::anyhow!("first alpha: {e}; nodes: {}", futures_nodes(&inf_h)))?;
+    let first_alpha =
+        served_by(&app, &app_h, "alpha", "which node?").await.map_err(|e| anyhow::anyhow!("first alpha: {e}; nodes: {}", futures_nodes(&inf_h)))?;
     assert!(first_alpha == p1 || first_alpha == p2);
 
     // Drain server-a from the inference node: it stops getting requests, and `nodes` says so.
     let out = ctl(&inf_h.home, &["drain", &p1]).await?;
     assert!(out.contains("drained"), "{out}");
     for i in 0..4 {
-        assert_eq!(served_by(&app, &app_h, "alpha", &format!("drained {i}")).await.map_err(|e| anyhow::anyhow!("drained alpha: {e}"))?, p2, "server-a is draining");
+        assert_eq!(
+            served_by(&app, &app_h, "alpha", &format!("drained {i}")).await.map_err(|e| anyhow::anyhow!("drained alpha: {e}"))?,
+            p2,
+            "server-a is draining"
+        );
     }
     let nodes = ctl(&inf_h.home, &["nodes"]).await?;
     assert!(nodes.lines().any(|l| l.contains(&p1) && l.contains("draining")), "{nodes}");

@@ -160,7 +160,7 @@ async fn the_catalog_merges_nodes_with_different_models() {
     // catalog/1: alpha is warm with one ready replica, beta warm, emb an embedding model.
     let cat = c.agent_catalog();
     let alpha = cat.iter().find(|m| m.id == "alpha").unwrap();
-    assert_eq!((alpha.state.clone(), alpha.replicas), (AgentState::Warm, 1));
+    assert_eq!((alpha.state, alpha.replicas), (AgentState::Warm, 1));
 
     // Each model is answered by the node that has it.
     assert_eq!(ask(&c, "alpha").await.unwrap(), "a says alpha");
