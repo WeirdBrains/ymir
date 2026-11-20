@@ -58,7 +58,7 @@ jobs:
           B="$PWD/target/debug"
           export YMIR_HOME="$RUNNER_TEMP/ymir"
           printf 'GGUF mock' > "$RUNNER_TEMP/tiny.gguf"
-          setup() { "$B/ymirctl" setup --name ci --llama-server "$B/ymir-mock-engine" --model "$RUNNER_TEMP/tiny.gguf" --port "$YMIR_CI_PORT" "$@"; }
+          setup() { "$B/ymirctl" setup --name ci --backend llamacpp --llama-server "$B/ymir-mock-engine" --model "$RUNNER_TEMP/tiny.gguf" --port "$YMIR_CI_PORT" "$@"; }
           setup --service --dry-run | tee out.txt
           grep -q "would write $HOME/Library/LaunchAgents/com.weirdbrains.ymird.plist" out.txt
           grep -q "would run: launchctl bootstrap gui/$(id -u) " out.txt
