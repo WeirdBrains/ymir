@@ -1269,8 +1269,8 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
 - **B1 Core and both shells** (built 2026-11-19; see [B1 status](#b1-status-built-2026-11-19)): `bragi-core` + `bragi-desktop` (Linux) + `bragi-bridge` and the
   Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
   Tests over `weirdnet-net` in-memory transports with a fake `InferHost`.
-- **B2 Pool client:** multi-node catalog, routing via the `weirdnet-agent` pool, retries,
-  automatic mid-answer failover, stand-in and cache flags, in both shells.
+- **B2 Pool client** (built 2026-11-19; see [B2 status](#b2-status-built-2026-11-19)): multi-node catalog, routing via
+  the `weirdnet-agent` pool, retries, automatic mid-answer failover, stand-in and cache flags, in both shells.
 - **B3 Platforms:** iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
 - **B4 Sync and optional extras:** history on the shared context store (after M5); the optional on-device model
   and push wake-ups, on both shells.
@@ -1668,7 +1668,7 @@ Bragi lives in its own public repo, [`WeirdBrains/bragi`](https://github.com/Wei
     `weirdnet-net`
   - `third_party/libp2p-swarm` (Morph's patch relaxing the wasm-only `js-sys` pin so GPUI resolves)
     goes away when libp2p or `weirdnet-net` moves on
-- **Not in B1:** a multi-node catalog and failover (B2), synced history (B4), Android
+- **Not in B1:** a multi-node catalog and failover (built in B2), synced history (B4), Android
   `weirdnet-bragi://` intent handling and a QR scanner (codes are pasted for now), a copy button
   for the code on desktop, and a release signing key.
 - **Untested against a real Ymir node or across machines.** Every run used the demo node over the
@@ -1680,6 +1680,70 @@ Bragi lives in its own public repo, [`WeirdBrains/bragi`](https://github.com/Wei
   committed. Fixed in the scripted demo build only (`BRAGI_DEMO`): the prompt field sets
   `autocorrect: false` and `enableSuggestions: false`. Real builds keep the keyboard's own settings.
   The Android screenshot set was retaken and `android-05-answer.png` reads "What does Bragi do?".
+
+## B2 status (built 2026-11-19)
+
+Bragi now uses every inference node among the user's devices at once. All behaviour is in
+`bragi-core`; both shells only draw it. Still on `weirdnet-agent` 0.4.1; nothing released.
+
+**What works, in both shells:**
+
+- **One merged model list.** `bragi-core` follows each inference node's catalog (one `Pool::subscribe`
+  watcher per node the roster lists, found by polling every 2 s) and merges them: one row per
+  chat model, best status across nodes (warm, busy, loading, loadable), replicas added, the
+  largest speed and context, the nodes that serve it (warm first), and a stand-in if a node
+  names one. A node that goes away drops out of the list within a few seconds. The chips say
+  "2 of 2 nodes" (desktop) or "2/2 nodes" (Android).
+- **Routing and failover.** A request goes to a pool over just the nodes that serve the chosen
+  model, warm first. `Pool` moves on to the next node when one is unreachable, refuses or is busy
+  before any text, and, during the answer, resumes on the next node that says it can (text is
+  placed by offset, so nothing repeats).
+- **Retries.** If every node fails before any text and the error could pass (unreachable, busy,
+  failed, timed out), the core waits 0.4 s, then 1.2 s, rebuilds the node order and tries again, up
+  to twice, sending a `retry` event the shells show as a notice. Cancel ends it at once; "no such
+  model" and refusals aren't retried.
+- **Flags.** The cache hit and stand-in from the answer's metadata arrive as a `meta` event while
+  it streams, and with the number of times it moved nodes (`resumed`) are kept in the history
+  message, so reopening a chat still shows "cached", "stand-in gemma-4-e4b" or "moved to another
+  node". The message keeps the model that was asked for.
+- **Demo.** `DemoNode::start_cloud` runs two inference nodes of one test user (the second is
+  certified by the first, so an app linked through the first is admitted by both): `gemma-4-e4b`
+  warm on both, `llama-3.3-70b` warm on the second, `qwen3-32b` loadable on the first, which a
+  stand-in answers. A repeated question is a cache hit. Scripted `Faults` make the next requests
+  be refused or the next answer's node die after N words; a prompt containing "even if a node
+  dies" does the latter, so the Android scenario can show it. The single-node demo is unchanged.
+
+**Tests:** all pass.
+
+- `cargo test --workspace`: 22 tests. `bragi-core` has 12: 3 unit tests, the 3 B1 scenario tests and
+  6 new ones in `tests/pool.rs` (the merged catalog and routing to the node that has the model, a node
+  refusing before the first token, every node failing and the core retrying then failing with
+  "failed" in the history, an answer that moves to the other node when its node dies and arrives
+  exact, the cache and stand-in flags in the events and the history, and a node leaving the catalog).
+  `bragi-desktop` has 10.
+- `flutter test` passes 2: the B1 scenario, extended with the merged list and the same three flags
+  through the real bridge, plus delta placement. `flutter analyze` and `cargo clippy -D warnings` are clean.
+- Both shells were played end to end in virtual workspaces, 11 screenshots each, both passed. The
+  desktop ran in Xvfb with `env -i` (`scripts/desktop-scenario.sh`). Android ran on a windowless
+  `google_apis` (API 35) emulator with a throwaway AVD, a separate SDK root and `-wipe-data`
+  (`scripts/android-scenario.sh`); the SDK, AVD and scratch were deleted afterwards. Screenshots
+  `*-09-standin`, `*-10-cached` and `*-11-failover` show the three flags.
+  They are in `/workspace/bragi-b2/` on the bot's box.
+
+**Gaps:**
+
+- **Only simulated nodes.** Every run used the two in-process demo nodes over the memory transport,
+  not Ymir's M4 daemons, and no run crossed machines. That run comes with the first cross-machine test.
+- **A cut-off answer can't yet move on a real Ymir node.** The pool resumes only on a node that
+  accepts an `assistant_prefix`. The demo nodes do; Ymir's don't (the `Request::continuing` and
+  `RoutedBackend` resume work, which depends on an unreleased `weirdnet-agent`). Until then a real
+  node that dies mid-answer leaves a partial answer. Pending, not started.
+- **Node order is plain.** Warm first, in catalog order. It doesn't weigh speed, distance or load,
+  and the user can't pin a node. Bragi's `Pool` has no per-node view beyond the catalog; a per-node
+  health or latency feed from `weirdnet-agent` would let it.
+- **Continue is still an instruction turn** (see the B1 gaps).
+- **Copies of generic code**, as in B1; the catalog merge itself (`CatalogView::merge`) is generic and
+  belongs next to `Pool::subscribe` in `weirdnet-agent` (a merged `CatalogWatch` over all nodes).
 
 ## Decisions (2026-11-19)
 
