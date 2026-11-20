@@ -149,6 +149,10 @@ impl RemoteModelNode {
                         }
                     }
                 }
+                // The record stream ended or couldn't start: the node is gone or unreachable. Drop
+                // its record now (rather than when it lapses, up to 90 s later) so routing and
+                // discovery stop counting on it; it comes back with its next record.
+                *r.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         });

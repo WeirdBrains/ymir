@@ -59,13 +59,15 @@ pub struct NodeInfo {
     pub in_flight: usize,
 }
 
-/// Failures that another node may not share: the node is gone, busy or broken. Asker mistakes
-/// (`BadRequest`, `Refused`, `Unsupported`) and cancels are not retried elsewhere.
+/// Failures that another node may not share: the node is gone, busy, broken or won't have this
+/// device (`Refused`: not admitted yet). Asker mistakes (`BadRequest`, `Unsupported`) and cancels
+/// are not retried elsewhere.
 fn retryable(e: &RemoteError) -> bool {
     matches!(
         e,
         RemoteError::Unreachable { .. }
             | RemoteError::Busy
+            | RemoteError::Refused { .. }
             | RemoteError::Unavailable { .. }
             | RemoteError::Failed { .. }
             | RemoteError::Closed
