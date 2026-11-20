@@ -6,6 +6,12 @@ Ymir is built in milestones. Each one lands its Weirdnet crate work first, publi
 
 Updated 2026-11-19. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
+## M0 Design (Done)
+
+The repo, the names, the three roles and the decisions, written down in docs/DESIGN.md and reviewed by the Weirdnet lead.
+
+Weirdnet crates: none new.
+
 ## M1 One box, three roles in one daemon (Done)
 
 One machine runs the model, inference and app roles in a single `ymird`. It detects the hardware, picks models that fit, runs llama.cpp, and serves an OpenAI-compatible endpoint on loopback so Jan and scripts work. `ymirctl setup` writes the config.

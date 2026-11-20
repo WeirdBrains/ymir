@@ -12,6 +12,14 @@ design = "https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md"
 unpublished = ["weirdnet-push"]   # planned crates with no crates.io page yet
 
 [[milestone]]
+id = "M0"
+title = "Design"
+status = "done"
+summary = "The repo, the names, the three roles and the decisions, written down in docs/DESIGN.md and reviewed by the Weirdnet lead."
+crates = []
+gaps = []
+
+[[milestone]]
 id = "M1"
 title = "One box, three roles in one daemon"
 status = "done"
