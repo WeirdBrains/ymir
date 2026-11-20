@@ -74,7 +74,7 @@ Known gaps:
 - No scheduler lease, placement plan, model swapping across nodes, replication or prefix warming yet: they need a lease and a synced plan from weirdnet-sync.
 - No shared (semantic) answer cache across nodes yet.
 - A batch job lives on the node that submitted it; it is not synced, so another node can't pick it up.
-- In the multi-node test every first token took 12 to 15 s, with or without a batch and also before this milestone. Not diagnosed.
+- Every answer waits 3 s per linked device the app can't reach (12 to 15 s in the multi-node test) before it starts: a `weirdnet-agent` 0.4.2 bug in finding inference nodes, reported to the Weirdnet lead. The first-token test waits on that fix.
 - Tested on one computer with a mock engine.
 
 ## M7 Split models (Planned)

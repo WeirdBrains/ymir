@@ -1704,13 +1704,19 @@ Unit tests cover the scoring (shorter queue wins, local first on ties, own sends
 penalty, slower and cold nodes, spread over equal nodes) and the fairness cap; an in-process test shows
 three replicas sharing a burst and a slow one getting the least.
 
-**An unexplained delay.** In this topology (two inference nodes, three model nodes, requests through the
-bridge) every request's first token arrives after 12 to 15 s, then the whole answer in 0.4 s, with or without a
-batch and with or without these M6 changes (checked on the M5 commit). Nothing is logged during the wait;
-with one inference node it is 15 s, which is the app pool's stall limit, so a first attempt appears to hang
-and the retry works. It does not show in the M5 tests, which do not time their answers. Not diagnosed; the
-test's p95 comparison is therefore between two equally slow runs, and says the batch added no delay, not
-that interactive answers are fast. Needs a look at the app-to-inference path (Weirdnet lead or Ymir).
+**The first-token delay (diagnosed 2026-11-19, upstream).** In this topology every request's first token
+arrived after 12 to 15 s, then the whole answer in 0.4 s, also on the M5 commit. It is not a stall and
+not Ymir's routing: `weirdnet-agent` 0.4.2's `LinkedNodes::nodes()`, which `Pool::infer` and
+`Pool::embed` call on every request before the first dial, checks each linked device in turn and, for
+each one it can't identify, waits the whole `with_wait` (Ymir's `find_wait`, 3 s) even when `connect`
+failed at once, with nothing cached between calls. The app can't reach model nodes or other apps
+(by design), so the M6 app pays 4 × 3 s = 12 s per request (three model nodes and the other device).
+Evidence: `tests/linked_nodes.rs` (ignored, measures) times `nodes()` at 9.1 s with three offline
+devices and a 3 s wait, 1.58 s with a 0.5 s wait, the same on every call; in `tests/latency.rs` (one
+inference node, one model node) the first token takes 3.1 s, and 0.08 to 0.11 s once the app is also
+given the model node's address. Real pools hit this too: every phone or laptop that is off adds 3 s to
+every answer. Reported to the Weirdnet lead; `tests/latency.rs` (first token under 1 s) is ignored until
+that release, and the M6 p95 comparison is between two equally delayed runs until then.
 
 **Gaps:**
 
