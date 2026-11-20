@@ -5,9 +5,9 @@ name: Pages
 on:
   push:
     branches: ['main']
-    paths: ['site/**', 'roadmap.toml', 'ROADMAP.md', 'brand/**', '.github/workflows/pages.yml']
+    paths: ['site/**', 'roadmap.toml', 'ROADMAP.md', 'brand/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/pages.yml']
   pull_request:
-    paths: ['site/**', 'roadmap.toml', 'ROADMAP.md', 'brand/**', '.github/workflows/pages.yml']
+    paths: ['site/**', 'roadmap.toml', 'ROADMAP.md', 'brand/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -48,10 +48,24 @@ jobs:
           else
             jaspr build --sitemap-domain https://weirdbrains.github.io/ymir
           fi
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the API reference (cargo doc) into the site
+        working-directory: .
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --workspace --no-deps --locked
+          mkdir -p site/build/jaspr/docs/api
+          cp -r target/doc/. site/build/jaspr/docs/api/
+          cp site/web/docs/api/index.html site/build/jaspr/docs/api/index.html
       - name: Check the output
         run: |
           test -f build/jaspr/index.html
           test -f build/jaspr/roadmap/index.html
+          test -f build/jaspr/docs/index.html
+          test -f build/jaspr/docs/guides/deployment/index.html
+          test -f build/jaspr/docs/develop/index.html
+          test -f build/jaspr/docs/api/ymir_core/index.html
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:

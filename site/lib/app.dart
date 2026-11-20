@@ -3,6 +3,9 @@ import 'package:jaspr/jaspr.dart';
 import 'package:jaspr_router/jaspr_router.dart';
 
 import 'components/layout.dart';
+import 'pages/docs.dart';
+import 'pages/docs_develop.dart';
+import 'pages/docs_guide.dart';
 import 'pages/hardware.dart';
 import 'pages/home.dart';
 import 'pages/quickstart.dart';
@@ -31,6 +34,21 @@ class App extends StatelessComponent {
           path: '/hardware',
           title: 'Hardware · $siteTitle',
           builder: (_, _) => const Layout(active: '/hardware', child: HardwarePage()),
+        ),
+        Route(
+          path: '/docs',
+          title: 'Docs · $siteTitle',
+          builder: (_, _) => const Layout(active: '/docs', child: DocsPage()),
+        ),
+        Route(
+          path: '/docs/guides/deployment',
+          title: 'Deployment guide · $siteTitle',
+          builder: (_, _) => const Layout(active: '/docs', child: DeploymentGuidePage()),
+        ),
+        Route(
+          path: '/docs/develop',
+          title: 'Developer guide · $siteTitle',
+          builder: (_, _) => const Layout(active: '/docs', child: DevelopPage()),
         ),
         Route(
           path: '/roadmap',

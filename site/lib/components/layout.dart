@@ -7,6 +7,7 @@ const _nav = [
   ('/', 'Overview'),
   ('/quickstart', 'Quickstart'),
   ('/hardware', 'Hardware'),
+  ('/docs', 'Docs'),
   ('/roadmap', 'Roadmap'),
 ];
 
@@ -44,6 +45,7 @@ class Layout extends StatelessComponent {
             a(href: repoUrl, [Component.text('GitHub')]),
             a(href: bragiSiteUrl, [Component.text('Bragi, the chat app')]),
             a(href: weirdnetUrl, [Component.text('Weirdnet')]),
+            a(href: siteLink('/docs'), [Component.text('Docs')]),
             a(href: siteLink('/roadmap'), [Component.text('Roadmap')]),
           ]),
         ]),
