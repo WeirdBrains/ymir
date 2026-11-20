@@ -1271,7 +1271,7 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
   Tests over `weirdnet-net` in-memory transports with a fake `InferHost`.
 - **B2 Pool client** (built 2026-11-19; see [B2 status](#b2-status-built-2026-11-19)): multi-node catalog, routing via
   the `weirdnet-agent` pool, retries, automatic mid-answer failover, stand-in and cache flags, in both shells.
-- **B3 Platforms:** iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
+- **B3 Platforms** (in progress 2026-11-19; see [B3 status](#b3-status-in-progress-2026-11-19)): iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
 - **B4 Sync and optional extras:** history on the shared context store (after M5); the optional on-device model
   and push wake-ups, on both shells.
 - **B5 Breadth:** BSDs where GPUI allows, agent mode and attachments, on both shells.
@@ -1806,9 +1806,52 @@ Bragi now uses every inference node among the user's devices at once. All behavi
 - **Node order is plain.** Warm first, in catalog order. It doesn't weigh speed, distance or load,
   and the user can't pin a node. Bragi's `Pool` has no per-node view beyond the catalog; a per-node
   health or latency feed from `weirdnet-agent` would let it.
-- **Continue is still an instruction turn** (see the B1 gaps).
+- **Continue** now sends the partial answer as an `assistant_prefix` (`Request::continuing`, agent 0.4.2), no longer an instruction turn.
 - **Copies of generic code**, as in B1; the catalog merge itself (`CatalogView::merge`) is generic and
   belongs next to `Pool::subscribe` in `weirdnet-agent` (a merged `CatalogWatch` over all nodes).
+
+## B3 status (in progress 2026-11-19)
+
+What a Linux box with no Mac and no Windows can build and check. Nothing is released, signed with a
+real key, or uploaded anywhere.
+
+**Built and run:**
+
+- **Android release builds.** `app/android/app/build.gradle.kts` signs `release` with
+  `app/android/key.properties` when it exists (git-ignored, with `*.jks`); without it the debug
+  key signs and the build says so. `scripts/package-android.sh` writes one apk per ABI
+  (`arm64-v8a` 13.6 MB, `armeabi-v7a` 12.3 MB, `x86_64` 14.4 MB) and the aab (70 MB) to
+  `dist/android` with `SHA256SUMS`. Both built here (debug-signed, demo mode on).
+- **F-Droid.** Fastlane metadata (title, descriptions, 512 px icon, changelog) under
+  `app/android/fastlane/metadata/android/en-US` and a draft recipe `packaging/fdroid/org.weirdbrains.bragi.yml`.
+  The recipe is valid YAML but was never run through `fdroid build` (no fdroidserver here) and it
+  names a tag `v0.1.0` that does not exist.
+- **Linux desktop.** `scripts/package-linux.sh` makes `dist/bragi-0.1.0-linux-x86_64.tar.gz`: binary, `.desktop`
+  file and hicolor icons in a `/usr` layout.
+- **Windows (partly).** `cargo check --target x86_64-pc-windows-gnu -p bragi-desktop` passes, so the
+  shell compiles for Windows. A cross-link does not work from Linux: `gpui_windows` needs the
+  DirectX shader compiler at build time. A Windows runner is needed.
+- **iOS scaffold.** `app/ios` from `flutter create` (bundle id `org.weirdbrains.bragi`, display name
+  Bragi, the brand AppIcon set). Not built.
+- **CI.** `.github/workflows/platforms.yml` (manual or on shell changes): macOS and Windows builds of
+  `bragi-desktop` with tests, and an unsigned `flutter build ios`. It has not run.
+
+**Tests:** `cargo fmt --check`, `clippy -D warnings` and `cargo test --workspace` (core 3 unit + 6 pool + 3 scenario, desktop 3) pass. Both scenarios passed, 11 screenshots each: desktop under Xvfb with `env -i`, Android on a headless google_apis (API 35) emulator with a throwaway AVD and SDK root, deleted afterwards. The Android run used the release
+x86_64 apk (debug-signed, demo mode). Screenshots are in `~/bragi-shots/b3/` on the dev box (the bot box could not be reached for a copy).
+
+**Gaps:**
+
+- **macOS, Windows and iOS are unbuilt and untested.** They need a Mac and a Windows machine (or
+  the CI above, which has not run). The iOS app also needs the Native Assets hook to build for Apple
+  targets (the `rust-toolchain.toml` has Android and Linux targets only) and iOS handling for what
+  `RustContext` does on Android; neither is checked. TestFlight needs Apple Developer
+  membership and signing, which are m3talsmith's.
+- **No release keys and no upload.** Play and F-Droid need a real keystore (m3talsmith) and a tagged
+  release, and F-Droid needs a merge request to `fdroiddata`.
+- **The net 0.8.1 Android init swap waits** on a `weirdnet-device-link` release on a looser
+  `weirdnet-net` range (it pins `=0.8.0`).
+- **The aab is 70 MB** because it carries all ABIs, and the apks are 12 to 14 MB each; no size work was done.
+- **No macOS bundle, Windows installer or notarization.**
 
 ## Decisions (2026-11-19)
 
