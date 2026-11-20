@@ -1,6 +1,7 @@
-//! M4: several model nodes behind one inference role, in one process with scripted nodes:
+//! M4 and M5: several model nodes behind one inference role, in one process with scripted nodes:
 //! the merged catalog, routing by model and load, failover before the first token, no failover
-//! after it, drain and resume, and nodes joining and leaving.
+//! after it, resuming an answer on another node from the text already streamed, drain and resume,
+//! and nodes joining and leaving.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,7 +10,7 @@ use futures::stream;
 use serde_json::json;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::catalog::ModelState as AgentState;
-use weirdnet_agent::remote::infer::v2::{Request, Usage};
+use weirdnet_agent::remote::infer::v2::{Prefix, Request, Usage};
 use weirdnet_agent::{CancelToken, Message, ToolCall};
 use weirdnet_backends::{Chunk, ChunkStream, ModelState, ModelStatus};
 use weirdnet_semcache::NoCache;
@@ -27,12 +28,21 @@ enum Mode {
     DiesMidAnswer,
     /// The asker's request is bad; no node would take it.
     Rejects,
+    /// Streams [`SENTENCE`] a word at a time (after any prefix it is given, as an engine does).
+    Words,
+    /// Like `Words`, but breaks after this many words.
+    WordsThenDies(usize),
 }
+
+/// What the `Words` modes say, whichever node says it.
+const SENTENCE: &str = "one two three four five six seven eight ";
 
 struct Scripted {
     name: String,
     models: Vec<(&'static str, bool, ModelState)>,
     mode: Mutex<Mode>,
+    /// The `assistant_prefix` of each chat it was asked.
+    prefixes: Mutex<Vec<Option<String>>>,
     draining: AtomicBool,
     chats: AtomicUsize,
     loads: AtomicUsize,
@@ -45,6 +55,7 @@ impl Scripted {
             name: name.into(),
             models: models.to_vec(),
             mode: Mutex::new(Mode::Works),
+            prefixes: Mutex::new(Vec::new()),
             draining: AtomicBool::new(false),
             chats: AtomicUsize::new(0),
             loads: AtomicUsize::new(0),
@@ -85,12 +96,28 @@ impl ModelNode for Scripted {
             self.chats.fetch_add(1, Ordering::SeqCst);
             let mode = *self.mode.lock().unwrap();
             let text = format!("{} says {}", self.name, model);
-            let _ = req;
+            let prefix = req.assistant_prefix.as_ref().map(|p| p.text.clone());
+            self.prefixes.lock().unwrap().push(prefix.clone());
+            let words = |die_after: Option<usize>| -> Vec<Result<Chunk, RemoteError>> {
+                let rest = SENTENCE.strip_prefix(prefix.as_deref().unwrap_or("")).expect("a prefix of the sentence");
+                let mut items: Vec<Result<Chunk, RemoteError>> = Vec::new();
+                for (i, w) in rest.split_inclusive(' ').enumerate() {
+                    if die_after == Some(i) {
+                        items.push(Err(RemoteError::Closed));
+                        return items;
+                    }
+                    items.push(Ok(Chunk::Text(w.to_string())));
+                }
+                items.push(Ok(Chunk::Done { finish_reason: Some("stop".into()), usage: Some(Usage::new(1, 1)) }));
+                items
+            };
             let items: Vec<Result<Chunk, RemoteError>> = match mode {
                 Mode::Works => vec![Ok(Chunk::Text(text)), Ok(Chunk::Done { finish_reason: Some("stop".into()), usage: Some(Usage::new(1, 1)) })],
                 Mode::Dead => return Err(RemoteError::Unreachable { message: format!("{} is gone", self.name) }),
                 Mode::DiesMidAnswer => vec![Ok(Chunk::Text(text)), Err(RemoteError::Closed)],
                 Mode::Rejects => return Err(RemoteError::BadRequest { message: "no".into() }),
+                Mode::Words => words(None),
+                Mode::WordsThenDies(n) => words(Some(n)),
             };
             Ok(Box::pin(stream::iter(items)) as ChunkStream)
         })
@@ -134,6 +161,12 @@ async fn ask(c: &Coordinator, model: &str) -> Result<String, RemoteError> {
     let text = out.0.lock().unwrap().clone();
     assert_eq!(f.finish_reason.as_deref(), Some("stop"));
     Ok(text)
+}
+
+/// With the exact-match answer cache on, as `ymird` runs it by default.
+fn cached(nodes: &[&Arc<Scripted>]) -> Coordinator {
+    let nodes: Vec<Arc<dyn ModelNode>> = nodes.iter().map(|n| (*n).clone() as Arc<dyn ModelNode>).collect();
+    Coordinator::new(nodes, Some("alpha".into()), Arc::new(weirdnet_semcache::ExactCache::<weirdnet_semcache::MemoryStore>::new(16)))
 }
 
 fn coordinator(nodes: &[&Arc<Scripted>]) -> Coordinator {
@@ -200,16 +233,16 @@ async fn a_cold_load_that_fails_moves_on() {
 }
 
 #[tokio::test]
-async fn nothing_moves_after_the_first_token_or_for_a_bad_request() {
+async fn a_bad_request_is_not_moved_and_a_node_that_keeps_breaking_ends_the_answer() {
     let a = Scripted::new("a", &[("alpha", false, READY)]);
     let b = Scripted::new("b", &[("alpha", false, READY)]);
     let c = coordinator(&[&a, &b]);
     a.set(Mode::DiesMidAnswer);
     b.set(Mode::DiesMidAnswer);
-    // The answer breaks after a token: the asker gets the error (its pool resumes), and the
-    // other node isn't asked to start over.
+    // The answer breaks after a token and again on the node it resumed on, with no node left:
+    // the asker gets the error (its pool may resume elsewhere).
     assert!(ask(&c, "alpha").await.is_err());
-    assert_eq!(a.chats.load(Ordering::SeqCst) + b.chats.load(Ordering::SeqCst), 1);
+    assert_eq!(a.chats.load(Ordering::SeqCst) + b.chats.load(Ordering::SeqCst), 2);
 
     // A bad request is the asker's mistake, not a node's.
     let (x, y) = (Scripted::new("x", &[("alpha", false, READY)]), Scripted::new("y", &[("alpha", false, READY)]));
@@ -283,4 +316,72 @@ async fn embeddings_fail_over_too() {
     }
     c.drain("b", true).await.unwrap();
     assert!(c.embed("emb", &["x".to_string()]).await.is_err(), "a is dead and b is draining");
+}
+
+async fn say(c: &Coordinator, req: Request) -> (Result<(), RemoteError>, String) {
+    let prepared = c.prepare(&req).unwrap();
+    let out = Collect::default();
+    let r = c.run(prepared, &req, &out, &CancelToken::new()).await.map(|_| ());
+    let text = out.0.lock().unwrap().clone();
+    (r, text)
+}
+
+#[tokio::test]
+async fn an_answer_resumes_on_another_node_from_the_text_already_streamed() {
+    let a = Scripted::new("a", &[("alpha", false, READY)]);
+    let b = Scripted::new("b", &[("alpha", false, READY)]);
+    let c = coordinator(&[&a, &b]);
+    // Whichever node is picked first breaks after three words; drain the other so the pick is a's.
+    b.drain(true).await.unwrap();
+    a.set(Mode::WordsThenDies(3));
+    b.set(Mode::Words);
+    let req = Request::messages(vec![Message::user("count")]).with_model("alpha");
+    let prepared = c.prepare(&req).unwrap();
+    b.drain(false).await.unwrap();
+    let out = Collect::default();
+    let f = c.run(prepared, &req, &out, &CancelToken::new()).await.unwrap();
+    // The text is whole and exact: b continued from "one two three ", nothing repeated.
+    assert_eq!(*out.0.lock().unwrap(), SENTENCE);
+    assert_eq!(*a.prefixes.lock().unwrap(), [None]);
+    assert_eq!(*b.prefixes.lock().unwrap(), [Some("one two three ".to_string())]);
+    assert_eq!(f.meta.resumed_from, Some(0));
+    assert_eq!(f.meta.served_by.as_deref(), Some("b"));
+}
+
+/// A question the cache will keep (deterministic sampling).
+fn plain() -> Request {
+    let mut r = Request::messages(vec![Message::user("count")]);
+    r.sampling.temperature = Some(0.0);
+    r
+}
+
+#[tokio::test]
+async fn a_request_with_a_prefix_continues_it_and_skips_the_cache() {
+    let a = Scripted::new("a", &[("alpha", false, READY)]);
+    a.set(Mode::Words);
+    let c = cached(&[&a]);
+    let req = plain().with_model("alpha");
+    let (r, full) = say(&c, req.clone()).await;
+    r.unwrap();
+    assert_eq!(full, SENTENCE);
+    // Asked again with the first words as the prefix (the asker's pool resuming here): only the
+    // rest streams, and it comes from the engine, not from the cached whole answer.
+    let prefix = "one two three ";
+    let (r, rest) = say(&c, req.with_prefix(Prefix::new(prefix, ""))).await;
+    r.unwrap();
+    assert_eq!(format!("{prefix}{rest}"), SENTENCE);
+    assert_eq!(a.chats.load(Ordering::SeqCst), 2, "the prefixed request reached the engine");
+    // The plain request again is a cache hit: no third engine call.
+    say(&c, plain().with_model("alpha")).await.0.unwrap();
+    assert_eq!(a.chats.load(Ordering::SeqCst), 2);
+    // And a resumed answer is not cached as if it were whole.
+    let b = Scripted::new("b", &[("beta", false, READY)]);
+    b.set(Mode::Words);
+    let c = cached(&[&b]);
+    let req = plain().with_model("beta").with_prefix(Prefix::new(prefix, ""));
+    say(&c, req).await.0.unwrap();
+    let (r, full) = say(&c, plain().with_model("beta")).await;
+    r.unwrap();
+    assert_eq!(full, SENTENCE, "the plain request got a whole answer");
+    assert_eq!(b.chats.load(Ordering::SeqCst), 2);
 }

@@ -9,7 +9,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::catalog::{CatalogModel as AgentModel, ModelState as AgentState, Purpose};
-use weirdnet_agent::remote::infer::v2::{Finish, Request, Usage};
+use weirdnet_agent::remote::infer::v2::{Finish, Prefix, Request, Usage};
+
+/// Times one answer may move to another model node after text has gone out.
+const MAX_RESUMES: u32 = 2;
 use weirdnet_agent::{CancelToken, ToolCall};
 use weirdnet_backends::error::{bad_request, engine_error, unavailable, unknown_model};
 use weirdnet_backends::{Chunk, ModelState, ModelStatus, ToolCalls};
@@ -366,12 +369,16 @@ impl Coordinator {
     /// stand-in.
     pub fn prepare(&self, req: &Request) -> Result<Prepared, RemoteError> {
         let model = self.resolve(req.model.as_deref())?;
+        // A request that continues a prefix is never answered from the cache, and waits for its
+        // own model (a stand-in would continue another model's text).
+        let continuing = req.assistant_prefix.is_some();
         if !req.raw
+            && !continuing
             && let Some(hit) = self.cache.get(&model, req)
         {
             return Ok(Prepared { model, standin: None, raw: false, route: Route::Cached(hit) });
         }
-        let (t, cold) = self.choose(&model, req.wait_for_model || req.raw)?;
+        let (t, cold) = self.choose(&model, req.wait_for_model || req.raw || continuing)?;
         Ok(Prepared { model: t.model, standin: t.standin, raw: req.raw, route: Route::Node { node: t.node, cold } })
     }
 
@@ -420,18 +427,31 @@ impl Coordinator {
         };
         let mut tried: HashSet<String> = HashSet::new();
         let mut reloaded = false;
+        // What this answer has streamed so far (after any prefix the asker sent), and how many
+        // times it moved to another node after text had gone out.
+        let mut shown = String::new();
+        let mut resumes = 0u32;
         loop {
-            let (err, sent) = match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw).await {
-                Ok(f) => return Ok(f),
+            let (err, sent) = match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw, &mut shown).await {
+                Ok(mut f) => {
+                    if resumes > 0 {
+                        f.meta.resumed_from = Some(req.assistant_prefix.as_ref().map_or(0, |p| p.text.chars().count() as u64));
+                    }
+                    return Ok(f);
+                }
                 Err(e) => e,
             };
-            if sent || !retryable(&err) || cancel.is_cancelled() {
+            // Text is out: move on only by resuming from it, on a node that continues a prefix.
+            if (sent && (resumes >= MAX_RESUMES || p.raw)) || !retryable(&err) || cancel.is_cancelled() {
                 return Err(err);
+            }
+            if sent {
+                resumes += 1;
             }
             tried.insert(node.name().to_string());
             match self.pick(&p.model, false, &tried) {
                 Ok((next, status)) => {
-                    tracing::warn!(model = %p.model, from = node.name(), to = next.name(), "{err}; moving the request to another node");
+                    tracing::warn!(model = %p.model, from = node.name(), to = next.name(), resumed_after_chars = shown.chars().count(), "{err}; moving the request to another node");
                     cold = status.state != ModelState::Ready;
                     node = next;
                 }
@@ -459,6 +479,7 @@ impl Coordinator {
         cancel: &CancelToken,
         standin: Option<&str>,
         raw: bool,
+        shown: &mut String,
     ) -> Result<Finish, (RemoteError, bool)> {
         if cold {
             tracing::info!(model = %model, node = node.name(), "cold start: loading");
@@ -469,8 +490,13 @@ impl Coordinator {
         }
         let mut routed = req.clone();
         routed.model = Some(model.to_string());
+        // A resume: what this answer already streamed goes on after any prefix the asker sent.
+        if !shown.is_empty() {
+            let base = req.assistant_prefix.as_ref().map_or("", |p| p.text.as_str());
+            routed.assistant_prefix = Some(Prefix::new(format!("{base}{shown}"), ""));
+        }
         let mut stream = node.chat(model, &routed).await.map_err(|e| (e, false))?;
-        let mut sent = false;
+        let mut sent = !shown.is_empty();
         let mut calls = ToolCalls::default();
         let mut answer = CachedAnswer::new(model.to_string(), "", "stop");
         loop {
@@ -483,6 +509,7 @@ impl Coordinator {
                 Chunk::Text(t) => {
                     sent = true;
                     answer.text.push_str(&t);
+                    shown.push_str(&t);
                     out.text(t);
                 }
                 Chunk::Reasoning(t) => {
@@ -507,7 +534,7 @@ impl Coordinator {
                     f.meta.standin = standin.map(str::to_string);
                     answer.finish_reason = Some(reason);
                     answer.usage = usage;
-                    if !raw && answer.complete() {
+                    if !raw && answer.complete() && req.assistant_prefix.is_none() && *shown == answer.text {
                         self.cache.put(model, req, &answer);
                     }
                     return Ok(f);

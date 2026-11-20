@@ -72,6 +72,12 @@ impl InferBackend for RoutedBackend {
         self.name.clone()
     }
 
+    /// Continues an `assistant_prefix`: the model nodes' engines do (llama.cpp prefill, vLLM
+    /// `continue_final_message`), so an asker whose answer was cut off can resume here.
+    fn resumes(&self) -> bool {
+        true
+    }
+
     async fn infer(&self, request: &v2::Request, out: &Output, cancel: &CancelToken) -> Result<Finish, RemoteError> {
         let prepared = self.prepared.lock().unwrap_or_else(|e| e.into_inner()).take();
         let prepared = match prepared {
