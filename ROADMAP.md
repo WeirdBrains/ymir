@@ -77,11 +77,18 @@ Known gaps:
 - Every answer waits 3 s per linked device the app can't reach (12 to 15 s in the multi-node test) before it starts: a `weirdnet-agent` 0.4.2 bug in finding inference nodes, reported to the Weirdnet lead. The first-token test waits on that fix.
 - Tested on one computer with a mock engine.
 
-## M7 Split models (Planned)
+## M7 Split models (In progress)
 
-A model too big for one machine is split across several (vLLM with Ray, or llama.cpp RPC), reproducing the big mode on the two DGX Sparks.
+A model too big for one machine is split across several (vLLM with Ray, or llama.cpp RPC), reproducing the big mode on the two DGX Sparks. The llama.cpp RPC path is built and tested on one machine over loopback, with a real model: opt-in pool policy, private-link-only planning, group up and down, teardown on member loss.
 
 Weirdnet crates: `weirdnet-backends`.
+
+Known gaps:
+- vLLM/Ray (tensor parallel over RoCE) groups are not built: they need the DGX Sparks, which were off limits.
+- The big mode has not been reproduced as a group job on server-a and server-b; that needs m3talsmith's go-ahead.
+- Capability records carry no link information, so private links, ports and memory are declared in the pool policy and link speed is not measured (upstream request).
+- A crashed worker on another node is noticed only when that node leaves the pool or a request fails; alerts for a lost group are logged, not delivered.
+- A group is started by the operator (ymirctl group up); placement and leases wait on sync 0.7.0.
 
 ## M8 Move server-a and server-b onto Ymir (Planned)
 

@@ -1514,7 +1514,7 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
 - `Busy` always answers `Retry-After: 1`; Windows kills the engine outright; vLLM is Linux only.
 - **The answer cache is exact-match for temperature 0 only** (no tools, inline messages), per
   `weirdnet-semcache`; other requests always go to a model.
-- No `GroupWorkers` (group jobs answer Unsupported until M7).
+- No `GroupWorkers` in M3 (group jobs answered Unsupported); M7 adds them for llama.cpp RPC.
 
 **Not done or untested:**
 
@@ -1730,6 +1730,73 @@ that release, and the M6 p95 comparison is between two equally delayed runs unti
 - **Fairness is a cap, not a weighted share.** Devices are held to the same cap; there are no per-device
   weights or quotas.
 - **One computer, a mock engine,** and the delay above.
+
+## M7 status (built 2026-11-20, llama.cpp RPC only)
+
+A model too big for one node can be served by a group of model nodes over a private link, using
+`weirdnet-backends` 0.1.1's group jobs (`GroupPlan`, `GroupWorkers`, `GroupUp`/`GroupDown`). Built and
+tested on the dev box only, over loopback, with mocks and with a real model. No other machine was touched.
+
+**What works:**
+
+- **Opt-in by pool policy.** `[[inference.split]]` (on inference nodes) names the model, its size, the
+  leader and the allowed nodes (`[[inference.split.node]]`: node name or peer id, `link`, rpc `port`,
+  `memory` the group may use there, `gbps`, models to `drop` first). A model not listed is never split.
+  `min_link_gbps` defaults to 10 (llama.cpp RPC wants 10 GbE or better).
+- **Private links only.** Loopback, RFC 1918, link-local and ULA addresses are accepted; public addresses
+  and CGNAT (100.64/10, which is what tailnets use) are refused. The config refuses a public link at load,
+  the planner refuses a non-private or too-slow link, and a worker binds only its own
+  `[model] private_link` and refuses a plan for any other address. Speed is declared in the policy, not
+  measured; a non-loopback link with no `gbps` is refused.
+- **Planner** (`ymir-core::group::plan_group`): the leader is the named node (or the largest); members
+  are added largest first until memory covers the model; nodes that answer `group_jobs: false`, are
+  draining, or lack a private fast link are skipped. A model that fits on the leader alone is refused as
+  not needing a group. Errors say which rule failed.
+- **Group lifecycle** (`Coordinator::group_up` / `group_down`, `ymirctl group up|down|status MODEL`):
+  workers start first (`rpc-server -H <private ip> -p <port>`, waited on until it listens), then the
+  leader runs `llama-server --rpc a:p,b:p` on loopback with a key kept in the state dir; the leader's
+  node advertises the model like any other (a wrapped launch), so the pool, cache and balancer need no
+  special case. A failed step rolls back what had started. `group down` unloads at the leader and stops
+  every member's processes.
+- **Member loss.** A watcher (every 5 s) takes a group down when a member leaves the pool, starts
+  draining, or a local group process exits; the loss and its reason are kept for `ymirctl group status`
+  and logged as a warning. The model then goes back to normal placement (the stand-in, if configured).
+- **Leader and worker config:** `[model] private_link`, `rpc_server` (`managed`, `system:` path, `off`),
+  `rpc_args`; the leader's `[[model.split]]` (`id`, `file`, `serve_port`, `context`, `slots`,
+  `gpu_layers`, `args`).
+
+**Tested:**
+
+- Unit tests for the link rules, planner, plan and leader arguments, worker refusals, key file.
+- `m7.rs`: three daemons over Weirdnet with a mock `rpc-server` and the mock engine: a slow link and an
+  unlisted model are refused before anything starts; `group up` makes the worker listen and the group
+  answer a chat; `group down` stops the worker; after another `up`, shutting the worker's node down takes
+  the group down and `group status` shows why.
+- `real_split.rs` (ignored; backs off if the GPU is busy or has under 7 GiB free): Qwen3-8B Q4_K_M, a
+  GPU `llama-server` leader and a CPU `rpc-server` worker (`--tensor-split 3,1`) as two model nodes over
+  loopback on an NVIDIA GPU. It came up in 20 s, answered through the pool, and ran at **8.3 tokens/s**
+  against **63.1 tokens/s** for the same model unsplit on the GPU. The split is far slower because a
+  quarter of the layers run on the CPU and every token crosses the RPC link; splitting is for models that
+  do not fit, not for speed.
+
+**Not done or untested:**
+
+- **vLLM with Ray (and tensor parallel over RoCE) groups.** Not built. `RpcWorkers` answers Unsupported
+  for any worker kind except `rpc-server`. They need a Ray cluster over 100 Gb/s links; the only such
+  machines are server-a and server-b, which were off limits.
+- **The big-mode reproduction on server-a and server-b** (a group job across the two servers, replacing the hand-run
+  big mode) has not been run. It needs m3talsmith's go-ahead and a plan for the private link between them.
+- **Capability records carry no link information**, only `group_jobs` and `groups`; so links, ports and
+  memory are declared in Ymir's pool policy. Upstream request: let a node advertise its private links
+  (address, measured speed) so the planner can discover them.
+- **Link speed is declared, not measured.**
+- **A crashed worker on another node is only noticed when that node leaves the pool or a request fails**
+  (node/1 has no question to ask a remote node about a group); a crashed local process is noticed in 5 s.
+- **Alerts for a lost group are logged and kept in status; not delivered** to an app device or channel.
+- **Scheduling is local.** The group is started by the operator or by `ymirctl`; nothing starts one on
+  demand or by placement, because the lease and synced plan are waiting on sync 0.7.0.
+- The group's leader serves through a loopback `llama-server` the node did not start through the
+  Supervisor, so engine args cannot be changed at runtime; the leader's args come from `[[model.split]]`.
 
 ## B1 status (built 2026-11-19)
 
