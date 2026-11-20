@@ -171,6 +171,13 @@ impl Daemon {
                 .map_err(|e| anyhow!("serving the inference role on Weirdnet: {e}"))?;
                 serving.push(Box::new(server));
                 serving.push(Box::new(feed));
+                if cfg.inference.agent.enabled {
+                    let auth = remote::roster_auth(&net.membership);
+                    let t = crate::tasks::serve(&net.node, c.clone(), auth, &cfg.node.name, &cfg.inference.agent)
+                        .await
+                        .map_err(|e| anyhow!("serving agent tasks on Weirdnet: {e}"))?;
+                    tasks.push(t);
+                }
                 let d = remote::discover_model_nodes(
                     c.clone(),
                     net.node.clone(),

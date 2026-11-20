@@ -23,6 +23,7 @@ pub mod paths;
 pub mod remote;
 pub mod service;
 pub mod setup;
+pub mod tasks;
 pub mod token;
 
 pub use config::NodeConfig;

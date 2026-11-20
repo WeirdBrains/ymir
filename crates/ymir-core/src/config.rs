@@ -295,6 +295,9 @@ pub struct InferenceSection {
     pub context_disk_budget: Option<String>,
     #[serde(default)]
     pub cache: CacheSection,
+    /// Agent tasks for the user's apps (task/1), e.g. Bragi's agent mode.
+    #[serde(default)]
+    pub agent: AgentSection,
     /// The cold-start stand-in; default the model with `role = "standin"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standin: Option<String>,
@@ -325,6 +328,7 @@ impl Default for InferenceSection {
             scheduler_eligible: true,
             context_disk_budget: None,
             cache: CacheSection::default(),
+            agent: AgentSection::default(),
             standin: None,
             standin_after: standin_after(),
             standin_warm: true,
@@ -363,6 +367,32 @@ fn threshold() -> f32 {
 impl Default for CacheSection {
     fn default() -> Self {
         Self { mode: local(), backend: embedded(), redis_url: None, threshold: threshold() }
+    }
+}
+
+/// `[inference.agent]`. Tasks answer with the pool's models and use no tools unless a
+/// `workspace` is set; then the one tool is `files.read`, which asks the user's approval on
+/// every call and reads only inside that directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSection {
+    /// Serve tasks (default on). Off: the node refuses them.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// The directory `files.read` may read from; unset means no tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Largest file `files.read` returns, in KiB.
+    #[serde(default = "max_file_kib")]
+    pub max_file_kib: u64,
+}
+
+fn max_file_kib() -> u64 {
+    64
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self { enabled: true, workspace: None, max_file_kib: max_file_kib() }
     }
 }
 

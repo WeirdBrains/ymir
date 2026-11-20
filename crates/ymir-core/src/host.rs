@@ -218,6 +218,11 @@ impl Sink for Turn<'_> {
     fn usage(&self, _: Usage) {}
 }
 
+/// The pool as an agent's model (task/1): the same route as infer/1.
+pub fn turn_backend(coord: Arc<Coordinator>, model: Option<String>) -> Arc<dyn ModelBackend> {
+    Arc::new(TurnBackend { coord, model })
+}
+
 /// infer/1 (agent turns): the same route, collected into a turn.
 struct TurnBackend {
     coord: Arc<Coordinator>,
