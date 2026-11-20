@@ -2056,9 +2056,11 @@ Attachments and agent mode are built on both shells. BSD support is written but 
 
 **Not built or not verified, and why:**
 
-- **BSDs: not built or run.** GPUI's Linux platform covers FreeBSD (so GhostBSD), but a cross build from Linux fails in
-  `aws-lc-sys` (no FreeBSD sysroot). A manual `freebsd` job is in `platforms.yml` (VM build and tests) and has never run. OpenBSD and
-  DragonFly are not GPUI targets.
+- **BSDs: the desktop app does not build on FreeBSD (found 2026-11-20).** The manual `freebsd` CI job in `platforms.yml` (a FreeBSD 14.2 VM,
+  rustup stable, git CLI, CA bundle, a stub `bzip2.pc`) got through every dependency and then failed in `gpui_linux`: GPUI gates
+  `layer_shell`, `PriorityQueueReceiver` and `PriorityQueueSender` to linux, windows and wasm, while `gpui_linux` uses them on FreeBSD.
+  It fails the same way at the pinned rev and on Zed's main, so it is a Zed bug, not Bragi's; fixing it means patching or forking GPUI.
+  The job now requires `bragi-core` to pass its tests there and only warns for the desktop build. OpenBSD and DragonFly are not GPUI targets.
 - **Real nodes served no `task/1` in B5**, so agent mode ran only against the demo node. Ymir M9 adds it (see the M9 status);
   Bragi's own agent mode has still not been run against a real `ymird`, only the two sides separately.
 - Attachments are text only (no images, PDFs or binary), and the Flutter file picker was only exercised in its scripted demo path.
