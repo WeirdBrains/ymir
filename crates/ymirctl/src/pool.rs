@@ -219,8 +219,8 @@ mod tests {
     #[test]
     fn the_hint_reads_ymir_on_the_node_name() {
         let mut cfg = NodeConfig::default();
-        cfg.node.name = "the dev box".into();
-        assert_eq!(link_hint(&cfg), "Ymir on the dev box");
+        cfg.node.name = "dev-box".into();
+        assert_eq!(link_hint(&cfg), "Ymir on dev-box");
         cfg.node.name.clear();
         assert_eq!(link_hint(&cfg), "Ymir on ymir");
     }

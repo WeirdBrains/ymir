@@ -1,4 +1,4 @@
-//! M2: model-node parity with server-a/server-b. Idle unload, crash backoff and crash loops, the stand-in
+//! M2: model-node parity with existing llama-swap servers. Idle unload, crash backoff and crash loops, the stand-in
 //! cold start, /v1/completions and /v1/embeddings, wrapping a stock server, alerts, and the user
 //! service, all against the mock engine in temp dirs.
 
