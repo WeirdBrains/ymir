@@ -111,7 +111,7 @@ are reachable only while the app is open.</p>
 <code>127.0.0.1</code> and <code>localhost</code>, so <a href="https://jan.ai">Jan</a> must run on the same machine as
 the bridge.</p>
 <ol>
-<li>Get the key: <code>ymirctl bridge token</code> prints it. It lives in <code>~/.config/ymir/state/bridge.token</code>. <code>ymirctl bridge token --rotate</code> makes a new one; restart <code>ymird</code> to use it.</li>
+<li>Get the key: <code>ymirctl bridge token</code> prints it. It lives in <code>~/.config/ymir/state/bridge.token</code>. <code>ymirctl bridge token --rotate</code> makes a new one; restart <code>ymird</code> to use it. There is one shared token per bridge. All of <code>ymirctl</code> is covered in the <a href="${ymirctl}#bridge-token">ymirctl guide</a>, including running it against a service that uses another account.</li>
 <li>List the model ids: <code>ymirctl models</code>.</li>
 <li>In Jan, open <strong>Settings → Model Providers</strong> and add an OpenAI-compatible provider. Menu names can differ a little between Jan versions.</li>
 <li>Set the base URL to <code>http://127.0.0.1:8484/v1</code> and paste the token as the API key.</li>
@@ -167,6 +167,7 @@ class DeploymentGuidePage extends StatelessComponent {
       prose(
         _html
             .replaceAll(r'${bragiSite}', bragiSiteUrl)
+            .replaceAll(r'${ymirctl}', siteLink('/docs/guides/ymirctl'))
             .replaceAll(r'${docs}', siteLink('/docs'))
             .replaceAll(r'${roadmap}', siteLink('/roadmap')),
       ),

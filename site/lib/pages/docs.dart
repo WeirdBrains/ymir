@@ -16,6 +16,9 @@ const _html = r'''
   <li><a href="${guide}#jan">4. Use Jan through the local bridge</a></li>
   <li><a href="${guide}#https">5. Optional: an HTTPS address on a private network</a></li>
   </ul></li>
+<li><a href="${ymirctl}">ymirctl guide</a>, every command grouped by task, with the
+  <a href="${reference}">generated command reference</a> (<a href="${ymirctl}#bridge">API keys</a>,
+  <a href="${ymirctl}#other-account">a service running as another account</a>)</li>
 <li><a href="${quickstart}">Quickstart</a>, the one-box short version</li>
 <li><a href="${hardware}">Hardware</a> Ymir runs on</li>
 </ul>
@@ -47,6 +50,8 @@ class DocsPage extends StatelessComponent {
       prose(
         _html
             .replaceAll(r'${guide}', siteLink('/docs/guides/deployment'))
+            .replaceAll(r'${ymirctl}', siteLink('/docs/guides/ymirctl'))
+            .replaceAll(r'${reference}', siteLink('/docs/reference/ymirctl/'))
             .replaceAll(r'${quickstart}', siteLink('/quickstart'))
             .replaceAll(r'${hardware}', siteLink('/hardware'))
             .replaceAll(r'${api}', siteLink('/docs/api/'))

@@ -6,6 +6,7 @@ import 'components/layout.dart';
 import 'pages/docs.dart';
 import 'pages/docs_develop.dart';
 import 'pages/docs_guide.dart';
+import 'pages/docs_ymirctl.dart';
 import 'pages/hardware.dart';
 import 'pages/home.dart';
 import 'pages/quickstart.dart';
@@ -44,6 +45,11 @@ class App extends StatelessComponent {
           path: '/docs/guides/deployment',
           title: 'Deployment guide · $siteTitle',
           builder: (_, _) => const Layout(active: '/docs', child: DeploymentGuidePage()),
+        ),
+        Route(
+          path: '/docs/guides/ymirctl',
+          title: 'ymirctl guide · $siteTitle',
+          builder: (_, _) => const Layout(active: '/docs', child: YmirctlGuidePage()),
         ),
         Route(
           path: '/docs/develop',
