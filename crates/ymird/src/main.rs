@@ -41,7 +41,12 @@ fn init_logging(log_file: Option<&std::path::Path>) -> Result<()> {
             let file = std::fs::OpenOptions::new().create(true).append(true).open(path).with_context(|| format!("opening {}", path.display()))?;
             tracing_subscriber::fmt().with_env_filter(filter()).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
         }
-        None => tracing_subscriber::fmt().with_env_filter(filter()).with_writer(std::io::stderr).init(),
+        // No colour codes when stderr is a file (launchd's StandardErrorPath, a redirect).
+        None => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+            .with_writer(std::io::stderr)
+            .init(),
     }
     Ok(())
 }
