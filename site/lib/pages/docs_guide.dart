@@ -10,8 +10,7 @@ Bragi chat app, and point Jan at it. Commands are exactly those <code>ymirctl</c
 <p><strong>What is released.</strong> Nothing in Ymir or Bragi is released yet, so there are no downloads to install:
 you build Ymir from source (step 1). The Linux packages the repository builds (tar.gz, zip, deb, an Arch package) are
 unsigned and unpublished, and there is no macOS or Windows installer. The bridge token and the Weirdnet identity are
-kept in files readable only by you (mode 0600); storing them in the operating system's keyring comes later. Linking
-Bragi to a Ymir pool is covered honestly in step 3.</p>
+kept in files readable only by you (mode 0600); storing them in the operating system's keyring comes later.</p>
 <p>Ymir is a <a href="https://weirdbrains.com">Weird Brains</a> project. Devices find each other over
 <a href="https://net.weirdbrains.com">Weirdnet</a>, so a pool needs no open ports and no API keys.</p>
 
@@ -86,19 +85,22 @@ can be anywhere.</p>
 <h2 id="bragi">3. Connect Bragi</h2>
 <p><a href="${bragiSite}">Bragi</a> is the chat app, for Linux desktops and Android phones. It does not talk to
 <code>ymird</code> directly: it joins your Weirdnet identity like any other device, finds your inference nodes and
-streams answers from their models.</p>
+streams answers from their models. You can link it either way round, and both ways end with the same six-digit check.</p>
+<p><strong>Bragi shows the code</strong> (the usual way for a new phone or desktop):</p>
 <ol>
 <li>Open Bragi on the new device. On first start it says <em>Link Bragi to your Weirdnet</em>. Tap <strong>Show a link code</strong>.</li>
-<li>Bragi shows a code, as text and as a QR code, for two minutes. On the phone you can copy it.</li>
-<li>Open that code on a device that is already linked, as the device that adds it.</li>
-<li>Bragi shows <em>Do both screens show this code?</em> with six digits. Compare them with the other device. If they match, tap <strong>They match</strong>; otherwise tap <strong>They don't</strong>.</li>
+<li>Bragi shows a <code>weirdnet-bragi://link/…</code> code, as text and as a QR code, for two minutes. On the phone you can copy it.</li>
+<li>On a device that is already in the pool, run <code>ymirctl pool add 'weirdnet-bragi://link/…'</code> (or open it in another linked Bragi).</li>
+<li><code>ymirctl</code> prints <em>Pairing with …: the code is</em> six digits, and Bragi shows <em>Do both screens show this code?</em> with the same six digits. Compare them. If they match, answer <code>y</code> on <code>ymirctl</code> and tap <strong>They match</strong> in Bragi; otherwise answer <code>N</code> and tap <strong>They don't</strong>.</li>
 <li>Bragi goes online and lists the models of every inference node in the pool. Pick one and chat.</li>
 </ol>
-<p>Bragi's codes start with <code>weirdnet-bragi://link/</code>. <code>ymirctl pool add</code> reads
-<code>weirdnet-ymir://</code> and <code>weirdnet-morph://</code> codes today, so a Bragi code has to be opened on a
-device that accepts that scheme, such as an already-linked Bragi. Bragi's pairing has been exercised against a built-in
-demo inference node and not yet against a Ymir pool on separate real machines, and the Android app has no QR scanner yet,
-so codes are pasted. Both apps are unreleased.</p>
+<p><strong>The pool shows the code</strong> (to add a Ymir node from a Bragi that is already linked): run
+<code>ymirctl pool link</code> on the new Ymir node, open its <code>weirdnet-ymir://link/…</code> code in Bragi, compare
+the six digits, and confirm on both. Restart <code>ymird</code> on the new node afterwards.</p>
+<p>Ymir and Bragi read each other's link codes, so a code from either can be opened in the other.
+Bragi's pairing is covered by automated tests, and by an end-to-end test of a headless Bragi and real <code>ymird</code>
+nodes on one computer, in both directions; it has not yet been run across separate real machines, and both apps are
+unreleased. Bragi has no QR scanner yet, so on a phone the code is pasted rather than scanned.</p>
 <p>You need at least one device with the <code>inference</code> role in the pool for Bragi to have models to show. Phones
 are reachable only while the app is open.</p>
 
