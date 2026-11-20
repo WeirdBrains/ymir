@@ -18,7 +18,7 @@ conflict. Read it first. This file only adds Ymir-specific rules.
 - Licensed BSD-3-Clause (`LICENSE`); every crate sets `license = "BSD-3-Clause"`.
 - Protocol ids are `/ymir/...` for app protocols. The URL scheme is `weirdnet-ymir://`, registered in
   `weirdnet-schemes`. Never use bare `weirdnet://`.
-- The reference deployment is m3talsmith's two GB10 servers (configs on the dev box in its deployment config directory).
+- The reference deployment is a two-server setup (its configs are kept off-repo).
   It is read-only from this project: never change server-a, server-b or the dev box services without m3talsmith's
   explicit go-ahead for that step.
 - Tests and manual runs use `YMIR_HOME` (and `WEIRDNET_MODELS_DIR`) pointed at a temp directory. Tests never

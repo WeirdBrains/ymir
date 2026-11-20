@@ -3,7 +3,7 @@
 Date: 2026-11-19. Status: design settled; every open question was answered on 2026-11-19 (see
 [Decisions](#decisions-2026-11-19)). **M1 is built** (single box, all three roles in one `ymird`;
 see [M1 status](#m1-status-built-2026-11-19)).
-Reference build: m3talsmith's two GB10 servers (deployment configs and a plan snapshot are kept off-repo).
+Reference build: a two-server deployment (deployment configs and a plan snapshot are kept off-repo).
 This doc follows the collective `weirdnet-agents/AGENTS.md`.
 
 ## Vision: a cloud of LLM models
@@ -522,7 +522,7 @@ unit tests in `shim`, `mlx` and `setup`; the macOS workflow runs a setup dry run
 downloads SmolLM2 135M's MLX weights and chats with it (reported but not required, as hosted
 runners may not expose Metal).
 
-**mistral.rs was tried and dropped.** Measured on m1 (GB10) against llama.cpp with the same GGUF and
+**mistral.rs was tried and dropped.** Measured on a GPU node against llama.cpp with the same GGUF and
 projector (8k context, one sequence, ~1,450-token prompt, 256 tokens out): Gemma 4 E4B decoded at
 40.7 tok/s on mistral.rs vs 64.3 on llama.cpp, Qwen3.6-35B-A3B at 70.0 vs 66.9; prefill and time
 to first token were about even; loads took 11–36 s vs 3 s, and mistral.rs fetched the base model's
@@ -542,9 +542,9 @@ with its model (checksummed, with consent, through `weirdnet-model`), and `ymird
 does an explicit `--mmproj` in `args`. The model budget does not count the projector (about
 0.5 GB) yet.
 
-Checked on m1 against mistral.rs 0.9.5, same GGUF and projector, OpenAI chat requests straight to
+Checked on a GPU node against mistral.rs 0.9.5, same GGUF and projector, OpenAI chat requests straight to
 each engine (2026-11-20; the pinned Gemma 4 E4B Q8_0 projector, checksum verified, answered the
-same as m1's F16 one):
+same as the F16 one):
 
 | Request | Gemma 4 E4B: llama.cpp | mistral.rs | Qwen3.6-35B-A3B: llama.cpp | mistral.rs |
 |---|---|---|---|---|
@@ -1567,7 +1567,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   `wrap = "http://127.0.0.1:8000/v1"` attaches to a stock server Ymir didn't start (vLLM,
   llama-server or anything OpenAI-compatible), loopback only, with an optional `wrap_api_key`
   (`env:`/`file:` reference). Unload only detaches; Ymir never stops a wrapped server.
-  Tested on the dev box's NVIDIA GPU (sm_86) with vLLM 0.34.0 (torch 2.14.0+cu130) in a venv under
+  Tested on an NVIDIA GPU with vLLM 0.34.0 (torch 2.14.0+cu130) in a venv under
   a scratch directory, `Qwen/Qwen2.5-0.5B-Instruct`, `--gpu-memory-utilization 0.5`: managed launch ready in
   72.8 s, **176.6 tok/s** (256 tokens) and **183.1 tok/s** (512) streamed through the bridge; wrapped
   stock server **172.2 tok/s**; GPU memory freed after unload.
@@ -1612,8 +1612,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 
 **Not done, stubbed or untested:**
 
-- **vLLM on the Spark (CUDA 13, sm_121) is untested.** server-a/server-b are live and weren't touched; only
-  sm_86 was run.
+- **vLLM on GB10 (CUDA 13, sm_121) is untested.** server-a/server-b are live and weren't touched; only an
+  older NVIDIA GPU was tested.
 - Packages: no `.rpm` (no `rpmbuild` or `nfpm` on the build box), no minisign signatures, the Nix
   flake and the Homebrew formula are written but untested, no macOS or Windows builds. Windows can't
   build yet: the control socket is a Unix socket. Linux binaries built on Arch need glibc 2.39, so
