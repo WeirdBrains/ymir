@@ -20,6 +20,7 @@ const bragiRepoUrl = 'https://github.com/WeirdBrains/bragi';
 const orgUrl = 'https://github.com/WeirdBrains';
 const weirdnetUrl = 'https://net.weirdbrains.com';
 const mainSiteUrl = 'https://www.weirdbrains.com';
-// Sibling site: this is its GitHub Pages address until a custom domain exists.
-const bragiSiteUrl = 'https://weirdbrains.github.io/bragi/';
+// Sibling site. Until both custom domains are live this is its GitHub Pages address; the Pages
+// workflow passes SIBLING_URL=https://bragi.weirdbrains.com/ when the CUSTOM_DOMAIN variable is set.
+const bragiSiteUrl = String.fromEnvironment('SIBLING_URL', defaultValue: 'https://weirdbrains.github.io/bragi/');
 String cratesIoUrl(String crate) => 'https://crates.io/crates/$crate';

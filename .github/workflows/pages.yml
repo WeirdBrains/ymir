@@ -35,7 +35,19 @@ jobs:
       - name: The roadmap pages match roadmap.toml
         run: python3 tool/gen_roadmap.py --check
       - name: Build the static site
-        run: jaspr build --sitemap-domain https://weirdbrains.github.io/ymir
+        # CUSTOM_DOMAIN (a repository variable) switches to the custom domain: root-relative links,
+        # the sibling site's domain and a CNAME file. Unset, the site is the github.io project page.
+        env:
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+        run: |
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            jaspr build --sitemap-domain "https://$CUSTOM_DOMAIN" \
+              --dart-define=SITE_BASE=/ --dart-define="SITE_URL=https://$CUSTOM_DOMAIN" \
+              --dart-define=SIBLING_URL=https://bragi.weirdbrains.com/
+            echo "$CUSTOM_DOMAIN" > build/jaspr/CNAME
+          else
+            jaspr build --sitemap-domain https://weirdbrains.github.io/ymir
+          fi
       - name: Check the output
         run: |
           test -f build/jaspr/index.html
