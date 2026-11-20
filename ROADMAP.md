@@ -53,14 +53,16 @@ Known gaps:
 - The cross-machine run on the laptop did not happen (the machine was busy). Every multi-node test ran on one computer.
 - Routing is ready node first, then fewest requests in flight. It does not yet weigh hardware, speed or warm prompts.
 
-## M5 Context sync and failover (Planned)
+## M5 Context sync and failover (Done)
 
 Conversations are kept in sync across inference nodes, so a reply can resume mid-answer after a model node or an inference node dies, with the full context and no repeated text.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 Known gaps:
-- Waits on a `weirdnet-sync` design for local eviction and working sets.
+- No eviction or working sets yet: inference nodes keep every conversation, until `weirdnet-sync` can drop a local copy.
+- Job checkpoints, attachments, retrieved context and prefix hints are not built. The conversation store lives in Ymir until `weirdnet-agent` has a context module.
+- Tested on one computer with a mock engine; no cross-machine run yet.
 
 ## M6 Workload spreading (Planned)
 

@@ -1307,7 +1307,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   raw infer); `Roster::check_caller`; `ymirctl` and Jan on another machine through its own bridge.
 - **M4 Several model nodes** (built 2026-11-19; see [M4 status](#m4-status-built-2026-11-19)). Linking, capability records, the merged
   catalog, failover before the first token, drain.
-- **M5 Context sync and failover** (gated: the `weirdnet-sync` eviction design). `weirdnet-agent`
+- **M5 Context sync and failover** (built 2026-11-19 with gaps; see [M5 status](#m5-status-built-2026-11-19-with-gaps); eviction waits on the `weirdnet-sync` design). `weirdnet-agent`
   `context` over `weirdnet-sync` 0.5: messages written at completion, job checkpoints, system prompts, attachments as content roots, retrieved
   context, prefix hints; inference-node working sets and pull-on-demand; encryption at rest;
   retention and tombstones; bridge ephemeral contexts. Mid-answer resume at both levels. Exit test:
@@ -1531,7 +1531,7 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
   `roster_changes_reach_other_devices` fails about half the runs, on the pre-bump versions too: when
   an app device links a third device, the inference node's pass against the app can finish with no
   error and still not learn the new cert (a pass that gets `needs-admission`/`unknown-key`
-  first), and four rounds don't always fix it. For the Weirdnet lead (`weirdnet-sync`).
+  first), and four rounds don't always fix it. For the Weirdnet lead (`weirdnet-sync`). **Fixed in `weirdnet-sync` 0.5.2** (see the M5 status): 12 of 12 runs pass.
 
 ## M4 status (built 2026-11-19)
 
@@ -1603,6 +1603,71 @@ Gaps: no capability-aware placement beyond "ready, then fewest in flight" (no ha
 warm-prefix scoring; that is M6/M7); drain on a remote node needs
 that node to run the model role of this version or later (an older node answers `unsupported`); the
 laptop cross-machine run did not happen (it was busy when tried).
+
+## M5 status (built 2026-11-19, with gaps)
+
+Answers survive a node dying mid-answer at both levels, and conversations live on the inference
+nodes and sync among them. On published crates only: `weirdnet-agent` 0.4.2, `weirdnet-openai`
+0.1.2, `weirdnet-sync` 0.5.2 (not 0.6; see below).
+
+**What works:**
+
+- **Resume after the first token, model level.** When a model node dies mid-answer, the inference node
+  continues on another node that serves the model: it sends what has streamed so far as an
+  `assistant_prefix` (up to twice per answer), and the asker sees one whole answer with no repeated
+  text. A request with a prefix skips the answer cache, waits for its own model (no stand-in), and
+  a resumed answer is never cached as whole. Over Weirdnet this goes through `Pool::infer`, which
+  needs 0.4.2 (0.4.1 failed with "characters missing" on a request that carries a prefix at the
+  start). A model node that goes quiet is given up on after 5 to 12 s (the asker's pool waits 15 s or more),
+  so the inference node moves first.
+- **Resume at the inference level.** The inference host now says `resume: true`, so an app's pool whose
+  inference node dies mid-answer continues on the other one, from the text it already shows. It is
+  also what `continue_final_message` needs: the bridge continues the last assistant message through
+  the pool, the reply holds only new text (tested through the bridge, and the 400 when
+  `add_generation_prompt` is also set).
+- **Conversations.** `ymir-core::context` keeps each conversation as sealed `weirdnet-sync`
+  records of type `ymir.context`: a meta register (title, system prompt, model, a tombstone flag) and one
+  append-only record per message. An assistant message is written when its answer completes,
+  under the job's id, so a retry or a resume writes the same record: one answer, never two. Tombstones
+  and age-based retention (`expire`) hide a conversation everywhere. The op log is saved to `log.json`
+  (sealed values) and reloaded, so sequence numbers carry on after a restart.
+- **`context_ref` requests.** The inference node assembles the prompt (system prompt, messages through
+  `head`) from its store. A request that names a conversation pulls from the caller first, so the newest turn
+  is there before the periodic pass; the cache is never used for these. `ymirctl context show|add|ask|delete`
+  drives it; `ask` adds a user turn on the app node and has the pool answer it.
+- **Sync.** Inference and app nodes pull `ymir.context` on every sync pass (`[network] sync_secs`, default 30);
+  a model-only node doesn't carry conversations. A lone device starts its own key chain; with several,
+  the first sealed write waits for the first rotation.
+- **`Daemon::shutdown`** now halts the Weirdnet node even while requests hold it, so an asker sees the
+  node go (this is what the kill tests rely on).
+
+**Exit test, on separate daemons over loopback with a slow mock engine** (`ymir-testkit/tests/m5.rs`): kill a
+model node mid-answer: the answer continues on the other with the exact text (5 of 5 runs). Kill an
+inference node mid-answer: the app's pool resumes on the other inference node, which gets the
+conversation by pull-on-demand, continues from the shown text, writes the answer once, and every
+node's copy ends the same (5 of 5). A third test checks conversations syncing among two inference
+nodes and the app, the answer on every copy, and a tombstone reaching all.
+
+**Tests:** `cargo test --workspace` all pass; the previously flaky `roster_changes_reach_other_devices` passes
+12 of 12 on sync 0.5.2, and the 100 s retry window in the M4 daemon test is gone.
+
+**`weirdnet-sync` 0.5.2 (roster fix):** a device linked on one device now reaches the others in one
+pass. It fixes the flake above and the `needs-admission` refusals. Ymir moved to it. Not moved
+to `weirdnet-sync` 0.6 (the Identity store), which would put two sync versions in the tree.
+
+**Gaps:**
+
+- **Not in M5 yet:** job checkpoints per finished task, attachments as content roots, retrieved context, prefix
+  hints, and the bridge's ephemeral contexts as a named feature (the bridge sends inline messages, which
+  are ephemeral already). Retention is a function, not yet a scheduled setting.
+- **No eviction or working sets.** `weirdnet-sync` can't drop a local copy without a tombstone, so inference
+  nodes hold every conversation. This is the sync design the milestone was gated on (Weirdnet lead).
+- **Generic code in Ymir.** The conversation schema, store, assembly, retention and the saved log belong in
+  `weirdnet-agent`'s `context` module (and the log's persistence in `weirdnet-sync` or its storage trait);
+  they are `ymir-core::context` and `membership.rs` until then, behind one interface.
+- **Bragi doesn't use the store yet** (B4), and the mock engine stands in for llama.cpp; the real-engine
+  resume is the same prefix path the engines already take.
+- **Cross-machine** runs are still pending (the laptop).
 
 ## B1 status (built 2026-11-19)
 
