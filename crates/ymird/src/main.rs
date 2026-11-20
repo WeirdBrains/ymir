@@ -35,7 +35,9 @@ async fn main() -> Result<()> {
     if let Some(r) = args.roles {
         cfg.roles = Roles::parse(&r)?;
     }
-    let daemon = Daemon::start(cfg, paths).await?;
+    let daemon = Daemon::start(cfg, paths.clone()).await?;
+    // Serving: an update on trial passes its health check (see `ymirctl update boot`).
+    ymir_core::update::commit_if_on_trial(&paths);
     wait_for_signal().await;
     daemon.shutdown().await;
     Ok(())

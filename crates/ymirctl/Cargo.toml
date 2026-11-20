@@ -17,6 +17,8 @@ tokio.workspace = true
 weirdnet-device-link.workspace = true
 weirdnet-model.workspace = true
 weirdnet-net.workspace = true
+weirdnet-update.workspace = true
+semver.workspace = true
 ymir-core.workspace = true
 
 [dev-dependencies]

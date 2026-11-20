@@ -34,6 +34,7 @@ weirdnet-semcache = "0.1.1"
 weirdnet-sync = "0.5.2"
 weirdnet-alerts = { version = "0.1.0", features = ["backends"] }
 weirdnet-rules = "=0.1.0"
+weirdnet-update = "0.2.0"
 
 anyhow = "1"
 axum = "0.8"
@@ -45,6 +46,7 @@ getrandom = "0.3"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "hostname"] }
 libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

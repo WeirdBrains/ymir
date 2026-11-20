@@ -25,6 +25,7 @@ pub mod service;
 pub mod setup;
 pub mod tasks;
 pub mod token;
+pub mod update;
 
 pub use config::NodeConfig;
 pub use coordinator::Coordinator;

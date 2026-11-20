@@ -32,6 +32,8 @@ weirdnet-openai.workspace = true
 weirdnet-semcache.workspace = true
 weirdnet-sync.workspace = true
 weirdnet-alerts.workspace = true
+weirdnet-update.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

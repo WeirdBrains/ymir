@@ -27,6 +27,32 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum UpdateCmd {
+    /// Pin the org root the updates must chain to (hex fingerprint and the first signed root file).
+    Trust {
+        #[arg(long)]
+        pin: String,
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Verify a bundle directory and stage it for the next start.
+    Stage { bundle: PathBuf },
+    /// What is pinned, the good release, a trial under way, and releases marked bad.
+    Status,
+    /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
+    /// with `--exec`, run it with the arguments after `--`. Use this as the service's ExecStart.
+    Boot {
+        #[arg(long)]
+        exec: bool,
+        /// The daemon to run when no release is installed (default `ymird` on PATH).
+        #[arg(long, default_value = "ymird")]
+        installed: PathBuf,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum Cmd {
     /// Show what hardware this machine has and the model memory budget.
     Hw {
@@ -35,6 +61,11 @@ pub enum Cmd {
     },
     /// Detect the hardware, pick a backend and models that fit, and write node.toml.
     Setup(SetupArgs),
+    /// Self-update: pin the org root, stage a signed bundle, start with rollback.
+    Update {
+        #[command(subcommand)]
+        cmd: UpdateCmd,
+    },
     /// Show the running node: roles, models and their state.
     Status {
         #[arg(long)]
@@ -258,6 +289,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Models => models(&paths, out).await,
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
         Cmd::Service { cmd } => service_cmd(&paths, out, cmd),
+        Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Nodes => nodes(&paths, out).await,
         Cmd::Drain { node, resume } => admin(&paths, out, ControlRequest::Drain { node, on: !resume }).await,
@@ -686,6 +718,57 @@ async fn chat(
     }
     if let Some(s) = &outcome.standin {
         writeln!(out, "(answered by the stand-in {s} while the model loads)")?;
+    }
+    Ok(())
+}
+
+fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> {
+    use ymir_core::update::{Boot, Updater};
+    let now = weirdnet_update::Timestamp::now();
+    let mut u = Updater::open(paths, now)?;
+    match cmd {
+        UpdateCmd::Trust { pin, root } => {
+            u.trust(&pin, &std::fs::read(&root).with_context(|| format!("reading {}", root.display()))?, now)?;
+            writeln!(out, "pinned: updates must chain to {pin}")?;
+        }
+        UpdateCmd::Stage { bundle } => {
+            let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+            let v = u.stage(&bundle, &running, now)?;
+            writeln!(out, "staged {} {}; it runs on trial at the next start", v.manifest.update_id, v.manifest.version)?;
+        }
+        UpdateCmd::Status => {
+            let s = u.status();
+            writeln!(out, "root: {}", if s.trusted { "pinned" } else { "not pinned" })?;
+            writeln!(out, "good release: {}", s.good.as_deref().unwrap_or("none (the installed binary)"))?;
+            writeln!(out, "health: {:?}", s.health)?;
+            if !s.bad.is_empty() {
+                writeln!(out, "marked bad: {}", s.bad.join(", "))?;
+            }
+        }
+        UpdateCmd::Boot { exec, installed, args } => {
+            let boot = u.boot()?;
+            let (path, note) = match &boot {
+                Boot::Installed => (installed, "installed binary".to_string()),
+                Boot::Run { id, path, trial } => (path.clone(), format!("release {id}{}", if *trial { " (on trial)" } else { "" })),
+                Boot::RolledBack { failed, run } => (run.as_ref().map(|r| r.1.clone()).unwrap_or(installed), format!("rolled back from {failed}")),
+            };
+            if !exec {
+                writeln!(out, "{}", path.display())?;
+                return Ok(());
+            }
+            eprintln!("ymirctl update boot: starting {note}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let e = std::process::Command::new(&path).args(&args).exec();
+                bail!("starting {}: {e}", path.display());
+            }
+            #[cfg(not(unix))]
+            {
+                let st = std::process::Command::new(&path).args(&args).status()?;
+                std::process::exit(st.code().unwrap_or(1));
+            }
+        }
     }
     Ok(())
 }
