@@ -39,6 +39,10 @@ pub trait ModelNode: Send + Sync {
     fn resumes(&self) -> bool {
         true
     }
+    /// Whether the node runs on this device (it wins ties when balancing).
+    fn local(&self) -> bool {
+        false
+    }
     /// Starts draining (waiting for requests under way) or resumes.
     fn drain<'a>(&'a self, _on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async { Err(RemoteError::Unsupported { message: "this node can't drain".into() }) })
@@ -132,6 +136,10 @@ impl ModelNode for LocalModelNode {
 
     fn draining(&self) -> bool {
         self.draining.load(Ordering::SeqCst)
+    }
+
+    fn local(&self) -> bool {
+        true
     }
 
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
