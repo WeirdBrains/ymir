@@ -21,11 +21,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use weirdnet_net::user::NodeCert;
 use weirdnet_net::{Keypair, Multiaddr, Node, PeerId, PublicKey, WEIRDNET};
-use weirdnet_sync::{Device, EpochKeys, Roster, SyncState};
+use weirdnet_sync::{Device, EpochKeys, LogEntry, LogPage, RecordOptions, RecordValue, Roster, SyncState};
 
 /// The sync type Ymir announces. It carries no records yet; the roster rides along with every
 /// pass.
 pub const SYNC_TYPE: &str = "ymir.pool";
+
+/// The sync type of conversations (see [`crate::context`]): sealed under the roster's key, so
+/// only the user's own devices can read it.
+pub const CONTEXT_TYPE: &str = "ymir.context";
 
 /// What a link transfer carries besides the identity: the roster, in Morph's format, so a Morph
 /// device and a Ymir node can link each other.
@@ -41,6 +45,9 @@ pub struct Membership {
     dir: PathBuf,
     node_key: Keypair,
     state: Arc<Mutex<SyncState>>,
+    /// Whether sync passes also carry conversations (inference and app roles; a model-only
+    /// node holds no conversation state).
+    context_sync: std::sync::atomic::AtomicBool,
 }
 
 fn now_ms() -> i64 {
@@ -70,6 +77,27 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Reloads the op log saved by [`Membership::save`], so our own sequence numbers carry on and
+/// conversations survive a restart.
+fn load_log(dir: &Path, st: &mut SyncState) {
+    let Ok(bytes) = std::fs::read(dir.join("log.json")) else { return };
+    let Ok(entries) = serde_json::from_slice::<Vec<LogEntry>>(&bytes) else {
+        tracing::warn!("log.json is unreadable; starting the op log empty");
+        return;
+    };
+    let mut by_node: std::collections::BTreeMap<String, Vec<LogEntry>> = Default::default();
+    for e in entries {
+        by_node.entry(e.node_id.0.clone()).or_default().push(e);
+    }
+    for (node, ops) in by_node {
+        let (from_seq, to_seq) = (ops.iter().map(|e| e.seq).min().unwrap_or(0), ops.iter().map(|e| e.seq).max().unwrap_or(0));
+        let node_id = weirdnet_sync::NodeId::new(node);
+        st.log.integrate(&LogPage { node_id: node_id.clone(), from_seq, to_seq, ops });
+        let c = st.log.contiguous(&node_id);
+        st.log.set_cursor(&node_id, c);
+    }
 }
 
 fn ensure_dir(dir: &Path) -> Result<()> {
@@ -164,9 +192,11 @@ impl Membership {
             auto_first_rotation: true,
             records: Default::default(),
         };
+        st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
+        load_log(dir, &mut st);
         st.publish_device_key(now_ms()).map_err(|e| anyhow!("device key: {e}"))?;
         st.refresh_keys();
-        Ok(Self { dir: dir.to_path_buf(), node_key, state: Arc::new(Mutex::new(st)) })
+        Ok(Self { dir: dir.to_path_buf(), node_key, state: Arc::new(Mutex::new(st)), context_sync: std::sync::atomic::AtomicBool::new(false) })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SyncState> {
@@ -176,9 +206,10 @@ impl Membership {
     /// Writes the roster and keys (and, the first time, the seed and node key).
     pub fn save(&self) -> Result<()> {
         ensure_dir(&self.dir)?;
-        let (seed, roster, keys) = {
+        let (seed, roster, keys, log) = {
             let st = self.lock();
-            (st.seed.clone(), serde_json::to_vec_pretty(&st.roster)?, st.keys.export())
+            let entries: Vec<&LogEntry> = st.log.iter().collect();
+            (st.seed.clone(), serde_json::to_vec_pretty(&st.roster)?, st.keys.export(), serde_json::to_vec(&entries)?)
         };
         if !self.dir.join("seed").is_file() {
             write_private(&self.dir.join("seed"), &seed)?;
@@ -188,7 +219,53 @@ impl Membership {
         }
         write_private(&self.dir.join("roster.json"), &roster)?;
         write_private(&self.dir.join("keys"), &keys)?;
+        write_private(&self.dir.join("log.json"), &log)?;
         Ok(())
+    }
+
+    /// Whether sync passes carry conversations too.
+    pub fn set_context_sync(&self, on: bool) {
+        self.context_sync.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Writes one record of `typ` (sealed for [`CONTEXT_TYPE`]) and saves.
+    pub fn write_record(&self, typ: &str, record_id: &str, value: &[u8]) -> Result<()> {
+        {
+            let mut st = self.lock();
+            let mut r = st.write(now_ms() as u64, typ, record_id, value);
+            // Sealing needs an epoch key. A lone device starts the chain itself; with several,
+            // the first rotation comes from a sync pass once every device has published its key
+            // (`weirdnet-sync` decides who starts it), so the write waits for that.
+            if matches!(&r, Err(weirdnet_sync::SyncError::Refused(m)) if m == "no-epoch-key") && st.roster.active().count() == 1 {
+                st.rotate(now_ms()).map_err(|e| anyhow!("starting the key chain: {e}"))?;
+                r = st.write(now_ms() as u64, typ, record_id, value);
+            }
+            r.map_err(|e| anyhow!("writing {typ}/{record_id}: {e}"))?;
+        }
+        self.save()
+    }
+
+    /// The latest value of every record of `typ` this node can read, by record id.
+    pub fn records(&self, typ: &str) -> Vec<(String, Vec<u8>)> {
+        let st = self.lock();
+        st.latest_entries(typ)
+            .into_iter()
+            .filter_map(|e| match st.read(e) {
+                Ok(RecordValue::Ready(v)) => Some((e.record_id.clone(), v.to_vec())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One pull of conversations from `peer` now (blocking), for a request that names a
+    /// conversation this node doesn't hold yet. True when the pass went through.
+    pub fn pull_context(&self, node: &SyncNode, peer: &str, addrs: &[Multiaddr]) -> bool {
+        let Ok(peer) = PeerId::from_str(peer) else { return false };
+        let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, addrs, CONTEXT_TYPE);
+        if out.error.is_none() {
+            let _ = self.save();
+        }
+        out.error.is_none()
     }
 
     pub fn node_key(&self) -> &Keypair {
@@ -263,6 +340,7 @@ impl Membership {
         let me = node.peer_id().to_string();
         let peers: Vec<NodeCert> = self.lock().roster.active().filter(|c| c.peer_id != me).cloned().collect();
         let mut reached = 0;
+        let context = self.context_sync.load(std::sync::atomic::Ordering::SeqCst);
         for cert in peers {
             let Ok(peer) = PeerId::from_str(&cert.peer_id) else { continue };
             let a = addrs(&cert);
@@ -272,6 +350,12 @@ impl Membership {
             match &out.error {
                 None => reached += 1,
                 Some(e) => tracing::debug!(peer = %cert.peer_id, applied = out.applied, "sync pass: {e}"),
+            }
+            if context && out.error.is_none() {
+                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, CONTEXT_TYPE);
+                if let Some(e) = &out.error {
+                    tracing::debug!(peer = %cert.peer_id, applied = out.applied, "context pass: {e}");
+                }
             }
         }
         if let Err(e) = self.save() {
