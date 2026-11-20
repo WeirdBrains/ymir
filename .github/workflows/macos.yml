@@ -1,0 +1,85 @@
+# macOS: Apple Silicon serves chat models with MLX-LM (ymir_core::mlx), Intel Macs with llama.cpp.
+#
+# `setup` is a dry run on both: it checks the backend setup picks and the node.toml it writes, with
+# no downloads. `mlx` then installs the pinned mlx-lm with uv, downloads the smallest catalog
+# model's MLX weights (SmolLM2 135M, 148 MB) and chats with it through ymird. Hosted runners may
+# not expose Metal to MLX, so that job reports but does not fail the run.
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    paths: ['crates/**', 'Cargo.*', '.github/workflows/macos.yml']
+  pull_request:
+    paths: ['crates/**', 'Cargo.*', '.github/workflows/macos.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  setup:
+    name: setup dry run (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            backend: mlx
+          - runner: macos-15-intel
+            backend: llamacpp
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --locked -p ymird -p ymirctl
+      - name: Unit tests (engines, setup, MLX)
+        run: cargo test --locked -p ymir-core --lib
+      - name: Engine shim end to end (mock engines)
+        run: cargo test --locked -p ymir-testkit --test engine_shim
+      - name: setup --dry-run picks ${{ matrix.backend }}
+        run: |
+          ctl() { target/debug/ymirctl --home "$RUNNER_TEMP/home" "$@"; }
+          out=$(ctl setup --dry-run --name ci)
+          echo "$out"
+          if [ "${{ matrix.backend }}" = mlx ]; then
+            echo "$out" | grep -q 'backend = "mlx"'
+            echo "$out" | grep -q 'MLX-LM: not installed'
+            # The embedding model stays on llama.cpp.
+            echo "$out" | grep -q 'embedding\] llamacpp'
+            if ctl setup --dry-run --backend llamacpp | grep -q 'backend = "mlx"'; then echo "--backend llamacpp still used MLX"; exit 1; fi
+          else
+            if echo "$out" | grep -q 'backend = "mlx"'; then echo "Intel Mac got MLX"; exit 1; fi
+            if ctl setup --dry-run --backend mlx; then echo "--backend mlx accepted on Intel"; exit 1; fi
+          fi
+
+  mlx:
+    name: MLX-LM with a real model (Apple Silicon)
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+      - name: Build
+        run: cargo build --release --locked -p ymird -p ymirctl
+      - name: setup --download installs mlx-lm and the MLX weights
+        run: |
+          target/release/ymirctl --home "$RUNNER_TEMP/home" setup --name ci --download --yes \
+            --memory-budget 1GiB --models-dir "$RUNNER_TEMP/models" --port 18484
+          cat "$RUNNER_TEMP/home/node.toml"
+          test -x "$RUNNER_TEMP/home/engines/mlx/bin/mlx_lm.server"
+      - name: Chat through ymird
+        run: |
+          target/release/ymird --home "$RUNNER_TEMP/home" > "$RUNNER_TEMP/ymird.log" 2>&1 &
+          for i in $(seq 1 60); do target/release/ymirctl --home "$RUNNER_TEMP/home" status >/dev/null 2>&1 && break; sleep 2; done
+          target/release/ymirctl --home "$RUNNER_TEMP/home" chat "Say hello in three words."
+      - name: Logs
+        if: always()
+        run: |
+          cat "$RUNNER_TEMP/ymird.log" || true
+          cat "$RUNNER_TEMP"/home/logs/* 2>/dev/null | tail -100 || true

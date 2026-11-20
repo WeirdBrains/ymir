@@ -23,6 +23,7 @@ package() {
   cd "ymir-cuda-${_ver}-${CARCH}-unknown-linux-gnu"
   install -Dm755 bin/ymird "${pkgdir}/usr/bin/ymird"
   install -Dm755 bin/ymirctl "${pkgdir}/usr/bin/ymirctl"
+  install -Dm755 bin/ymir-engine "${pkgdir}/usr/bin/ymir-engine"
   # The bundled llama.cpp engine; ymird finds it at ../lib/ymir/llama.cpp from /usr/bin.
   install -d "${pkgdir}/usr/lib/ymir"
   cp -a lib/ymir/llama.cpp "${pkgdir}/usr/lib/ymir/"

@@ -16,7 +16,7 @@ class Ymir < Formula
   end
 
   def install
-    bin.install "bin/ymird", "bin/ymirctl"
+    bin.install "bin/ymird", "bin/ymirctl", "bin/ymir-engine"
     # The bundled llama.cpp engine (Metal on Apple Silicon); ymird finds it at ../lib/ymir/llama.cpp.
     (lib/"ymir").install "lib/ymir/llama.cpp"
     doc.install "share/doc/ymir/README.md"
