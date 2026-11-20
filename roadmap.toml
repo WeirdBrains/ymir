@@ -54,10 +54,13 @@ gaps = [
 [[milestone]]
 id = "M4"
 title = "Several model nodes"
-status = "in-progress"
+status = "done"
 summary = "More than one model node in the pool: linking devices, each node advertising what it can run, one combined model list, failover before the first token, and draining a node before maintenance."
 crates = ["weirdnet-device-link", "weirdnet-relay", "weirdnet-net", "weirdnet-agent", "weirdnet-backends"]
-gaps = []
+gaps = [
+  "The cross-machine run on the laptop did not happen (the machine was busy). Every multi-node test ran on one computer.",
+  "Routing is ready node first, then fewest requests in flight. It does not yet weigh hardware, speed or warm prompts.",
+]
 
 [[milestone]]
 id = "M5"

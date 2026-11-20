@@ -43,11 +43,15 @@ Known gaps:
 - Linking the owner's real Weirdnet identity is still to do.
 - One roster-sync test fails about half the time, a known upstream issue.
 
-## M4 Several model nodes (In progress)
+## M4 Several model nodes (Done)
 
 More than one model node in the pool: linking devices, each node advertising what it can run, one combined model list, failover before the first token, and draining a node before maintenance.
 
 Weirdnet crates: `weirdnet-device-link`, `weirdnet-relay`, `weirdnet-net`, `weirdnet-agent`, `weirdnet-backends`.
+
+Known gaps:
+- The cross-machine run on the laptop did not happen (the machine was busy). Every multi-node test ran on one computer.
+- Routing is ready node first, then fewest requests in flight. It does not yet weigh hardware, speed or warm prompts.
 
 ## M5 Context sync and failover (Planned)
 
