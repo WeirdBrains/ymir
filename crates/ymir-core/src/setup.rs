@@ -10,7 +10,7 @@ use crate::config::{LocalModel, NodeConfig, Roles};
 #[derive(Debug, Clone, Default)]
 pub struct SetupOptions {
     pub name: Option<String>,
-    /// An existing `llama-server`; default: look on `PATH`.
+    /// An external `llama-server` to use instead of the one shipped with Ymir.
     pub llama_server: Option<PathBuf>,
     /// GGUF files to serve instead of catalog models (the first is the main model).
     pub models: Vec<PathBuf>,
@@ -28,10 +28,26 @@ pub struct Proposal {
     pub hardware: Hardware,
     pub plan: Plan,
     pub config: NodeConfig,
+    /// The `llama-server` the node will run, if one was found.
     pub llama_server: Option<PathBuf>,
+    /// Where it comes from.
+    pub engine: EngineSource,
     pub vllm: Option<PathBuf>,
     /// Catalog models in the config that aren't downloaded yet.
     pub to_download: Vec<CatalogEntry>,
+}
+
+/// Where setup found `llama-server`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineSource {
+    /// Shipped with this Ymir install (the default; `llamacpp = "managed"`).
+    Bundled(crate::engine::Bundled),
+    /// Given with `--llama-server` (`llamacpp = "system:..."`).
+    Given,
+    /// Found on `PATH` because this install has no engine of its own (`llamacpp = "system:..."`).
+    Path,
+    /// None found: loads fail until one is installed.
+    Missing,
 }
 
 pub fn budget(hw: &Hardware, opts: &SetupOptions) -> Budget {
@@ -43,6 +59,11 @@ pub fn budget(hw: &Hardware, opts: &SetupOptions) -> Budget {
 }
 
 pub fn propose(hw: Hardware, opts: &SetupOptions) -> Proposal {
+    propose_with(hw, opts, crate::engine::bundled())
+}
+
+/// [`propose`] with the bundled engine given (`None`: this install ships none).
+pub fn propose_with(hw: Hardware, opts: &SetupOptions, bundled: Option<crate::engine::Bundled>) -> Proposal {
     let plan = weirdnet_model::hw::plan(&hw, budget(&hw, opts));
     let mut cfg = NodeConfig::default();
     cfg.node.name = opts.name.clone().unwrap_or_else(hostname);
@@ -53,10 +74,25 @@ pub fn propose(hw: Hardware, opts: &SetupOptions) -> Proposal {
     if let Some(p) = opts.bridge_port {
         cfg.app.bridge.port = p;
     }
-    let llama_server = opts.llama_server.clone().or_else(|| find_in_path("llama-server"));
-    if let Some(p) = &llama_server {
+    // The engine shipped with Ymir is the default, resolved by ymird at each start (`managed`), so
+    // a package upgrade upgrades the engine too. An explicit `--llama-server` wins; an install
+    // without an engine of its own falls back to one on PATH, pinned by path because a service's
+    // PATH can differ from the shell's.
+    let pin = |cfg: &mut NodeConfig, p: &PathBuf| {
         cfg.model.llamacpp = format!("system:{}", std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).display());
-    }
+    };
+    let (llama_server, engine) = if let Some(p) = &opts.llama_server {
+        pin(&mut cfg, p);
+        (Some(p.clone()), EngineSource::Given)
+    } else if let Some(b) = bundled {
+        cfg.model.llamacpp = "managed".into();
+        (Some(b.llama_server()), EngineSource::Bundled(b))
+    } else if let Some(p) = find_in_path("llama-server") {
+        pin(&mut cfg, &p);
+        (Some(p), EngineSource::Path)
+    } else {
+        (None, EngineSource::Missing)
+    };
     let vllm = if hw.vllm_supported() { find_in_path("vllm") } else { None };
     cfg.model.vllm = if hw.vllm_supported() { "auto".into() } else { "off".into() };
 
@@ -103,7 +139,7 @@ pub fn propose(hw: Hardware, opts: &SetupOptions) -> Proposal {
             }
         }
     }
-    Proposal { hardware: hw, plan, config: cfg, llama_server, vllm, to_download }
+    Proposal { hardware: hw, plan, config: cfg, llama_server, engine, vllm, to_download }
 }
 
 /// This machine's host name, else `ymir`.
@@ -152,6 +188,7 @@ mod tests {
         assert_eq!(c.roles, Roles::ALL);
         assert_eq!(c.main_model().unwrap().id, "qwen3-8b");
         assert_eq!(c.model.llamacpp, "system:/opt/llama-server");
+        assert_eq!(p.engine, EngineSource::Given);
         assert_eq!(p.to_download.len(), 3);
         // 12 GB of VRAM holds the 8B or the stand-in, not both: they share the swap group.
         assert_eq!(c.model.local.iter().find(|m| m.id == "gemma-4-e2b").unwrap().swap_group.as_deref(), Some("main"));
@@ -167,5 +204,25 @@ mod tests {
         assert_eq!(p.config.model.local.len(), 1);
         assert_eq!(p.config.main_model().unwrap().id, "tiny-model");
         assert!(p.to_download.is_empty());
+    }
+
+    #[test]
+    fn the_bundled_engine_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = dir.path().join("lib/ymir/llama.cpp");
+        std::fs::create_dir_all(&eng).unwrap();
+        let server = crate::engine::program(&eng, "llama-server");
+        std::fs::write(&server, b"x").unwrap();
+        let b = crate::engine::Bundled::at(&eng).unwrap();
+        let opts = SetupOptions { models_dir: Some(dir.path().into()), ..Default::default() };
+        let p = propose_with(nvidia_pc(), &opts, Some(b.clone()));
+        assert_eq!(p.config.model.llamacpp, "managed");
+        assert_eq!(p.llama_server, Some(server));
+        assert_eq!(p.engine, EngineSource::Bundled(b.clone()));
+        // --llama-server still picks an external engine.
+        let opts = SetupOptions { llama_server: Some("/opt/llama-server".into()), ..opts };
+        let p = propose_with(nvidia_pc(), &opts, Some(b));
+        assert_eq!(p.config.model.llamacpp, "system:/opt/llama-server");
+        assert_eq!(p.engine, EngineSource::Given);
     }
 }

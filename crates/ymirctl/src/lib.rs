@@ -200,7 +200,7 @@ pub enum BridgeCmd {
 pub struct SetupArgs {
     #[arg(long)]
     pub name: Option<String>,
-    /// Use this llama-server binary (default: look on PATH).
+    /// Use this external llama-server instead of the one shipped with Ymir.
     #[arg(long)]
     pub llama_server: Option<PathBuf>,
     /// Serve this GGUF (repeatable; the first is the main model) instead of catalog models.
@@ -418,11 +418,17 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     for n in &p.plan.notes {
         writeln!(out, "Note: {n}")?;
     }
-    match &p.llama_server {
-        Some(l) => writeln!(out, "llama.cpp: {}", l.display())?,
-        None => writeln!(
+    match (&p.engine, &p.llama_server) {
+        (setup::EngineSource::Bundled(b), _) => {
+            writeln!(out, "llama.cpp: {}, shipped with Ymir ({})", b.describe(), b.dir.display())?;
+            if let Some(hint) = b.info.as_ref().and_then(|i| ymir_core::engine::advice(&p.hardware, i)) {
+                writeln!(out, "Note: {hint}")?;
+            }
+        }
+        (_, Some(l)) => writeln!(out, "llama.cpp: {} (external)", l.display())?,
+        (_, None) => writeln!(
             out,
-            "llama.cpp: not found. Install llama.cpp (llama-server) or pass --llama-server PATH; managed builds come with weirdnet-backends"
+            "llama.cpp: not found. This Ymir build ships without an engine; install a release package (it includes llama.cpp) or pass --llama-server PATH"
         )?,
     }
     match &p.vllm {

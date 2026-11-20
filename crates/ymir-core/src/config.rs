@@ -672,13 +672,23 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     Ok(std::time::Duration::from_secs_f64(n * mult))
 }
 
-/// `managed` looks in Ymir's engines dir, then `PATH`; `system:/path` uses that; `auto` (vLLM)
-/// looks on `PATH`; `off` disables.
+/// `managed` looks in Ymir's engines dir, then at the engine shipped with this install (see
+/// [`crate::engine`]), then on `PATH`; `system:/path` uses that; `auto` (vLLM) looks on `PATH`;
+/// `off` disables.
 fn resolve_engine(setting: &str, binary: &str, managed_path: &Path) -> Option<PathBuf> {
+    resolve_engine_with(setting, binary, managed_path, crate::engine::bundled().as_ref())
+}
+
+fn resolve_engine_with(setting: &str, binary: &str, managed_path: &Path, bundled: Option<&crate::engine::Bundled>) -> Option<PathBuf> {
     match setting.trim() {
         "off" => None,
         s if s.starts_with("system:") => Some(PathBuf::from(&s["system:".len()..])),
-        "managed" => Some(managed_path.to_path_buf()).filter(|p| p.exists()).or_else(|| find_in_path(binary)),
+        "managed" => Some(managed_path.to_path_buf())
+            .filter(|p| p.exists())
+            .or_else(|| bundled.map(|b| crate::engine::program(&b.dir, binary)).filter(|p| p.is_file()))
+            .or_else(|| find_in_path(binary))
+            // llama.cpp renamed `rpc-server` to `ggml-rpc-server` in its release builds.
+            .or_else(|| (binary == "rpc-server").then(|| find_in_path("ggml-rpc-server")).flatten()),
         _ => find_in_path(binary),
     }
 }
@@ -807,5 +817,26 @@ mod tests {
         assert_eq!(l[0].source, "/models/Qwen3-8B-Q4_K_M.gguf");
         assert_eq!(l[1].source, "/models/x/mine.gguf");
         assert!(l[1].embedding);
+    }
+    #[test]
+    fn managed_prefers_the_engines_dir_then_the_bundled_engine() {
+        let t = tempfile::tempdir().unwrap();
+        let bundle = t.path().join("lib/ymir/llama.cpp");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("llama-server"), b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bundle.join("llama-server"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let b = crate::engine::Bundled::at(&bundle).unwrap();
+        let managed = t.path().join("home/engines/llama.cpp/llama-server");
+        let got = resolve_engine_with("managed", "llama-server", &managed, Some(&b));
+        assert_eq!(got, Some(bundle.join("llama-server")));
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::write(&managed, b"x").unwrap();
+        assert_eq!(resolve_engine_with("managed", "llama-server", &managed, Some(&b)), Some(managed.clone()));
+        assert_eq!(resolve_engine_with("system:/opt/ls", "llama-server", &managed, Some(&b)), Some(PathBuf::from("/opt/ls")));
+        assert_eq!(resolve_engine_with("off", "llama-server", &managed, Some(&b)), None);
     }
 }

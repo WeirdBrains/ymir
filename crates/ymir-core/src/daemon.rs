@@ -106,7 +106,7 @@ impl Daemon {
             let engines = cfg.engines(&paths);
             if engines.is_empty() {
                 tracing::warn!(
-                    "model role: no engine found (llama.cpp is `{}`); loads will fail until llama-server is installed",
+                    "model role: no engine found (llama.cpp is `{}`, and this install ships no engine); loads will fail until llama-server is installed",
                     cfg.model.llamacpp
                 );
             }
