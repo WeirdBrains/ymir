@@ -223,9 +223,9 @@ pub struct SetupArgs {
     /// Use this external llama-server instead of the one shipped with Ymir.
     #[arg(long)]
     pub llama_server: Option<PathBuf>,
-    /// Engine for chat models: llamacpp, mlx (Apple Silicon) or mistralrs (default: mlx on Apple
-    /// Silicon Macs, llamacpp elsewhere). Embedding models always use llama.cpp.
-    #[arg(long, value_parser = ["llamacpp", "mlx", "mistralrs"])]
+    /// Engine for chat models: llamacpp or mlx (Apple Silicon; the default there). Embedding and
+    /// vision models always use llama.cpp.
+    #[arg(long, value_parser = ["llamacpp", "mlx"])]
     pub backend: Option<String>,
     /// Serve this GGUF (repeatable; the first is the main model) instead of catalog models.
     #[arg(long = "model")]
@@ -462,16 +462,14 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
             "llama.cpp: not found. This Ymir build ships without an engine; install a release package (it includes llama.cpp) or pass --llama-server PATH"
         )?,
     }
-    match (p.backend.as_str(), &p.mlx_server, &p.mistralrs) {
-        ("mlx", Some(s), _) => writeln!(out, "MLX-LM: {} (chat models; embeddings use llama.cpp)", s.display())?,
-        ("mlx", None, _) => writeln!(
+    match (p.backend.as_str(), &p.mlx_server) {
+        ("mlx", Some(s)) => writeln!(out, "MLX-LM: {} (chat models; embeddings use llama.cpp)", s.display())?,
+        ("mlx", None) => writeln!(
             out,
             "MLX-LM: not installed (chat models). `--download` installs mlx-lm {} into {}",
             ymir_core::mlx::MLX_LM_VERSION,
             ymir_core::mlx::venv(&paths.engines()).display()
         )?,
-        ("mistralrs", Some(m), _) | ("mistralrs", _, Some(m)) => writeln!(out, "mistral.rs: {} (chat models)", m.display())?,
-        ("mistralrs", _, None) => writeln!(out, "mistral.rs: not found (put `mistralrs` on PATH or set model.mistralrs); chat models will not load")?,
         _ => {}
     }
     match &p.vllm {
@@ -487,7 +485,13 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
         let missing =
             if p.to_download.iter().any(|e| e.spec.id == m.id) || p.mlx_download.iter().any(|w| w.id == m.id) { ", not downloaded" } else { "" };
         let engine = m.backend.as_deref().unwrap_or("llamacpp");
-        writeln!(out, "  {} [{}] {engine}{size}{missing}", m.id, m.role.as_deref().unwrap_or("chat"))?;
+        let vision = match ymir_core::vision::for_model(&m.id) {
+            Some(v) if engine == "llamacpp" => {
+                format!(", images (projector {}{})", weirdnet_model::human(v.size), if p.projectors.contains(&v) { ", not downloaded" } else { "" })
+            }
+            _ => String::new(),
+        };
+        writeln!(out, "  {} [{}] {engine}{size}{missing}{vision}", m.id, m.role.as_deref().unwrap_or("chat"))?;
     }
     if args.dry_run {
         writeln!(out, "\n{}", p.config.to_toml()?)?;
@@ -531,6 +535,27 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
             p.to_download.retain(|d| d.spec.id != e.spec.id);
         }
     }
+    if args.download && !p.projectors.is_empty() {
+        let store = weirdnet_model::ModelStore::new(p.config.models_dir());
+        for v in p.projectors.clone() {
+            let spec = v.spec();
+            for line in spec.consent_text(store.hub()) {
+                writeln!(out, "{line}")?;
+            }
+            if !args.yes && !confirm(out, input, "Download it? [y/N] ")? {
+                writeln!(out, "Skipped {} (the model works, without images)", spec.id)?;
+                continue;
+            }
+            let st = store.clone();
+            let path = tokio::task::spawn_blocking(move || {
+                let consent = weirdnet_model::Consent::given(&spec);
+                weirdnet_model::download(&st, &spec, &consent, &mut |_| true)
+            })
+            .await??;
+            writeln!(out, "Downloaded {}", path.display())?;
+            p.projectors.retain(|x| x.model != v.model);
+        }
+    }
     if args.download && p.backend == "mlx" && (p.mlx_server.is_none() || !p.mlx_download.is_empty()) {
         mlx_setup(paths, &mut p, args.yes, out, input).await?;
     }
@@ -538,7 +563,14 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     ymir_core::token::load_or_create(paths)?;
     writeln!(out, "\nWrote {}", cfg_path.display())?;
     writeln!(out, "Roles: {}", p.config.roles.names().join(", "))?;
-    let pending: Vec<&str> = p.to_download.iter().map(|e| e.spec.id.as_str()).chain(p.mlx_download.iter().map(|w| w.id)).collect();
+    let projectors: Vec<String> = p.projectors.iter().map(|v| format!("{} projector", v.model)).collect();
+    let pending: Vec<&str> = p
+        .to_download
+        .iter()
+        .map(|e| e.spec.id.as_str())
+        .chain(p.mlx_download.iter().map(|w| w.id))
+        .chain(projectors.iter().map(String::as_str))
+        .collect();
     if !pending.is_empty() {
         writeln!(out, "Not downloaded yet: {} (run `ymirctl setup --download --force`)", pending.join(", "))?;
     }

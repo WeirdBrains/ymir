@@ -4,6 +4,10 @@
 //! for `YMIR_MOCK_LOAD_MS` (default 200) after start, like a model loading. `/v1/completions`
 //! continues the prompt with " once upon a time"; `/v1/embeddings` returns
 //! `[chars, words, 1, 0]` per input.
+//!
+//! Images: with `--mmproj FILE` (a file that exists), image parts in a chat message are counted and
+//! the answer ends with ` [N image(s)]`; without one, a request with an image fails like
+//! `llama-server`'s ("image input is not supported").
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,6 +23,7 @@ use serde_json::{Value, json};
 struct Mock {
     alias: String,
     key: Option<String>,
+    vision: bool,
     ready_at: Instant,
 }
 
@@ -27,11 +32,12 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let host = flag("--host").unwrap_or_else(|| "127.0.0.1".into());
-    let port: u16 = flag("--port").or_else(|| flag("-p")).and_then(|p| p.parse().ok()).unwrap_or(8080);
+    let port: u16 = flag("--port").and_then(|p| p.parse().ok()).unwrap_or(8080);
     let alias = flag("--alias").or_else(|| flag("--model")).unwrap_or_else(|| "mock".into());
     let load_ms = std::env::var("YMIR_MOCK_LOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     assert_eq!(host, "127.0.0.1", "engines must bind loopback only");
-    let st = Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), ready_at: Instant::now() + Duration::from_millis(load_ms) });
+    let vision = flag("--mmproj").is_some_and(|p| std::path::Path::new(&p).is_file());
+    let st = Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), vision, ready_at: Instant::now() + Duration::from_millis(load_ms) });
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(models))
@@ -127,13 +133,23 @@ async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body):
     if !matches!(body["model"].as_str(), Some(m) if m == st.alias || m == "default_model") {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("unknown model {}", body["model"])}}))).into_response();
     }
-    let said = body["messages"]
-        .as_array()
-        .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
-        .and_then(|m| m["content"].as_str())
-        .unwrap_or("")
-        .to_string();
-    let answer = format!("Hello from {}! You said: {said}", st.alias);
+    let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user"));
+    let content = last_user.map(|m| &m["content"]);
+    let parts: &[Value] = content.and_then(Value::as_array).map_or(&[], Vec::as_slice);
+    let images = parts.iter().filter(|p| p["type"] == "image_url").count();
+    if images > 0 && !st.vision {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": {"code": 500, "message": "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj", "type": "server_error"}})),
+        )
+            .into_response();
+    }
+    let said = match content.and_then(Value::as_str) {
+        Some(t) => t.to_string(),
+        None => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+    };
+    let seen = if images > 0 { format!(" [{images} image(s)]") } else { String::new() };
+    let answer = format!("Hello from {}! You said: {said}{seen}", st.alias);
     // A trailing assistant message is a prefix to continue (llama.cpp prefill), as a resume
     // sends: only what comes after it streams.
     let prefix = body["messages"].as_array().and_then(|m| m.last()).filter(|m| m["role"] == "assistant").and_then(|m| m["content"].as_str());

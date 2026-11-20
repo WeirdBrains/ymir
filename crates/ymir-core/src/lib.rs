@@ -29,6 +29,7 @@ pub mod shim;
 pub mod tasks;
 pub mod token;
 pub mod update;
+pub mod vision;
 
 pub use config::NodeConfig;
 pub use coordinator::Coordinator;

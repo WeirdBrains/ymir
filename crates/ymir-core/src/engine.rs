@@ -105,22 +105,6 @@ pub fn candidates(exe: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// A program shipped beside the bundled llama.cpp in its own directory (`mistral.rs/mistralrs`),
-/// for an executable at `exe`.
-pub fn sibling_from(exe: &Path, dir: &str, name: &str) -> Option<PathBuf> {
-    candidates(exe).into_iter().filter_map(|c| c.parent().map(|p| program(&p.join(dir), name))).find(|p| p.is_file())
-}
-
-/// `mistralrs` shipped with this install (`$YMIR_ENGINE_DIR/../mistral.rs/` when that is set).
-pub fn bundled_mistralrs() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(ENGINE_DIR_ENV).filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir).parent().map(|p| program(&p.join("mistral.rs"), "mistralrs")).filter(|p| p.is_file());
-    }
-    let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    sibling_from(&exe, "mistral.rs", "mistralrs")
-}
-
 /// The bundled engine for an executable at `exe`.
 pub fn bundled_from(exe: &Path) -> Option<Bundled> {
     candidates(exe).into_iter().find_map(Bundled::at)

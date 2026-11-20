@@ -1,21 +1,21 @@
 //! `ymir-engine`: the program the supervisor starts for llama.cpp-kind models when a node also
-//! serves models on MLX (macOS) or mistral.rs. It takes `llama-server`'s arguments and picks the
+//! serves models on MLX-LM (Apple Silicon). It takes `llama-server`'s arguments and picks the
 //! engine from the model source:
 //!
 //! | Source | Engine |
 //! |---|---|
 //! | `mlx:<dir or Hub id>` | `mlx_lm.server`, behind a small proxy |
-//! | `mistralrs:<GGUF or dir>` | `mistralrs serve`, behind the same proxy |
 //! | anything else (a GGUF path) | `llama-server`, exec'd with the arguments unchanged |
 //!
-//! The proxy makes the other engines look like `llama-server` to the supervisor and to `ymird`: it
+//! The proxy makes MLX-LM look like `llama-server` to the supervisor and to `ymird`: it
 //! answers `/health` (200 once the model is loaded and has produced a token), `/v1/models` (the
 //! alias), checks `LLAMA_API_KEY` as a bearer token, rewrites the request's `model` to what the
-//! engine expects, and streams everything else through. Each engine still runs as its own process
+//! engine expects, turns away image and audio input (MLX-LM's server takes text only) and streams
+//! everything else through. Each engine still runs as its own process
 //! (the proxy and the engine die together), so a crash stays out of `ymird`.
 //!
-//! Interim: `weirdnet-backends` keys engines by kind with one program per kind, and has no MLX or
-//! mistral.rs adapter. Once it has (proposal in docs/DESIGN.md), this goes away.
+//! Interim: `weirdnet-backends` keys engines by kind with one program per kind, and has no MLX
+//! adapter. Once it has (proposal in docs/DESIGN.md), this goes away.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,8 +34,6 @@ use serde_json::{Value, json};
 
 /// Source prefix for models served by MLX-LM.
 pub const MLX: &str = "mlx:";
-/// Source prefix for models served by mistral.rs.
-pub const MISTRALRS: &str = "mistralrs:";
 /// The program name of the shim.
 pub const PROGRAM: &str = "ymir-engine";
 /// Overrides where `ymird` looks for the shim (default: next to the running executable).
@@ -44,7 +42,6 @@ pub const SHIM_ENV: &str = "YMIR_ENGINE_SHIM";
 /// Shim-only flags (stripped before an engine sees the arguments).
 pub const LLAMA_FLAG: &str = "--ymir-llama-server";
 pub const MLX_FLAG: &str = "--ymir-mlx-server";
-pub const MISTRALRS_FLAG: &str = "--ymir-mistralrs";
 
 /// Where the shim is: `$YMIR_ENGINE_SHIM`, else next to the running executable.
 pub fn locate() -> Option<PathBuf> {
@@ -61,25 +58,17 @@ pub fn locate() -> Option<PathBuf> {
 pub enum Backend {
     Llamacpp,
     Mlx,
-    Mistralrs,
 }
 
 impl Backend {
     pub fn of(source: &str) -> (Self, &str) {
-        if let Some(s) = source.strip_prefix(MLX) {
-            (Self::Mlx, s)
-        } else if let Some(s) = source.strip_prefix(MISTRALRS) {
-            (Self::Mistralrs, s)
-        } else {
-            (Self::Llamacpp, source)
-        }
+        if let Some(s) = source.strip_prefix(MLX) { (Self::Mlx, s) } else { (Self::Llamacpp, source) }
     }
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Llamacpp => "llama.cpp",
             Self::Mlx => "MLX-LM",
-            Self::Mistralrs => "mistral.rs",
         }
     }
 }
@@ -94,10 +83,8 @@ pub struct Args {
     pub ctx: Option<u32>,
     pub slots: Option<u32>,
     pub embedding: bool,
-    pub mmproj: Option<String>,
     pub llama_server: Option<PathBuf>,
     pub mlx_server: Option<PathBuf>,
-    pub mistralrs: Option<PathBuf>,
     /// Everything but the shim's own flags, for `llama-server`.
     pub passthrough: Vec<String>,
 }
@@ -108,18 +95,16 @@ pub fn parse(args: &[String]) -> Args {
     while i < args.len() {
         let flag = args[i].as_str();
         let val = args.get(i + 1).cloned();
-        let shim_only = matches!(flag, LLAMA_FLAG | MLX_FLAG | MISTRALRS_FLAG);
+        let shim_only = matches!(flag, LLAMA_FLAG | MLX_FLAG);
         match (flag, &val) {
             (LLAMA_FLAG, Some(v)) => a.llama_server = Some(v.into()),
             (MLX_FLAG, Some(v)) => a.mlx_server = Some(v.into()),
-            (MISTRALRS_FLAG, Some(v)) => a.mistralrs = Some(v.into()),
             ("--model" | "-m", Some(v)) => a.model.clone_from(v),
             ("--host", Some(v)) => a.host.clone_from(v),
             ("--port", Some(v)) => a.port = v.parse().unwrap_or(8080),
             ("--alias", Some(v)) => a.alias.clone_from(v),
             ("--ctx-size" | "-c", Some(v)) => a.ctx = v.parse().ok(),
             ("--parallel" | "-np", Some(v)) => a.slots = v.parse().ok(),
-            ("--mmproj", Some(v)) => a.mmproj = Some(v.clone()),
             ("--embedding" | "--embeddings", _) => a.embedding = true,
             _ => {}
         }
@@ -137,7 +122,7 @@ pub fn parse(args: &[String]) -> Args {
 }
 
 /// The command for the engine behind the proxy, on loopback `port`, and the `model` value
-/// requests must carry (empty: whatever the engine lists first in `/v1/models`).
+/// requests must carry.
 pub fn upstream(a: &Args, backend: Backend, source: &str, port: u16) -> Result<(PathBuf, Vec<String>, String)> {
     let port = port.to_string();
     match backend {
@@ -150,38 +135,6 @@ pub fn upstream(a: &Args, backend: Backend, source: &str, port: u16) -> Result<(
             let max = a.ctx.unwrap_or(32768).to_string();
             let args = vec!["--model".into(), source.into(), "--host".into(), "127.0.0.1".into(), "--port".into(), port, "--max-tokens".into(), max];
             Ok((prog, args, "default_model".into()))
-        }
-        Backend::Mistralrs => {
-            let prog = a.mistralrs.clone().context("this install has no mistral.rs (set backend = \"llamacpp\" for this model)")?;
-            let mut args: Vec<String> =
-                vec!["serve".into(), "--host".into(), "127.0.0.1".into(), "-p".into(), port, "--no-ui".into(), "--disable-metrics".into()];
-            args.extend(["--token-source".into(), "none".into()]);
-            if let Some(s) = a.slots {
-                args.extend(["--max-seqs".into(), s.to_string()]);
-            }
-            if let Some(c) = a.ctx {
-                args.extend(["--max-model-len".into(), c.to_string()]);
-                // Size the paged KV cache to the context, not to a fraction of (unified) memory.
-                args.extend(["--kv-cache".into(), format!("{}tokens", u64::from(c) * u64::from(a.slots.unwrap_or(1)))]);
-            }
-            if a.embedding {
-                args.push("embedding".into());
-            }
-            let p = std::path::Path::new(source);
-            if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")) {
-                let dir = p.parent().map_or_else(|| ".".into(), |d| d.to_string_lossy().into_owned());
-                let file = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                args.extend(["-m".into(), dir, "-f".into(), file]);
-                if let Some(m) = &a.mmproj {
-                    args.extend([
-                        "--mmproj".into(),
-                        std::path::Path::new(m).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
-                    ]);
-                }
-            } else {
-                args.extend(["-m".into(), source.into()]);
-            }
-            Ok((prog, args, String::new()))
         }
         Backend::Llamacpp => bail!("llama.cpp runs directly"),
     }
@@ -237,7 +190,7 @@ fn exec_llama(a: &Args) -> ExitCode {
 
 struct Proxy {
     upstream: String,
-    model: std::sync::OnceLock<String>,
+    model: String,
     alias: String,
     key: Option<String>,
     http: reqwest::Client,
@@ -256,7 +209,7 @@ async fn proxy(a: Args, backend: Backend, source: String) -> Result<u8> {
         .with_context(|| format!("starting {}", prog.display()))?;
     let st = Arc::new(Proxy {
         upstream: format!("http://127.0.0.1:{port}"),
-        model: if model.is_empty() { std::sync::OnceLock::new() } else { std::sync::OnceLock::from(model) },
+        model,
         alias: a.alias.clone(),
         key: std::env::var("LLAMA_API_KEY").ok().filter(|k| !k.is_empty()),
         http: reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).build()?,
@@ -293,19 +246,7 @@ async fn terminated() {
 /// Ready means the engine has loaded the model and produced a token, not just opened its port
 /// (MLX-LM answers `/health` before the weights are in).
 async fn warm(st: Arc<Proxy>) {
-    while st.model.get().is_none() {
-        let listed = async {
-            let v: Value = st.http.get(format!("{}/v1/models", st.upstream)).timeout(Duration::from_secs(5)).send().await.ok()?.json().await.ok()?;
-            v["data"][0]["id"].as_str().map(str::to_string)
-        };
-        match listed.await {
-            Some(id) => {
-                let _ = st.model.set(id);
-            }
-            None => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
-    }
-    let body = json!({"model": st.model.get(), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "stream": false});
+    let body = json!({"model": st.model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "stream": false});
     loop {
         let r = st.http.post(format!("{}/v1/chat/completions", st.upstream)).json(&body).timeout(Duration::from_secs(600)).send().await;
         match r {
@@ -349,7 +290,18 @@ fn deny(st: &Proxy, headers: &HeaderMap) -> Option<Response> {
     })
 }
 
-/// Request bodies can carry images; allow them.
+/// Image or audio parts in a chat request (OpenAI content parts).
+fn has_media(v: &Value) -> bool {
+    v["messages"].as_array().is_some_and(|ms| {
+        ms.iter().any(|m| {
+            m["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|p| matches!(p["type"].as_str(), Some("image_url" | "input_audio" | "image"))))
+        })
+    })
+}
+
+/// Request bodies can be large (long prompts); allow them.
 const MAX_BODY: usize = 256 << 20;
 
 async fn forward(State(st): State<Arc<Proxy>>, req: Request) -> Response {
@@ -365,9 +317,14 @@ async fn forward(State(st): State<Arc<Proxy>>, req: Request) -> Response {
     };
     let body = match serde_json::from_slice::<Value>(&bytes) {
         Ok(mut v) if v.get("model").is_some() => {
-            if let Some(m) = st.model.get() {
-                v["model"] = Value::String(m.clone());
+            if has_media(&v) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": {"code": 400, "message": "this model runs on MLX-LM, which takes text only; send images to a llama.cpp model", "type": "invalid_request_error"}})),
+                )
+                    .into_response();
             }
+            v["model"] = Value::String(st.model.clone());
             serde_json::to_vec(&v).unwrap_or_else(|_| bytes.to_vec())
         }
         _ => bytes.to_vec(),
@@ -430,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn mlx_and_mistralrs_commands() {
+    fn mlx_command() {
         let mut a = parse(&v(&["--model", "mlx:/m/mlx/Qwen3-8B-4bit", "--port", "1", "--ctx-size", "4096", "--ymir-mlx-server", "/v/mlx_lm.server"]));
         let (b, src) = Backend::of(&a.model);
         let (prog, args, model) = upstream(&a, b, src, 9).unwrap();
@@ -439,23 +396,8 @@ mod tests {
         assert_eq!(model, "default_model");
         a.embedding = true;
         assert!(upstream(&a, b, src, 9).is_err());
-
-        let a = parse(&v(&[
-            "--model",
-            "mistralrs:/m/g.gguf",
-            "--mmproj",
-            "/m/p.gguf",
-            "--parallel",
-            "2",
-            "--ctx-size",
-            "4096",
-            "--ymir-mistralrs",
-            "/b/mistralrs",
-        ]));
-        let (b, src) = Backend::of(&a.model);
-        let (_, args, _) = upstream(&a, b, src, 9).unwrap();
-        for w in [["-m", "/m"], ["-f", "g.gguf"], ["--mmproj", "p.gguf"], ["--max-seqs", "2"], ["--kv-cache", "8192tokens"]] {
-            assert!(args.windows(2).any(|x| x == w), "{w:?} in {args:?}");
-        }
+        let img = json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "?"}, {"type": "image_url", "image_url": {"url": "data:,"}}]}]});
+        assert!(has_media(&img));
+        assert!(!has_media(&json!({"messages": [{"role": "user", "content": "hi"}]})));
     }
 }
