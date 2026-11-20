@@ -1665,7 +1665,7 @@ to `weirdnet-sync` 0.6 (the Identity store), which would put two sync versions i
 - **Generic code in Ymir.** The conversation schema, store, assembly, retention and the saved log belong in
   `weirdnet-agent`'s `context` module (and the log's persistence in `weirdnet-sync` or its storage trait);
   they are `ymir-core::context` and `membership.rs` until then, behind one interface.
-- **Bragi doesn't use the store yet** (B4), and the mock engine stands in for llama.cpp; the real-engine
+- **Bragi uses the store for history since B4, but not yet for requests**, and the mock engine stands in for llama.cpp; the real-engine
   resume is the same prefix path the engines already take.
 - **Cross-machine** runs are still pending (the laptop).
 
@@ -1917,6 +1917,54 @@ x86_64 apk (debug-signed, demo mode). Screenshots are in `~/bragi-shots/b3/` on 
   `weirdnet-net` range (it pins `=0.8.0`).
 - **The aab is 70 MB** because it carries all ABIs, and the apks are 12 to 14 MB each; no size work was done.
 - **No macOS bundle, Windows installer or notarization.**
+
+## B4 status (in progress 2026-11-19)
+
+History moved onto the shared context store. The optional parts are not built.
+
+**Built and run:**
+
+- **Conversations are sealed `ymir.context` records.** `bragi-core`'s `context` module copies Ymir's M5
+  store layout (`{conversation}/meta`, `{conversation}/m/{id}`, sealed `weirdnet-sync` records), so a
+  conversation written by Bragi can be read by a Ymir pool and the other way round; Bragi's own fields (how an
+  answer ended, its node, the cache and stand-in flags, resumes) ride along as extra JSON keys, which Ymir
+  ignores. The generic part belongs in `weirdnet-agent` and is copied here until a release has it.
+- **`Identity` carries the op log and writes records.** It keeps `log.json` (reloaded on start so sequence numbers
+  carry on), configures the sealed type, and pulls it from every other device on each sync pass. A lone device
+  starts the key chain itself. With other devices the first rotation comes from a sync pass, so a write
+  before then waits: it is kept in `identity/pending.json`, shows in reads, and goes out once the key is there.
+- **History is the store.** `History` keeps its API (`load`, `save`, `page`, `delete`); `save` writes only the
+  messages that changed, a streaming answer updates one record in place, and a delete is a tombstone that
+  reaches the other devices. B1's local files are imported once on the first linked start and moved to
+  `history.imported`. Sync passes now run right after going online and on resume (`Core::sync_now`); both
+  shells redraw when a pass changed history.
+- **Test.** `tests/sync.rs`: two cores linked to one demo node; one chats, the other reads it after sync passes,
+  answers from the second device, and a delete on one disappears from the other. 6 of 6 runs passed after a fix to
+  the harness (below).
+- **Scenarios.** Both shells now end with a "second laptop": a second core on the demo identity asks a question and
+  syncs it over, and it appears in the history list and opens (desktop screenshots 12 and 13, Android 12 and 13).
+
+**Tests:** `cargo fmt --check`, `clippy -D warnings` and `cargo test --workspace` pass (core 7 unit + 6 pool + 3
+scenario + 1 sync, desktop 3). Desktop scenario under Xvfb with `env -i` passed (13 screenshots), Android on a headless
+google_apis (API 35) emulator with a throwaway AVD and SDK root, deleted afterwards, passed (13 screenshots, release x86_64
+apk, debug-signed, demo mode). Screenshots: `~/bragi-shots/b4/` on the dev box.
+
+**Not built, and why:**
+
+- **Push wake-ups: blocked on the Weirdnet lead.** `weirdnet-push` is unpublished.
+- **On-device model: not built.** It needs a llama.cpp build and model packaging for Android and the desktop, and a
+  place in the pool as a local node; that is its own piece of work, not started.
+- **Not run across real machines or with Morph or Ymir as the other device** (test identities, memory transport):
+  needs m3talsmith to link two real devices. Ymir's own sealed-context read of a Bragi record is checked only for the JSON fields it
+  reads, not against a running Ymir pool.
+- **Requests still send whole messages.** Bragi does not send `context_ref` yet, so a Ymir node reads no history
+  from the store for Bragi's chats; that follows once the node side of M5 is in use.
+- **Keys:** a conversation written on a device that has not yet received the first epoch key waits (see above); it is
+  unsealed on that device's disk until then, like B1's history was.
+- **Test harness finding:** devices on the memory transport find each other by address only, and the key chain's first
+  rotation is made by the pulling device with the lowest peer id, so a stand-in device that never pulls can stall it.
+  The demo node now pulls too (`DemoNode::sync_with`). Real devices run sync passes and are not affected.
+- **No merge of two devices editing one message** beyond last-writer-wins per record, and no retention or expiry yet.
 
 ## Decisions (2026-11-19)
 
