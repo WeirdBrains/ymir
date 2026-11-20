@@ -56,6 +56,10 @@ pub struct NetworkSection {
     pub slots: usize,
     #[serde(default = "queue")]
     pub queue: usize,
+    /// Batch or background requests one device may have here at once (default: half of
+    /// `slots + queue`), so it can't leave the user's other devices with `Busy`.
+    #[serde(default)]
+    pub batch_per_device: Option<usize>,
     /// Seconds between sync passes against the user's other devices (roster, conversations).
     #[serde(default = "sync_secs")]
     pub sync_secs: u64,
@@ -89,6 +93,7 @@ impl Default for NetworkSection {
             peers: Vec::new(),
             slots: slots(),
             queue: queue(),
+            batch_per_device: None,
             sync_secs: sync_secs(),
         }
     }

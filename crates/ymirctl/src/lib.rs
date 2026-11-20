@@ -82,6 +82,19 @@ pub enum Cmd {
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
     },
+    /// Spread a list of prompts (one per line of FILE, or stdin with `-`) over the pool at batch
+    /// priority; prints each answer in order.
+    Batch {
+        file: String,
+        #[arg(long, short)]
+        model: Option<String>,
+        /// Tasks in flight at once.
+        #[arg(long)]
+        concurrency: Option<usize>,
+        /// Extra tries for a task that fails in a way another try could fix.
+        #[arg(long)]
+        retries: Option<u32>,
+    },
     /// This node's place in your Weirdnet: link it, link other devices, revoke.
     Pool {
         #[command(subcommand)]
@@ -236,6 +249,29 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Context { cmd } => context_cmd(&paths, out, cmd).await,
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
+        }
+        Cmd::Batch { file, model, concurrency, retries } => {
+            let text = if file == "-" {
+                let mut s = String::new();
+                input.read_to_string(&mut s)?;
+                s
+            } else {
+                std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
+            };
+            let prompts: Vec<String> = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+            let r = control::request(&paths.socket(), &ControlRequest::Batch { prompts, model, concurrency, retries }).await?;
+            if !r.ok {
+                bail!("{}", r.message.unwrap_or_default());
+            }
+            for i in &r.batch {
+                if i.ok {
+                    writeln!(out, "{}\t{}\t{}", i.index, i.node, i.text.replace('\n', " "))?;
+                } else {
+                    writeln!(out, "{}\tFAILED after {} tries: {}", i.index, i.attempts, i.text)?;
+                }
+            }
+            writeln!(out, "# {}", r.message.unwrap_or_default())?;
+            Ok(())
         }
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;

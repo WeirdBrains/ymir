@@ -65,6 +65,16 @@ pub enum ControlRequest {
         #[serde(default)]
         model: Option<String>,
     },
+    /// Fan `prompts` out over the pool at batch priority and wait for all the answers.
+    Batch {
+        prompts: Vec<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        concurrency: Option<usize>,
+        #[serde(default)]
+        retries: Option<u32>,
+    },
 }
 
 fn user() -> String {
@@ -160,6 +170,9 @@ pub struct ControlResponse {
     pub chat: Option<ChatResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversations: Vec<ConversationView>,
+    /// The outcomes of a [`ControlRequest::Batch`], in prompt order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<crate::batch::BatchItem>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -185,10 +198,10 @@ pub struct ConversationView {
 
 impl ControlResponse {
     fn ok(message: impl Into<String>) -> Self {
-        Self { ok: true, message: Some(message.into()), status: None, chat: None, conversations: Vec::new() }
+        Self { ok: true, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new() }
     }
     fn err(message: impl Into<String>) -> Self {
-        Self { ok: false, message: Some(message.into()), status: None, chat: None, conversations: Vec::new() }
+        Self { ok: false, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new() }
     }
 }
 
@@ -272,6 +285,7 @@ impl ControlHandler {
                     message: None,
                     chat: None,
                     conversations: Vec::new(),
+                    batch: Vec::new(),
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -395,6 +409,21 @@ impl ControlHandler {
                     }
                     Err(i) => ControlResponse::err(format!("{} (after {} characters)", i.error, i.partial.text.chars().count())),
                 }
+            }
+            ControlRequest::Batch { prompts, model, concurrency, retries } => {
+                let Some(pool) = &self.pool else { return ControlResponse::err("batch needs the app role") };
+                let mut o = crate::batch::BatchOptions::new(format!(
+                    "batch-{:x}",
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+                ));
+                o.model = model;
+                o.concurrency = concurrency.unwrap_or(o.concurrency);
+                o.retries = retries.unwrap_or(o.retries);
+                let items = crate::batch::run(pool.clone(), prompts, o, weirdnet_agent::CancelToken::new()).await;
+                let failed = items.iter().filter(|i| !i.ok).count();
+                let mut r = ControlResponse::ok(format!("{} task(s), {failed} failed", items.len()));
+                r.batch = items;
+                r
             }
             ControlRequest::PoolRevoke { peer } => {
                 let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };

@@ -7,12 +7,14 @@
 //! ([`remote`]).
 
 pub mod balance;
+pub mod batch;
 pub mod client;
 pub mod config;
 pub mod context;
 pub mod control;
 pub mod coordinator;
 pub mod daemon;
+pub mod fair;
 pub mod host;
 pub mod membership;
 pub mod model_node;

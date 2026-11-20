@@ -133,6 +133,8 @@ pub struct Coordinator {
     running: Arc<AtomicUsize>,
     /// Chooses among replicas (M6).
     balance: Balancer,
+    /// Per-device cap on batch work (M6).
+    fair: crate::fair::Fair,
 }
 
 /// Where a request goes.
@@ -175,7 +177,26 @@ impl Coordinator {
     }
 
     pub fn with_options(nodes: Vec<Arc<dyn ModelNode>>, main: Option<String>, cache: Arc<dyn AnswerCache>, opts: CoordinatorOptions) -> Self {
-        Self { nodes: RwLock::new(nodes), main, cache, opts, loading: Arc::new(Mutex::new(HashSet::new())), running: Arc::new(AtomicUsize::new(0)), balance: Balancer::new() }
+        Self {
+            nodes: RwLock::new(nodes),
+            main,
+            cache,
+            opts,
+            loading: Arc::new(Mutex::new(HashSet::new())),
+            running: Arc::new(AtomicUsize::new(0)),
+            balance: Balancer::new(),
+            fair: crate::fair::Fair::new(),
+        }
+    }
+
+    /// Limits each device to `cap` batch or background requests here at once.
+    pub fn set_batch_cap(&self, cap: usize) {
+        self.fair.set_cap(cap);
+    }
+
+    /// Counts a batch request from `device` against its cap (`Busy` when it has too many).
+    pub fn enter_batch(&self, device: &str) -> Result<crate::fair::Hold, RemoteError> {
+        self.fair.enter(device)
     }
 
     /// Whether some node serving `model` can continue an answer from a prefix (what a resume
@@ -300,7 +321,13 @@ impl Coordinator {
         }
         let cands: Vec<Candidate> = ready
             .iter()
-            .map(|(n, s)| Candidate { node: n.name().to_string(), local: n.local(), reported: s.in_flight, slots: s.slots.map_or(1, |x| x as usize), cold: None })
+            .map(|(n, s)| Candidate {
+                node: n.name().to_string(),
+                local: n.local(),
+                reported: s.in_flight,
+                slots: s.slots.map_or(1, |x| x as usize),
+                cold: None,
+            })
             .collect();
         let best = self.balance.choose(model, &cands).map(|i| ready.swap_remove(i));
         match best.or(fallback) {

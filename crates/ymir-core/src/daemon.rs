@@ -126,7 +126,9 @@ impl Daemon {
             }
             let cache: Arc<dyn AnswerCache> =
                 if cfg.inference.cache.mode == "off" { Arc::new(NoCache) } else { Arc::new(ExactCache::<weirdnet_semcache::MemoryStore>::new(256)) };
-            Some(Arc::new(Coordinator::with_options(nodes, main_model.clone(), cache, cfg.coordinator_options())))
+            let coord = Coordinator::with_options(nodes, main_model.clone(), cache, cfg.coordinator_options());
+            coord.set_batch_cap(cfg.network.batch_per_device.unwrap_or_else(|| ((cfg.network.slots + cfg.network.queue) / 2).max(1)));
+            Some(Arc::new(coord))
         } else {
             None
         };

@@ -102,8 +102,11 @@ impl InferHost for InferenceHost {
         if matches!(request.input, v2::Input::Context(_)) && self.context.is_none() {
             return Err(RemoteError::BadRequest { message: "this node holds no conversations".into() });
         }
+        // A device's batch work is capped, so it can't crowd out the others (interactive is not).
+        let hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&caller.peer)?) };
         let prepared = self.coord.prepare(request)?;
         Ok(Arc::new(RoutedBackend {
+            _hold: hold,
             coord: self.coord.clone(),
             name: prepared.model.clone(),
             prepared: Mutex::new(Some(prepared)),
@@ -121,6 +124,7 @@ impl InferHost for InferenceHost {
 /// One infer/2 request, routed when it was opened (so `Accepted` names the model that answers,
 /// the stand-in included).
 struct RoutedBackend {
+    _hold: Option<crate::fair::Hold>,
     coord: Arc<Coordinator>,
     name: String,
     prepared: Mutex<Option<Prepared>>,

@@ -166,7 +166,9 @@ impl Dispatch<'_> {
 
 impl Drop for Dispatch<'_> {
     fn drop(&mut self) {
-        if !self.done && let Some(s) = self.balancer.lock().get_mut(&self.node) {
+        if !self.done
+            && let Some(s) = self.balancer.lock().get_mut(&self.node)
+        {
             s.sent = s.sent.saturating_sub(1);
         }
     }
