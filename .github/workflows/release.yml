@@ -1,0 +1,174 @@
+# Build Ymir's release files for every platform and engine variant, with llama.cpp bundled
+# (scripts/engine.py, pinned in packaging/engines/llama.cpp.toml), and smoke-test them: each
+# default Linux and macOS archive is unpacked and runs a real tiny GGUF through ymirctl setup,
+# ymird and the bridge (crates/ymir-testkit/tests/real_bundle.rs).
+#
+# Runs on v* tags and by hand. It only builds and uploads workflow artifacts: publishing a GitHub
+# release, TAUR or Homebrew stays with scripts/weirdnet_release.py (see release.toml `next`).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # SmolLM2-135M-Instruct, Q4_K_M (105 MB, Apache-2.0): the smoke test's model.
+  SMOKE_GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf
+
+jobs:
+  linux:
+    name: linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 keeps ymird's glibc requirement low (2.35).
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      YMIR_ENGINE_CACHE: ${{ github.workspace }}/.engine-cache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Packaging tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+      - name: Build
+        run: cargo build --release --locked -p ymird -p ymirctl
+      - name: Engines run on this runner
+        run: |
+          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --out /tmp/engine-default --check
+          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
+      - name: Package (default and CUDA)
+        run: |
+          python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --engine /tmp/engine-default
+          python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --engine /tmp/engine-cuda
+          rm -rf /tmp/engine-cuda .engine-cache
+          ls -la dist
+      - name: Smoke test the default archive with a real model
+        run: |
+          mkdir -p /tmp/bundle && tar xzf dist/ymir-[0-9]*-${{ matrix.arch }}-unknown-linux-gnu.tar.gz -C /tmp/bundle
+          curl -sSfL -o /tmp/tiny.gguf "$SMOKE_GGUF_URL"
+          YMIR_TEST_BUNDLE=$(echo /tmp/bundle/ymir-*) YMIR_TEST_GGUF=/tmp/tiny.gguf \
+            cargo test --locked -p ymir-testkit --test real_bundle -- --ignored --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  arch:
+    name: arch packages
+    needs: linux
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dist-linux-*
+          path: linux
+          merge-multiple: true
+      - name: makepkg (as a normal user)
+        run: |
+          pacman -Sy --noconfirm --needed python
+          useradd -m builder
+          chown -R builder .
+          su builder -c "python3 scripts/package.py --out dist-arch --pacman-from linux/ymir-*-unknown-linux-gnu.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-arch
+          path: dist-arch/*.pkg.tar.zst
+          if-no-files-found: error
+
+  macos:
+    name: macos (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ymird -p ymirctl
+      - name: Package
+        run: |
+          python3 scripts/engine.py fetch --target ${{ matrix.target }} --out /tmp/engine --check
+          python3 scripts/package.py --target ${{ matrix.target }} --engine /tmp/engine
+          ls -la dist
+      - name: Smoke test with a real model
+        run: |
+          mkdir -p /tmp/bundle && tar xzf dist/ymir-*-${{ matrix.target }}.tar.gz -C /tmp/bundle
+          curl -sSfL -o /tmp/tiny.gguf "$SMOKE_GGUF_URL"
+          YMIR_TEST_BUNDLE=$(echo /tmp/bundle/ymir-*) YMIR_TEST_GGUF=/tmp/tiny.gguf \
+            cargo test --locked -p ymir-testkit --test real_bundle -- --ignored --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  windows:
+    name: windows (${{ matrix.target }}, ${{ matrix.variant }})
+    # The Windows port of ymird (named pipes for the control socket, a Windows service) isn't done;
+    # this job shows how far it gets and packages the zip once it builds.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, runner: windows-2022, variant: default }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2022, variant: cuda }
+          - { target: aarch64-pc-windows-msvc, runner: windows-11-arm, variant: default }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ymird -p ymirctl
+      - name: Package
+        shell: bash
+        run: |
+          python scripts/engine.py fetch --target ${{ matrix.target }} --variant ${{ matrix.variant }} --out engine --check
+          python scripts/package.py --target ${{ matrix.target }} --variant ${{ matrix.variant }} --engine engine
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}-${{ matrix.variant }}
+          path: dist/
+          if-no-files-found: error
+
+  sums:
+    name: SHA256SUMS
+    needs: [linux, arch, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: One SHA256SUMS for every file
+        run: |
+          cd dist && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS

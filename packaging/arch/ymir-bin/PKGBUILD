@@ -5,25 +5,28 @@ pkgname=ymir-bin
 _ver=0.1.0
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Private cloud of LLM models on your own machines (node daemon and CLI) (prebuilt binary)"
+pkgdesc="Private cloud of LLM models on your own machines (node daemon and CLI), llama.cpp included (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/WeirdBrains/ymir"
-license=('BSD-3-Clause')
-depends=('glibc' 'libgcc')
-optdepends=('llama.cpp: the llama-server engine for GGUF models'
+license=('BSD-3-Clause' 'MIT')
+depends=('glibc' 'gcc-libs' 'openssl' 'brotli' 'zlib' 'zstd')
+optdepends=('vulkan-icd-loader: GPU offload through Vulkan'
             'python-vllm: the vLLM engine (NVIDIA)')
 provides=('ymir')
-conflicts=('ymir' 'ymir-git')
+conflicts=('ymir' 'ymir-git' 'ymir-cuda' 'ymir-cuda-bin')
 options=('!strip' '!debug')
 source_x86_64=("ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('526d6d598ee8b7ca317b575e0bbd5d28d111b2fe2d342133104146b47f4d1c58')
-sha256sums_aarch64=('07038f41ef26e69ba4c5b03184c759f3a126b8213a4fff7f6352d6cc6050d050')
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
 
 package() {
   cd "ymir-${_ver}-${CARCH}-unknown-linux-gnu"
   install -Dm755 bin/ymird "${pkgdir}/usr/bin/ymird"
   install -Dm755 bin/ymirctl "${pkgdir}/usr/bin/ymirctl"
+  # The bundled llama.cpp engine; ymird finds it at ../lib/ymir/llama.cpp from /usr/bin.
+  install -d "${pkgdir}/usr/lib/ymir"
+  cp -a lib/ymir/llama.cpp "${pkgdir}/usr/lib/ymir/"
   install -Dm644 share/doc/ymir/README.md "${pkgdir}/usr/share/doc/ymir/README.md"
   install -Dm644 share/icons/hicolor/scalable/apps/ymir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/ymir.svg"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

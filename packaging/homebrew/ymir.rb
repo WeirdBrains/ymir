@@ -4,7 +4,7 @@ class Ymir < Formula
   desc "Private cloud of LLM models on your own machines (node daemon and CLI)"
   homepage "https://github.com/WeirdBrains/ymir"
   version "0.1.0"
-  license "BSD-3-Clause"
+  license all_of: ["BSD-3-Clause", "MIT"] # Ymir; the bundled llama.cpp
 
   on_arm do
     url "https://github.com/WeirdBrains/ymir/releases/download/v#{version}/ymir-#{version}-aarch64-apple-darwin.tar.gz"
@@ -17,6 +17,8 @@ class Ymir < Formula
 
   def install
     bin.install "bin/ymird", "bin/ymirctl"
+    # The bundled llama.cpp engine (Metal on Apple Silicon); ymird finds it at ../lib/ymir/llama.cpp.
+    (lib/"ymir").install "lib/ymir/llama.cpp"
     doc.install "share/doc/ymir/README.md"
     pkgshare.install "share/icons/hicolor/scalable/apps/ymir.svg"
   end
@@ -31,5 +33,6 @@ class Ymir < Formula
 
   test do
     assert_match version.to_s, shell_output("#{bin}/ymirctl --version")
+    assert_match "version", shell_output("#{lib}/ymir/llama.cpp/llama-server --version 2>&1")
   end
 end

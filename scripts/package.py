@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Build Ymir's Linux release files from already-built binaries. Standard library only.
+"""Build Ymir's release files from already-built binaries. Standard library only.
 
-    python3 scripts/package.py [--target TRIPLE ...] [--out dist] [--recipe]
+    python3 scripts/package.py [--target TRIPLE ...] [--variant default|cuda] [--out dist] [--recipe]
+                               [--engine DIR | --no-engine]
+    python3 scripts/package.py --pacman-from dist/ymir-VERSION-TRIPLE.tar.gz ...
 
 For each target (default: the host's x86_64 or aarch64 GNU triple) it reads
-$CARGO_TARGET_DIR/<triple>/release/{ymird,ymirctl} (or target/release for the host) and writes:
+$CARGO_TARGET_DIR/<triple>/release/{ymird,ymirctl} (or target/release for the host), adds the
+llama.cpp engine for that target and variant (scripts/engine.py fetch, pinned in
+packaging/engines/llama.cpp.toml; --engine uses a directory you prepared, --no-engine leaves it out)
+and writes, with PKG = ymir for the default variant and ymir-cuda for the CUDA one:
 
-  ymir-VERSION-TRIPLE.tar.gz, .zip       user-level install: bin/, share/doc, LICENSE
-  ymir_DEBVER-1_ARCH.deb                 built with `ar` (no dpkg-deb needed)
-  ymir-bin-PKGVER-1-ARCH.pkg.tar.zst     makepkg on the TAUR recipe with local sources
-  ymir-VERSION-1.ARCH.rpm                only when rpmbuild is installed (skipped with a notice)
+  Linux:
+  PKG-VERSION-TRIPLE.tar.gz, .zip        user-level install: bin/, lib/ymir/llama.cpp/, share/doc, LICENSE
+  PKG_DEBVER-1_ARCH.deb                  built with `ar` (no dpkg-deb needed)
+  PKG-bin-PKGVER-1-ARCH.pkg.tar.zst      makepkg on the TAUR recipe with local sources (Arch only)
+  PKG-VERSION-1.ARCH.rpm                 only when rpmbuild is installed (skipped with a notice)
+  macOS: PKG-VERSION-TRIPLE.tar.gz, .zip (same layout as Linux; Homebrew installs from the tar.gz)
+  Windows: PKG-VERSION-TRIPLE.zip        ymird.exe, ymirctl.exe and llama.cpp\\ side by side
   SHA256SUMS, and .minisig files when minisign and MINISIGN_KEY are set (else skipped)
 
---recipe rewrites packaging/arch/ymir-bin/PKGBUILD for VERSION with the sha256 of the tarballs
-built here (the release workflow does this with the release's own files).
+ymird finds the engine relative to its own executable, so every layout works without
+configuration. --recipe rewrites packaging/arch/PKG-bin/PKGBUILD for VERSION with the sha256 of the
+tarballs built here (the release workflow does this with the release's own files). --pacman-from
+makes only the Arch packages, from tarballs built elsewhere (the release workflow's Arch job).
 
 The daemon has no .desktop entry, so there is only the standalone form of each package.
 """
@@ -40,6 +50,12 @@ MAINTAINER = "Weird Brains LLC <m3talsmith@gmail.com>"
 URL = "https://github.com/WeirdBrains/ymir"
 SUMMARY = "Private cloud of LLM models on your own machines (node daemon and CLI)"
 ARCH = {"x86_64": ("amd64", "x86_64"), "aarch64": ("arm64", "aarch64")}
+VARIANTS = ["default", "cuda"]
+ENGINE_DIR = "lib/ymir/llama.cpp"
+# What the bundled llama-server links against (besides glibc), per package format.
+DEB_DEPENDS = "libstdc++6, libgcc-s1, libgomp1, libssl3 | libssl3t64, libbrotli1, zlib1g, libzstd1"
+ARCH_DEPENDS = "'glibc' 'gcc-libs' 'openssl' 'brotli' 'zlib' 'zstd'"
+RPM_REQUIRES = "glibc, libstdc++, libgomp, openssl-libs, libbrotli, zlib, libzstd"
 
 
 def version():
@@ -58,6 +74,14 @@ def pkgver(v):
     return v.replace("-", "")
 
 
+def pkg_name(variant):
+    return "ymir" if variant == "default" else f"ymir-{variant}"
+
+
+def other_pkgs(variant):
+    return [pkg_name(x) for x in VARIANTS if x != variant]
+
+
 def target_dir():
     return Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
 
@@ -66,13 +90,18 @@ def host_triple():
     return f"{platform.machine()}-unknown-linux-gnu"
 
 
+def exe_suffix(triple):
+    return ".exe" if "windows" in triple else ""
+
+
 def bin_dir(triple):
     d = target_dir() / triple / "release"
-    if not (d / "ymird").exists() and triple == host_triple():
+    sfx = exe_suffix(triple)
+    if not (d / f"ymird{sfx}").exists() and triple == host_triple():
         d = target_dir() / "release"
     for b in BINS:
-        if not (d / b).is_file():
-            sys.exit(f"{d / b} is missing; build first: cargo build --release --locked --target {triple} -p ymird -p ymirctl")
+        if not (d / f"{b}{sfx}").is_file():
+            sys.exit(f"{d / (b + sfx)} is missing; build first: cargo build --release --locked --target {triple} -p ymird -p ymirctl")
     return d
 
 
@@ -84,17 +113,26 @@ def sha256(p):
     return h.hexdigest()
 
 
-def _info(name, size=0, mode=0o644, kind=tarfile.REGTYPE, mtime=None):
+def mtime():
+    return int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
+
+
+def _info(name, size=0, mode=0o644, kind=tarfile.REGTYPE, link=None):
     ti = tarfile.TarInfo(name)
     ti.size, ti.mode, ti.type = size, mode, kind
+    if link is not None:
+        ti.type, ti.linkname, ti.size, ti.mode = tarfile.SYMTYPE, link, 0, 0o777
     ti.uid = ti.gid = 0
     ti.uname = ti.gname = "root"
-    ti.mtime = mtime if mtime is not None else int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
+    ti.mtime = mtime()
     return ti
 
 
-def add_file(tar, name, data, mode=0o644):
-    tar.addfile(_info(name, len(data), mode), io.BytesIO(data))
+def add_entry(tar, name, data, mode, link=None):
+    if link is not None:
+        tar.addfile(_info(name, link=link))
+    else:
+        tar.addfile(_info(name, len(data), mode), io.BytesIO(data))
 
 
 def add_dirs(tar, names):
@@ -102,45 +140,95 @@ def add_dirs(tar, names):
         tar.addfile(_info(d, mode=0o755, kind=tarfile.DIRTYPE))
 
 
-def archive_files(bdir):
-    """(path in the archive, bytes, mode) for the user-level tar.gz/zip."""
+def parent_dirs(names):
+    return sorted({str(Path(n).parents[i]) for n in names for i in range(len(Path(n).parents) - 1)})
+
+
+# An entry is (path, bytes or None, mode, symlink target or None).
+
+
+def engine_entries(engine, prefix):
+    """The engine directory's files under `prefix`, symlinks kept."""
+    if engine is None:
+        return []
+    out = []
+    for p in sorted(engine.iterdir()):
+        name = f"{prefix}/{p.name}"
+        if p.is_symlink():
+            out.append((name, None, 0o777, os.readlink(p)))
+        elif p.is_file():
+            mode = 0o755 if os.access(p, os.X_OK) else 0o644
+            out.append((name, p.read_bytes(), mode, None))
+    return out
+
+
+def archive_files(bdir, triple, engine):
+    """Entries of the user-level tar.gz/zip."""
+    sfx = exe_suffix(triple)
+    if sfx:  # Windows: flat, the engine in llama.cpp\ next to ymird.exe.
+        return [
+            (f"ymird{sfx}", (bdir / f"ymird{sfx}").read_bytes(), 0o755, None),
+            (f"ymirctl{sfx}", (bdir / f"ymirctl{sfx}").read_bytes(), 0o755, None),
+            ("README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
+            ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644, None),
+        ] + engine_entries(engine, "llama.cpp")
     return [
-        ("bin/ymird", (bdir / "ymird").read_bytes(), 0o755),
-        ("bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755),
-        ("share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644),
-        ("share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644),
-        ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644),
-    ]
+        ("bin/ymird", (bdir / "ymird").read_bytes(), 0o755, None),
+        ("bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755, None),
+        ("share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
+        ("share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644, None),
+        ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644, None),
+    ] + engine_entries(engine, ENGINE_DIR)
 
 
-def system_files(bdir):
-    """(path under /, bytes, mode) for deb/rpm/pacman packages."""
+def system_files(bdir, engine):
+    """Entries under / for deb/rpm packages."""
     return [
-        ("usr/bin/ymird", (bdir / "ymird").read_bytes(), 0o755),
-        ("usr/bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755),
-        ("usr/lib/systemd/user/ymird.service", (ROOT / "packaging/systemd/ymird.service").read_bytes(), 0o644),
-        ("usr/share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644),
-        ("usr/share/doc/ymir/copyright", (ROOT / "LICENSE").read_bytes(), 0o644),
-        ("usr/share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644),
-    ]
+        ("usr/bin/ymird", (bdir / "ymird").read_bytes(), 0o755, None),
+        ("usr/bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755, None),
+        ("usr/lib/systemd/user/ymird.service", (ROOT / "packaging/systemd/ymird.service").read_bytes(), 0o644, None),
+        ("usr/share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
+        ("usr/share/doc/ymir/copyright", (ROOT / "LICENSE").read_bytes(), 0o644, None),
+        ("usr/share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644, None),
+    ] + engine_entries(engine, f"usr/{ENGINE_DIR}")
 
 
-def build_tar_zip(out, v, triple, bdir):
-    top = f"ymir-{v}-{triple}"
-    tgz = out / f"{top}.tar.gz"
-    with tarfile.open(tgz, "w:gz") as tar:
-        add_dirs(tar, [top, f"{top}/bin", f"{top}/share", f"{top}/share/doc", f"{top}/share/doc/ymir",
-                       f"{top}/share/icons", f"{top}/share/icons/hicolor", f"{top}/share/icons/hicolor/scalable", f"{top}/share/icons/hicolor/scalable/apps"])
-        for name, data, mode in archive_files(bdir):
-            add_file(tar, f"{top}/{name}", data, mode)
+def resolve(entries, name, link):
+    """A symlink's target data, for formats without symlinks (zip)."""
+    by_name = {n: (d, l) for n, d, _, l in entries}
+    seen = 0
+    while link is not None and seen < 10:
+        name = str(Path(name).parent / link)
+        data, link = by_name[name]
+        seen += 1
+    return data
+
+
+def build_tar_zip(out, v, triple, bdir, engine, variant):
+    top = f"{pkg_name(variant)}-{v}-{triple}"
+    entries = archive_files(bdir, triple, engine)
+    made = []
+    if "windows" not in triple:
+        tgz = out / f"{top}.tar.gz"
+        with tarfile.open(tgz, "w:gz") as tar:
+            add_dirs(tar, [top] + [f"{top}/{d}" for d in parent_dirs(n for n, *_ in entries)])
+            for name, data, mode, link in entries:
+                add_entry(tar, f"{top}/{name}", data, mode, link)
+        made.append(tgz)
     z = out / f"{top}.zip"
     with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, data, mode in archive_files(bdir):
-            info = zipfile.ZipInfo(f"{top}/{name}", date_time=time.gmtime(int(os.environ.get("SOURCE_DATE_EPOCH", time.time())))[:6])
+        for name, data, mode, link in entries:
+            if link is not None:
+                # No symlinks in zip: only the soname the libraries load needs a copy.
+                if not re.search(r"\.so\.\d+$", name):
+                    continue
+                data, mode = resolve(entries, name, link), 0o755
+            info = zipfile.ZipInfo(f"{top}/{name}", date_time=time.gmtime(mtime())[:6])
             info.external_attr = (0o100000 | mode) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             zf.writestr(info, data)
-    return [tgz, z]
+    made.append(z)
+    return made
 
 
 def glibc_needed(binaries):
@@ -154,31 +242,48 @@ def glibc_needed(binaries):
     return f"{best[0]}.{best[1]}" if best else None
 
 
-def build_deb(out, v, arch, bdir):
+def elf_files(bdir, engine):
+    files = [bdir / b for b in BINS]
+    if engine is not None:
+        files += [p for p in engine.iterdir() if p.is_file() and not p.is_symlink() and p.read_bytes()[:4] == b"\x7fELF"]
+    return files
+
+
+def build_deb(out, v, arch, bdir, engine, variant):
     deb_arch = ARCH[arch][0]
-    files = system_files(bdir)
+    name = pkg_name(variant)
+    files = system_files(bdir, engine)
     data_buf = io.BytesIO()
     with tarfile.open(fileobj=data_buf, mode="w:gz") as tar:
-        dirs = sorted({str(Path(n).parents[i]) for n, _, _ in files for i in range(len(Path(n).parents) - 1)})
-        add_dirs(tar, ["./"] + [f"./{d}/" for d in dirs])
-        for name, data, mode in files:
-            add_file(tar, f"./{name}", data, mode)
-    glibc = glibc_needed([bdir / b for b in BINS])
+        add_dirs(tar, ["./"] + [f"./{d}/" for d in parent_dirs(n for n, *_ in files)])
+        for n, data, mode, link in files:
+            add_entry(tar, f"./{n}", data, mode, link)
+    glibc = glibc_needed(elf_files(bdir, engine))
     depends = f"libc6 (>= {glibc})" if glibc else "libc6"
-    installed_kb = sum(len(d) for _, d, _ in files) // 1024 + 1
+    if engine is not None:
+        depends += f", {DEB_DEPENDS}"
+    others = ", ".join(other_pkgs(variant))
+    installed_kb = sum(len(d) for _, d, _, l in files if l is None) // 1024 + 1
+    engine_line = (
+        f" Includes llama.cpp's llama-server ({'CUDA 13' if variant == 'cuda' else 'CPU and Vulkan'}) in /usr/{ENGINE_DIR}.\n" if engine else ""
+    )
     control = (
-        f"Package: ymir\nVersion: {debver(v)}-1\nArchitecture: {deb_arch}\nMaintainer: {MAINTAINER}\n"
-        f"Installed-Size: {installed_kb}\nDepends: {depends}\nSection: net\nPriority: optional\nHomepage: {URL}\n"
+        f"Package: {name}\nVersion: {debver(v)}-1\nArchitecture: {deb_arch}\nMaintainer: {MAINTAINER}\n"
+        f"Installed-Size: {installed_kb}\nDepends: {depends}\n"
+        + ("Recommends: libvulkan1\n" if engine is not None and variant == "default" else "")
+        + (f"Conflicts: {others}\nReplaces: {others}\nProvides: ymir\n" if variant != "default" else f"Conflicts: {others}\n")
+        + f"Section: net\nPriority: optional\nHomepage: {URL}\n"
         f"Description: {SUMMARY}\n ymird runs the model, inference and app roles; ymirctl sets up and talks to it.\n"
+        f"{engine_line}"
         " Run it per user: systemctl --user enable --now ymird\n"
     )
-    md5 = "".join(f"{hashlib.md5(d).hexdigest()}  {n}\n" for n, d, _ in files)
+    md5 = "".join(f"{hashlib.md5(d).hexdigest()}  {n}\n" for n, d, _, l in files if l is None)
     ctl_buf = io.BytesIO()
     with tarfile.open(fileobj=ctl_buf, mode="w:gz") as tar:
         add_dirs(tar, ["./"])
-        add_file(tar, "./control", control.encode())
-        add_file(tar, "./md5sums", md5.encode())
-    deb = out / f"ymir_{debver(v)}-1_{deb_arch}.deb"
+        add_entry(tar, "./control", control.encode(), 0o644)
+        add_entry(tar, "./md5sums", md5.encode(), 0o644)
+    deb = out / f"{name}_{debver(v)}-1_{deb_arch}.deb"
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         (t / "debian-binary").write_bytes(b"2.0\n")
@@ -195,28 +300,36 @@ def _ar_has_D():
     return "[D]" in r.stdout or " D " in r.stdout
 
 
-def pkgbuild(v, sums, local=False):
-    """The ymir-bin recipe. `sums` maps arch -> sha256 of the release tarball."""
+def pkgbuild(v, sums, variant="default", local=False):
+    """The PKG-bin recipe. `sums` maps arch -> sha256 of the release tarball."""
+    pkg = pkg_name(variant)
     if local:
-        src = {a: f'("ymir-{v}-{a}-unknown-linux-gnu.tar.gz")' for a in ARCH}
+        src = {a: f'("{pkg}-{v}-{a}-unknown-linux-gnu.tar.gz")' for a in ARCH}
     else:
-        src = {a: f'("ymir-${{_ver}}-{a}-unknown-linux-gnu.tar.gz::${{url}}/releases/download/v${{_ver}}/ymir-${{_ver}}-{a}-unknown-linux-gnu.tar.gz")' for a in ARCH}
+        src = {a: f'("{pkg}-${{_ver}}-{a}-unknown-linux-gnu.tar.gz::${{url}}/releases/download/v${{_ver}}/{pkg}-${{_ver}}-{a}-unknown-linux-gnu.tar.gz")' for a in ARCH}
+    engine_desc = "llama.cpp with CUDA 13 included" if variant == "cuda" else "llama.cpp included"
+    names = ["ymir", "ymir-git"] + [n for p in other_pkgs(variant) for n in (p, f"{p}-bin")]
+    conflicts = " ".join(f"'{n}'" for n in dict.fromkeys(names))
+    optdepends = (
+        "optdepends=('vulkan-icd-loader: GPU offload through Vulkan'\n            'python-vllm: the vLLM engine (NVIDIA)')"
+        if variant == "default"
+        else "optdepends=('python-vllm: the vLLM engine (NVIDIA)')"
+    )
     return f"""# Maintainer: {MAINTAINER}
 # Prebuilt binaries from the GitHub release. scripts/package.py --recipe (and the release workflow)
 # fill in pkgver and the sha256sums; scripts/weirdnet_release.py taur publishes this recipe to TAUR.
-pkgname=ymir-bin
+pkgname={pkg}-bin
 _ver={v}
 pkgver={pkgver(v)}
 pkgrel=1
-pkgdesc="{SUMMARY} (prebuilt binary)"
+pkgdesc="{SUMMARY}, {engine_desc} (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="{URL}"
-license=('BSD-3-Clause')
-depends=('glibc' 'libgcc')
-optdepends=('llama.cpp: the llama-server engine for GGUF models'
-            'python-vllm: the vLLM engine (NVIDIA)')
+license=('BSD-3-Clause' 'MIT')
+depends=({ARCH_DEPENDS})
+{optdepends}
 provides=('ymir')
-conflicts=('ymir' 'ymir-git')
+conflicts=({conflicts})
 options=('!strip' '!debug')
 source_x86_64={src['x86_64']}
 source_aarch64={src['aarch64']}
@@ -224,9 +337,12 @@ sha256sums_x86_64=('{sums.get('x86_64', 'SKIP')}')
 sha256sums_aarch64=('{sums.get('aarch64', 'SKIP')}')
 
 package() {{
-  cd "ymir-${{_ver}}-${{CARCH}}-unknown-linux-gnu"
+  cd "{pkg}-${{_ver}}-${{CARCH}}-unknown-linux-gnu"
   install -Dm755 bin/ymird "${{pkgdir}}/usr/bin/ymird"
   install -Dm755 bin/ymirctl "${{pkgdir}}/usr/bin/ymirctl"
+  # The bundled llama.cpp engine; ymird finds it at ../lib/ymir/llama.cpp from /usr/bin.
+  install -d "${{pkgdir}}/usr/lib/ymir"
+  cp -a {ENGINE_DIR} "${{pkgdir}}/usr/lib/ymir/"
   install -Dm644 share/doc/ymir/README.md "${{pkgdir}}/usr/share/doc/ymir/README.md"
   install -Dm644 share/icons/hicolor/scalable/apps/ymir.svg "${{pkgdir}}/usr/share/icons/hicolor/scalable/apps/ymir.svg"
   install -Dm644 LICENSE "${{pkgdir}}/usr/share/licenses/${{pkgname}}/LICENSE"
@@ -237,14 +353,15 @@ UNIT
 """
 
 
-def build_pacman(out, v, arch, tarball):
+def build_pacman(out, v, arch, tarball, variant):
     if not shutil.which("makepkg"):
-        print("notice: makepkg not found; skipping pkg.tar.zst")
+        print("notice: makepkg not found; skipping pkg.tar.zst (the release workflow's Arch job builds it)")
         return []
+    pkg = pkg_name(variant)
     with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as t:
         t = Path(t)
         shutil.copy(tarball, t / tarball.name)
-        (t / "PKGBUILD").write_text(pkgbuild(v, {arch: sha256(tarball)}, local=True))
+        (t / "PKGBUILD").write_text(pkgbuild(v, {arch: sha256(tarball)}, variant, local=True))
         # The system makepkg.conf, with CARCH set so the aarch64 package can be made on x86_64.
         conf = t / "makepkg.conf"
         conf.write_text(f'source /etc/makepkg.conf\nCARCH="{arch}"\nPKGEXT=".pkg.tar.zst"\nPKGDEST="{out}"\nSRCDEST="{t}"\nBUILDDIR="{t / "build"}"\n')
@@ -252,29 +369,41 @@ def build_pacman(out, v, arch, tarball):
         if r.returncode != 0:
             print(r.stdout[-2000:], r.stderr[-2000:])
             sys.exit(f"makepkg failed for {arch}")
-    return sorted(out.glob(f"ymir-bin-{pkgver(v)}-1-{arch}.pkg.tar.zst"))
+    return sorted(out.glob(f"{pkg}-bin-{pkgver(v)}-1-{arch}.pkg.tar.zst"))
 
 
-def build_rpm(out, v, arch, bdir):
+def build_rpm(out, v, arch, bdir, engine, variant):
+    name = pkg_name(variant)
     if not shutil.which("rpmbuild"):
-        print(f"notice: rpmbuild not found; skipping ymir-{v}-1.{arch}.rpm (the release workflow builds it)")
+        print(f"notice: rpmbuild not found; skipping {name}-{v}-1.{arch}.rpm (the release workflow builds it)")
         return []
+    files = system_files(bdir, engine)
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         root = t / "root"
-        for name, data, mode in system_files(bdir):
-            p = root / name
+        for n, data, mode, link in files:
+            p = root / n
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(data)
-            p.chmod(mode)
-        files = "\n".join(f"/{n}" for n, _, _ in system_files(bdir))
+            if link is not None:
+                os.symlink(link, p)
+            else:
+                p.write_bytes(data)
+                p.chmod(mode)
+        listed = "\n".join(f"/{n}" for n, *_ in files)
+        if engine is not None:
+            listed += f"\n%dir /usr/lib/ymir\n%dir /usr/{ENGINE_DIR}"
+        others = " ".join(other_pkgs(variant))
         spec = t / "ymir.spec"
         spec.write_text(
-            f"Name: ymir\nVersion: {v.replace('-', '~')}\nRelease: 1\nSummary: {SUMMARY}\nLicense: BSD-3-Clause\nURL: {URL}\nBuildArch: {arch}\n"
-            f"%description\n{SUMMARY}.\n%install\ncp -a {root}/. %{{buildroot}}/\n%files\n{files}\n"
+            f"Name: {name}\nVersion: {v.replace('-', '~')}\nRelease: 1\nSummary: {SUMMARY}\nLicense: BSD-3-Clause AND MIT\nURL: {URL}\nBuildArch: {arch}\n"
+            # The bundled libraries are private to the engine: don't provide or require them system-wide.
+            f"AutoReqProv: no\nRequires: {RPM_REQUIRES if engine is not None else 'glibc'}\nConflicts: {others}\n"
+            + ("Provides: ymir\n" if variant != "default" else "")
+            + "%global __os_install_post %{nil}\n%global debug_package %{nil}\n"
+            f"%description\n{SUMMARY}.\n%install\ncp -a {root}/. %{{buildroot}}/\n%files\n{listed}\n"
         )
         subprocess.run(["rpmbuild", "-bb", "--target", arch, "--define", f"_topdir {t}", "--define", f"_rpmdir {out}", "--define", "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm", str(spec)], check=True)
-    return sorted(out.glob(f"ymir-*.{arch}.rpm"))
+    return sorted(out.glob(f"{name}-{v.replace('-', '~')}-1.{arch}.rpm"))
 
 
 def sign(files):
@@ -289,32 +418,77 @@ def sign(files):
     return sigs
 
 
+def fetch_engine(triple, variant, into):
+    subprocess.run([sys.executable, str(ROOT / "scripts/engine.py"), "fetch", "--target", triple, "--variant", variant, "--out", str(into)], check=True)
+    return into
+
+
+def write_sums(out):
+    files = sorted(p for p in out.iterdir() if p.is_file() and p.name != "SHA256SUMS" and not p.name.endswith((".minisig", ".part")))
+    (out / "SHA256SUMS").write_text("".join(f"{sha256(f)}  {f.name}\n" for f in files))
+
+
+def pacman_from(out, v, tarballs):
+    made = []
+    for tb in tarballs:
+        m = re.match(r"^(ymir(?:-([a-z0-9]+))?)-" + re.escape(v) + r"-(x86_64|aarch64)-unknown-linux-gnu\.tar\.gz$", tb.name)
+        if not m:
+            sys.exit(f"{tb.name}: not a Linux release tarball for {v}")
+        made += build_pacman(out, v, m.group(3), tb, m.group(2) or "default")
+    return made
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", action="append", help="target triple (repeatable)")
+    ap.add_argument("--variant", default="default", choices=VARIANTS, help="engine variant (default: CPU+Vulkan, or Metal on macOS)")
+    ap.add_argument("--engine", help="a prepared engine directory (scripts/engine.py fetch/build) instead of fetching one")
+    ap.add_argument("--no-engine", action="store_true", help="leave the llama.cpp engine out (it must then be installed separately)")
     ap.add_argument("--out", default="dist")
-    ap.add_argument("--recipe", action="store_true", help="rewrite packaging/arch/ymir-bin/PKGBUILD with these tarballs' sums")
+    ap.add_argument("--recipe", action="store_true", help="rewrite packaging/arch/PKG-bin/PKGBUILD with these tarballs' sums")
+    ap.add_argument("--pacman-from", nargs="+", type=Path, metavar="TARBALL", help="only build Arch packages from these tarballs")
     a = ap.parse_args()
     v = version()
     out = (ROOT / a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    if a.pacman_from:
+        made = pacman_from(out, v, a.pacman_from)
+        write_sums(out)
+        for f in made:
+            print(f"{f.stat().st_size:>10}  {f.name}")
+        return
+    if a.engine and len(a.target or [host_triple()]) > 1:
+        sys.exit("--engine works with one --target")
     made, sums = [], {}
-    for triple in a.target or [host_triple()]:
-        arch = triple.split("-")[0]
-        if arch not in ARCH or not triple.endswith("-linux-gnu"):
-            sys.exit(f"{triple}: only x86_64/aarch64 Linux GNU targets are packaged here")
-        bdir = bin_dir(triple)
-        tz = build_tar_zip(out, v, triple, bdir)
-        sums[arch] = sha256(tz[0])
-        made += tz
-        made += build_deb(out, v, arch, bdir)
-        made += build_pacman(out, v, arch, tz[0])
-        made += build_rpm(out, v, arch, bdir)
+    with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+        for triple in a.target or [host_triple()]:
+            arch = triple.split("-")[0]
+            linux = triple.endswith("-linux-gnu")
+            if arch not in ARCH or not (linux or triple.endswith("-apple-darwin") or triple.endswith("-pc-windows-msvc")):
+                sys.exit(f"{triple}: only x86_64/aarch64 Linux GNU, macOS and Windows MSVC targets are packaged here")
+            bdir = bin_dir(triple)
+            engine = None
+            if a.engine:
+                engine = Path(a.engine).resolve()
+            elif not a.no_engine:
+                engine = fetch_engine(triple, a.variant, Path(scratch) / f"{triple}-{a.variant}")
+            if engine is not None and not (engine / f"llama-server{exe_suffix(triple)}").is_file():
+                sys.exit(f"{engine} has no llama-server")
+            tz = build_tar_zip(out, v, triple, bdir, engine, a.variant)
+            made += tz
+            if not linux:
+                continue
+            sums[arch] = sha256(tz[0])
+            made += build_deb(out, v, arch, bdir, engine, a.variant)
+            made += build_pacman(out, v, arch, tz[0], a.variant)
+            made += build_rpm(out, v, arch, bdir, engine, a.variant)
     made += sign(made)
-    (out / "SHA256SUMS").write_text("".join(f"{sha256(f)}  {f.name}\n" for f in made if not f.name.endswith(".minisig")))
+    write_sums(out)
     if a.recipe:
-        (ROOT / "packaging/arch/ymir-bin/PKGBUILD").write_text(pkgbuild(v, sums))
-        print("wrote packaging/arch/ymir-bin/PKGBUILD")
+        path = ROOT / f"packaging/arch/{pkg_name(a.variant)}-bin/PKGBUILD"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(pkgbuild(v, sums, a.variant))
+        print(f"wrote {path.relative_to(ROOT)}")
     for f in made:
         print(f"{f.stat().st_size:>10}  {f.relative_to(ROOT) if f.is_relative_to(ROOT) else f}")
 

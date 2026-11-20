@@ -3,7 +3,7 @@ helpers = "0.3.2"
 project = "ymir"
 require_message = true
 next = [
-  "build the release files: scripts/package.py for each Linux target (the Release workflow does all platforms)",
+  "build the release files: the Release workflow (.github/workflows/release.yml) builds every platform and variant; download its artifacts into dist/",
   "python3 scripts/weirdnet_release.py github {version}   # upload dist/ to the GitHub release",
   "python3 scripts/weirdnet_release.py assets {version}   # every platform file is on the release",
   "python3 scripts/package.py --recipe, commit, then: python3 scripts/weirdnet_release.py taur {version} --dry-run",
@@ -50,12 +50,30 @@ dir = "packaging/arch/ymir-bin"
 srcinfo = "generate"
 source_contains = "v{version}"
 
+[[taur.packages]]
+name = "ymir-cuda-bin"
+dir = "packaging/arch/ymir-cuda-bin"
+srcinfo = "generate"
+source_contains = "v{version}"
+
+# Two variants of every file: `ymir` (llama.cpp with CPU and Vulkan, Metal on macOS) and `ymir-cuda`
+# (llama.cpp with CUDA 13 and its runtime), each with the engine bundled (scripts/engine.py).
 [github]
 files = [
   "dist/ymir-{version}-*-unknown-linux-gnu.tar.gz",
   "dist/ymir-{version}-*-unknown-linux-gnu.zip",
   "dist/ymir_{debver}-1_*.deb",
+  "dist/ymir-{version}-1.*.rpm",
   "dist/ymir-bin-{pkgver}-1-*.pkg.tar.zst",
+  "dist/ymir-cuda-{version}-*-unknown-linux-gnu.tar.gz",
+  "dist/ymir-cuda-{version}-*-unknown-linux-gnu.zip",
+  "dist/ymir-cuda_{debver}-1_*.deb",
+  "dist/ymir-cuda-{version}-1.*.rpm",
+  "dist/ymir-cuda-bin-{pkgver}-1-*.pkg.tar.zst",
+  "dist/ymir-{version}-*-apple-darwin.tar.gz",
+  "dist/ymir-{version}-*-apple-darwin.zip",
+  "dist/ymir-{version}-*-pc-windows-msvc.zip",
+  "dist/ymir-cuda-{version}-*-pc-windows-msvc.zip",
 ]
 sums = "SHA256SUMS"
 
@@ -73,6 +91,14 @@ assets = [
   "ymir-{version}-1.aarch64.rpm",
   "ymir-bin-{pkgver}-1-x86_64.pkg.tar.zst",
   "ymir-bin-{pkgver}-1-aarch64.pkg.tar.zst",
+  "ymir-cuda-{version}-x86_64-unknown-linux-gnu.tar.gz",
+  "ymir-cuda-{version}-aarch64-unknown-linux-gnu.tar.gz",
+  "ymir-cuda_{debver}-1_amd64.deb",
+  "ymir-cuda_{debver}-1_arm64.deb",
+  "ymir-cuda-{version}-1.x86_64.rpm",
+  "ymir-cuda-{version}-1.aarch64.rpm",
+  "ymir-cuda-bin-{pkgver}-1-x86_64.pkg.tar.zst",
+  "ymir-cuda-bin-{pkgver}-1-aarch64.pkg.tar.zst",
 ]
 
 [[platforms]]
@@ -87,7 +113,7 @@ os = "windows"
 arch = ["x86_64", "aarch64"]
 formats = ["zip", "exe", "exe-wix"]
 channels = ["github"]
-assets = ["ymir-{version}-*-pc-windows-msvc.zip", "YmirSetup-{version}.exe"]
+assets = ["ymir-{version}-*-pc-windows-msvc.zip", "ymir-cuda-{version}-x86_64-pc-windows-msvc.zip", "YmirSetup-{version}.exe"]
 
 [[platforms]]
 os = "android"
