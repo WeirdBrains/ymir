@@ -2059,9 +2059,102 @@ Attachments and agent mode are built on both shells. BSD support is written but 
 - **BSDs: not built or run.** GPUI's Linux platform covers FreeBSD (so GhostBSD), but a cross build from Linux fails in
   `aws-lc-sys` (no FreeBSD sysroot). A manual `freebsd` job is in `platforms.yml` (VM build and tests) and has never run. OpenBSD and
   DragonFly are not GPUI targets.
-- **Real nodes do not serve `task/1` yet**, so agent mode is only run against the demo node; against a Ymir node it
-  reports that tasks are not offered.
+- **Real nodes served no `task/1` in B5**, so agent mode ran only against the demo node. Ymir M9 adds it (see the M9 status);
+  Bragi's own agent mode has still not been run against a real `ymird`, only the two sides separately.
 - Attachments are text only (no images, PDFs or binary), and the Flutter file picker was only exercised in its scripted demo path.
+
+## M9 status (in progress 2026-11-20)
+
+The parts of "breadth and hardening" that can be built and tested on one machine are built: self-update with rollback,
+agent tasks for Bragi, and a security review with checks that run. Push, the Windows service and BSD packages are not.
+
+**Built and run:**
+
+- **Agent tasks (`task/1`), for Bragi's agent mode.** `ymir-core::tasks`: the inference role serves `/weirdnet-agent/task/1`
+  to the user's linked devices (the same roster check as every other protocol; a stranger, another identity's device or a
+  revoked device gets nothing). The model is the pool's own, through the coordinator. With no workspace set, a task has **no
+  tools**. With `[inference.agent] workspace = "/some/dir"` it has one, `files.read`: it asks the asker for approval on every
+  call (a card in Bragi), reads one UTF-8 file of up to `max_file_kib` (64) inside that directory, and refuses `..`, absolute
+  paths and links that point out of it. `enabled = false` turns tasks off. Companions `assistant` (Bragi's default) and
+  `ymir` run here; others are refused. Tests (`ymir-core/tests/tasks.rs`, in-memory transport, test identities): approved
+  card reads the file and the model repeats it, a declined card never runs the tool, `../` and absolute paths error, a stranger
+  and a revoked device are refused, no workspace means no tools; a unit test covers path resolution.
+- **Self-update with rollback (`ymir-core::update`, `ymirctl update`).** On `weirdnet-update` 0.2.0. `update trust --pin HEX
+  --root FILE` pins the org root (the first root must match the pin; a pin is never replaced). `update stage DIR` checks a bundle
+  directory (`manifest.env`, optional `freshness.env`, `roots/*.env`, the files): k-of-n root chain, release-key delegation for
+  `com.weirdbrains.ymir`/`stable`, expiry, replay and equivocation, no downgrade below the running version, a known-bad update,
+  this OS and CPU, a plain file-set format (deb/rpm are refused, they need a package manager), `ymird` present, and every file's
+  signed size and BLAKE3, then moves it into `updates/releases/<id>/` in one step. The next `update boot` runs it on trial; `ymird`
+  commits it once serving; a start that never gets there counts as failed, and after two the previous good release returns
+  and the update is marked bad for good (re-staging it is refused). `ymirctl service install --managed-updates` starts the
+  service through `ymirctl update boot --exec`. Tests: five unit tests (happy path and restart, crash loop and rollback, wrong
+  signer, tampered file, other OS, replay, downgrade, wrong pin, nothing pinned) and `m9.rs` through `ymirctl`.
+- **Security review of the roster check, role boundaries and backend ports** (below), with checks that run in `m9.rs`: a running
+  combined node (bridge, Weirdnet listener, an engine) has only loopback listeners, the state dir is 0700, the control socket,
+  bridge token and identity seed 0600, the bridge refuses a missing or wrong token and a foreign `Host`.
+
+**Security review (by the author, not audited).**
+
+- *Roster check:* infer/1, infer/2, catalog/1, node/1 and now task/1 all authorize through `RosterAuth` before anything is
+  read; capability records must carry the user's certificate. Covered by existing tests for strangers and revocation
+  (`ymir-core/tests/remote.rs`, `m3.rs`) and the new task tests. Nothing admits a device that is not in the user's roster.
+- *Role boundaries:* **not enforced by the transport.** A model node authorizes any linked device, so an app device can dial it
+  directly and skip the inference node's cache, batch caps and fairness. It cannot reach anything outside the user's own
+  devices, so this is a bypass of Ymir's scheduling, not of confidentiality (read from the code; not demonstrated). Fixing it needs the
+  caller's role in the authorization decision (upstream request below).
+- *Backend ports:* engines bind `127.0.0.1` (`--host 127.0.0.1` in `weirdnet-backends`; the test checks the live sockets) and
+  each launch gets a random API key (`LLAMA_API_KEY` or `VLLM_API_KEY`, in the environment), which Ymir sends as a bearer token. The bridge is loopback with a
+  token on every endpoint and a `Host` check. Another local user on the same box can still connect to a port but not use it
+  without the key. The Weirdnet listener is the one socket meant to be reachable from the network (default `0.0.0.0`); it
+  accepts only Noise-authenticated peers and then the roster check.
+- *Group workers (M7):* llama.cpp `rpc-server` has no authentication, so Ymir binds it to a declared private-link address only and refuses
+  any address that is not loopback, RFC 1918 or link-local (tests in `m7.rs`). Anything else on that network can talk to the worker, so a
+  "private link" must be a cable or an isolated VLAN, as the design already says. The M9 check does not start a group.
+- *Secrets:* the bridge token and seed are files (0600), not in the OS keyring; the keyring is still open work. The unit file
+  carries no secret. Update state is 0700.
+- *Task tools:* an agent task has no tool unless the operator sets a workspace, the one tool is read-only and asks every time, and
+  "always allow" answers last only for that task's session (the node builds a fresh policy per task).
+- *Not reviewed:* `weirdnet-*` internals (Weirdnet lead), the engines themselves, the semantic cache's privacy, Windows named-pipe
+  control (does not exist yet).
+
+**Not built, and why:**
+
+- **Push wake-ups:** `weirdnet-push` 0.1.0 has sealed payloads and APNs/FCM senders, but its Weirdnet front end (so the inference node
+  can embed it with no listener) does not exist; tracked below. It also needs Apple and Google credentials from m3talsmith.
+- **Windows service and named-pipe control; BSD packages:** not built or tried. Nothing here runs on Windows or a BSD, and the
+  user service covers systemd and launchd only. (Bragi's FreeBSD CI job is a separate item, see the Bragi B5 status.)
+- **A bundle fetcher.** `update stage` takes a directory. Announcements over `weirdnet-relay` (`/weirdnet/updates/1`, feature
+  `wire`) and downloads are the next piece; nothing is signed with a real org key (m3talsmith holds those) and no release was cut.
+- **Updating `ymirctl` and the engines with `ymird`:** the release directory may hold `ymirctl`, but only `ymird` is started from
+  it; the service still calls the installed `ymirctl`.
+- **Self-update on a real machine** was not exercised: the tests run on one box with fake binaries and test keys.
+
+**Upstream issues (Weirdnet lead; no `weirdnet-*` edits made here).** All four are still open and unchanged on 2026-11-20:
+`weirdnet-openai` #1 (images, content arrays, unknown parameters) and #2 (Retry-After from Busy), `weirdnet-agent` #1
+(Busy retry delay), `weirdnet-backends` #1 (Windows graceful stop, vLLM on Windows). New, found in M9 (to file; drafts):
+
+1. **`weirdnet-agent`: `Serving` has no `tasks` field.** `task/1` can only be served by calling `node.accept_streams(task::PROTOCOL, ..)`
+   and `task::serve` by hand, and redoing the roster check. Ask: `Serving { tasks: Option<Arc<dyn TaskHost>> }` with the same
+   authorization as infer; and `TaskHost::session` should receive the `Caller`, so a host can scope tools per device.
+2. **`weirdnet-agent`/`weirdnet-backends`: authorization has no role.** `Authorize::authorize(&Caller)` and `RosterAuth` cannot tell an
+   app device from an inference node, so a model node cannot refuse app devices. Ask: let a roster entry or the announced app
+   (`INFERENCE_APP`, `MODEL_NODE_APP`) reach the authorization hook.
+3. **`weirdnet-update`: `signing_identity` is required (1..128 chars) for plain file-set packages.** A Linux tarball has no platform
+   signing identity; Ymir writes `unsigned`. Ask: allow empty for `InstallMode::Swap` formats, or document the value.
+4. **`weirdnet-push`:** the Weirdnet front end for the server `Service` (already listed above, needed for push wake-ups).
+
+**1.0 criteria (proposed).** Ymir is 1.0 when all of these hold; each has its state today.
+
+| Criterion | State |
+| --- | --- |
+| M1 to M7 built, M8 done with m3talsmith's approval at each step | M1 to M6 done, M7 llama.cpp only; **M8 not started** |
+| Full workspace tests pass on a clean checkout, and the real-engine tests have run on the target hardware | passes here; real engines run on one RTX box only |
+| A run across at least two real machines: link, serve, fail over mid-answer, update | not done (all tests are one box, memory or loopback transport) |
+| The four upstream issues are closed or knowingly accepted | all open |
+| Push wake-ups work end to end on a phone | not built |
+| Signed releases from the real org root, installed by `ymirctl update` and rolled back when broken | mechanism built and tested with test keys; no real keys, no release |
+| Packages for Linux, macOS and Windows, plus BSD where GPUI/Rust allow | tarball and service files only; nothing signed |
+| A review by someone other than the author | the review above is the author's |
 
 ## Decisions (2026-11-19)
 

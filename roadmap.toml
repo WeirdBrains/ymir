@@ -113,10 +113,17 @@ gaps = []
 [[milestone]]
 id = "M9"
 title = "Breadth and hardening"
-status = "planned"
-summary = "Self-update with rollback, push wake-ups, a Windows service, BSD packages, a security review, and the 1.0 criteria. The open issues parked from M3 are handled here."
+status = "in-progress"
+summary = "Built: self-update with rollback on weirdnet-update (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, and a security review with checks that run. Not built: push wake-ups, the Windows service, BSD packages, a bundle fetcher. The four upstream issues are still open."
 crates = ["weirdnet-update", "weirdnet-push", "weirdnet-agent"]
-gaps = ["`weirdnet-push` is planned and does not exist yet."]
+gaps = [
+  "Push wake-ups wait on the Weirdnet front end of `weirdnet-push` (does not exist) and on Apple and Google credentials from m3talsmith.",
+  "Windows service, named-pipe control and BSD packages are not built or tried.",
+  "Self-update takes a bundle directory: no fetcher or relay announcements yet, nothing signed with a real org key, and it was only run on one box with test keys.",
+  "Upstream, still open: weirdnet-openai #1 and #2, weirdnet-agent #1, weirdnet-backends #1. New asks written up: a `tasks` field in `Serving`, roles in authorization, and an unsigned signing identity for plain file sets.",
+  "The security review is the author's. Role boundaries are not enforced: a model node accepts any linked device.",
+  "No run across real machines, so the 1.0 criteria in DESIGN.md are mostly open.",
+]
 
 [[milestone]]
 id = "M10"

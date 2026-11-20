@@ -15,6 +15,30 @@ pub const LAUNCHD_LABEL: &str = "com.weirdbrains.ymird";
 pub struct ServiceSpec {
     pub ymird: PathBuf,
     pub home: PathBuf,
+    /// Start through `ymirctl update boot --exec`, so a staged update runs on trial and rolls back
+    /// if it does not come up. `None`: run `ymird` directly.
+    pub ymirctl: Option<PathBuf>,
+}
+
+/// The command line the service runs.
+pub fn command(spec: &ServiceSpec) -> Vec<String> {
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    match &spec.ymirctl {
+        None => vec![s(&spec.ymird), "--home".into(), s(&spec.home)],
+        Some(ctl) => vec![
+            s(ctl),
+            "--home".into(),
+            s(&spec.home),
+            "update".into(),
+            "boot".into(),
+            "--exec".into(),
+            "--installed".into(),
+            s(&spec.ymird),
+            "--".into(),
+            "--home".into(),
+            s(&spec.home),
+        ],
+    }
 }
 
 /// Quotes a path for a systemd `ExecStart=` line.
@@ -39,7 +63,7 @@ StartLimitBurst=5\n\
 \n\
 [Service]\n\
 Type=simple\n\
-ExecStart={} --home {}\n\
+ExecStart={}\n\
 Restart=on-failure\n\
 RestartSec=5\n\
 KillMode=mixed\n\
@@ -49,8 +73,7 @@ NoNewPrivileges=yes\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-        sd_quote(&spec.ymird),
-        sd_quote(&spec.home)
+        command(spec).iter().map(|a| sd_quote(Path::new(a))).collect::<Vec<_>>().join(" ")
     )
 }
 
@@ -68,7 +91,7 @@ pub fn launchd_plist(spec: &ServiceSpec) -> String {
 <dict>
   <key>Label</key><string>{LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{}</string><string>--home</string><string>{}</string></array>
+  <array>{}</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -78,8 +101,7 @@ pub fn launchd_plist(spec: &ServiceSpec) -> String {
 </dict>
 </plist>
 "#,
-        xml(&spec.ymird.to_string_lossy()),
-        xml(&spec.home.to_string_lossy()),
+        command(spec).iter().map(|a| format!("<string>{}</string>", xml(a))).collect::<String>(),
         xml(&log.to_string_lossy()),
         xml(&log.to_string_lossy())
     )
@@ -263,7 +285,21 @@ mod tests {
     use super::*;
 
     fn spec() -> ServiceSpec {
-        ServiceSpec { ymird: "/opt/ymir/bin/ymird".into(), home: "/home/u/My Config/ymir".into() }
+        ServiceSpec { ymird: "/opt/ymir/bin/ymird".into(), home: "/home/u/My Config/ymir".into(), ymirctl: None }
+    }
+
+    #[test]
+    fn managed_updates_start_through_ymirctl_boot() {
+        let mut sp = spec();
+        sp.ymirctl = Some("/opt/ymir/bin/ymirctl".into());
+        let unit = systemd_unit(&sp);
+        assert!(
+            unit.contains(
+                "ExecStart=/opt/ymir/bin/ymirctl --home \"/home/u/My Config/ymir\" update boot --exec --installed /opt/ymir/bin/ymird -- --home \"/home/u/My Config/ymir\"\n"
+            ),
+            "{unit}"
+        );
+        assert!(launchd_plist(&sp).contains("<string>update</string><string>boot</string><string>--exec</string>"));
     }
 
     #[test]
@@ -271,7 +307,7 @@ mod tests {
         let u = systemd_unit(&spec());
         assert!(u.contains("ExecStart=/opt/ymir/bin/ymird --home \"/home/u/My Config/ymir\"\n"), "{u}");
         assert!(u.contains("Restart=on-failure") && u.contains("WantedBy=default.target"));
-        let p = launchd_plist(&ServiceSpec { ymird: "/opt/a&b/ymird".into(), home: "/h".into() });
+        let p = launchd_plist(&ServiceSpec { ymird: "/opt/a&b/ymird".into(), home: "/h".into(), ymirctl: None });
         assert!(p.contains("<string>/opt/a&amp;b/ymird</string>"));
         assert!(p.contains(LAUNCHD_LABEL));
     }

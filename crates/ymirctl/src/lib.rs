@@ -170,6 +170,9 @@ pub enum ServiceCmd {
         /// The ymird binary (default: next to ymirctl, else on PATH).
         #[arg(long)]
         ymird: Option<PathBuf>,
+        /// Start through `ymirctl update boot`, so a staged update gets a trial and a rollback.
+        #[arg(long)]
+        managed_updates: bool,
     },
     /// Stop, disable and remove the user service.
     Uninstall {
@@ -479,7 +482,7 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     }
     if args.service {
         let opts = ymir_core::service::InstallOptions { dir: args.unit_dir.clone(), start: !args.no_start, dry_run: false };
-        for line in ymir_core::service::install(&service_spec(paths, args.ymird.clone())?, &opts)? {
+        for line in ymir_core::service::install(&service_spec(paths, args.ymird.clone(), false)?, &opts)? {
             writeln!(out, "{line}")?;
         }
         writeln!(out, "Next: `ymirctl status`, then `ymirctl chat \"Hello\"`.")?;
@@ -492,21 +495,25 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     Ok(())
 }
 
-fn service_spec(paths: &Paths, ymird: Option<PathBuf>) -> Result<ymir_core::service::ServiceSpec> {
+fn service_spec(paths: &Paths, ymird: Option<PathBuf>, managed: bool) -> Result<ymir_core::service::ServiceSpec> {
     let ymird = ymird.or_else(ymir_core::service::find_ymird).context("ymird not found next to ymirctl or on PATH; pass --ymird")?;
     let ymird = std::fs::canonicalize(&ymird).unwrap_or(ymird);
     let home = std::fs::canonicalize(&paths.home).unwrap_or_else(|_| paths.home.clone());
-    Ok(ymir_core::service::ServiceSpec { ymird, home })
+    let ymirctl = if managed { Some(std::env::current_exe().context("finding ymirctl")?) } else { None };
+    Ok(ymir_core::service::ServiceSpec { ymird, home, ymirctl })
 }
 
 fn service_cmd(paths: &Paths, out: &mut dyn Write, cmd: ServiceCmd) -> Result<()> {
     use ymir_core::service;
     let lines = match cmd {
-        ServiceCmd::Install { args, no_start, ymird } => {
+        ServiceCmd::Install { args, no_start, ymird, managed_updates } => {
             if !paths.config().exists() && !args.dry_run {
                 bail!("{} does not exist; run `ymirctl setup` first", paths.config().display());
             }
-            service::install(&service_spec(paths, ymird)?, &service::InstallOptions { dir: args.unit_dir, start: !no_start, dry_run: args.dry_run })?
+            service::install(
+                &service_spec(paths, ymird, managed_updates)?,
+                &service::InstallOptions { dir: args.unit_dir, start: !no_start, dry_run: args.dry_run },
+            )?
         }
         ServiceCmd::Uninstall { args } => service::uninstall(args.unit_dir.as_deref(), args.dry_run)?,
         ServiceCmd::Status { args } => service::status(args.unit_dir.as_deref())?,
