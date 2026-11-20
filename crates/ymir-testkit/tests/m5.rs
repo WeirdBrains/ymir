@@ -2,10 +2,6 @@
 //! nodes. Separate daemons over Weirdnet on 127.0.0.1 (nothing leaves the box), with a mock
 //! engine that streams slowly so a node can be killed in the middle of an answer.
 //!
-//! The two failover tests need `weirdnet-agent` with the prefix fix (unreleased after 0.4.1), so
-//! they run with `--features agent-prefix` and a local `[patch]`; the conversation test needs
-//! nothing unreleased.
-//!
 //! - A model node dies mid-answer: the inference node continues the answer on another model node
 //!   from the text already streamed (an assistant prefix), and the asker sees one whole answer.
 //! - An inference node dies mid-answer: the app's pool resumes on the other inference node, which
@@ -142,6 +138,9 @@ async fn stream_chat(d: &Daemon, h: &Home, model: &str, q: &str, mut on_text: im
             let event: String = buf.drain(..i + 2).collect();
             let Some(data) = event.trim().strip_prefix("data:") else { continue };
             let Ok(v) = serde_json::from_str::<Value>(data.trim()) else { continue };
+            if v.get("error").is_some() {
+                bail!("the stream failed after {text:?}: {v}");
+            }
             if let Some(t) = v["choices"][0]["delta"]["content"].as_str().filter(|t| !t.is_empty()) {
                 text.push_str(t);
                 pieces += 1;
@@ -152,7 +151,6 @@ async fn stream_chat(d: &Daemon, h: &Home, model: &str, q: &str, mut on_text: im
     Ok(text)
 }
 
-#[cfg(feature = "agent-prefix")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_model_node_dying_mid_answer_is_resumed_on_another() -> Result<()> {
     // SAFETY: set before any daemon starts in this test; both tests set the same value.
@@ -212,7 +210,6 @@ async fn a_model_node_dying_mid_answer_is_resumed_on_another() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "agent-prefix")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inference_node_dying_mid_answer_is_resumed_with_the_full_context() -> Result<()> {
     // SAFETY: as above.
@@ -269,7 +266,9 @@ async fn an_inference_node_dying_mid_answer_is_resumed_with_the_full_context() -
     };
     let coords = [inf1.coordinator.clone().unwrap(), inf2.coordinator.clone().unwrap()];
     eventually(30, "an inference node starts the answer", async || Ok(coords.iter().any(|c| c.in_flight() > 0))).await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Long enough for the model to load and a few words to reach the app (300 ms a word), so the
+    // node dies mid-answer rather than before the first token.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     let (dying, survivor, surv_h) = if coords[0].in_flight() > 0 { (inf1, inf2, &i2_h) } else { (inf2, inf1, &i1_h) };
     dying.shutdown().await;
 
@@ -369,5 +368,49 @@ async fn conversations_sync_and_any_inference_node_answers_from_them() -> Result
     inf1.shutdown().await;
     inf2.shutdown().await;
     model.shutdown().await;
+    Ok(())
+}
+
+/// `continue_final_message` through the bridge: the last assistant message is continued by the
+/// model, the reply holds only the new text, and the answer cache is not consulted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bridge_continues_a_final_assistant_message() -> Result<()> {
+    // SAFETY: as above.
+    unsafe { std::env::set_var("YMIR_MOCK_WORD_MS", "5") };
+    let tmp = tempfile::tempdir()?;
+    let h = home(tmp.path(), "box", "model inference app", &[], &["alpha"])?;
+    let d = start(&h).await?;
+    let (http, url, token) = bridge(&d, &h);
+    let q = "count the road home";
+    let shown = "Hello from alpha! You";
+    let ask = |messages: Value, extra: Value| {
+        let (http, url, token) = (http.clone(), url.clone(), token.clone());
+        async move {
+            let mut body = json!({"model": "alpha", "temperature": 0, "messages": messages});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let r = http.post(format!("{url}/chat/completions")).bearer_auth(&token).json(&body).send().await?;
+            Ok::<_, anyhow::Error>((r.status().as_u16(), r.json::<Value>().await?))
+        }
+    };
+    // A plain question first, so the cache holds the whole answer.
+    let (status, whole) = ask(json!([{"role": "user", "content": q}]), json!({})).await?;
+    assert_eq!(status, 200, "{whole}");
+    assert_eq!(whole["choices"][0]["message"]["content"], said(q));
+    // Continue from "Hello from alpha! You": only the rest comes back.
+    let (status, rest) = ask(
+        json!([{"role": "user", "content": q}, {"role": "assistant", "content": shown}]),
+        json!({"continue_final_message": true, "add_generation_prompt": false}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{rest}");
+    assert_eq!(rest["choices"][0]["message"]["content"], said(q).strip_prefix(shown).unwrap());
+    // Asking to continue while also adding a generation prompt is the caller's mistake.
+    let (status, _) = ask(
+        json!([{"role": "user", "content": q}, {"role": "assistant", "content": shown}]),
+        json!({"continue_final_message": true, "add_generation_prompt": true}),
+    )
+    .await?;
+    assert_eq!(status, 400);
+    d.shutdown().await;
     Ok(())
 }

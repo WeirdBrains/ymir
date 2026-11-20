@@ -170,7 +170,11 @@ impl RemoteModelNode {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         });
-        let po = PoolOptions::default().with_cert(cert).with_accept_timeout(opts.accept_timeout).with_infer_v1_fallback(false);
+        // A model node that stops talking is given up on sooner than the asker gives up on this inference
+        // node (its pool stalls at 15 s or more), so the answer can move to another model node here
+        // first instead of the asker's pool timing out on a silent stream.
+        let stall = weirdnet_agent::pool::Stall::new(Duration::from_secs(5), 3, Duration::from_secs(12));
+        let po = PoolOptions::default().with_cert(cert).with_accept_timeout(opts.accept_timeout).with_infer_v1_fallback(false).with_stall(stall);
         // Raw inference goes to the model node's own protocol id, falling back to infer/2 for a node
         // on backends 0.1.0.
         let pool = Pool::new(Arc::new(RawInferDialer::new(dialer)), vec![peer.to_string()]).with_options(po);
@@ -209,12 +213,10 @@ impl ModelNode for RemoteModelNode {
         self.record().is_some_and(|c| c.draining)
     }
 
-    /// Continuing an answer on a model node over Weirdnet goes through `weirdnet-agent`'s
-    /// `Pool::infer`, which in 0.4.1 fails ("characters of the answer are missing") when a request
-    /// carries a prefix on its first attempt. The fix is unreleased, so this is off until the
-    /// `agent-prefix` feature says the agent has it (then it needs nothing else).
+    /// A model node continues an assistant prefix (llama.cpp prefill, vLLM `continue_final_message`),
+    /// and `weirdnet-agent` 0.4.2's pool carries one on a first attempt.
     fn resumes(&self) -> bool {
-        cfg!(feature = "agent-prefix")
+        true
     }
 
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {

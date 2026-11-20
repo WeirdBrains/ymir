@@ -5057,9 +5057,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "721259c9004e32b394356e9ef4cc4f81cfccd33f359abdf98ee3c5682b095828"
+checksum = "a91b950c6f8920ef67516374d05a382cd9fbc2cd764b735251570d977c348381"
 dependencies = [
  "async-trait",
  "cbor4ii",
@@ -5209,9 +5209,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-openai"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33f4813c6eeee24e6e46ce9c35dd1644556e071df31bc89a9843db1536bbe536"
+checksum = "4a2a96ad98a97536bc1493bc68fe09fbdb1132ecc74eaf364f451cc70a21887c"
 dependencies = [
  "axum",
  "futures",
@@ -5246,9 +5246,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-sync"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbf856d3524dffaa5be3641e6dcef5606c12febd74085dad58151edd61dd673f"
+checksum = "5e72069ce49f1186ba44d06dcf6aefdbcb028f0c960ac45ed86796eb83b7317f"
 dependencies = [
  "blake3",
  "cbor4ii",
