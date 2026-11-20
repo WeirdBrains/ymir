@@ -89,7 +89,7 @@ async fn linked_nodes_waits_for_every_unreachable_device() -> Result<()> {
     drop(first);
     let inf = start(&inf_tmp).await?;
     let inf_addr = addr(&inf_tmp).await?;
-    let app_h = home(root, "dev", "app", &[inf_addr.clone()], &[])?;
+    let app_h = home(root, "dev", "app", std::slice::from_ref(&inf_addr), &[])?;
     let cfg = NodeConfig::load(&app_h.paths.config())?;
     let net = Network::start(&cfg, &app_h.paths).await?.expect("on Weirdnet");
     let (inf_peer, inf_ma) = {
