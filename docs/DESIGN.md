@@ -1889,18 +1889,21 @@ real key, or uploaded anywhere.
   DirectX shader compiler at build time. A Windows runner is needed.
 - **iOS scaffold.** `app/ios` from `flutter create` (bundle id `org.weirdbrains.bragi`, display name
   Bragi, the brand AppIcon set). Not built.
-- **CI.** `.github/workflows/platforms.yml` (manual or on shell changes): macOS and Windows builds of
-  `bragi-desktop` with tests, and an unsigned `flutter build ios`. It has not run.
+- **CI (ran 2026-11-19/20, no secrets, nothing published).** `.github/workflows/platforms.yml` (manual or on shell
+  changes) on GitHub Actions: `bragi-desktop` builds and its tests pass on `macos-15` and `windows-2025`
+  (run 44676967359), and `flutter build ios --release --no-codesign` succeeds (run 44684531804). Fixes it
+  needed: `macos-14` runners no longer exist (moved to `macos-15`); the iOS Rust targets in the bridge's
+  `rust-toolchain.toml`; and linking the bridge for iOS 15 (`.cargo/config.toml`: rustc's default minimum left
+  `___chkstk_darwin`, used by `aws-lc-sys`, unresolved). The Native Assets hook needed no change.
 
 **Tests:** `cargo fmt --check`, `clippy -D warnings` and `cargo test --workspace` (core 3 unit + 6 pool + 3 scenario, desktop 3) pass. Both scenarios passed, 11 screenshots each: desktop under Xvfb with `env -i`, Android on a headless google_apis (API 35) emulator with a throwaway AVD and SDK root, deleted afterwards. The Android run used the release
 x86_64 apk (debug-signed, demo mode). Screenshots are in `~/bragi-shots/b3/` on the dev box (the bot box could not be reached for a copy).
 
 **Gaps:**
 
-- **macOS, Windows and iOS are unbuilt and untested.** They need a Mac and a Windows machine (or
-  the CI above, which has not run). The iOS app also needs the Native Assets hook to build for Apple
-  targets (the `rust-toolchain.toml` has Android and Linux targets only) and iOS handling for what
-  `RustContext` does on Android; neither is checked. TestFlight needs Apple Developer
+- **macOS, Windows and iOS build in CI but have never been run.** The desktop tests pass on both, but no scenario
+  was played on macOS or Windows and the iOS app was never launched (no Mac or device here); the Android-only
+  pieces are cfg-gated, so the iOS build should have no `RustContext` equivalent to supply, unchecked. TestFlight needs Apple Developer
   membership and signing, which are m3talsmith's.
 - **No release keys and no upload.** Play and F-Droid need a real keystore (m3talsmith) and a tagged
   release, and F-Droid needs a merge request to `fdroiddata`.
