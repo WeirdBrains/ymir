@@ -17,5 +17,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ymir-core.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+
 [lints]
 workspace = true

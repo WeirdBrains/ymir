@@ -13,6 +13,7 @@ use weirdnet_model::hw::human_gib;
 use ymir_core::client::BridgeClient;
 use ymir_core::config::Roles;
 use ymir_core::control::{self, ControlRequest, ModelState, StatusReport};
+use ymir_core::service::{self, Scope, ServiceSpec, Target};
 use ymir_core::setup::{self, SetupOptions};
 use ymir_core::{NodeConfig, Paths};
 
@@ -141,7 +142,8 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: BridgeCmd,
     },
-    /// Run ymird as a user-level service (systemd --user on Linux, a launchd agent on macOS).
+    /// Run ymird as a background service: a systemd user unit (Linux), a launchd agent (macOS) or
+    /// a logon task (Windows); with --system, a machine service.
     Service {
         #[command(subcommand)]
         cmd: ServiceCmd,
@@ -156,6 +158,11 @@ pub struct ServiceArgs {
     /// Print what would happen; change nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// The machine's service instead of this user's (root, or an elevated prompt on Windows): a
+    /// systemd system unit, a launchd daemon, or the Windows service `NT SERVICE\ymird`. Its node
+    /// directory defaults to /var/lib/ymir, /Library/Application Support/Ymir or %ProgramData%\Ymir.
+    #[arg(long)]
+    pub system: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -173,8 +180,21 @@ pub enum ServiceCmd {
         /// Start through `ymirctl update boot`, so a staged update gets a trial and a rollback.
         #[arg(long)]
         managed_updates: bool,
+        /// With --system on Linux and macOS: the account ymird runs as (default: $SUDO_USER).
+        #[arg(long)]
+        run_as: Option<String>,
     },
-    /// Stop, disable and remove the user service.
+    /// Start the installed service.
+    Start {
+        #[command(flatten)]
+        args: ServiceArgs,
+    },
+    /// Stop it cleanly (engines too). It starts again at the next login or boot.
+    Stop {
+        #[command(flatten)]
+        args: ServiceArgs,
+    },
+    /// Stop, disable and remove the service.
     Uninstall {
         #[command(flatten)]
         args: ServiceArgs,
@@ -240,7 +260,7 @@ pub struct SetupArgs {
     /// Print the proposal and write nothing.
     #[arg(long)]
     pub dry_run: bool,
-    /// Also install and start ymird as a user service.
+    /// Also install and start ymird as a user service (systemd, launchd or a Windows logon task).
     #[arg(long)]
     pub service: bool,
     /// With --service: write the unit here instead (never starts it).
@@ -288,6 +308,7 @@ pub enum ContextCmd {
 }
 
 pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<()> {
+    let cli_home = cli.home.clone();
     let paths = cli.home.map(Paths::new).unwrap_or_else(Paths::from_env);
     match cli.cmd {
         Cmd::Hw { json } => hw(out, json),
@@ -295,7 +316,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Status { json } => status(&paths, out, json).await,
         Cmd::Models => models(&paths, out).await,
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
-        Cmd::Service { cmd } => service_cmd(&paths, out, cmd),
+        Cmd::Service { cmd } => service_cmd(cli_home.as_deref(), paths, out, cmd).await,
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Nodes => nodes(&paths, out).await,
@@ -470,6 +491,15 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     }
     if args.dry_run {
         writeln!(out, "\n{}", p.config.to_toml()?)?;
+        if args.service {
+            writeln!(out, "Service:")?;
+            let spec = service_spec(paths, args.ymird.clone(), false, Scope::User, None)?;
+            let t = Target::current(Scope::User, args.unit_dir.as_deref(), &spec.home)?;
+            let plan = service::install_plan(&spec, &t, &service::Host::detect(&t), !args.no_start)?;
+            for line in service::execute(&plan, true)? {
+                writeln!(out, "{line}")?;
+            }
+        }
         return Ok(());
     }
     if args.download && !p.to_download.is_empty() {
@@ -516,8 +546,10 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
         writeln!(out, "MLX-LM is not installed yet (run `ymirctl setup --download --force`)")?;
     }
     if args.service {
-        let opts = ymir_core::service::InstallOptions { dir: args.unit_dir.clone(), start: !args.no_start, dry_run: false };
-        for line in ymir_core::service::install(&service_spec(paths, args.ymird.clone(), false)?, &opts)? {
+        let spec = service_spec(paths, args.ymird.clone(), false, Scope::User, None)?;
+        let t = Target::current(Scope::User, args.unit_dir.as_deref(), &spec.home)?;
+        let plan = service::install_plan(&spec, &t, &service::Host::detect(&t), !args.no_start)?;
+        for line in service::execute(&plan, false)? {
             writeln!(out, "{line}")?;
         }
         writeln!(out, "Next: `ymirctl status`, then `ymirctl chat \"Hello\"`.")?;
@@ -571,33 +603,105 @@ async fn mlx_setup(paths: &Paths, p: &mut setup::Proposal, yes: bool, out: &mut 
     Ok(())
 }
 
-fn service_spec(paths: &Paths, ymird: Option<PathBuf>, managed: bool) -> Result<ymir_core::service::ServiceSpec> {
-    let ymird = ymird.or_else(ymir_core::service::find_ymird).context("ymird not found next to ymirctl or on PATH; pass --ymird")?;
-    let ymird = std::fs::canonicalize(&ymird).unwrap_or(ymird);
-    let home = std::fs::canonicalize(&paths.home).unwrap_or_else(|_| paths.home.clone());
-    let ymirctl = if managed { Some(std::env::current_exe().context("finding ymirctl")?) } else { None };
-    Ok(ymir_core::service::ServiceSpec { ymird, home, ymirctl })
+/// A path for a service definition: absolute, symlinks resolved on Unix. On Windows `canonicalize`
+/// gives `\\?\` paths, which some tools reject, so it is only made absolute there.
+fn service_path(p: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
+    } else {
+        std::fs::canonicalize(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+    }
 }
 
-fn service_cmd(paths: &Paths, out: &mut dyn Write, cmd: ServiceCmd) -> Result<()> {
-    use ymir_core::service;
+fn service_spec(paths: &Paths, ymird: Option<PathBuf>, managed: bool, scope: Scope, run_as: Option<String>) -> Result<ServiceSpec> {
+    let ymird = ymird.or_else(service::find_ymird).context("ymird not found next to ymirctl or on PATH; pass --ymird")?;
+    let ymirctl = if managed { Some(service_path(&std::env::current_exe().context("finding ymirctl")?)) } else { None };
+    Ok(ServiceSpec { ymird: service_path(&ymird), home: service_path(&paths.home), ymirctl, scope, run_as })
+}
+
+/// The node directory a service command acts on: `--home`/`YMIR_HOME` when given, else the user
+/// default, or with `--system` the machine default.
+fn service_paths(explicit_home: Option<&std::path::Path>, paths: Paths, scope: Scope) -> Paths {
+    match (explicit_home, scope) {
+        (None, Scope::System) => Paths::new(service::system_home(service::Os::current())),
+        _ => paths,
+    }
+}
+
+async fn service_cmd(explicit_home: Option<&std::path::Path>, paths: Paths, out: &mut dyn Write, cmd: ServiceCmd) -> Result<()> {
+    let args = match &cmd {
+        ServiceCmd::Install { args, .. }
+        | ServiceCmd::Start { args }
+        | ServiceCmd::Stop { args }
+        | ServiceCmd::Uninstall { args }
+        | ServiceCmd::Status { args } => args.clone(),
+    };
+    let scope = if args.system { Scope::System } else { Scope::User };
+    let paths = service_paths(explicit_home, paths, scope);
+    let t = Target::current(scope, args.unit_dir.as_deref(), &service_path(&paths.home))?;
+    let windows_task = t.os == service::Os::Windows && scope == Scope::User && !t.custom;
     let lines = match cmd {
-        ServiceCmd::Install { args, no_start, ymird, managed_updates } => {
+        ServiceCmd::Install { no_start, ymird, managed_updates, run_as, .. } => {
             if !paths.config().exists() && !args.dry_run {
-                bail!("{} does not exist; run `ymirctl setup` first", paths.config().display());
+                bail!("{} does not exist; run `ymirctl{} setup` first", paths.config().display(), home_flag(explicit_home, scope, &paths));
             }
-            service::install(
-                &service_spec(paths, ymird, managed_updates)?,
-                &service::InstallOptions { dir: args.unit_dir, start: !no_start, dry_run: args.dry_run },
-            )?
+            let run_as = run_as.or_else(|| std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()));
+            let spec = service_spec(&paths, ymird, managed_updates, scope, run_as)?;
+            if windows_task && !args.dry_run && control::reachable(&paths.socket()).await {
+                // Reinstalling over a running task: let the old ymird stop cleanly first.
+                stop_over_control(&paths).await;
+            }
+            service::execute(&service::install_plan(&spec, &t, &service::Host::detect(&t), !no_start)?, args.dry_run)?
         }
-        ServiceCmd::Uninstall { args } => service::uninstall(args.unit_dir.as_deref(), args.dry_run)?,
-        ServiceCmd::Status { args } => service::status(args.unit_dir.as_deref())?,
+        ServiceCmd::Start { .. } => service::execute(&service::start_plan(&t), args.dry_run)?,
+        ServiceCmd::Stop { .. } | ServiceCmd::Uninstall { .. } => {
+            let mut log = Vec::new();
+            // A Windows task can only be ended hard, which would leave engines running: ask ymird
+            // to shut down over the control pipe first, then end the task if it is still there.
+            if windows_task {
+                if args.dry_run {
+                    log.push("would ask ymird to stop over its control pipe".into());
+                } else if stop_over_control(&paths).await {
+                    log.push("ymird stopped".into());
+                }
+            }
+            let plan = if matches!(cmd, ServiceCmd::Stop { .. }) { service::stop_plan(&t) } else { service::uninstall_plan(&t) };
+            log.extend(service::execute(&plan, args.dry_run)?);
+            log
+        }
+        ServiceCmd::Status { .. } => {
+            let mut log = service::status(&t);
+            if !t.custom {
+                let up = control::reachable(&paths.socket()).await;
+                log.push(format!("ymird: {}", if up { "answering (`ymirctl status` for details)" } else { "not answering" }));
+            }
+            log
+        }
     };
     for l in lines {
         writeln!(out, "{l}")?;
     }
     Ok(())
+}
+
+/// ` --home DIR` when the service's node directory isn't the one `ymirctl` uses by default.
+fn home_flag(explicit_home: Option<&std::path::Path>, scope: Scope, paths: &Paths) -> String {
+    if explicit_home.is_none() && scope == Scope::System { format!(" --home \"{}\"", paths.home.display()) } else { String::new() }
+}
+
+/// Asks the `ymird` at `paths` to shut down and waits (up to a minute) until it stops answering.
+/// Returns whether it was running.
+async fn stop_over_control(paths: &Paths) -> bool {
+    if control::request(&paths.socket(), &ControlRequest::Shutdown).await.is_err() {
+        return false;
+    }
+    for _ in 0..240 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if !control::reachable(&paths.socket()).await {
+            break;
+        }
+    }
+    true
 }
 
 fn confirm(out: &mut dyn Write, input: &mut dyn BufRead, prompt: &str) -> Result<bool> {
