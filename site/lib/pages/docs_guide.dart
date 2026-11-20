@@ -205,19 +205,23 @@ with the bridge token as the API key (step 5).</li>
 It still needs Ymir, because <code>ymird</code> is what joins it to the pool and starts and stops its models.</p>
 <p><strong>Do I need llama.cpp or CUDA installed?</strong> No. Every Ymir download includes llama.cpp; the
 <code>ymir-cuda</code> build also includes the CUDA runtime, so an NVIDIA machine needs only its driver. On an Apple
-Silicon Mac, <code>ymirctl setup --download</code> installs MLX-LM for you. Only vLLM and mistral.rs are separate
-installs, and both are optional.</p>
+Silicon Mac, <code>ymirctl setup --download</code> installs MLX-LM for you. Only vLLM is a separate install, and it is
+optional.</p>
 <p><strong>Which engine runs my models?</strong> It depends on the machine, and <code>ymirctl setup</code> picks it:</p>
 <ul>
 <li><strong>Mac with Apple Silicon</strong>: chat models run on Apple's MLX (MLX-LM), with MLX-format weights.
 <code>ymirctl setup --download</code> installs MLX-LM into Ymir's folder (with <code>uv</code> if you have it, else
-Python 3) and downloads the weights, asking first. The embedding model runs on llama.cpp.</li>
+Python 3) and downloads the weights, asking first. Models that take images, and the embedding model, run on
+llama.cpp.</li>
 <li><strong>Intel Mac, Linux and Windows</strong>: llama.cpp, included in every download (<code>ymir-cuda</code> for
 NVIDIA GPUs).</li>
 </ul>
-<p>Choose another with <code>ymirctl setup --backend llamacpp</code> (on a Mac) or <code>--backend mistralrs</code>, or set
-<code>backend</code> per model in <code>node.toml</code>. mistral.rs is optional and not included; it was measured against
-llama.cpp and is slower on some models, so llama.cpp stays the default.</p>
+<p>On a Mac, <code>ymirctl setup --backend llamacpp</code> keeps everything on llama.cpp; <code>backend</code> can also be
+set per model in <code>node.toml</code>.</p>
+<p><strong>Can models read images?</strong> The engines can: catalog models that take images (Gemma 4) come with their
+vision projector, which <code>ymirctl setup --download</code> fetches and <code>ymird</code> hands to llama.cpp. But
+Ymir's bridge and the pool carry text only for now, so Jan, Bragi and other clients can't send images through Ymir
+yet; that needs a change in Weirdnet, which is planned. Models on MLX take text only.</p>
 <p><strong>What happens when a model crashes?</strong> Each model runs in its own engine process. If one dies,
 <code>ymird</code> keeps running and starts the model again (a request it had not started answering is retried once);
 a model that keeps crashing is marked failed instead of being restarted forever. With more than one model node, the inference

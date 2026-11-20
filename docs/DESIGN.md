@@ -420,7 +420,6 @@ devices, link speeds; used for splitting) and what each backend can do here.
 |---|---|---|
 | llama.cpp `llama-server` (managed by Ymir) | Everywhere: CUDA, ROCm/HIP, Metal, Vulkan, CPU; Linux, macOS, Windows, BSD | Default backend. GGUF models. |
 | MLX-LM `mlx_lm.server` (managed venv, through `ymir-engine`) | macOS on Apple Silicon | Default for chat models there. MLX weights. |
-| mistral.rs `mistralrs serve` (through `ymir-engine`) | Linux, Windows (CUDA or CPU), macOS (Metal) | Optional, per model. GGUF and safetensors, vision. |
 | In-process llama.cpp (`weirdnet-model` `llama`) | Everywhere | Tiny models and embeddings without an extra process; Bragi's optional offline model. |
 | vLLM (managed by Ymir, Rust frontend as on server-a/server-b) | Linux, NVIDIA sm_80+ (sm_121 needs the CUDA 13 build), AMD ROCm on vLLM's supported list | Optional. High concurrency, NVFP4/FP8. Never on macOS, Windows or BSD. |
 | vLLM + Ray | Linux nodes with a fast private link | Split models (see big mode). |
@@ -486,13 +485,13 @@ Generic part, proposed to the Weirdnet lead for `weirdnet-backends` (the design 
 engine build script, so Morph, Bragi and other apps reuse them. Until then the code is in
 `ymir_core::engine` and `scripts/engine.py`, marked to be extracted.
 
-### Engines per platform: MLX on Macs, mistral.rs evaluated (2026-11-20)
+### Engines per platform: MLX on Macs, llama.cpp everywhere else (2026-11-20)
 
-| Platform | Chat models | Embeddings | Opt-in |
+| Platform | Chat models | Vision models, embeddings | Opt-in |
 |---|---|---|---|
-| macOS, Apple Silicon | **MLX-LM** (`backend = "mlx"`), MLX weights from `mlx-community` | llama.cpp (bundled) | `--backend llamacpp` |
+| macOS, Apple Silicon | **MLX-LM** (`backend = "mlx"`), MLX weights from `mlx-community` | llama.cpp (bundled, Metal) | `--backend llamacpp` |
 | macOS, Intel | llama.cpp (bundled, Metal/CPU) | llama.cpp | — |
-| Linux, Windows | llama.cpp (bundled; `ymir-cuda` for NVIDIA) | llama.cpp | `--backend mistralrs`; vLLM (Linux, NVIDIA) |
+| Linux, Windows | llama.cpp (bundled; `ymir-cuda` for NVIDIA) | llama.cpp | vLLM (Linux, NVIDIA) |
 
 **MLX (default on Apple Silicon).** m3talsmith: "run MLX/MLX-LM on Macs instead of llama.cpp".
 `ymirctl setup` on an arm64 Mac proposes the same catalog models, served by `mlx_lm.server` from
@@ -500,59 +499,86 @@ MLX-format weights (`ymir_core::mlx::WEIGHTS`: each catalog chat model mapped to
 `mlx-community` 4-bit repo, MXFP4 for gpt-oss, pinned to a commit). `setup --download` installs
 `mlx-lm` (pinned, 0.32.2) into `<home>/engines/mlx` with `uv` when present (it brings its own
 Python), else `python3 -m venv`, and downloads the weights to `<models_dir>/mlx/<name>`, asking
-first for each, so loads need no network. Catalog models without MLX weights, and the embedding
-model (MLX-LM's server has no embeddings endpoint; config validation rejects `mlx` with
-`role = "embedding"`), stay on llama.cpp. `mlx = "managed" | "system:PATH" | "off"` in `[model]`.
+first for each, so loads need no network. MLX-LM's server is text-only and has no embeddings
+endpoint, so models that take images (Gemma 4, with their projector) and the embedding model stay
+on llama.cpp; config validation rejects `mlx` with `role = "embedding"`, and `ymir-engine` answers
+400 to image or audio parts sent to an MLX model. (`mlx-vlm` would serve images on MLX; not
+adopted yet.) `mlx = "managed" | "system:PATH" | "off"` in `[model]`.
 
-**How the extra engines run: `ymir-engine`.** `weirdnet-backends` keys engines by kind, one program
-per kind, and has adapters for llama.cpp and vLLM only. Rather than edit it, Ymir ships a small
-binary, `ymir-engine` (`ymir_core::shim`), next to `ymird`. When a node has an `mlx` or `mistralrs`
-model, the llama.cpp-kind program becomes `ymir-engine`, with the real engines passed as extra
-arguments. It reads the model source: a GGUF path execs `llama-server` with the arguments
-unchanged; `mlx:<dir>` and `mistralrs:<gguf>` start that engine on a private loopback port behind a
-proxy that speaks `llama-server`'s interface to the supervisor and `ymird`: `/health` turns 200
-only after the model has produced a token (MLX-LM answers `/health` before its weights are in),
-`/v1/models` lists the alias, `LLAMA_API_KEY` is checked as the bearer token, the request's `model`
-is rewritten to what the engine expects, and responses stream through. Each engine is still its
-own process tree, so a crash stays out of `ymird`, and restart and failover work as before. The
-proposal for `weirdnet-backends` is an `Mlx` and a `Mistralrs` `EngineKind` with adapters (launch
-arguments, readiness, model name), after which `ymir-engine` goes away. Tests:
-`ymir-testkit/tests/engine_shim.rs` (one node, a llama.cpp, an MLX and a mistral.rs model, mock
-engines, chat through `ymird` to each) and unit tests in `shim`, `mlx` and `setup`; the macOS
-workflow runs a setup dry run on Apple Silicon (expects MLX) and Intel (expects llama.cpp), and an
-Apple Silicon job that installs mlx-lm, downloads SmolLM2 135M's MLX weights and chats with it
-(reported but not required, as hosted runners may not expose Metal).
+**How MLX runs: `ymir-engine`.** `weirdnet-backends` keys engines by kind, one program per kind,
+and has adapters for llama.cpp and vLLM only. Rather than edit it, Ymir ships a small binary,
+`ymir-engine` (`ymir_core::shim`), next to `ymird`. When a node has an `mlx` model, the
+llama.cpp-kind program becomes `ymir-engine`, with the real engines passed as extra arguments. It
+reads the model source: a GGUF path execs `llama-server` with the arguments unchanged; `mlx:<dir>`
+starts `mlx_lm.server` on a private loopback port behind a proxy that speaks `llama-server`'s
+interface to the supervisor and `ymird`: `/health` turns 200 only after the model has produced a
+token (MLX-LM answers `/health` before its weights are in), `/v1/models` lists the alias,
+`LLAMA_API_KEY` is checked as the bearer token, the request's `model` is rewritten to MLX-LM's
+`default_model`, and responses stream through. The engine is still its own process tree, so a
+crash stays out of `ymird`, and restart and failover work as before. Tests:
+`ymir-testkit/tests/engine_shim.rs` (a llama.cpp and an MLX model on one node, mock engines) and
+unit tests in `shim`, `mlx` and `setup`; the macOS workflow runs a setup dry run on Apple Silicon
+(expects MLX) and Intel (expects llama.cpp), and an Apple Silicon job that installs mlx-lm,
+downloads SmolLM2 135M's MLX weights and chats with it (reported but not required, as hosted
+runners may not expose Metal).
 
-**mistral.rs (evaluated; opt-in, not the default).** m3talsmith asked to try mistral.rs as the
-embedded default on Linux and Windows, benchmark it against llama.cpp on m1 (GB10), and keep
-llama.cpp as the fallback. mistral.rs 0.9.5's prebuilt `cuda130-sm121` aarch64 binary runs on GB10
-(driver 580, CUDA 13.0), loads the same GGUF files, and serves vision through the OpenAI path
-(Gemma 4 and Qwen3.6 with their projectors). Measured with `scripts/bench_engines.py` on m1, same
-GGUF and projector, 8192-token context, one sequence, all layers on the GPU, a ~1,450-token prompt
-(unique per run, so no prefix cache), 256 tokens out at temperature 0, median of 3 runs, the
-running `ymird`'s own models idle beside it:
+**mistral.rs was tried and dropped.** Measured on m1 (GB10) against llama.cpp with the same GGUF and
+projector (8k context, one sequence, ~1,450-token prompt, 256 tokens out): Gemma 4 E4B decoded at
+40.7 tok/s on mistral.rs vs 64.3 on llama.cpp, Qwen3.6-35B-A3B at 70.0 vs 66.9; prefill and time
+to first token were about even; loads took 11–36 s vs 3 s, and mistral.rs fetched the base model's
+config and tokenizer from Hugging Face at load. llama.cpp with the projector files matched it on
+images (see Vision), so m3talsmith chose llama.cpp alone: "keep llama.cpp and include the
+projector files".
 
-| Model (Q4_K_M) | Engine | Load | TTFT | Prefill tok/s | Decode tok/s | GPU memory |
-|---|---|---|---|---|---|---|
-| gemma4-e4b + mmproj | llama.cpp | 2.7 s | 0.28 s | 5,180 | **64.3** | 4.4 GiB |
-| gemma4-e4b + mmproj | mistral.rs | 11.1 s | 0.33 s | 4,440 | 40.7 | 7.3 GiB |
-| gemma4-e4b + mmproj | mistral.rs, paged attention off | 6.6 s | 0.23 s | 6,460 | 44.7 | 6.9 GiB |
-| qwen3.6-35b-a3b + mmproj | llama.cpp | 3.2 s | 0.59 s | 2,470 | 66.9 | 20.2 GiB |
-| qwen3.6-35b-a3b + mmproj | mistral.rs | 29–36 s | 0.60 s | 2,430 | **70.0** | 21.2 GiB |
+### Vision (projectors)
 
-llama.cpp is m1's own build (the one its `ymird` runs). mistral.rs is 37% slower at decode on
-Gemma 4 E4B, 5% faster on the Qwen3.6 MoE, about even on prefill, takes 4–11× longer to load
-(llama.cpp maps the file; mistral.rs reads the weights in), and fetches the base model's
-`config.json` and tokenizer from Hugging Face at load (a multimodal GGUF needs `--tok-model-id`
-when the GGUF doesn't name its base model), which an offline node can't do. Its CUDA builds are per
-GPU architecture (upstream publishes 40-odd `cudaXXX-smYY` archives), against llama.cpp's one
-CUDA 13 build for sm_75 to sm_121. Linking it into `ymird` itself would also give up crash
-isolation, which is why (b) won for llama.cpp. So: llama.cpp stays the default; mistral.rs is
-`backend = "mistralrs"` (`ymirctl setup --backend mistralrs`), run as its own process through
-`ymir-engine`, found as `mistralrs` on `PATH` or `mistralrs = "system:PATH"` (or
-`lib/ymir/mistral.rs/` beside the bundled llama.cpp, should a release ever ship it). Revisit when it
-matches llama.cpp's decode speed on the catalog models and loads without the network; switching the
-default is one line (`setup::default_backend`).
+llama.cpp reads images through a separate projector GGUF (`--mmproj`). `ymir_core::vision` pins
+one per vision-capable catalog model, from the same upstream repo as the weights, with size and
+SHA-256: `gemma-4-e2b` → `ggml-org/gemma-4-E2B-it-GGUF` `mmproj-gemma-4-E2B-it-Q8_0.gguf`
+(557 MB), `gemma-4-e4b` → `ggml-org/gemma-4-E4B-it-GGUF` `mmproj-gemma-4-E4B-it-Q8_0.gguf`
+(560 MB). The other catalog models are text-only. `ymirctl setup --download` fetches the projector
+with its model (checksummed, with consent, through `weirdnet-model`), and `ymird` passes
+`--mmproj` whenever it is on disk; `mmproj = "path"` or `"off"` in `[[model.local]]` overrides, as
+does an explicit `--mmproj` in `args`. The model budget does not count the projector (about
+0.5 GB) yet.
+
+Checked on m1 against mistral.rs 0.9.5, same GGUF and projector, OpenAI chat requests straight to
+each engine (2026-11-20; the pinned Gemma 4 E4B Q8_0 projector, checksum verified, answered the
+same as m1's F16 one):
+
+| Request | Gemma 4 E4B: llama.cpp | mistral.rs | Qwen3.6-35B-A3B: llama.cpp | mistral.rs |
+|---|---|---|---|---|
+| One image (64 px) | ✓ | ✓ | ✓ | ✓ |
+| Two images in one message | ✓ | ✗ (400, "0 image placeholders but 2 image inputs") | ✓ | ✓ |
+| Tiny image (8 px) | ✓ | ✓ | ✓ | ✗ (400, Qwen needs ≥ 32 px) |
+| Large image (1920×1080) | ✓ 0.6 s | ✓ 0.3 s | ✓ 1.7 s | ✓ 1.3 s |
+| Audio (`input_audio`, WAV) | ✓ | ✗ (only its own `audio_url` part) | ✗ (no audio in the projector) | ✗ |
+| Remote `https://` image URL | ✗ (data URLs only) | ✗ | ✗ | ✗ |
+
+So llama.cpp with projectors covers everything mistral.rs did here and more. mistral.rs's extra
+content parts (`video_url`, `audio_url`, `file`) have no llama.cpp counterpart; nothing in Ymir
+sends them.
+
+**Gap: the pool does not carry images yet.** `weirdnet-openai` turns away chat content parts other
+than text (400, "content parts of type `image_url` are not supported"), and `weirdnet-agent`'s
+`Message` and infer/2 carry text only. So an image sent to Ymir's bridge (Jan, Bragi, scripts) is
+refused before it reaches any engine, whichever engine it is. The engines are ready
+(`tests/vision.rs` checks that the engine `ymird` starts takes images, and pins the bridge's
+refusal so it flips when Weirdnet changes). The fix belongs in Weirdnet (proposal below).
+
+**Proposal for `weirdnet-backends` / `weirdnet-agent` / `weirdnet-openai` (Weirdnet lead):**
+
+1. MLX engine kind. Add `EngineKind::Mlx` to `weirdnet-backends` with an adapter: launch
+   `mlx_lm.server --model <dir> --host 127.0.0.1 --port <p> --max-tokens <context>`, readiness
+   only after a one-token completion (its `/health` is 200 before the weights load), requests'
+   `model` set to `default_model`, an API-key check in front (MLX-LM has none), and a pinned
+   `mlx-lm` installed in a uv venv (as vLLM is today). Ymir's `ymir-engine` and `ymir_core::mlx`
+   are the working reference; with this, `ymir-engine` goes away.
+2. Content parts. `weirdnet-agent` `Message` content as text or parts (text, `image_url` with a
+   data URL, `input_audio`), carried by infer/2, `weirdnet-openai` passing parts through instead of
+   refusing them, and the llama.cpp adapter forwarding them to `llama-server` unchanged. Routing
+   should know which models take images (a `vision` capability in the model list), so a request
+   with an image never lands on a text-only model or an MLX one.
 
 ### Model sizing
 
