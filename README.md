@@ -43,7 +43,8 @@ Ymir-specific app.
 
 Release files (tar.gz, zip, deb, rpm, Arch, Nix) include llama.cpp, so a server install is: unpack or install the
 package, `ymirctl setup --download --yes --service`, done. There are two builds: `ymir` (CPU and Vulkan) and
-`ymir-cuda` (CUDA 13 with its runtime, for NVIDIA; needs only the driver). The
+`ymir-cuda` (CUDA 13 with its runtime, for NVIDIA; needs only the driver). On Apple Silicon Macs, chat models run on
+MLX instead: `setup --download` installs MLX-LM and the MLX weights (`--backend llamacpp` keeps llama.cpp). The
 [deployment guide](https://ymir.weirdbrains.com/docs/guides/deployment/) has the details.
 
 Nothing is released yet, so build from source (Rust 1.99) and put the pinned llama.cpp build

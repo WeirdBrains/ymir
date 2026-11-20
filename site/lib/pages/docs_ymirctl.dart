@@ -42,6 +42,7 @@ token. It refuses to overwrite an existing <code>node.toml</code> unless you pas
 <tbody>
 <tr><td><code>--name NAME</code></td><td>The node's name in the pool.</td></tr>
 <tr><td><code>--llama-server PATH</code></td><td>Use this external <code>llama-server</code> instead of the llama.cpp shipped with Ymir (the default).</td></tr>
+<tr><td><code>--backend ENGINE</code></td><td>Engine for chat models: <code>llamacpp</code>, <code>mlx</code> (Apple Silicon) or <code>mistralrs</code>. Default: <code>mlx</code> on Apple Silicon Macs, <code>llamacpp</code> elsewhere. Embedding models always use llama.cpp.</td></tr>
 <tr><td><code>--model PATH</code></td><td>Serve this GGUF file instead of catalog models. Repeat for more; the first is the main model.</td></tr>
 <tr><td><code>--catalog</code></td><td>With <code>--model</code>, also propose catalog models.</td></tr>
 <tr><td><code>--memory-budget SIZE</code></td><td>Memory models may use, such as <code>10GiB</code> (default: automatic).</td></tr>
@@ -49,7 +50,7 @@ token. It refuses to overwrite an existing <code>node.toml</code> unless you pas
 <tr><td><code>--models-dir DIR</code></td><td>Where GGUF files live (default: <code>$WEIRDNET_MODELS_DIR</code>, else the shared Weirdnet models folder).</td></tr>
 <tr><td><code>--port PORT</code></td><td>Bridge port on 127.0.0.1 (default 8484).</td></tr>
 <tr><td><code>--roles LIST</code></td><td>Roles to turn on, comma separated (default <code>model,inference,app</code>).</td></tr>
-<tr><td><code>--download</code></td><td>Download the proposed catalog models; asks first.</td></tr>
+<tr><td><code>--download</code></td><td>Download the proposed catalog models; asks first. On Apple Silicon it also installs MLX-LM and downloads the MLX weights.</td></tr>
 <tr><td><code>--yes</code></td><td>Answer yes to the download prompts.</td></tr>
 <tr><td><code>--force</code></td><td>Replace an existing <code>node.toml</code>.</td></tr>
 <tr><td><code>--dry-run</code></td><td>Print the proposal and write nothing.</td></tr>
