@@ -10,7 +10,7 @@ next = [
 ]
 
 [env]
-CARGO_TARGET_DIR = "a scratch disk/cargo-target/ymir"
+CARGO_TARGET_DIR = "/scratch/cargo-target/ymir"
 
 [[files]]                       # [workspace.package] version; every crate uses version.workspace
 kind = "cargo-workspace"

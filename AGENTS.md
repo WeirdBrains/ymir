@@ -18,13 +18,13 @@ conflict. Read it first. This file only adds Ymir-specific rules.
 - Licensed BSD-3-Clause (`LICENSE`); every crate sets `license = "BSD-3-Clause"`.
 - Protocol ids are `/ymir/...` for app protocols. The URL scheme is `weirdnet-ymir://`, registered in
   `weirdnet-schemes`. Never use bare `weirdnet://`.
-- The reference deployment is m3talsmith's two GB10 servers (configs on the dev box in `the deployment config directory`).
+- The reference deployment is m3talsmith's two GB10 servers (configs on the dev box in its deployment config directory).
   It is read-only from this project: never change server-a, server-b or the dev box services without m3talsmith's
   explicit go-ahead for that step.
 - Tests and manual runs use `YMIR_HOME` (and `WEIRDNET_MODELS_DIR`) pointed at a temp directory. Tests never
   download a model, start a GPU backend or touch the real network; real-model tests are `#[ignore]`.
 - No secrets in configs, logs, docs or commits. SMTP passwords and similar live in the OS keyring or an
   encrypted store, referenced by name only.
-- On the dev box, build with `CARGO_TARGET_DIR` under a scratch directory and clean targets afterwards.
+- On the dev box, build with `CARGO_TARGET_DIR` under a scratch disk and clean targets afterwards.
   Nothing opens on the live desktop.
 - Keep `docs/DESIGN.md` current in the same change as the code.

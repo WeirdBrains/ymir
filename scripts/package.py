@@ -36,7 +36,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BINS = ["ymird", "ymirctl"]
-MAINTAINER = "m3talsmith <m3talsmith@gmail.com>"
+MAINTAINER = "Weird Brains LLC <m3talsmith@gmail.com>"
 URL = "https://github.com/WeirdBrains/ymir"
 SUMMARY = "Private cloud of LLM models on your own machines (node daemon and CLI)"
 ARCH = {"x86_64": ("amd64", "x86_64"), "aarch64": ("arm64", "aarch64")}

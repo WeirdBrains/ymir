@@ -54,13 +54,6 @@ class RoadmapPage extends StatelessComponent {
                     else
                       a(href: cratesIoUrl(c), classes: 'crate-chip', [Component.text(c)]),
               ]),
-              if (m.gaps.isNotEmpty)
-                div(classes: 'gaps', [
-                  span(classes: 'k', [Component.text('Known gaps')]),
-                  ul([
-                    for (final g in m.gaps) li(_inline(g)),
-                  ]),
-                ]),
             ]),
         ]),
       ]),

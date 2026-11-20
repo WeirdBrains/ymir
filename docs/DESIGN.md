@@ -73,7 +73,7 @@ Weirdnet main until it ships (AGENTS.md); we don't build it inside the app.
 
 - Training or fine-tuning (the separate trainer stays separate).
 - Other users: no CI tenants, teammates or shared pools; no invites, membership roles or quotas.
-- Any HTTPS or API-key endpoint, LAN or public. No WeirdBrains-run gateway (forbidden by AGENTS.md).
+- Any HTTPS or API-key endpoint, LAN or public. No [WeirdBrains](https://weirdbrains.com)-run gateway (forbidden by AGENTS.md).
 - Writing our own inference engine: we drive llama.cpp and vLLM, and in-process llama.cpp through
   `weirdnet-model`.
 - llama-swap: replaced by Ymir's own process manager.
@@ -90,7 +90,7 @@ Weirdnet main until it ships (AGENTS.md); we don't build it inside the app.
 | Entry GPU | NVIDIA with 8 GB VRAM (Turing sm_75 or newer), AMD RDNA2+ with 8 GB (ROCm or Vulkan), or Apple Silicon with 16 GB | llama.cpp GPU offload; Gemma 4 E4B plus a 7-9B Q4 model. |
 | Comfortable | 16-24 GB VRAM, or a 32-64 GB Mac | A 27-35B Q4 model (dense, or MoE like `qwen3.6-35b-a3b`) plus a small stand-in and an embedding model. |
 | vLLM | Linux, NVIDIA sm_80+ (Ampere or newer, including GB10 sm_121 with CUDA 13 builds) with 24 GB+, or AMD Instinct / RDNA3 on the ROCm list | vLLM as an extra backend: higher concurrency and NVFP4/FP8 checkpoints. |
-| DGX Spark | GB10, sm_121, 128 GB unified memory | The server-a/server-b setup on one box: `qwen3.6-35b-a3b` on llama.cpp, a 27B NVFP4 on vLLM, Gemma 4 E4B stand-in, embeddings. |
+| DGX Spark | GB10, sm_121, 128 GB unified memory | The two-server setup on one box: `qwen3.6-35b-a3b` on llama.cpp, a 27B NVFP4 on vLLM, Gemma 4 E4B stand-in, embeddings. |
 
 Disk: models are big. The setup shows the download size and asks before fetching (the
 `weirdnet-model` `Consent` rule).
@@ -196,7 +196,7 @@ separate app and is always an app node. The single-box quickstart enables all th
 ```
 
 Every device runs `ymird` as a systemd user or system unit, a launchd agent, or a Windows service
-running as `NT SERVICE\ymird` (AGENTS.md). It bootstraps from the public WeirdBrains relay by
+running as `NT SERVICE\ymird` (AGENTS.md). It bootstraps from the public [WeirdBrains](https://weirdbrains.com) relay by
 default, and the operator can override that.
 
 ### Profiles
@@ -852,7 +852,7 @@ hardware, not hard-coded per host).
 | `weirdnet-schemes`, `weirdnetctl` | registering `weirdnet-ymir://` and `weirdnet-bragi://` |
 | `weirdnet-update` | signed update metadata for `ymird` self-update (decision 14) |
 | `weirdnet-mcp` 0.4.0 (on agent =0.3.0; 0.5.0 comes with agent 0.4.0) | optional `ymirctl mcp` tools (status, load, chat) |
-| `weirdnet-relay` 0.6.0 | the public WeirdBrains relay and an optional own relay. On `weirdnet-net =0.8.0`; the public relay runs 0.6.0 (weirdnet-relay `07f1162`). |
+| `weirdnet-relay` 0.6.0 | the public [WeirdBrains](https://weirdbrains.com) relay and an optional own relay. On `weirdnet-net =0.8.0`; the public relay runs 0.6.0 (weirdnet-relay `07f1162`). |
 
 No longer used by this design: `weirdnet-access`, `weirdnet-accounts` and `weirdnet-tls` (no
 roles, no API keys, no HTTPS endpoint).
@@ -1128,7 +1128,7 @@ are stopped, not removed, until the final step.
 6. **Big mode:** replace `/opt/llm/bin/big-mode` with the group job over the same ConnectX-7 link
    and NCCL settings, decided by server-a's inference node. Verify with the existing `e2e-big.sh` prompts.
 7. **Alerts:** move the Wi-Fi fallback and other alerts to `weirdnet-alerts` on server-a's inference node,
-   keep `ts-watchdog` (host ops), retire `monitor timer` once peer watching proves itself for a week.
+   keep the host-ops watchdog, retire the old monitor timer once peer watching proves itself for a week.
 8. **Optional redundancy:** turn on `inference` on server-b too, so the pool keeps coordinating if server-a goes
    down (server-b's models stay reachable).
 9. **Retire:** after a quiet week, disable Caddy, rvl-cache and llama-swap units, and remove
@@ -1479,7 +1479,7 @@ Built on the published crates, unchanged, now on their patch releases (caret ran
   spread by `weirdnet-sync` passes every 30 s; a device linked elsewhere is answered after the next
   passes, and revocations stick.
 - **`[network]`** in node.toml: `enabled`, `port` (4848), `listen`, `mdns`, `discovery`, `relays`
-  (default: the Weird Brains relay), `peers` (`/ip4/…/tcp/…/p2p/PEER`; dialing grants nothing),
+  (default: the [Weird Brains](https://weirdbrains.com) relay), `peers` (`/ip4/…/tcp/…/p2p/PEER`; dialing grants nothing),
   `slots`, `queue`. Weirdnet starts only when the node has an identity.
 - Tests (M3 count; M4 below): 32 pass, 3 ignored (the 9 `ymir-alerts` tests now live in `weirdnet-alerts`); fmt and clippy (`-D warnings`) are clean.
   - `ymir-core/tests/remote.rs` (5): several devices in one process on the memory transport. They
@@ -2163,7 +2163,7 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 | Criterion | State |
 | --- | --- |
 | M1 to M7 built, M8 done with m3talsmith's approval at each step | M1 to M6 done, M7 llama.cpp only; **M8 not started** |
-| Full workspace tests pass on a clean checkout, and the real-engine tests have run on the target hardware | passes here; real engines run on one RTX box only |
+| Full workspace tests pass on a clean checkout, and the real-engine tests have run on the target hardware | passes here; real engines run on one NVIDIA box only |
 | A run across at least two real machines: link, serve, fail over mid-answer, update | not done (all tests are one box, memory or loopback transport) |
 | The four upstream issues are closed or knowingly accepted | all open |
 | Push wake-ups work end to end on a phone | not built |

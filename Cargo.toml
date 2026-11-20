@@ -13,7 +13,7 @@ edition = "2024"
 rust-version = "1.99"
 license = "BSD-3-Clause"
 repository = "https://github.com/WeirdBrains/ymir"
-authors = ["Weird Brains"]
+authors = ["Weird Brains LLC"]
 
 [workspace.dependencies]
 async-trait = "0.1"

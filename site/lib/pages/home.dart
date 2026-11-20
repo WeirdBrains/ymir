@@ -4,9 +4,9 @@ import 'package:jaspr/jaspr.dart';
 import '../content/roadmap.dart';
 import '../site.dart';
 
-Component _card(String title, String text) => div(classes: 'card', [
+Component _card(String title, Object text) => div(classes: 'card', [
   h3([Component.text(title)]),
-  p([Component.text(text)]),
+  p([text is Component ? text : Component.text(text as String)]),
 ]);
 
 class Home extends StatelessComponent {
@@ -86,12 +86,23 @@ class Home extends StatelessComponent {
       section(classes: 'section band', [
         div(classes: 'wrap', [
           div(classes: 'section-head', [
-            h2([Component.text('Part of the WeirdBrains family')]),
+            h2([
+              Component.text('Part of the '),
+              a(href: mainSiteUrl, [Component.text('WeirdBrains')]),
+              Component.text(' family'),
+            ]),
             p([Component.text('Ymir holds only the Ymir-specific app. The generic parts are published Weirdnet crates.')]),
           ]),
           div(classes: 'grid', [
             _card('Bragi', 'The chat client for desktop and phone. It finds your Ymir nodes and streams answers from your own machines.'),
-            _card('Weirdnet', 'The peer-to-peer network under every WeirdBrains app: identities, devices, relays and the inference protocol.'),
+            _card(
+              'Weirdnet',
+              Component.fragment([
+                Component.text('The peer-to-peer network under every '),
+                a(href: mainSiteUrl, [Component.text('WeirdBrains')]),
+                Component.text(' app: identities, devices, relays and the inference protocol.'),
+              ]),
+            ),
             _card('Open source', 'BSD-3-Clause. Source and issues on GitHub.'),
           ]),
           div(classes: 'actions', [

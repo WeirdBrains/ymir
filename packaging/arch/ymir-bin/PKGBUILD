@@ -1,4 +1,4 @@
-# Maintainer: m3talsmith <m3talsmith@gmail.com>
+# Maintainer: Weird Brains LLC <m3talsmith@gmail.com>
 # Prebuilt binaries from the GitHub release. scripts/package.py --recipe (and the release workflow)
 # fill in pkgver and the sha256sums; scripts/weirdnet_release.py taur publishes this recipe to TAUR.
 pkgname=ymir-bin
