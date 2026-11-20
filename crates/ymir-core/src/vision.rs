@@ -96,6 +96,7 @@ mod tests {
         assert_eq!(resolve("gemma-4-e4b", None, d.path()), Some(d.path().join("mmproj-gemma-4-E4B-it-Q8_0.gguf")));
         assert_eq!(resolve("gemma-4-e4b", Some("off"), d.path()), None);
         assert_eq!(resolve("x", Some("p.gguf"), d.path()), Some(d.path().join("p.gguf")));
-        assert_eq!(resolve("x", Some("/a/p.gguf"), d.path()), Some(PathBuf::from("/a/p.gguf")));
+        let abs = d.path().join("elsewhere").join("p.gguf");
+        assert_eq!(resolve("x", Some(abs.to_str().unwrap()), Path::new("models")), Some(abs));
     }
 }
