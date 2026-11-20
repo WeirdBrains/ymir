@@ -2,7 +2,8 @@
 <!-- Ymir MSI, WiX Toolset 7 (built by make-installer.ps1 from an unpacked Windows release zip).
      Installs the release files to Program Files\Ymir, puts them on PATH and registers the
      Windows service `ymird` (manual start, account NT SERVICE\ymird) with its node directory
-     %ProgramData%\Ymir. User-level installs use the zip and `ymirctl setup --service` instead. -->
+     %ProgramData%\Ymir. User-level installs use the zip and ymirctl setup with its service flag instead
+     (XML comments cannot hold a double hyphen). -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -33,8 +34,8 @@
       <Directory Id="INSTALLFOLDER" Name="Ymir">
         <Component Id="cmpYmird" Guid="{B3C143C6-99CA-4E64-98CA-8AA2B830933D}">
           <File Id="filYmird" Source="$(var.ReleaseDir)\ymird.exe" Name="ymird.exe" KeyPath="yes" />
-          <!-- Manual start: it needs a node.toml first (`ymirctl --home "%ProgramData%\Ymir"
-               setup`, elevated), then `ymirctl service install --system` sets it to start at
+          <!-- Manual start: it needs a node.toml first (ymirctl setup, elevated, with
+               its home set to %ProgramData%\Ymir), then ymirctl service install with the system flag sets it to start at
                boot and starts it. Its own virtual account: SID
                S-1-5-80-3634176441-2608231802-3936123067-875301740-2825028368. -->
           <ServiceInstall Id="svcInstall"
