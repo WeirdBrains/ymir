@@ -108,6 +108,7 @@ def archive_files(bdir):
         ("bin/ymird", (bdir / "ymird").read_bytes(), 0o755),
         ("bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755),
         ("share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644),
+        ("share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644),
         ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644),
     ]
 
@@ -120,6 +121,7 @@ def system_files(bdir):
         ("usr/lib/systemd/user/ymird.service", (ROOT / "packaging/systemd/ymird.service").read_bytes(), 0o644),
         ("usr/share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644),
         ("usr/share/doc/ymir/copyright", (ROOT / "LICENSE").read_bytes(), 0o644),
+        ("usr/share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644),
     ]
 
 
@@ -127,7 +129,8 @@ def build_tar_zip(out, v, triple, bdir):
     top = f"ymir-{v}-{triple}"
     tgz = out / f"{top}.tar.gz"
     with tarfile.open(tgz, "w:gz") as tar:
-        add_dirs(tar, [top, f"{top}/bin", f"{top}/share", f"{top}/share/doc", f"{top}/share/doc/ymir"])
+        add_dirs(tar, [top, f"{top}/bin", f"{top}/share", f"{top}/share/doc", f"{top}/share/doc/ymir",
+                       f"{top}/share/icons", f"{top}/share/icons/hicolor", f"{top}/share/icons/hicolor/scalable", f"{top}/share/icons/hicolor/scalable/apps"])
         for name, data, mode in archive_files(bdir):
             add_file(tar, f"{top}/{name}", data, mode)
     z = out / f"{top}.zip"
@@ -225,6 +228,7 @@ package() {{
   install -Dm755 bin/ymird "${{pkgdir}}/usr/bin/ymird"
   install -Dm755 bin/ymirctl "${{pkgdir}}/usr/bin/ymirctl"
   install -Dm644 share/doc/ymir/README.md "${{pkgdir}}/usr/share/doc/ymir/README.md"
+  install -Dm644 share/icons/hicolor/scalable/apps/ymir.svg "${{pkgdir}}/usr/share/icons/hicolor/scalable/apps/ymir.svg"
   install -Dm644 LICENSE "${{pkgdir}}/usr/share/licenses/${{pkgname}}/LICENSE"
   install -Dm644 /dev/stdin "${{pkgdir}}/usr/lib/systemd/user/ymird.service" <<'UNIT'
 {(ROOT / "packaging/systemd/ymird.service").read_text().rstrip()}

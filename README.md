@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/svg/ymir-lockup.svg">
+    <img src="brand/svg/ymir-lockup-light.svg" alt="Ymir" width="360">
+  </picture>
+</p>
+
 # Ymir
 
 **A cloud of LLM models: a private, self-hosted model cloud.** Start with one machine. Add
@@ -88,6 +95,8 @@ Linux packages (tar.gz, zip, .deb, and the `ymir-bin` TAUR package) are built wi
 
 `YMIR_HOME` moves the config and state (default `~/.config/ymir`); `WEIRDNET_MODELS_DIR` moves the
 model files.
+
+Brand assets and rules are in `brand/` and [BRAND.md](BRAND.md). The roadmap is [ROADMAP.md](ROADMAP.md), generated from `roadmap.toml` with the website in `site/` (Jaspr; `python3 site/tool/gen_roadmap.py` after editing).
 
 Crates: `ymir-core`, `ymird`, `ymirctl` (the app), `ymir-testkit` (tests). Backends, the OpenAI bridge, the answer
 cache, alerts, hardware detection and the request types come from the published `weirdnet-*` crates.

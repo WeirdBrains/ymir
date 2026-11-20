@@ -25,6 +25,7 @@ package() {
   install -Dm755 bin/ymird "${pkgdir}/usr/bin/ymird"
   install -Dm755 bin/ymirctl "${pkgdir}/usr/bin/ymirctl"
   install -Dm644 share/doc/ymir/README.md "${pkgdir}/usr/share/doc/ymir/README.md"
+  install -Dm644 share/icons/hicolor/scalable/apps/ymir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/ymir.svg"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/user/ymird.service" <<'UNIT'
 # Ymir node daemon, user level. Packages install this as /usr/lib/systemd/user/ymird.service.

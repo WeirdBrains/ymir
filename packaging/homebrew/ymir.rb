@@ -18,6 +18,7 @@ class Ymir < Formula
   def install
     bin.install "bin/ymird", "bin/ymirctl"
     doc.install "share/doc/ymir/README.md"
+    pkgshare.install "share/icons/hicolor/scalable/apps/ymir.svg"
   end
 
   # A launchd agent, user level: `brew services start ymir`.
