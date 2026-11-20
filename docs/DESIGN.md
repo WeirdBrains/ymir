@@ -1523,7 +1523,7 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
   there would have been disruptive. server-a and server-b weren't touched.
 - **Linking m3talsmith's real identity needs him**: `ymirctl pool link` on a node, then the code opened
   in Morph. Morph main now accepts `weirdnet-ymir://link/…` codes (Identity → Add device), and `pool add`
-  takes Morph's `weirdnet-morph://link/` codes too (same payload). The signed roster label reads
+  takes Morph's `weirdnet-morph://link/` and Bragi's `weirdnet-bragi://link/` codes too (same payload; `normalize_link` rewrites the scheme, and Bragi does the same for Ymir's and Morph's codes). `bragi/scripts/ymir-link-e2e.sh` links a headless Bragi core and real `ymird` nodes both ways over loopback. The signed roster label reads
   "Ymir on <name>" (the device-link hint). Linking the real identity still waits for m3talsmith.
 - Seeds are kept in 0600 files, as decision 12 says, not in the OS keyring. M10's cert-only link
   removes the seed copies.

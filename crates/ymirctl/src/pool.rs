@@ -19,14 +19,19 @@ pub const SCHEME: &str = "weirdnet-ymir://";
 /// Morph's scheme. Its codes carry the same payload, so `pool add` takes them too.
 pub const MORPH_SCHEME: &str = "weirdnet-morph://";
 
-/// Reads a pasted code as a Ymir one: a `weirdnet-morph://link/` code is the same payload under
-/// Morph's scheme. Anything else is left for the link check to refuse.
+/// Bragi's scheme. Its link codes carry the same payload as Ymir's and Morph's.
+pub const BRAGI_SCHEME: &str = "weirdnet-bragi://";
+
+/// Reads a pasted code as a Ymir one: a `weirdnet-morph://link/` or `weirdnet-bragi://link/` code
+/// is the same payload under another app's scheme. Anything else is left for the link check to refuse.
 pub fn normalize_link(code: &str) -> String {
     let code = code.trim();
-    match code.strip_prefix(MORPH_SCHEME) {
-        Some(rest) if rest.starts_with("link/") => format!("{SCHEME}{rest}"),
-        _ => code.to_string(),
+    for other in [MORPH_SCHEME, BRAGI_SCHEME] {
+        if let Some(rest) = code.strip_prefix(other).filter(|r| r.starts_with("link/")) {
+            return format!("{SCHEME}{rest}");
+        }
     }
+    code.to_string()
 }
 
 /// The device-link hint, which becomes the label in the signed roster: "Ymir on `<name>`".
@@ -40,7 +45,7 @@ pub enum PoolCmd {
     Link,
     /// Link another device from this one: paste the code it shows.
     Add {
-        /// The `weirdnet-ymir://` (or Morph's `weirdnet-morph://`) code the other device shows.
+        /// The `weirdnet-ymir://` (or Morph's `weirdnet-morph://`, or Bragi's `weirdnet-bragi://`) code the other device shows.
         link: String,
         /// The name the other device gets for this user.
         #[arg(long, default_value = "Ymir")]
@@ -213,6 +218,8 @@ mod tests {
         assert_eq!(normalize_link("weirdnet-ymir://link/abc"), "weirdnet-ymir://link/abc");
         // Only link codes convert; the rest fails the link check as before.
         assert_eq!(normalize_link("weirdnet-morph://invite/abc"), "weirdnet-morph://invite/abc");
+        assert_eq!(normalize_link(" weirdnet-bragi://link/abc\n"), "weirdnet-ymir://link/abc");
+        assert_eq!(normalize_link("weirdnet-bragi://invite/abc"), "weirdnet-bragi://invite/abc");
         assert_eq!(normalize_link("weirdnet://link/abc"), "weirdnet://link/abc");
     }
 
