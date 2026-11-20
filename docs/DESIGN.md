@@ -1313,7 +1313,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   retention and tombstones; bridge ephemeral contexts. Mid-answer resume at both levels. Exit test:
   kill a model node mid-answer, then an inference node mid-answer; each reply continues with the full
   context and no duplicate text.
-- **M6 Workload spreading (core).** Load-balanced routing across replicas, scheduler lease,
+- **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Load-balanced routing across replicas, scheduler lease,
   cloud-wide swap, placement and replication, prefix warming, device fairness and priority classes,
   batch and agent job fan-out, pool-mode semantic cache; several inference nodes active-active. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
@@ -1668,6 +1668,62 @@ to `weirdnet-sync` 0.6 (the Identity store), which would put two sync versions i
 - **Bragi doesn't use the store yet** (B4), and the mock engine stands in for llama.cpp; the real-engine
   resume is the same prefix path the engines already take.
 - **Cross-machine** runs are still pending (the laptop).
+
+## M6 status (built 2026-11-19, partly)
+
+The pieces of workload spreading that need only published crates (`weirdnet-agent` 0.4.2,
+`weirdnet-backends` 0.1.1) are built. Placement, replication and the shared cache are not.
+
+**What works:**
+
+- **Load balancing across replicas** (`ymir-core::balance`). Among the model nodes with a model ready,
+  the inference node scores each by predicted completion (`wait + service + load + penalty`, with
+  `wait = queue_depth / slots * mean_service`) and takes the cheaper of two random candidates (power of
+  two choices). `queue_depth` is the larger of the node's reported in-flight count and what this inference
+  node has itself sent it that hasn't finished; `mean_service` is measured here per node and model (2 s
+  until one request finishes); a `Busy` answer adds a penalty that fades over 5 s; a node on this device wins
+  ties. Replaces "fewest in flight".
+- **Device fairness** (`ymir-core::fair`). A device may have at most `[network] batch_per_device` batch or
+  background requests running or waiting on an inference node (default half of `slots + queue`); past
+  that the answer is `Busy`. Interactive requests are never held back, and the admission queue already
+  serves them before batch work, so one device's batch can't fill the queue and leave another with `Busy`.
+- **Priority classes.** `weirdnet-agent`'s admission queue (interactive, then batch, then background) is in
+  use at every inference node; the bridge asks at interactive, `ymirctl batch` at batch.
+- **Batch fan-out** (`ymir-core::batch`, `ymirctl batch FILE`). One prompt per line, spread over the pool at
+  batch priority with a concurrency cap, per-task retries under one job id (`Busy` included, so the fan-out
+  slows to what the pool takes), results in prompt order.
+- **Several inference nodes active-active.** Each routes on its own; the app's pool already spreads and fails
+  over between them (M4/M5).
+
+**Exit test** (`ymir-testkit/tests/m6.rs`, separate daemons over loopback, mock engine): two inference
+nodes, three model nodes (two replicas of `alpha`, one `beta`), two app devices. One device fans out 24
+prompts (8 at a time, `batch_per_device = 2`) while the other asks ten questions one after another.
+Result: all 24 batch tasks answered in order with 0 failures, and the interactive p95 with the batch
+running was within noise of the p95 without it (the test bounds it to 2 s plus twice the quiet p95).
+Unit tests cover the scoring (shorter queue wins, local first on ties, own sends counted, busy
+penalty, slower and cold nodes, spread over equal nodes) and the fairness cap; an in-process test shows
+three replicas sharing a burst and a slow one getting the least.
+
+**An unexplained delay.** In this topology (two inference nodes, three model nodes, requests through the
+bridge) every request's first token arrives after 12 to 15 s, then the whole answer in 0.4 s, with or without a
+batch and with or without these M6 changes (checked on the M5 commit). Nothing is logged during the wait;
+with one inference node it is 15 s, which is the app pool's stall limit, so a first attempt appears to hang
+and the retry works. It does not show in the M5 tests, which do not time their answers. Not diagnosed; the
+test's p95 comparison is therefore between two equally slow runs, and says the batch added no delay, not
+that interactive answers are fast. Needs a look at the app-to-inference path (Weirdnet lead or Ymir).
+
+**Gaps:**
+
+- **Not built: scheduler lease, placement plan, cloud-wide swap, replication on queue wait, prefix warming.**
+  They need a lease and a signed, synced plan (`weirdnet-sync` has no lease primitive) and warm-prefix data in the
+  capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
+  and relays for the same reason.
+- **Not built: the pool-mode semantic cache.** `weirdnet-semcache` still has only the exact cache here.
+- **Batch jobs are not synced.** The submitting node runs the fan-out, so if it goes down the job stops
+  (the design wants the job record synced so another node picks it up). No tasks with tools or approvals.
+- **Fairness is a cap, not a weighted share.** Devices are held to the same cap; there are no per-device
+  weights or quotas.
+- **One computer, a mock engine,** and the delay above.
 
 ## B1 status (built 2026-11-19)
 

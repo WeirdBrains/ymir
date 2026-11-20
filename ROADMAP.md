@@ -64,11 +64,18 @@ Known gaps:
 - Job checkpoints, attachments, retrieved context and prefix hints are not built. The conversation store lives in Ymir until `weirdnet-agent` has a context module.
 - Tested on one computer with a mock engine; no cross-machine run yet.
 
-## M6 Workload spreading (Planned)
+## M6 Workload spreading (In progress)
 
-Load balancing across replicas, moving models around the cloud, fair sharing between devices, priority classes, batch jobs, a shared answer cache, and several inference nodes active at once.
+Load balancing across replicas, moving models around the cloud, fair sharing between devices, priority classes, batch jobs, a shared answer cache, and several inference nodes active at once. Balancing, the per-device cap, priorities and batch fan-out are built; placement and the shared cache are not.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
+
+Known gaps:
+- No scheduler lease, placement plan, model swapping across nodes, replication or prefix warming yet: they need a lease and a synced plan from weirdnet-sync.
+- No shared (semantic) answer cache across nodes yet.
+- A batch job lives on the node that submitted it; it is not synced, so another node can't pick it up.
+- In the multi-node test every first token took 12 to 15 s, with or without a batch and also before this milestone. Not diagnosed.
+- Tested on one computer with a mock engine.
 
 ## M7 Split models (Planned)
 
