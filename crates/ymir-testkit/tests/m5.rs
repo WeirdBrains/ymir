@@ -28,6 +28,19 @@ fn said(q: &str) -> String {
     format!("Hello from alpha! You said: {q}")
 }
 
+/// The mock engine reads its word delay from the environment when a daemon starts it, and the
+/// environment is shared by every test in this binary: a test that wants 300 ms a word must not
+/// have another one set 5 ms before its engines start (on a busy machine the other tests got there
+/// first, and the "slow" answer was over before the node was killed). Hold the guard for the
+/// whole test; the tests that set the delay then run one after another.
+async fn word_ms(ms: u32) -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = LOCK.lock().await;
+    // SAFETY: only tests holding the guard set it, each before starting its daemons.
+    unsafe { std::env::set_var("YMIR_MOCK_WORD_MS", ms.to_string()) };
+    guard
+}
+
 async fn ctl_with(home: &Path, args: &[&str], out: &mut dyn Write, input: &str) -> Result<()> {
     let mut argv = vec!["ymirctl".to_string(), "--home".into(), home.display().to_string()];
     argv.extend(args.iter().map(|a| a.to_string()));
@@ -153,8 +166,7 @@ async fn stream_chat(d: &Daemon, h: &Home, model: &str, q: &str, mut on_text: im
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_model_node_dying_mid_answer_is_resumed_on_another() -> Result<()> {
-    // SAFETY: set before any daemon starts in this test; both tests set the same value.
-    unsafe { std::env::set_var("YMIR_MOCK_WORD_MS", "300") };
+    let _words = word_ms(300).await;
     let tmp = tempfile::tempdir()?;
     let root = tmp.path();
     let inf_tmp = home(root, "inf", "inference", &[], &[])?;
@@ -213,7 +225,7 @@ async fn a_model_node_dying_mid_answer_is_resumed_on_another() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inference_node_dying_mid_answer_is_resumed_with_the_full_context() -> Result<()> {
     // SAFETY: as above.
-    unsafe { std::env::set_var("YMIR_MOCK_WORD_MS", "300") };
+    let _words = word_ms(300).await;
     let tmp = tempfile::tempdir()?;
     let root = tmp.path();
     let i1_tmp = home(root, "inf1", "inference", &[], &[])?;
@@ -301,7 +313,7 @@ async fn an_inference_node_dying_mid_answer_is_resumed_with_the_full_context() -
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn conversations_sync_and_any_inference_node_answers_from_them() -> Result<()> {
     // SAFETY: as above; a quick mock here.
-    unsafe { std::env::set_var("YMIR_MOCK_WORD_MS", "5") };
+    let _words = word_ms(5).await;
     let tmp = tempfile::tempdir()?;
     let root = tmp.path();
     let i1_tmp = home(root, "inf1", "inference", &[], &[])?;
@@ -376,7 +388,7 @@ async fn conversations_sync_and_any_inference_node_answers_from_them() -> Result
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_bridge_continues_a_final_assistant_message() -> Result<()> {
     // SAFETY: as above.
-    unsafe { std::env::set_var("YMIR_MOCK_WORD_MS", "5") };
+    let _words = word_ms(5).await;
     let tmp = tempfile::tempdir()?;
     let h = home(tmp.path(), "box", "model inference app", &[], &["alpha"])?;
     let d = start(&h).await?;
