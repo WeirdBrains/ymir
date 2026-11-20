@@ -884,8 +884,9 @@ mod tests {
             LocalModel { id: "mine".into(), file: Some("x/mine.gguf".into()), role: Some("embedding".into()), ..Default::default() },
         ];
         let l = cfg.launches();
-        assert_eq!(l[0].source, "/models/Qwen3-8B-Q4_K_M.gguf");
-        assert_eq!(l[1].source, "/models/x/mine.gguf");
+        // Compared as paths: on Windows the join uses `\`.
+        assert_eq!(Path::new(&l[0].source), Path::new("/models/Qwen3-8B-Q4_K_M.gguf"));
+        assert_eq!(Path::new(&l[1].source), Path::new("/models/x/mine.gguf"));
         assert!(l[1].embedding);
     }
     #[test]
@@ -893,16 +894,18 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let bundle = t.path().join("lib/ymir/llama.cpp");
         std::fs::create_dir_all(&bundle).unwrap();
-        std::fs::write(bundle.join("llama-server"), b"x").unwrap();
+        // `llama-server.exe` on Windows.
+        let program = crate::engine::program(&bundle, "llama-server");
+        std::fs::write(&program, b"x").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(bundle.join("llama-server"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let b = crate::engine::Bundled::at(&bundle).unwrap();
         let managed = t.path().join("home/engines/llama.cpp/llama-server");
         let got = resolve_engine_with("managed", "llama-server", &managed, Some(&b));
-        assert_eq!(got, Some(bundle.join("llama-server")));
+        assert_eq!(got, Some(program));
         std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
         std::fs::write(&managed, b"x").unwrap();
         assert_eq!(resolve_engine_with("managed", "llama-server", &managed, Some(&b)), Some(managed.clone()));

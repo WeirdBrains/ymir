@@ -260,7 +260,7 @@ mod tests {
         assert!(p.to_download.iter().all(|e| e.spec.id == emb.id));
         c.validate().unwrap();
         let src = &c.launches().into_iter().find(|l| l.id == main.id).unwrap().source;
-        assert!(src.starts_with("mlx:") && src.contains("/mlx/"), "{src}");
+        assert!(src.starts_with("mlx:") && src.contains(&format!("{0}mlx{0}", std::path::MAIN_SEPARATOR)), "{src}");
         // llama.cpp on request, and everywhere but Apple Silicon.
         let p = propose(mac(), &SetupOptions { backend: Some("llamacpp".into()), ..opts.clone() });
         assert!(p.config.model.local.iter().all(|m| m.backend.as_deref() == Some("llamacpp")) && p.mlx_download.is_empty());
