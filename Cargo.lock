@@ -5697,6 +5697,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "dirs",
  "futures",
  "getrandom 0.3.4",

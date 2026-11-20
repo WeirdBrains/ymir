@@ -203,6 +203,10 @@ pub struct SetupArgs {
     /// Use this external llama-server instead of the one shipped with Ymir.
     #[arg(long)]
     pub llama_server: Option<PathBuf>,
+    /// Engine for chat models: llamacpp, mlx (Apple Silicon) or mistralrs (default: mlx on Apple
+    /// Silicon Macs, llamacpp elsewhere). Embedding models always use llama.cpp.
+    #[arg(long, value_parser = ["llamacpp", "mlx", "mistralrs"])]
+    pub backend: Option<String>,
     /// Serve this GGUF (repeatable; the first is the main model) instead of catalog models.
     #[arg(long = "model")]
     pub models: Vec<PathBuf>,
@@ -409,8 +413,14 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
         reserve: args.reserve,
         models_dir: args.models_dir,
         bridge_port: args.port,
+        backend: args.backend,
+        engines_dir: Some(paths.engines()),
     };
-    let mut p = setup::propose(weirdnet_model::hw::detect(), &opts);
+    let hw = weirdnet_model::hw::detect();
+    if opts.backend.as_deref() == Some("mlx") && !ymir_core::mlx::supported(&hw.os, &hw.arch) {
+        bail!("--backend mlx needs an Apple Silicon Mac (this is {} {})", hw.os, hw.arch);
+    }
+    let mut p = setup::propose(hw, &opts);
     if let Some(r) = &args.roles {
         p.config.roles = Roles::parse(r)?;
     }
@@ -431,6 +441,18 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
             "llama.cpp: not found. This Ymir build ships without an engine; install a release package (it includes llama.cpp) or pass --llama-server PATH"
         )?,
     }
+    match (p.backend.as_str(), &p.mlx_server, &p.mistralrs) {
+        ("mlx", Some(s), _) => writeln!(out, "MLX-LM: {} (chat models; embeddings use llama.cpp)", s.display())?,
+        ("mlx", None, _) => writeln!(
+            out,
+            "MLX-LM: not installed (chat models). `--download` installs mlx-lm {} into {}",
+            ymir_core::mlx::MLX_LM_VERSION,
+            ymir_core::mlx::venv(&paths.engines()).display()
+        )?,
+        ("mistralrs", Some(m), _) | ("mistralrs", _, Some(m)) => writeln!(out, "mistral.rs: {} (chat models)", m.display())?,
+        ("mistralrs", _, None) => writeln!(out, "mistral.rs: not found (put `mistralrs` on PATH or set model.mistralrs); chat models will not load")?,
+        _ => {}
+    }
     match &p.vllm {
         Some(v) => writeln!(out, "vLLM: {}", v.display())?,
         None if p.hardware.vllm_supported() => writeln!(out, "vLLM: not installed (optional; GGUF models use llama.cpp)")?,
@@ -439,8 +461,12 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     writeln!(out, "Models:")?;
     for m in &p.config.model.local {
         let size = weirdnet_model::hw::find(&m.id).map(|e| format!(" ({})", weirdnet_model::human(e.spec.size))).unwrap_or_default();
-        let missing = if p.to_download.iter().any(|e| e.spec.id == m.id) { ", not downloaded" } else { "" };
-        writeln!(out, "  {} [{}]{size}{missing}", m.id, m.role.as_deref().unwrap_or("chat"))?;
+        let mlx = (m.backend.as_deref() == Some("mlx")).then(|| ymir_core::mlx::weights(&m.id)).flatten();
+        let size = mlx.map(|w| format!(" ({})", weirdnet_model::human(w.size))).unwrap_or(size);
+        let missing =
+            if p.to_download.iter().any(|e| e.spec.id == m.id) || p.mlx_download.iter().any(|w| w.id == m.id) { ", not downloaded" } else { "" };
+        let engine = m.backend.as_deref().unwrap_or("llamacpp");
+        writeln!(out, "  {} [{}] {engine}{size}{missing}", m.id, m.role.as_deref().unwrap_or("chat"))?;
     }
     if args.dry_run {
         writeln!(out, "\n{}", p.config.to_toml()?)?;
@@ -475,16 +501,19 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
             p.to_download.retain(|d| d.spec.id != e.spec.id);
         }
     }
+    if args.download && p.backend == "mlx" && (p.mlx_server.is_none() || !p.mlx_download.is_empty()) {
+        mlx_setup(paths, &mut p, args.yes, out, input).await?;
+    }
     p.config.save(&cfg_path)?;
     ymir_core::token::load_or_create(paths)?;
     writeln!(out, "\nWrote {}", cfg_path.display())?;
     writeln!(out, "Roles: {}", p.config.roles.names().join(", "))?;
-    if !p.to_download.is_empty() {
-        writeln!(
-            out,
-            "Not downloaded yet: {} (run `ymirctl setup --download --force`)",
-            p.to_download.iter().map(|e| e.spec.id.as_str()).collect::<Vec<_>>().join(", ")
-        )?;
+    let pending: Vec<&str> = p.to_download.iter().map(|e| e.spec.id.as_str()).chain(p.mlx_download.iter().map(|w| w.id)).collect();
+    if !pending.is_empty() {
+        writeln!(out, "Not downloaded yet: {} (run `ymirctl setup --download --force`)", pending.join(", "))?;
+    }
+    if p.backend == "mlx" && p.mlx_server.is_none() {
+        writeln!(out, "MLX-LM is not installed yet (run `ymirctl setup --download --force`)")?;
     }
     if args.service {
         let opts = ymir_core::service::InstallOptions { dir: args.unit_dir.clone(), start: !args.no_start, dry_run: false };
@@ -497,6 +526,47 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     }
     if p.config.roles.app {
         writeln!(out, "OpenAI clients (Jan): base URL http://127.0.0.1:{}/v1, API key from `ymirctl bridge token`.", p.config.app.bridge.port)?;
+    }
+    Ok(())
+}
+
+/// Installs MLX-LM into the managed venv and downloads the MLX weights, asking first.
+async fn mlx_setup(paths: &Paths, p: &mut setup::Proposal, yes: bool, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<()> {
+    let venv = ymir_core::mlx::venv(&paths.engines());
+    if p.mlx_server.is_none() {
+        writeln!(
+            out,
+            "MLX-LM: installs mlx-lm {} and its Python dependencies from PyPI into {} (about 500 MB; uses `uv` if it is on PATH, else python3).",
+            ymir_core::mlx::MLX_LM_VERSION,
+            venv.display()
+        )?;
+        if !yes && !confirm(out, input, "Install it? [y/N] ")? {
+            writeln!(out, "Skipped MLX-LM; MLX models will not load until it is installed")?;
+            return Ok(());
+        }
+        let v = venv.clone();
+        p.mlx_server = Some(tokio::task::spawn_blocking(move || ymir_core::mlx::install(&v)).await??);
+        writeln!(out, "Installed {}", p.mlx_server.as_ref().map(|s| s.display().to_string()).unwrap_or_default())?;
+    }
+    let models_dir = p.config.models_dir();
+    for w in p.mlx_download.clone() {
+        writeln!(
+            out,
+            "{}: downloads {} ({}) from Hugging Face, revision {}, into {}.",
+            w.id,
+            w.repo,
+            weirdnet_model::human(w.size),
+            &w.revision[..12],
+            w.dir(&models_dir).display()
+        )?;
+        if !yes && !confirm(out, input, "Download it? [y/N] ")? {
+            writeln!(out, "Skipped {}", w.id)?;
+            continue;
+        }
+        let (v, d) = (venv.clone(), models_dir.clone());
+        let dest = tokio::task::spawn_blocking(move || ymir_core::mlx::download(&v, w, &d)).await??;
+        writeln!(out, "Downloaded {}", dest.display())?;
+        p.mlx_download.retain(|x| x.id != w.id);
     }
     Ok(())
 }

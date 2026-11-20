@@ -213,6 +213,14 @@ pub struct ModelSection {
     /// `auto` (only where supported) | `system:/path/to/vllm` | `off`.
     #[serde(default = "auto")]
     pub vllm: String,
+    /// MLX-LM's `mlx_lm.server`, for `backend = "mlx"` (Apple Silicon): `managed` (the venv
+    /// `ymirctl setup` installs, else on `PATH`) | `system:/path/to/mlx_lm.server` | `off`.
+    #[serde(default = "managed", skip_serializing_if = "is_managed")]
+    pub mlx: String,
+    /// mistral.rs, for `backend = "mistralrs"`: `managed` (shipped with Ymir, else `mistralrs` on
+    /// `PATH`) | `system:/path/to/mistralrs` | `off`.
+    #[serde(default = "managed", skip_serializing_if = "is_managed")]
+    pub mistralrs: String,
     /// Where GGUF files live; default `$WEIRDNET_MODELS_DIR` or the shared Weirdnet models dir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models_dir: Option<PathBuf>,
@@ -231,6 +239,10 @@ fn managed() -> String {
     "managed".into()
 }
 
+fn is_managed(s: &str) -> bool {
+    s == "managed"
+}
+
 impl Default for ModelSection {
     fn default() -> Self {
         Self {
@@ -242,6 +254,8 @@ impl Default for ModelSection {
             rpc_server: managed(),
             rpc_args: Vec::new(),
             vllm: auto(),
+            mlx: managed(),
+            mistralrs: managed(),
             models_dir: None,
             local: Vec::new(),
             split: Vec::new(),
@@ -253,7 +267,7 @@ impl Default for ModelSection {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LocalModel {
     pub id: String,
-    /// `llamacpp` (default) or `vllm`.
+    /// `llamacpp` (default), `mistralrs`, `mlx` (Apple Silicon) or `vllm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,8 +277,9 @@ pub struct LocalModel {
     /// `main`, `standin` or `embedding`; default `chat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// GGUF path (absolute, or relative to `models_dir`), or a vLLM model path or Hub id. Default:
-    /// the catalog file for `id` in `models_dir`.
+    /// GGUF path (absolute, or relative to `models_dir`), an MLX weights directory (likewise) or
+    /// Hub id, or a vLLM model path or Hub id. Default: the catalog file for `id` in `models_dir`
+    /// (for `mlx`, the catalog model's MLX weights in `models_dir/mlx/`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,10 +481,12 @@ impl NodeConfig {
                 bail!("model `{}` is listed twice", m.id);
             }
             if let Some(b) = &m.backend
-                && b != "llamacpp"
-                && b != "vllm"
+                && !BACKENDS.contains(&b.as_str())
             {
-                bail!("model `{}`: unknown backend `{b}` (llamacpp or vllm)", m.id);
+                bail!("model `{}`: unknown backend `{b}` (llamacpp, mistralrs, mlx or vllm)", m.id);
+            }
+            if m.backend.as_deref() == Some("mlx") && m.is_embedding() {
+                bail!("model `{}`: MLX-LM's server has no embeddings endpoint; use backend = \"llamacpp\" for embedding models", m.id);
             }
             if let Some(t) = &m.idle_ttl {
                 parse_duration(t).with_context(|| format!("model `{}`: idle_ttl", m.id))?;
@@ -563,16 +580,49 @@ impl NodeConfig {
         self.model.models_dir.clone().unwrap_or_else(|| weirdnet_model::ModelStore::from_env().dir().to_path_buf())
     }
 
-    /// The engines this node can run, from `llamacpp` and `vllm`.
+    /// The engines this node can run, from `llamacpp`, `mlx`, `mistralrs` and `vllm`.
+    ///
+    /// llama.cpp, MLX-LM and mistral.rs all run as the supervisor's llama.cpp kind: when a model
+    /// uses MLX-LM or mistral.rs, the program is `ymir-engine` (see [`crate::shim`]), which runs
+    /// `llama-server` for GGUF sources and the other engine for `mlx:` and `mistralrs:` sources.
     pub fn engines(&self, paths: &Paths) -> Vec<EngineConfig> {
         let mut out = Vec::new();
-        if let Some(p) = resolve_engine(&self.model.llamacpp, "llama-server", &paths.engines().join("llama.cpp").join("llama-server")) {
-            out.push(EngineConfig::llamacpp(p));
+        let llama = resolve_engine(&self.model.llamacpp, "llama-server", &paths.engines().join("llama.cpp").join("llama-server"));
+        let uses = |b: &str| self.model.local.iter().any(|m| m.backend.as_deref() == Some(b));
+        let mlx = uses("mlx").then(|| crate::mlx::resolve(&self.model.mlx, &paths.engines())).flatten();
+        let mistralrs = uses("mistralrs").then(|| self.mistralrs_program()).flatten();
+        match crate::shim::locate().filter(|_| uses("mlx") || uses("mistralrs")) {
+            Some(shim) => {
+                let mut e = EngineConfig::llamacpp(shim);
+                for (flag, p) in [(crate::shim::LLAMA_FLAG, &llama), (crate::shim::MLX_FLAG, &mlx), (crate::shim::MISTRALRS_FLAG, &mistralrs)] {
+                    if let Some(p) = p {
+                        e.extra_args.extend([flag.to_string(), p.to_string_lossy().into_owned()]);
+                    }
+                }
+                out.push(e);
+            }
+            None => {
+                if uses("mlx") || uses("mistralrs") {
+                    tracing::warn!("models use mlx or mistralrs but {} is not installed next to ymird; they will fail to load", crate::shim::PROGRAM);
+                }
+                if let Some(p) = llama {
+                    out.push(EngineConfig::llamacpp(p));
+                }
+            }
         }
         if let Some(p) = resolve_engine(&self.model.vllm, "vllm", &paths.engines().join("vllm").join("bin").join("vllm")) {
             out.push(EngineConfig::vllm(p));
         }
         out
+    }
+
+    /// `mistralrs`: shipped with this install, else on `PATH` (`managed`), or as set.
+    pub fn mistralrs_program(&self) -> Option<PathBuf> {
+        match self.model.mistralrs.trim() {
+            "off" => None,
+            s if s.starts_with("system:") => Some(PathBuf::from(&s["system:".len()..])),
+            _ => crate::engine::bundled_mistralrs().or_else(|| find_in_path("mistralrs")),
+        }
     }
 
     /// `rpc-server`, when this node can be a worker.
@@ -617,8 +667,10 @@ impl NodeConfig {
             .local
             .iter()
             .map(|m| {
-                let engine = if m.backend.as_deref() == Some("vllm") { EngineKind::Vllm } else { EngineKind::Llamacpp };
+                let backend = m.backend.as_deref().unwrap_or("llamacpp");
+                let engine = if backend == "vllm" { EngineKind::Vllm } else { EngineKind::Llamacpp };
                 let source = match (&m.file, engine) {
+                    _ if backend == "mlx" => format!("{}{}", crate::shim::MLX, mlx_source(m, &dir)),
                     (Some(f), EngineKind::Llamacpp) => {
                         let p = Path::new(f);
                         if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }.to_string_lossy().into_owned()
@@ -629,6 +681,7 @@ impl NodeConfig {
                         None => dir.join(format!("{}.gguf", m.id)).to_string_lossy().into_owned(),
                     },
                 };
+                let source = if backend == "mistralrs" { format!("{}{source}", crate::shim::MISTRALRS) } else { source };
                 let mut l = ModelLaunch::new(&m.id, engine, source);
                 l.context = m.context;
                 l.slots = m.slots;
@@ -650,6 +703,23 @@ impl NodeConfig {
                 l
             })
             .collect()
+    }
+}
+
+/// The `[[model.local]]` backends.
+pub const BACKENDS: &[&str] = &["llamacpp", "mistralrs", "mlx", "vllm"];
+
+/// Where an MLX model's weights are: `file` (a directory, absolute or under `models_dir`, or a Hub
+/// id), else the catalog model's MLX weights under `models_dir/mlx/`.
+fn mlx_source(m: &LocalModel, dir: &Path) -> String {
+    match &m.file {
+        Some(f) if Path::new(f).is_absolute() => f.clone(),
+        Some(f) if dir.join(f).exists() || !f.contains('/') => dir.join(f).to_string_lossy().into_owned(),
+        Some(f) => f.clone(),
+        None => match crate::mlx::weights(&m.id) {
+            Some(w) => w.dir(dir).to_string_lossy().into_owned(),
+            None => dir.join("mlx").join(&m.id).to_string_lossy().into_owned(),
+        },
     }
 }
 

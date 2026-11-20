@@ -113,9 +113,16 @@ impl LocalModelNode {
     /// A clear message for the common setup mistake: the GGUF isn't there.
     fn check_file(&self, model: &str) -> Result<(), RemoteError> {
         match self.sources.iter().find(|(id, ..)| id == model) {
-            Some((_, EngineKind::Llamacpp, src, false)) if !Path::new(src).is_file() => Err(unavailable(format!(
-                "{model}: model file {src} is missing (download it with `ymirctl setup --download`, or set `file` in node.toml)"
-            ))),
+            Some((_, EngineKind::Llamacpp, src, false)) => match crate::shim::Backend::of(src) {
+                (crate::shim::Backend::Mlx, dir) if Path::new(dir).is_absolute() && !Path::new(dir).is_dir() => Err(unavailable(format!(
+                    "{model}: MLX weights {dir} are missing (download them with `ymirctl setup --download`, or set `file` in node.toml)"
+                ))),
+                (crate::shim::Backend::Mlx, _) => Ok(()),
+                (_, f) if !Path::new(f).is_file() => Err(unavailable(format!(
+                    "{model}: model file {f} is missing (download it with `ymirctl setup --download`, or set `file` in node.toml)"
+                ))),
+                _ => Ok(()),
+            },
             _ => Ok(()),
         }
     }

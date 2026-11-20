@@ -27,7 +27,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let host = flag("--host").unwrap_or_else(|| "127.0.0.1".into());
-    let port: u16 = flag("--port").and_then(|p| p.parse().ok()).unwrap_or(8080);
+    let port: u16 = flag("--port").or_else(|| flag("-p")).and_then(|p| p.parse().ok()).unwrap_or(8080);
     let alias = flag("--alias").or_else(|| flag("--model")).unwrap_or_else(|| "mock".into());
     let load_ms = std::env::var("YMIR_MOCK_LOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     assert_eq!(host, "127.0.0.1", "engines must bind loopback only");
@@ -80,7 +80,7 @@ fn check(st: &Mock, headers: &HeaderMap, body: &Value) -> Option<Response> {
     if !authorized(st, headers) {
         return Some((StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response());
     }
-    if body["model"].as_str() != Some(st.alias.as_str()) {
+    if !matches!(body["model"].as_str(), Some(m) if m == st.alias || m == "default_model") {
         return Some(
             (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("unknown model {}", body["model"])}}))).into_response(),
         );
@@ -124,7 +124,7 @@ async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body):
     if !authorized(&st, &headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response();
     }
-    if body["model"].as_str() != Some(st.alias.as_str()) {
+    if !matches!(body["model"].as_str(), Some(m) if m == st.alias || m == "default_model") {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("unknown model {}", body["model"])}}))).into_response();
     }
     let said = body["messages"]

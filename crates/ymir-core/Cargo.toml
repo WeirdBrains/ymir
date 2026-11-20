@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+axum.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 futures.workspace = true
