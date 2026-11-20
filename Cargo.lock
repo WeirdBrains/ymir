@@ -5133,9 +5133,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a91b950c6f8920ef67516374d05a382cd9fbc2cd764b735251570d977c348381"
+checksum = "f4f7ad8290ef685cb7183cc3448995e6ae815f950cfaa8c5e3da4301830186bc"
 dependencies = [
  "async-trait",
  "cbor4ii",
@@ -5144,6 +5144,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "weirdnet-net",
  "weirdnet-sync",
 ]

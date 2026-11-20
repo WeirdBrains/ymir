@@ -152,7 +152,6 @@ async fn timed(d: &Daemon, h: &Home, model: &str, q: &str) -> Result<(Duration, 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails until weirdnet-agent's LinkedNodes stops waiting 3 s per unreachable linked device on every request (see linked_nodes.rs); un-ignore with that release"]
 async fn first_token_is_fast_over_loopback() -> Result<()> {
     let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_env("YMIR_TEST_LOG")).with_test_writer().try_init();
     let tmp = tempfile::tempdir()?;
