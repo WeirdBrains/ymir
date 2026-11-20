@@ -288,7 +288,7 @@ async fn wrap_refuses_non_loopback_and_reports_a_dead_server() -> Result<()> {
     let sup = Supervisor::new(Vec::new(), vec![l.clone()], SupervisorOptions::default());
     let err = sup.load("w").await.unwrap_err().to_string();
     assert!(err.contains("not answering"), "{err}");
-    l.wrap = Some(Wrap { url: "http://192.168.1.5:8000".into(), api_key: None });
+    l.wrap = Some(Wrap { url: "http://192.0.2.5:8000".into(), api_key: None });
     let sup = Supervisor::new(Vec::new(), vec![l], SupervisorOptions::default());
     assert!(sup.load("w").await.unwrap_err().to_string().contains("loopback"));
     Ok(())

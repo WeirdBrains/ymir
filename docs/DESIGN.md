@@ -1004,7 +1004,7 @@ listen = ["/ip4/0.0.0.0/tcp/4747", "/ip4/0.0.0.0/udp/4747/quic-v1"]   # Weirdnet
 [model]
 memory_budget = "auto"               # or e.g. "100GiB"
 reserve = "12GiB"                    # unified memory kept for the OS
-private_link = "10.0.0.1"         # optional: address for group jobs (RoCE/NCCL, RPC)
+private_link = "10.0.0.1"            # optional: private address for group jobs (RoCE/NCCL, RPC)
 llamacpp = "managed"                 # managed | system:/path | off
 vllm = "auto"                        # auto (only where supported) | off
 # wrap = "http://127.0.0.1:8000"     # or wrap a stock vllm/llama-server already running here
