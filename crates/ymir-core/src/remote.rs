@@ -100,6 +100,7 @@ pub fn connect_pool(node: Arc<SyncNode>, m: &Membership, hints: &[(PeerId, Vec<M
 /// role leaves `/weirdnet-agent/infer/2` to the inference role, so one box serves both. The
 /// inference role uses its own models in process.
 /// `hardware` goes into the capability record (for placement).
+#[allow(clippy::too_many_arguments)]
 pub fn serve_model(
     node: &Arc<SyncNode>,
     supervisor: Supervisor,
