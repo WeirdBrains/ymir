@@ -37,6 +37,18 @@ pub const CONTEXT_TYPE: &str = "ymir.context";
 pub struct LinkSettings {
     #[serde(default)]
     pub roster: Roster,
+    /// Where the user's other devices can be dialed (`/ip4/…/tcp/…/p2p/PEER`), from the device
+    /// that sent the link: a device on another network (no mDNS, no DHT) finds the nodes this way.
+    /// Bragi sends and reads the same field; older senders leave it out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+}
+
+impl LinkSettings {
+    /// The `peers` a link transfer's settings carry (none when it has no such field or isn't JSON).
+    pub fn peers_in(settings: &str) -> Vec<String> {
+        serde_json::from_str::<LinkSettings>(settings).map(|s| s.peers).unwrap_or_default()
+    }
 }
 
 pub type SyncNode = Node<Vec<u8>, Vec<u8>>;
@@ -304,7 +316,13 @@ impl Membership {
 
     /// The transfer payload for a device linked from here.
     pub fn link_settings(&self) -> String {
-        serde_json::to_string(&LinkSettings { roster: self.roster() }).unwrap_or_else(|_| "{}".into())
+        self.link_settings_with(Vec::new())
+    }
+
+    /// [`link_settings`](Self::link_settings) with `peers`: where the new device can dial the
+    /// user's other devices.
+    pub fn link_settings_with(&self, peers: Vec<String>) -> String {
+        serde_json::to_string(&LinkSettings { roster: self.roster(), peers }).unwrap_or_else(|_| "{}".into())
     }
 
     /// The seed, for a device link sent from here.

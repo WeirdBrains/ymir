@@ -8,9 +8,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use weirdnet_device_link::{HostNode, HostStatus, Pairing, with_link_limits};
-use weirdnet_net::{Keypair, NodeConfig as NetConfig};
+use weirdnet_net::{Keypair, Multiaddr, NodeConfig as NetConfig, PeerHint};
 use ymir_core::control::{self, ControlRequest};
-use ymir_core::membership::{Membership, SYNC_TYPE};
+use ymir_core::membership::{LinkSettings, Membership, SYNC_TYPE};
 use ymir_core::{NodeConfig, Paths};
 
 /// The link scheme Ymir shows (`weirdnet-ymir://link/…`). Never bare `weirdnet://`.
@@ -56,6 +56,9 @@ pub enum PoolCmd {
     },
     /// The linked devices.
     Devices,
+    /// Where this node (and the devices it dials) can be reached, for a device that can't find
+    /// them on its own: paste one into Bragi's Link a device box. `pool add` sends these along.
+    Addresses,
     /// Revoke a device everywhere this roster reaches.
     Revoke { peer: String },
     /// Start a new Weirdnet identity on this node, for a cloud of its own.
@@ -86,6 +89,54 @@ async fn daemon_on_weirdnet(paths: &Paths) -> bool {
         Ok(r) => r.status.is_some_and(|s| s.network.is_some()),
         Err(_) => false,
     }
+}
+
+/// `addr` as a dialable `…/p2p/PEER` address, or `None` for one nobody else can dial
+/// (unspecified, loopback when `keep_loopback` is off, or not an address at all).
+fn dialable(addr: &str, peer: &str, keep_loopback: bool) -> Option<String> {
+    let m: Multiaddr = addr.parse().ok()?;
+    let s = m.to_string();
+    let parts: Vec<&str> = s.split('/').collect();
+    let mut has_peer = false;
+    for w in parts.windows(2) {
+        match w[0] {
+            "ip4" | "ip6" => {
+                let ip: std::net::IpAddr = w[1].parse().ok()?;
+                if ip.is_unspecified() || (!keep_loopback && ip.is_loopback()) {
+                    return None;
+                }
+            }
+            "p2p" => has_peer = true,
+            _ => {}
+        }
+    }
+    Some(if has_peer { s } else { format!("{s}/p2p/{peer}") })
+}
+
+/// Where this node and the devices it dials can be reached: the running ymird's listen
+/// addresses (or the configured ones), then the configured `[network] peers` that are linked
+/// devices. Loopback addresses only when there is nothing else.
+pub async fn addresses(paths: &Paths, cfg: &NodeConfig, m: &Membership) -> Vec<String> {
+    let me = m.peer_id().to_string();
+    let listening: Vec<String> = match control::request(&paths.socket(), &ControlRequest::Status).await {
+        Ok(r) => r.status.and_then(|s| s.network).map(|n| n.listening).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let listening = if listening.is_empty() { cfg.network.listen.clone().unwrap_or_default() } else { listening };
+    let mut out: Vec<String> = listening.iter().filter_map(|a| dialable(a, &me, false)).collect();
+    if out.is_empty() {
+        out = listening.iter().filter_map(|a| dialable(a, &me, true)).collect();
+    }
+    let linked: Vec<String> = m.roster().active().map(|c| c.peer_id.clone()).filter(|p| *p != me).collect();
+    for p in &cfg.network.peers {
+        if let Ok(hint) = PeerHint::from_addr(p)
+            && linked.contains(&hint.peer_id)
+            && !out.contains(p)
+        {
+            out.push(p.clone());
+        }
+    }
+    out
 }
 
 fn read(out: &mut dyn Write, input: &mut dyn BufRead, prompt: &str) -> Result<bool> {
@@ -137,6 +188,13 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                         let t = host.take().map_err(|e| anyhow!("{e}"))?;
                         let m = Membership::adopt(&dir, node_key, &t.seed, t.node_cert.clone(), &t.settings)?;
                         writeln!(out, "Linked as {} ({}) to {}.", t.node_cert.label, m.peer_id(), m.user_id())?;
+                        let peers = LinkSettings::peers_in(&t.settings);
+                        if !peers.is_empty() && (!cfg.network.discovery || !cfg.network.mdns) {
+                            writeln!(out, "With discovery off, add the devices it can reach to [network] peers in node.toml:")?;
+                            for p in &peers {
+                                writeln!(out, "  {p}")?;
+                            }
+                        }
                         writeln!(out, "Restart ymird to put it on Weirdnet.")?;
                         return Ok(());
                     }
@@ -160,7 +218,11 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 bail!("cancelled: the codes did not match");
             }
             let seed = m.seed()?;
-            let settings = m.link_settings();
+            // Where the pool's nodes are: a device on another network (Bragi on a laptop, the
+            // nodes on a private network with discovery off) has no other way to find them.
+            let peers = addresses(paths, cfg, &m).await;
+            let told = peers.len();
+            let settings = m.link_settings_with(peers);
             let sync = vec![SYNC_TYPE.to_string()];
             let cert =
                 tokio::task::spawn_blocking(move || pairing.send_with(&seed, &profile_name, &settings, &sync)).await?.map_err(|e| anyhow!("{e}"))?;
@@ -173,6 +235,20 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 m.approve(cert.clone())?;
             }
             writeln!(out, "Linked {} ({}).", cert.label, cert.peer_id)?;
+            if told > 0 {
+                writeln!(out, "Sent it {told} address{} to reach your nodes at (`ymirctl pool addresses`).", if told == 1 { "" } else { "es" })?;
+            }
+            Ok(())
+        }
+        PoolCmd::Addresses => {
+            let m = Membership::open(&dir)?.context("this node is not linked yet; run `ymirctl pool link`")?;
+            let all = addresses(paths, cfg, &m).await;
+            if all.is_empty() {
+                bail!("no address to share: ymird isn't listening on Weirdnet (start it, or set [network] listen)");
+            }
+            for a in all {
+                writeln!(out, "{a}")?;
+            }
             Ok(())
         }
         PoolCmd::Devices => {
@@ -221,6 +297,28 @@ mod tests {
         assert_eq!(normalize_link(" weirdnet-bragi://link/abc\n"), "weirdnet-ymir://link/abc");
         assert_eq!(normalize_link("weirdnet-bragi://invite/abc"), "weirdnet-bragi://invite/abc");
         assert_eq!(normalize_link("weirdnet://link/abc"), "weirdnet://link/abc");
+    }
+
+    #[test]
+    fn shared_addresses_are_dialable() {
+        let peer = "12D3KooWQH96LGJd33JquZXNyrmrs7HAeaeviiFqdwnzwfdmj1VY";
+        assert_eq!(dialable("/ip4/192.0.2.7/tcp/4848", peer, false).unwrap(), format!("/ip4/192.0.2.7/tcp/4848/p2p/{peer}"));
+        let full = format!("/ip4/192.0.2.7/udp/4848/quic-v1/p2p/{peer}");
+        assert_eq!(dialable(&full, peer, false).unwrap(), full);
+        assert_eq!(dialable("/ip4/0.0.0.0/tcp/4848", peer, true), None);
+        assert_eq!(dialable("/ip4/127.0.0.1/tcp/4848", peer, false), None);
+        assert!(dialable("/ip4/127.0.0.1/tcp/4848", peer, true).is_some());
+        assert_eq!(dialable("not an address", peer, true), None);
+    }
+
+    #[test]
+    fn link_settings_carry_addresses_and_older_ones_read_as_none() {
+        assert_eq!(
+            LinkSettings::peers_in(r#"{"roster":{"epoch":0,"certs":[]},"peers":["/ip4/192.0.2.7/tcp/4848/p2p/x"]}"#),
+            vec!["/ip4/192.0.2.7/tcp/4848/p2p/x"]
+        );
+        assert!(LinkSettings::peers_in(r#"{"roster":{"epoch":0,"certs":[]}}"#).is_empty());
+        assert!(LinkSettings::peers_in("").is_empty());
     }
 
     #[test]

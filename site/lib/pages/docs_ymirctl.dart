@@ -164,6 +164,12 @@ ymirctl pool add 'weirdnet-ymir://link/...'
 # Does the other device show the same code? [y/N] y</code></pre>
 <h3 id="pool-devices"><code>ymirctl pool devices</code></h3>
 <p>Lists the identity and each device: <em>this node</em>, <em>linked</em> or <em>revoked</em>, with its peer id.</p>
+<h3 id="pool-addresses"><code>ymirctl pool addresses</code></h3>
+<p>Prints where this node can be reached (<code>/ip4/…/tcp/4848/p2p/PEER</code>, from the running <code>ymird</code> or the
+configured <code>[network] listen</code>), followed by the configured <code>[network] peers</code> that are linked devices.
+A device that can't discover your nodes on its own, such as Bragi on another network than nodes with discovery off, needs
+one: paste it into Bragi's <strong>Link a device</strong> box. <code>pool add</code> sends the same list to the device it
+links, and <code>pool link</code> prints the list it received when discovery is off here.</p>
 <h3 id="pool-revoke"><code>ymirctl pool revoke PEER</code></h3>
 <p>Revokes a device everywhere the roster reaches. Use the peer id from <code>pool devices</code>. If <code>ymird</code> is
 running on Weirdnet the change goes through it.</p>
