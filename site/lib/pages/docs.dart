@@ -15,6 +15,7 @@ const _html = r'''
   <li><a href="${guide}#bragi">3. Connect Bragi</a></li>
   <li><a href="${guide}#jan">4. Use Jan through the local bridge</a></li>
   <li><a href="${guide}#https">5. Optional: an HTTPS address on a private network</a></li>
+  <li><a href="${guide}#faq">Questions</a>: do you need Ymir on every machine, llama.cpp and CUDA, crashes</li>
   </ul></li>
 <li><a href="${ymirctl}">ymirctl guide</a>, every command grouped by task, with the
   <a href="${reference}">generated command reference</a> (<a href="${ymirctl}#bridge">API keys</a>,

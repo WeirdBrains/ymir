@@ -39,17 +39,22 @@ shared Rust core. Only the UI shell differs.
 Generic pieces live in `weirdnet-*` crates (owned by the Weirdnet lead); this repo holds only the
 Ymir-specific app.
 
-## Try it (from source)
+## Try it
 
-Needs Rust 1.99 and a `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp).
-On an NVIDIA PC, take the release's `ubuntu-cuda-12.8-x64` build and unpack its matching `cudart-`
-archive into the same directory (no CUDA toolkit needed); llama.cpp offloads all layers that fit by
-default, so `node.toml` needs only `llamacpp = "system:/path/to/llama-server"`.
+Release files (tar.gz, zip, deb, rpm, Arch, Nix) include llama.cpp, so a server install is: unpack or install the
+package, `ymirctl setup --download --yes --service`, done. There are two builds: `ymir` (CPU and Vulkan) and
+`ymir-cuda` (CUDA 13 with its runtime, for NVIDIA; needs only the driver). The
+[deployment guide](https://ymir.weirdbrains.com/docs/guides/deployment/) has the details.
+
+Nothing is released yet, so build from source (Rust 1.99) and put the pinned llama.cpp build
+(`packaging/engines/llama.cpp.toml`) next to the binaries, where `ymird` looks for it.
+`python3 scripts/package.py [--variant cuda]` builds the release files themselves into `dist/`.
 
 ```sh
 cargo build --release -p ymird -p ymirctl
+python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --out target/release/llama.cpp   # --variant cuda for NVIDIA
 ymirctl hw                                   # what this machine has and the model budget
-ymirctl setup --llama-server /path/to/llama-server --model /path/to/model.gguf
+ymirctl setup --model /path/to/model.gguf    # or --llama-server PATH for your own llama.cpp
 #   or: ymirctl setup --download             # catalog models that fit, asks before downloading
 ymird &                                      # model, inference and app roles in one process
 ymirctl chat "Hello"                         # streams through the loopback bridge

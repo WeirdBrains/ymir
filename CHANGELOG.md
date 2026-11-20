@@ -16,3 +16,5 @@ All notable changes to Ymir are listed here. The format follows
 - Health alerts by email, webhook and log, including the default route on Wi-Fi.
 - User-level service install (systemd user unit, launchd agent).
 - Linux tar.gz, zip, deb and pkg.tar.zst packages, a TAUR recipe and a Nix flake.
+- llama.cpp bundled in every release file, used by `ymirctl setup` by default: `ymir` (CPU and Vulkan) and `ymir-cuda` (CUDA 13 with its runtime).
+- rpm packages, a release workflow for Linux, macOS and Windows, and a smoke test that runs a real model from an unpacked archive.

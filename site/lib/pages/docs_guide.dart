@@ -7,21 +7,46 @@ const _html = r'''
 <p>This guide takes you from nothing to a working private model cloud: install Ymir, add a second device, connect the
 Bragi chat app, and point Jan at it. Commands are exactly those <code>ymirctl</code> offers; run
 <code>ymirctl --help</code> or <code>ymirctl &lt;command&gt; --help</code> for the full list.</p>
-<p><strong>What is released.</strong> Nothing in Ymir or Bragi is released yet, so there are no downloads to install:
-you build Ymir from source (step 1). The Linux packages the repository builds (tar.gz, zip, deb, an Arch package) are
-unsigned and unpublished, and there is no macOS or Windows installer. The bridge token and the Weirdnet identity are
-kept in files readable only by you (mode 0600); storing them in the operating system's keyring comes later.</p>
+<p><strong>What is released.</strong> Nothing in Ymir or Bragi is released yet. Ymir's release files (step 1) are
+built by its release workflow but not published, so for now you build them yourself from source, which takes one more
+command. The bridge token and the Weirdnet identity are kept in files readable only by you (mode 0600); storing them in
+the operating system's keyring comes later.</p>
 <p>Ymir is a <a href="https://weirdbrains.com">Weird Brains</a> project. Devices find each other over
 <a href="https://net.weirdbrains.com">Weirdnet</a>, so a pool needs no open ports and no API keys.</p>
 
 <h2 id="install">1. Install Ymir on a server or desktop</h2>
-<p>You need Rust 1.99, a C toolchain, and a <code>llama-server</code> from
-<a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a> (Ymir can also wrap a vLLM server on NVIDIA hardware).
-On an NVIDIA PC, take llama.cpp's <code>ubuntu-cuda-12.8-x64</code> build and unpack its matching
-<code>cudart-</code> archive into the same directory; no CUDA toolkit is needed.</p>
+<p>Ymir is one download with <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a> built in: no separate
+llama.cpp, CUDA toolkit, Python or Rust to install. Pick the build for the machine:</p>
+<ul>
+<li><strong><code>ymir</code></strong>: llama.cpp for the CPU and for any GPU through Vulkan (NVIDIA, AMD, Intel).</li>
+<li><strong><code>ymir-cuda</code></strong>: llama.cpp with CUDA 13 and its runtime libraries, for NVIDIA GPUs from
+Turing (RTX 20 series) through Blackwell, DGX Spark (GB10) included. It needs only the NVIDIA driver (580 or newer).
+Linux x86_64 and ARM64.</li>
+</ul>
+<p>Each comes as a <code>tar.gz</code> or <code>zip</code> you unpack anywhere (no root needed), a <code>.deb</code>, an
+<code>.rpm</code> and an Arch package (<code>ymir-bin</code>, <code>ymir-cuda-bin</code>), and there is a Nix flake.
+A server install is three steps: unpack, set up, start.</p>
+<pre><code># 1. Unpack (user level), or install the package: sudo apt install ./ymir-cuda_VERSION-1_arm64.deb
+tar xzf ymir-cuda-VERSION-aarch64-unknown-linux-gnu.tar.gz -C ~/.local/opt
+ln -s ~/.local/opt/ymir-cuda-VERSION-aarch64-unknown-linux-gnu/bin/ymir* ~/.local/bin/
+
+# 2 and 3. Pick models that fit, download them, and start ymird as a service
+ymirctl setup --download --yes --service
+loginctl enable-linger $USER                 # keep it running after you log out</code></pre>
+<p>Setup says which engine it found, such as <code>llama.cpp: llama.cpp b12590 (cuda: cpu, cuda), shipped with
+Ymir</code>, and tells you when the machine has an NVIDIA GPU but the <code>ymir</code> build is installed (it then runs
+on the GPU through Vulkan, which is slower than CUDA). The engine runs as its own process under <code>ymird</code>, so a
+model that crashes is restarted without taking <code>ymird</code> down.</p>
+<p><strong>Until the first release: build the files yourself.</strong> You need Rust 1.99 and Python 3.11. The package
+script downloads the pinned llama.cpp build (checking its SHA-256) and writes the same files a release has into
+<code>dist/</code>:</p>
 <pre><code>git clone https://github.com/WeirdBrains/ymir && cd ymir
 cargo build --release -p ymird -p ymirctl
-# put target/release/ymird and target/release/ymirctl on your PATH, side by side</code></pre>
+python3 scripts/package.py                   # dist/ymir-…; add --variant cuda for dist/ymir-cuda-…</code></pre>
+<p><strong>Your own engine.</strong> <code>ymirctl setup --llama-server /path/to/llama-server</code> uses a llama.cpp
+build you provide instead of the bundled one. vLLM, for NVIDIA servers that want it, stays a separate install:
+<code>ymird</code> finds <code>vllm</code> on <code>PATH</code> or wraps a <code>vllm serve</code> that is already
+running.</p>
 <p><strong>Look at the machine.</strong> <code>ymirctl hw</code> shows the hardware and the memory budget for models
 (<code>--json</code> for scripts).</p>
 <p><strong>Set it up.</strong> <code>ymirctl setup</code> detects the hardware, picks models that fit and writes
@@ -29,8 +54,7 @@ cargo build --release -p ymird -p ymirctl
 one of:</p>
 <pre><code>ymirctl setup --dry-run                      # show the proposal, write nothing
 ymirctl setup --download                     # catalog models that fit; asks before downloading (--yes skips the question)
-ymirctl setup --llama-server /path/to/llama-server --model /path/to/model.gguf
-                                             # your own GGUF; repeat --model, the first is the main model</code></pre>
+ymirctl setup --model /path/to/model.gguf    # your own GGUF; repeat --model, the first is the main model</code></pre>
 <p>Useful options: <code>--name</code> (this node's name), <code>--memory-budget 10GiB</code>,
 <code>--reserve 12GiB</code> (memory kept for the OS), <code>--models-dir</code>, <code>--port</code> (bridge port on
 127.0.0.1, default 8484) and <code>--force</code> to replace an existing <code>node.toml</code>.</p>
@@ -148,6 +172,30 @@ key. Use the host name, not the address, because the certificate covers the name
 by re-running <code>tailscale cert</code> (a daily timer works) and reloading Caddy. Any reverse proxy that rewrites the
 <code>Host</code> header and does not buffer the response works the same way.</p>
 
+<h2 id="faq">Questions</h2>
+<p><strong>Do I need to install Ymir on every machine?</strong> No, only on the machines that serve: every machine that
+runs models (the <code>model</code> role), coordinates the pool (the <code>inference</code> role) or hosts the
+OpenAI-compatible bridge (the <code>app</code> role). One <code>ymird</code> can be all three, and a pool needs at least
+one inference node somewhere, which can be the same machine as a model node. Machines that only ask questions don't
+need Ymir:</p>
+<ul>
+<li><a href="${bragiSite}">Bragi</a> joins your Weirdnet identity on its own and talks to your inference nodes (step 3).</li>
+<li>Apps built on <code>weirdnet-agent</code> do the same.</li>
+<li>Plain OpenAI clients, such as Jan or a script, use the bridge: on the machine that runs it at
+<code>http://127.0.0.1:8484/v1</code> (step 4), or from another device through an HTTPS address on a private network,
+with the bridge token as the API key (step 5).</li>
+</ul>
+<p><strong>What about a machine that only runs models?</strong> Install Ymir and set it up with
+<code>ymirctl setup --roles model</code>; it then runs models for the pool and leaves routing to the inference nodes.
+It still needs Ymir, because <code>ymird</code> is what joins it to the pool and starts and stops its models.</p>
+<p><strong>Do I need llama.cpp or CUDA installed?</strong> No. Every Ymir download includes llama.cpp; the
+<code>ymir-cuda</code> build also includes the CUDA runtime, so an NVIDIA machine needs only its driver. Only vLLM is a
+separate install, and it is optional.</p>
+<p><strong>What happens when a model crashes?</strong> Each model runs in its own engine process. If one dies,
+<code>ymird</code> keeps running and starts the model again (a request it had not started answering is retried once);
+a model that keeps crashing is marked failed instead of being restarted forever. With more than one model node, the inference
+node sends requests to another node that has the model.</p>
+
 <h2 id="next">Where next</h2>
 <p>See the <a href="${docs}">documentation index</a>, the <a href="${roadmap}">roadmap</a>, and
 <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md">DESIGN.md</a> for the full design.</p>
@@ -162,7 +210,7 @@ class DeploymentGuidePage extends StatelessComponent {
       pageHero(
         eyebrow: 'Docs · Guides',
         title: 'Deployment guide',
-        lede: 'Install Ymir, add a device, connect Bragi, and use Jan.',
+        lede: 'Install Ymir, add a device, connect Bragi, use Jan, and common questions.',
       ),
       prose(
         _html

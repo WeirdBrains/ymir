@@ -5,16 +5,16 @@ import '../site.dart';
 
 const _html = r'''
 <h2 id="build">Build it</h2>
-<p>Nothing is released yet, so Ymir builds from source. You need Rust 1.99 and a <code>llama-server</code> from
-<a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>. On an NVIDIA PC, take the release's
-<code>ubuntu-cuda-12.8-x64</code> build and unpack its matching <code>cudart-</code> archive into the same directory
-(no CUDA toolkit needed). llama.cpp offloads every layer that fits, so <code>node.toml</code> needs only
-<code>llamacpp = "system:/path/to/llama-server"</code>.</p>
+<p>Ymir's release files include llama.cpp, so a server needs nothing else (see the
+<a href="${guide}#install">deployment guide</a>). Nothing is released yet, so build from source with Rust 1.99, and put
+the pinned llama.cpp build next to the binaries, where <code>ymird</code> looks for it:</p>
 <pre><code>git clone https://github.com/WeirdBrains/ymir && cd ymir
-cargo build --release -p ymird -p ymirctl</code></pre>
+cargo build --release -p ymird -p ymirctl
+python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --out target/release/llama.cpp
+#   aarch64-unknown-linux-gnu on ARM; add --variant cuda for NVIDIA (CUDA 13, driver 580 or newer)</code></pre>
 <h2 id="run">Set up and run</h2>
 <pre><code>ymirctl hw                                   # what this machine has and the model budget
-ymirctl setup --llama-server /path/to/llama-server --model /path/to/model.gguf
+ymirctl setup --model /path/to/model.gguf    # uses the llama.cpp next to ymird
 #   or: ymirctl setup --download             # catalog models that fit, asks before downloading
 ymird &amp;                                      # model, inference and app roles in one process
 ymirctl chat "Hello"                         # streams through the loopback bridge
@@ -62,7 +62,7 @@ class QuickstartPage extends StatelessComponent {
         title: 'Set up one box',
         lede: 'From the README: build from source, set up, and point Jan at the loopback bridge.',
       ),
-      prose(_html.replaceAll(r'${roadmapUrl}', siteLink('/roadmap'))),
+      prose(_html.replaceAll(r'${roadmapUrl}', siteLink('/roadmap')).replaceAll(r'${guide}', siteLink('/docs/guides/deployment'))),
     ]);
   }
 }

@@ -431,6 +431,59 @@ downloader; vLLM in its own uv venv as `/opt/llm/vllm` today). Hardware detectio
 `hw` doesn't depend on `llama-cpp-2`, so it works without the `llama` feature. Ymir's process
 manager decides what runs when.
 
+### The bundled engine (decided 2026-11-20)
+
+m3talsmith asked for a binary install with minimal setup on the server: no separate llama.cpp
+install. Every Ymir release file now carries a pinned llama.cpp build next to `ymird`, and `ymirctl
+setup` uses it by default (`llamacpp = "managed"`). A server install is: download or install the
+package, `ymirctl setup --download --yes --service`.
+
+Three ways were weighed:
+
+| Option | For | Against |
+|---|---|---|
+| (a) llama.cpp in-process (`llama-cpp-2`, GPU backends as cargo features) | One binary, no IPC | A model crash (CUDA error, `GGML_ASSERT`, out-of-memory abort) kills `ymird` and every other model and the coordinator with it; a server would have to be rewritten on top of the bindings (OpenAI API, chat templates, slots, embeddings, tool calls, RPC); one build per GPU backend for `ymird` itself; CUDA builds of the whole daemon in CI |
+| **(b) bundle upstream's `llama-server` in the release files** (chosen) | Crash isolation for free (the engine is a child process; the supervisor restarts it and the coordinator fails over, as before); the supervisor, adapters and tests stay the same; llama.cpp's own server, which is what the pool already runs; upstream publishes checksummed builds for every target we ship (Linux x86_64/ARM64 CPU+Vulkan and CUDA 13, macOS Metal, Windows), so CI never compiles CUDA | Larger downloads, the CUDA variant especially; two variants per Linux target |
+| (c) download a pinned llama.cpp during `ymirctl setup` | Small packages | Setup needs the internet and a second trust path; an air-gapped or locked-down server can't install; the package isn't self-contained |
+
+Why (b): crash isolation and failover are requirements, and (b) keeps the engine a separate process
+without anything new to install. In-process llama.cpp stays where it fits: tiny models and
+embeddings in `weirdnet-model` (`llama`), and Bragi's offline model.
+
+How it works:
+
+- `packaging/engines/llama.cpp.toml` pins one upstream build (`b12590` at first) and, per target and
+  variant, the upstream release archives with their SHA-256. `scripts/engine.py fetch` downloads and
+  checks them and keeps only `llama-server`, `rpc-server`, their libraries and GPU backends, the
+  licenses and an `engine.toml` (build, variant, backends). `scripts/engine.py build` compiles the
+  same set from source for targets upstream doesn't publish (the BSDs, distributions that build from
+  source). `scripts/engine.py pin bNNNN` moves the pin.
+- Variants: `ymir` = llama.cpp with CPU (one backend per CPU generation, picked at run time) and
+  Vulkan (any GPU), Metal on Apple Silicon; `ymir-cuda` = CPU and CUDA 13 with the CUDA runtime
+  libraries (NVIDIA redistributables), for Linux x86_64 and ARM64 (and Windows x86_64). CUDA 13's
+  default architectures cover sm_75 through sm_120 and sm_121a (GB10), so one build serves
+  everything from a Turing desktop card to a DGX Spark; it needs driver 580 or newer. ROCm can be added as a third variant from
+  upstream's ROCm builds; until then AMD runs through Vulkan.
+- Layout: `lib/ymir/llama.cpp/` beside `bin/` (tar.gz, deb, rpm, Arch, Homebrew, Nix), or
+  `llama.cpp\` next to `ymird.exe` (Windows zip, update bundles). `ymir_core::engine` finds it
+  relative to the running executable; `$YMIR_ENGINE_DIR` overrides. `managed` resolves at every start
+  in this order: `<home>/engines/llama.cpp/`, the bundled engine, `PATH`. So a package upgrade
+  upgrades the engine, and `--llama-server PATH` (`system:PATH`) still picks an external build.
+- `ymirctl setup` names the engine it found and warns when the machine has an NVIDIA GPU but the
+  installed build has no CUDA.
+- vLLM stays an external engine (`vllm = "auto"` or `system:PATH`, or a wrapped `vllm serve`).
+- Tests: `ymir-testkit/tests/bundled_engine.rs` (setup and `ymird` pick the bundled engine, with the
+  mock engine laid out as a package installs it) and `real_bundle.rs` (an unpacked release archive,
+  its own `ymirctl` and `ymird` processes, a real tiny GGUF streamed through the bridge, and a killed
+  engine that `ymird` survives and restarts). The Release workflow runs `real_bundle` on every
+  default Linux and macOS archive.
+
+Generic part, proposed to the Weirdnet lead for `weirdnet-backends` (the design already gives it
+"pinned checksummed engine builds per platform"): locating an engine shipped with an app plus its
+`engine.toml`, the pin manifest format and fetch with `weirdnet-model`'s download and consent, and the
+engine build script, so Morph, Bragi and other apps reuse them. Until then the code is in
+`ymir_core::engine` and `scripts/engine.py`, marked to be extracted.
+
 ### Model sizing
 
 `weirdnet-model`'s catalog grows from Gemma 4 only to a tiered catalog with per-quant memory
@@ -914,7 +967,8 @@ a rename plus a dependency swap. All are `publish = false`.
 | `ymir-alerts` (retired after M3: now `weirdnet-alerts` 0.1.0) | `weirdnet-alerts` | observations, `weirdnet-rules` `RuleSpec`s with `fail`/`ok`/`event` actions, the server-a/server-b rule pack, hourly dedupe with recovery notices, SMTP (lettre), webhook, push (off) and log sinks with dry-run, route/disk/GPU probes |
 
 Also generic but small, in `ymir-core` for now: `service` (systemd user unit and launchd agent
-install). `health` moved to `weirdnet_alerts::engine`.
+install) and `engine` (finding the llama.cpp build shipped next to the executable, for
+`weirdnet-backends`). `health` moved to `weirdnet_alerts::engine`.
 
 Trait seams that stay in `ymir-core` until their protocol exists: `ModelNode` (becomes the
 `/weirdnet-backends/node/1` client plus raw infer/2 in M3) and the control socket (the local transport
@@ -1057,6 +1111,8 @@ has `[roles] app = true` and nothing else.
 - **User-level by default** (systemd user unit with lingering, launchd agent); `--system` for headless
   servers where it is genuinely system-level.
 - Prebuilt binaries only; installing never needs Rust. Release files are signed with minisign.
+- **llama.cpp is bundled** in every release file, in two variants (`ymir`: CPU and Vulkan, Metal on
+  macOS; `ymir-cuda`: CUDA 13 and its runtime). See [The bundled engine](#the-bundled-engine-decided-2026-11-20).
 
 ### Updates (decided 2026-11-19: both)
 
