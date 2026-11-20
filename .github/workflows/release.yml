@@ -125,8 +125,8 @@ jobs:
 
   windows:
     name: windows (${{ matrix.target }}, ${{ matrix.variant }})
-    # The Windows port of ymird (named pipes for the control socket, a Windows service) isn't done;
-    # this job shows how far it gets and packages the zip once it builds.
+    # ymird builds and runs as a service on Windows (named-pipe control, logon task, Windows
+    # service; CI tests them). Kept non-blocking until a release has shipped the Windows files.
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -152,6 +152,65 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}-${{ matrix.variant }}
+          path: dist/
+          if-no-files-found: error
+
+
+  windows-installer:
+    name: windows installers (MSI, YmirSetup exe)
+    needs: windows
+    continue-on-error: true
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dist-*-pc-windows-msvc-default
+          path: zips
+          merge-multiple: true
+      # WiX 7 is used under the Open Source Maintenance Fee EULA v1.1, accepted for WeirdBrains
+      # projects on 2026-11-12; every wix command passes -acceptEula wix7.
+      - name: Install pinned WiX 7.0.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/wixtoolset/wix/releases/download/v7.0.1/wix-cli-x64.msi"
+          $expected = "93673c89ab33b1fd3f07ad5e609b7cae694bd716b2914259b61a41c02303b64c"
+          $msi = Join-Path $env:RUNNER_TEMP "wix-cli-x64.msi"
+          Invoke-WebRequest -Uri $url -OutFile $msi
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $msi).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "WiX MSI hash mismatch: $actual != $expected" }
+          $p = Start-Process msiexec.exe -ArgumentList @("/i", "`"$msi`"", "/qn", "/norestart") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "WiX install failed: $($p.ExitCode)" }
+          $wixBin = "C:\Program Files\WiX Toolset v7.0\bin"
+          & (Join-Path $wixBin "wix.exe") extension add -acceptEula wix7 -g WixToolset.UI.wixext/7.0.1 WixToolset.Util.wixext/7.0.1 WixToolset.BootstrapperApplications.wixext/7.0.1
+          if ($LASTEXITCODE -ne 0) { throw "wix extension add failed: $LASTEXITCODE" }
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+      - name: MSIs and YmirSetup exe (unsigned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq "ymird" | Select-Object -ExpandProperty version
+          $msis = @{}
+          foreach ($t in @(@{ triple = "x86_64-pc-windows-msvc"; arch = "x64" }, @{ triple = "aarch64-pc-windows-msvc"; arch = "arm64" })) {
+            $zip = "zips\ymir-$version-$($t.triple).zip"
+            if (!(Test-Path $zip)) { Write-Host "::warning::no $zip, so no $($t.arch) MSI"; continue }
+            $dir = Join-Path $env:RUNNER_TEMP $t.arch
+            Expand-Archive -Path $zip -DestinationPath $dir
+            $rel = (Get-ChildItem $dir -Directory | Select-Object -First 1).FullName
+            powershell -File packaging\windows\make-installer.ps1 -ReleaseDir $rel -Version $version -Arch $t.arch -OutDir dist
+            if ($LASTEXITCODE -ne 0) { throw "MSI build failed ($($t.arch))" }
+            $msis[$t.arch] = (Resolve-Path "dist\ymir-$version-$($t.arch).msi").Path
+          }
+          if (-not $msis.ContainsKey("x64")) { throw "no x64 MSI" }
+          $setup = @("-Setup", "-MsiX64", $msis["x64"], "-Version", $version, "-OutDir", "dist")
+          if ($msis.ContainsKey("arm64")) { $setup += @("-MsiArm64", $msis["arm64"]) }
+          powershell -File packaging\windows\make-installer.ps1 @setup
+          if ($LASTEXITCODE -ne 0) { throw "YmirSetup build failed" }
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-installers
           path: dist/
           if-no-files-found: error
 

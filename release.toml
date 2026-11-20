@@ -74,6 +74,8 @@ files = [
   "dist/ymir-{version}-*-apple-darwin.zip",
   "dist/ymir-{version}-*-pc-windows-msvc.zip",
   "dist/ymir-cuda-{version}-*-pc-windows-msvc.zip",
+  "dist/ymir-{version}-*.msi",
+  "dist/YmirSetup-{version}.exe",
 ]
 sums = "SHA256SUMS"
 
@@ -111,7 +113,7 @@ assets = ["ymir-{version}-*-apple-darwin.tar.gz"]
 [[platforms]]
 os = "windows"
 arch = ["x86_64", "aarch64"]
-formats = ["zip", "exe", "exe-wix"]
+formats = ["zip", "exe", "exe-wix"]  # exe-wix: YmirSetup (WiX 7 bundle) around ymir-VERSION-ARCH.msi
 channels = ["github"]
 assets = ["ymir-{version}-*-pc-windows-msvc.zip", "ymir-cuda-{version}-x86_64-pc-windows-msvc.zip", "YmirSetup-{version}.exe"]
 

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ymir MSI, WiX Toolset 7 (built by make-installer.ps1 from an unpacked Windows release zip).
+     Installs the release files to Program Files\Ymir, puts them on PATH and registers the
+     Windows service `ymird` (manual start, account NT SERVICE\ymird) with its node directory
+     %ProgramData%\Ymir. User-level installs use the zip and `ymirctl setup --service` instead. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Ymir"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="Weird Brains LLC"
+           UpgradeCode="{9E4A1B59-27C0-4294-B367-0CC71993AC5F}"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500">
+    <!-- The older version is removed inside this install's transaction, so YmRememberRunning can
+         see whether its service was running first. -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of Ymir is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+
+    <Feature Id="MainFeature" Title="Ymir" Level="1">
+      <ComponentRef Id="cmpYmird" />
+      <ComponentGroupRef Id="grpRelease" />
+      <ComponentRef Id="cmpProgramData" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Ymir">
+        <Component Id="cmpYmird" Guid="{B3C143C6-99CA-4E64-98CA-8AA2B830933D}">
+          <File Id="filYmird" Source="$(var.ReleaseDir)\ymird.exe" Name="ymird.exe" KeyPath="yes" />
+          <!-- Manual start: it needs a node.toml first (`ymirctl --home "%ProgramData%\Ymir"
+               setup`, elevated), then `ymirctl service install --system` sets it to start at
+               boot and starts it. Its own virtual account: SID
+               S-1-5-80-3634176441-2608231802-3936123067-875301740-2825028368. -->
+          <ServiceInstall Id="svcInstall"
+                          Name="ymird"
+                          DisplayName="Ymir node"
+                          Description="Ymir node (model, inference and app roles)"
+                          Start="demand"
+                          Type="ownProcess"
+                          ErrorControl="normal"
+                          Vital="yes"
+                          Account="NT SERVICE\ymird"
+                          Arguments="--windows-service --home &quot;[CommonAppDataFolder]Ymir&quot; --log-file &quot;[CommonAppDataFolder]Ymir\state\logs\ymird.log&quot;">
+            <ServiceConfig ServiceSid="unrestricted" FailureActionsWhen="failedToStopOrReturnedError" OnInstall="yes" OnReinstall="yes" />
+            <!-- Restart after a crash or an error exit (60 s, every time; the count resets after a day). -->
+            <util:ServiceConfig FirstFailureActionType="restart"
+                                SecondFailureActionType="restart"
+                                ThirdFailureActionType="restart"
+                                RestartServiceDelayInSeconds="60"
+                                ResetPeriodInDays="1" />
+          </ServiceInstall>
+          <ServiceControl Id="svcControl" Name="ymird" Stop="both" Remove="uninstall" Wait="yes" />
+          <!-- ymird.exe and ymirctl.exe on the system PATH. -->
+          <Environment Id="envPath" Name="PATH" Action="set" Part="last" System="yes" Permanent="no" Value="[INSTALLFOLDER]" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Everything else in the release zip (ymirctl.exe, the llama.cpp engine, docs, LICENSE),
+         with its folders. -->
+    <ComponentGroup Id="grpRelease" Directory="INSTALLFOLDER">
+      <Files Include="$(var.ReleaseDir)\**">
+        <Exclude Files="$(var.ReleaseDir)\ymird.exe" />
+      </Files>
+    </ComponentGroup>
+
+    <!-- %ProgramData%\Ymir: owner SYSTEM; protected DACL for SYSTEM, Administrators and
+         NT SERVICE\ymird only. Kept on uninstall (it holds the node's identity and models). -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="ProgramDataYmir" Name="Ymir">
+        <Component Id="cmpProgramData" Guid="{E359A1C6-6DBD-41C2-9DC0-4A7F3CADF4DD}" Permanent="yes" NeverOverwrite="yes" KeyPath="yes">
+          <CreateFolder>
+            <PermissionEx Sddl="O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-80-3634176441-2608231802-3936123067-875301740-2825028368)" />
+          </CreateFolder>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="System64Folder" />
+
+    <!-- Upgrades restart a service that was running: remember (immediate, before the old
+         version is removed, which stops it), then start it again after StartServices. -->
+    <CustomAction Id="YmRememberRunning"
+                  Directory="System64Folder"
+                  ExeCommand="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;del /f /q &quot;[TempFolder]ymird-restart-after-upgrade&quot; 2&gt;nul &amp; &quot;[System64Folder]sc.exe&quot; query ymird | &quot;[System64Folder]find.exe&quot; &quot;RUNNING&quot; &gt;nul &amp;&amp; echo running&gt;&quot;[TempFolder]ymird-restart-after-upgrade&quot;&quot;"
+                  Execute="immediate"
+                  Return="ignore" />
+    <CustomAction Id="YmRestoreRunning"
+                  Directory="System64Folder"
+                  ExeCommand="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;if exist &quot;[TempFolder]ymird-restart-after-upgrade&quot; (del /f /q &quot;[TempFolder]ymird-restart-after-upgrade&quot; &amp; &quot;[System64Folder]sc.exe&quot; start ymird)&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="YmRememberRunning" Before="InstallInitialize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="YmRestoreRunning" After="StartServices" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- YmirSetup-VERSION.exe: a WiX 7 bundle around the Ymir MSI for this machine's architecture
+     (built by make-installer.ps1 -Setup). -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="Ymir"
+          Version="$(var.ProductVersion)"
+          Manufacturer="Weird Brains LLC"
+          UpgradeCode="{19C4A260-1258-455E-A4D2-2A1089A55074}"
+          AboutUrl="https://github.com/WeirdBrains/ymir">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication LicenseFile="$(var.LicenseRtf)" Theme="rtfLicense" />
+    </BootstrapperApplication>
+    <Chain>
+<?ifdef MsiArm64 ?>
+      <!-- NativeMachine 43620 is IMAGE_FILE_MACHINE_ARM64. -->
+      <MsiPackage Id="YmirX64" SourceFile="$(var.MsiX64)" InstallCondition="NativeMachine &lt;&gt; 43620" />
+      <MsiPackage Id="YmirArm64" SourceFile="$(var.MsiArm64)" InstallCondition="NativeMachine = 43620" />
+<?else ?>
+      <MsiPackage Id="YmirX64" SourceFile="$(var.MsiX64)" />
+<?endif ?>
+    </Chain>
+  </Bundle>
+</Wix>
