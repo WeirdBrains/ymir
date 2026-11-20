@@ -15,6 +15,7 @@ pub mod control;
 pub mod coordinator;
 pub mod daemon;
 pub mod fair;
+pub mod group;
 pub mod host;
 pub mod membership;
 pub mod model_node;
