@@ -71,6 +71,8 @@ pub struct Daemon {
     /// Weirdnet servers (inference, model node), kept until shutdown.
     serving: Vec<Box<dyn std::any::Any + Send + Sync>>,
     network: Option<Network>,
+    /// Woken by a `shutdown` control request.
+    exit: Arc<tokio::sync::Notify>,
 }
 
 /// (device, inode) of a file, to tell our socket from a successor's.
@@ -297,6 +299,7 @@ impl Daemon {
         // Control socket.
         let listener = control::bind(&paths.socket()).await?;
         let socket_id = file_id(&paths.socket());
+        let exit = Arc::new(tokio::sync::Notify::new());
         let handler = Arc::new(ControlHandler {
             node: name.clone(),
             roles: roles.names().into_iter().map(str::to_string).collect(),
@@ -308,10 +311,17 @@ impl Daemon {
             network: network.as_ref().map(|n| (n.membership.clone(), n.node.clone())),
             context,
             pool: app_pool,
+            exit: exit.clone(),
         });
         tasks.push(tokio::spawn(control::serve(listener, handler, stop_rx)));
         tracing::info!(node = %name, roles = ?roles.names(), "ymird started");
-        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper, serving, network })
+        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper, serving, network, exit })
+    }
+
+    /// Resolves when a `shutdown` control request arrives (`ymirctl service stop` on a Windows
+    /// scheduled task). The caller then runs [`Daemon::shutdown`].
+    pub async fn exit_requested(&self) {
+        self.exit.notified().await;
     }
 
     /// Stops the bridge and control socket, then every engine.

@@ -181,6 +181,7 @@ pub fn propose_with(hw: Hardware, opts: &SetupOptions, bundled: Option<crate::en
 }
 
 /// This machine's host name, else `ymir`.
+#[cfg(unix)]
 pub fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; gethostname NUL-terminates on success.
@@ -193,6 +194,12 @@ pub fn hostname() -> String {
         }
     }
     "ymir".into()
+}
+
+/// This machine's host name (`COMPUTERNAME`), else `ymir`.
+#[cfg(not(unix))]
+pub fn hostname() -> String {
+    std::env::var("COMPUTERNAME").ok().map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()).unwrap_or_else(|| "ymir".into())
 }
 
 #[cfg(test)]

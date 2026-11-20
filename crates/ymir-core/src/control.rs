@@ -1,13 +1,14 @@
 //! `/ymir/control/1`, local transport: JSON lines over a Unix socket in the node's private state
-//! directory (mode 0600). Over Weirdnet (M3) the same messages go to admin devices on the roster.
+//! directory (mode 0600), or on Windows a local-only named pipe derived from that path (see
+//! [`pipe_name`]; the pipe's default DACL lets only its owner, SYSTEM and Administrators write).
+//! Over Weirdnet (M3) the same messages go to admin devices on the roster.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use weirdnet_backends::EngineKind;
 pub use weirdnet_backends::ModelState;
 
@@ -82,6 +83,9 @@ pub enum ControlRequest {
         #[serde(default)]
         retries: Option<u32>,
     },
+    /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
+    /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
+    Shutdown,
 }
 
 fn user() -> String {
@@ -250,6 +254,8 @@ pub struct ControlHandler {
     pub context: Option<crate::context::ContextStore>,
     /// The pool the app role asks through.
     pub pool: Option<Arc<weirdnet_agent::pool::Pool>>,
+    /// Woken by [`ControlRequest::Shutdown`]; `ymird` waits on it next to its signals.
+    pub exit: Arc<tokio::sync::Notify>,
 }
 
 impl ControlHandler {
@@ -276,6 +282,11 @@ impl ControlHandler {
 
     pub async fn handle(&self, req: ControlRequest) -> ControlResponse {
         match req {
+            ControlRequest::Shutdown => {
+                tracing::info!("shutdown requested over the control socket");
+                self.exit.notify_one();
+                ControlResponse::ok("ymird is stopping")
+            }
             ControlRequest::Status => {
                 let models = self
                     .nodes()
@@ -499,8 +510,38 @@ impl ControlHandler {
     }
 }
 
+/// The control endpoint `ymird` listens on.
+#[cfg(unix)]
+pub type Listener = tokio::net::UnixListener;
+
+/// The control endpoint `ymird` listens on: the next free instance of its named pipe.
+#[cfg(windows)]
+pub struct Listener {
+    name: String,
+    next: tokio::net::windows::named_pipe::NamedPipeServer,
+}
+
+/// The local named pipe that stands in for the control socket at `socket` on Windows:
+/// `\\.\pipe\ymird-<hash of the socket path>`, so every `YMIR_HOME` gets its own pipe and
+/// `ymirctl` finds it from the same path. Defined on every OS so it can be tested anywhere.
+pub fn pipe_name(socket: &Path) -> String {
+    let abs = std::path::absolute(socket).unwrap_or_else(|_| socket.to_path_buf());
+    let key = abs.to_string_lossy().replace('/', "\\").to_lowercase();
+    // `canonicalize` on Windows gives `\\?\C:\...`: the same file as `C:\...`.
+    let key = key.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(key);
+    // FNV-1a, 64 bit: stable across builds and platforms (std's hasher is not).
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!(r"\\.\pipe\ymird-{h:016x}")
+}
+
 /// Binds the socket, replacing a stale one. Fails if another `ymird` answers on it.
-pub async fn bind(path: &Path) -> Result<UnixListener> {
+#[cfg(unix)]
+pub async fn bind(path: &Path) -> Result<Listener> {
+    use tokio::net::{UnixListener, UnixStream};
     if path.exists() {
         if UnixStream::connect(path).await.is_ok() {
             bail!("another ymird is already running (control socket {})", path.display());
@@ -508,7 +549,6 @@ pub async fn bind(path: &Path) -> Result<UnixListener> {
         std::fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
     }
     let listener = UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -516,11 +556,40 @@ pub async fn bind(path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
-pub async fn serve(listener: UnixListener, handler: Arc<ControlHandler>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+/// Creates the first instance of the control pipe. Fails if another `ymird` holds it.
+#[cfg(windows)]
+pub async fn bind(path: &Path) -> Result<Listener> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    let name = pipe_name(path);
+    let next = ServerOptions::new()
+        .first_pipe_instance(true)
+        .reject_remote_clients(true)
+        .create(&name)
+        .map_err(|e| anyhow::anyhow!("another ymird is already running (control pipe {name}): {e}"))?;
+    Ok(Listener { name, next })
+}
+
+#[cfg(unix)]
+async fn accept(listener: &mut Listener) -> std::io::Result<tokio::net::UnixStream> {
+    listener.accept().await.map(|(s, _)| s)
+}
+
+#[cfg(windows)]
+async fn accept(listener: &mut Listener) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    listener.next.connect().await?;
+    let fresh = ServerOptions::new().reject_remote_clients(true).create(&listener.name)?;
+    Ok(std::mem::replace(&mut listener.next, fresh))
+}
+
+pub async fn serve(mut listener: Listener, handler: Arc<ControlHandler>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
+        let accepted = tokio::select! {
+            accepted = accept(&mut listener) => accepted,
+            _ = shutdown.wait_for(|stop| *stop) => return,
+        };
+        match accepted {
+            Ok(stream) => {
                 let h = handler.clone();
                 tokio::spawn(async move {
                     if let Err(e) = connection(stream, h).await {
@@ -528,13 +597,16 @@ pub async fn serve(listener: UnixListener, handler: Arc<ControlHandler>, mut shu
                     }
                 });
             }
-            _ = shutdown.wait_for(|stop| *stop) => return,
+            Err(e) => {
+                tracing::debug!("control accept: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
         }
     }
 }
 
-async fn connection(stream: UnixStream, handler: Arc<ControlHandler>) -> Result<()> {
-    let (r, mut w) = stream.into_split();
+async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, handler: Arc<ControlHandler>) -> Result<()> {
+    let (r, mut w) = tokio::io::split(stream);
     let mut lines = BufReader::new(r.take(64 * 1024)).lines();
     while let Some(line) = lines.next_line().await? {
         let resp = match serde_json::from_str::<ControlRequest>(&line) {
@@ -548,16 +620,47 @@ async fn connection(stream: UnixStream, handler: Arc<ControlHandler>) -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
+async fn connect(socket: &Path) -> Result<tokio::net::UnixStream> {
+    tokio::net::UnixStream::connect(socket).await.with_context(|| format!("ymird is not running (no control socket at {})", socket.display()))
+}
+
+#[cfg(windows)]
+async fn connect(socket: &Path) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let name = pipe_name(socket);
+    let mut tries = 0;
+    loop {
+        match ClientOptions::new().open(&name) {
+            Ok(c) => return Ok(c),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tries < 40 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                bail!("ymird is not running (no control pipe {name} for {})", socket.display())
+            }
+            Err(e) => return Err(e).with_context(|| format!("opening control pipe {name} (an elevated prompt is needed for a system service)")),
+        }
+    }
+}
+
 /// Sends one request to the `ymird` at `socket`.
 pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlResponse> {
-    let stream = UnixStream::connect(socket).await.with_context(|| format!("ymird is not running (no control socket at {})", socket.display()))?;
-    let (r, mut w) = stream.into_split();
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
     let mut line = serde_json::to_vec(req)?;
     line.push(b'\n');
     w.write_all(&line).await?;
     let mut lines = BufReader::new(r).lines();
     let resp = lines.next_line().await?.context("ymird closed the control connection")?;
     Ok(serde_json::from_str(&resp)?)
+}
+
+/// Whether a `ymird` answers on `socket`.
+pub async fn reachable(socket: &Path) -> bool {
+    request(socket, &ControlRequest::Status).await.is_ok()
 }
 
 fn no_context() -> ControlResponse {
