@@ -65,6 +65,13 @@ pub enum ControlRequest {
         #[serde(default)]
         model: Option<String>,
     },
+    /// Split models (M7): bring the group for `model` up or down, or list the groups.
+    Group {
+        /// `up`, `down` or `status`.
+        action: String,
+        #[serde(default)]
+        model: Option<String>,
+    },
     /// Fan `prompts` out over the pool at batch priority and wait for all the answers.
     Batch {
         prompts: Vec<String>,
@@ -173,6 +180,12 @@ pub struct ControlResponse {
     /// The outcomes of a [`ControlRequest::Batch`], in prompt order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub batch: Vec<crate::batch::BatchItem>,
+    /// The split-model groups that are up (`ymirctl group status`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<crate::group::GroupInfo>,
+    /// Groups that went down by themselves, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_losses: Vec<crate::group::GroupLoss>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -198,10 +211,10 @@ pub struct ConversationView {
 
 impl ControlResponse {
     fn ok(message: impl Into<String>) -> Self {
-        Self { ok: true, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new() }
+        Self { ok: true, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new(), groups: Vec::new(), group_losses: Vec::new() }
     }
     fn err(message: impl Into<String>) -> Self {
-        Self { ok: false, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new() }
+        Self { ok: false, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new(), groups: Vec::new(), group_losses: Vec::new() }
     }
 }
 
@@ -286,6 +299,8 @@ impl ControlHandler {
                     chat: None,
                     conversations: Vec::new(),
                     batch: Vec::new(),
+                    groups: Vec::new(),
+                    group_losses: Vec::new(),
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -408,6 +423,30 @@ impl ControlHandler {
                         r
                     }
                     Err(i) => ControlResponse::err(format!("{} (after {} characters)", i.error, i.partial.text.chars().count())),
+                }
+            }
+            ControlRequest::Group { action, model } => {
+                let Some(c) = &self.coordinator else { return ControlResponse::err("split models are decided by an inference node; this one has no inference role") };
+                match (action.as_str(), model) {
+                    ("up", Some(m)) => match c.group_up(&m).await {
+                        Ok(i) => {
+                            let mut r = ControlResponse::ok(format!("{m} is up: {} leads, with {}", i.leader, i.members.iter().skip(1).cloned().collect::<Vec<_>>().join(", ")));
+                            r.groups = vec![i];
+                            r
+                        }
+                        Err(e) => ControlResponse::err(e.to_string()),
+                    },
+                    ("down", Some(m)) => match c.group_down(&m).await {
+                        Ok(_) => ControlResponse::ok(format!("{m}: group down; normal placement resumes")),
+                        Err(e) => ControlResponse::err(e.to_string()),
+                    },
+                    ("status", _) => {
+                        let mut r = ControlResponse::ok("groups");
+                        r.groups = c.groups();
+                        r.group_losses = c.group_losses();
+                        r
+                    }
+                    _ => ControlResponse::err("usage: group up MODEL | group down MODEL | group status"),
                 }
             }
             ControlRequest::Batch { prompts, model, concurrency, retries } => {

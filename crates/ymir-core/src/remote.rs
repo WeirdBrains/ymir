@@ -108,12 +108,16 @@ pub fn serve_model(
     queue: usize,
     hardware: Option<(weirdnet_model::hw::Hardware, weirdnet_model::hw::Budget)>,
     combined: bool,
+    workers: Option<Arc<dyn weirdnet_backends::node::GroupWorkers>>,
 ) -> Result<(NodeServer, Arc<NodeService>), RemoteError> {
     let auth = roster_auth(m);
     let host = Arc::new(ModelHost::new(supervisor, auth.clone()));
     let mut service = NodeService::new(host, m.node_key().clone(), Some(m.our_cert()), auth).with_admission(slots.max(1), queue);
     if let Some((hw, budget)) = hardware {
         service = service.with_hardware(hw, budget);
+    }
+    if let Some(w) = workers {
+        service = service.with_group_workers(w);
     }
     let service = Arc::new(service);
     let server = NodeServer::start_with(node, service.clone(), NodeServerOptions::default().with_legacy_infer2(!combined))?;
@@ -211,6 +215,18 @@ impl ModelNode for RemoteModelNode {
 
     fn draining(&self) -> bool {
         self.record().is_some_and(|c| c.draining)
+    }
+
+    fn group_jobs(&self) -> bool {
+        self.record().is_some_and(|c| c.group_jobs)
+    }
+
+    fn group_up<'a>(&'a self, plan: &'a weirdnet_backends::node::GroupPlan) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(self.client.group_up(&self.peer, plan.clone()))
+    }
+
+    fn group_down<'a>(&'a self, group: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(self.client.group_down(&self.peer, group))
     }
 
     /// A model node continues an assistant prefix (llama.cpp prefill, vLLM `continue_final_message`),

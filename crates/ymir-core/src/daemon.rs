@@ -12,6 +12,7 @@ use weirdnet_semcache::{AnswerCache, ExactCache, NoCache};
 
 use crate::control::{self, ControlHandler};
 use crate::membership::{Membership, SyncNode};
+use crate::group::{self, RpcWorkers};
 use crate::{Coordinator, LocalModelNode, ModelNode, NodeConfig, Paths, host, remote};
 
 /// This device on Weirdnet.
@@ -100,6 +101,7 @@ impl Daemon {
         // Model role.
         let mut model_node = None;
         let mut supervisor = None;
+        let mut group_workers: Option<Arc<RpcWorkers>> = None;
         if roles.model {
             let engines = cfg.engines(&paths);
             if engines.is_empty() {
@@ -111,10 +113,17 @@ impl Daemon {
             for e in &engines {
                 tracing::info!(engine = e.kind.name(), program = %e.program.display(), "model role: engine");
             }
-            let launches = cfg.launches();
+            let mut launches = cfg.launches();
+            // Split models (M7): the leader's llama-server is wrapped, and appears when a group is up.
+            let key = group::load_or_create_key(&paths.state().join("split.key")).with_context(|| "creating the split-model key")?;
+            launches.extend(cfg.split_launches(&key));
             let sup = Supervisor::new(engines, launches.clone(), SupervisorOptions { log_dir: Some(paths.logs()), ..Default::default() });
             supervisor = Some(sup.clone());
-            model_node = Some(Arc::new(LocalModelNode::new(&name, sup, &launches)));
+            let node = Arc::new(LocalModelNode::new(&name, sup, &launches));
+            let workers: Arc<RpcWorkers> = Arc::new(RpcWorkers::new(cfg.worker_config(&paths, key)));
+            node.set_group_workers(workers.clone());
+            group_workers = Some(workers);
+            model_node = Some(node);
         }
 
         // Inference role.
@@ -135,6 +144,9 @@ impl Daemon {
 
         let (stop, stop_rx) = watch::channel(false);
         let mut tasks = Vec::new();
+        if let (Some(c), false) = (&coordinator, cfg.inference.split.is_empty()) {
+            tasks.push(c.spawn_group_watch(std::time::Duration::from_secs(5)));
+        }
         let mut serving: Vec<Box<dyn std::any::Any + Send + Sync>> = Vec::new();
 
         // Weirdnet: the roles reach the user's other devices.
@@ -180,7 +192,7 @@ impl Daemon {
                     cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
                 );
                 let (server, service) =
-                    remote::serve_model(&net.node, sup.clone(), &net.membership, 4, 32, Some((hw, budget)), coordinator.is_some())
+                    remote::serve_model(&net.node, sup.clone(), &net.membership, 4, 32, Some((hw, budget)), coordinator.is_some(), group_workers.clone().map(|w| w as Arc<dyn weirdnet_backends::node::GroupWorkers>))
                         .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
                 if let Some(n) = &model_node {
                     n.attach_host(service.host().clone());

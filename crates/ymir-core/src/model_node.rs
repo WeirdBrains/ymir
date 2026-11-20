@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::infer::v2::{Input, Request};
 use weirdnet_backends::error::unavailable;
+use weirdnet_backends::node::{GroupPlan, GroupWorkers};
 use weirdnet_backends::{ChunkStream, EngineKind, ModelHost, ModelStatus, Supervisor};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -43,6 +44,23 @@ pub trait ModelNode: Send + Sync {
     fn local(&self) -> bool {
         false
     }
+    /// Whether the node takes group jobs (`GroupUp`): it can run an `rpc-server` or lead one.
+    fn group_jobs(&self) -> bool {
+        false
+    }
+    /// Joins the group `plan` describes: unloads `plan.drop`, then starts this node's worker (or,
+    /// for the leader, the serving process).
+    fn group_up<'a>(&'a self, _plan: &'a GroupPlan) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node takes no group jobs".into() }) })
+    }
+    fn group_down<'a>(&'a self, _group: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node takes no group jobs".into() }) })
+    }
+    /// Whether this node's processes of `group` still run. A remote node can't say (node/1 has
+    /// no such question), so it is taken to be fine while it stays in the pool.
+    fn group_alive<'a>(&'a self, _group: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async { true })
+    }
     /// Starts draining (waiting for requests under way) or resumes.
     fn drain<'a>(&'a self, _on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async { Err(RemoteError::Unsupported { message: "this node can't drain".into() }) })
@@ -57,6 +75,8 @@ pub struct LocalModelNode {
     draining: AtomicBool,
     /// The model-node service on Weirdnet, when this box serves one: draining here drains it too.
     service_host: Mutex<Option<Arc<ModelHost>>>,
+    /// Starts this node's part of a group, when it takes group jobs.
+    workers: Mutex<Option<Arc<crate::group::RpcWorkers>>>,
 }
 
 /// How long a drain waits for requests under way.
@@ -70,7 +90,13 @@ impl LocalModelNode {
             sources: launches.iter().map(|l| (l.id.clone(), l.engine, l.source.clone(), l.wrap.is_some())).collect(),
             draining: AtomicBool::new(false),
             service_host: Mutex::new(None),
+            workers: Mutex::new(None),
         }
+    }
+
+    /// Lets this node join split-model groups (M7).
+    pub fn set_group_workers(&self, workers: Arc<crate::group::RpcWorkers>) {
+        *self.workers.lock().unwrap_or_else(|e| e.into_inner()) = Some(workers);
     }
 
     /// Ties this node's drain state to the host that serves the model-node protocol (the
@@ -140,6 +166,39 @@ impl ModelNode for LocalModelNode {
 
     fn local(&self) -> bool {
         true
+    }
+
+    fn group_jobs(&self) -> bool {
+        self.workers.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    fn group_up<'a>(&'a self, plan: &'a GroupPlan) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let workers = workers.ok_or_else(|| RemoteError::Unsupported { message: "this node takes no group jobs".into() })?;
+            for model in &plan.drop {
+                self.supervisor.unload(model).await?;
+            }
+            workers.up(&self.name, plan).await
+        })
+    }
+
+    fn group_alive<'a>(&'a self, group: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            match workers {
+                Some(w) => w.alive(group).await,
+                None => true,
+            }
+        })
+    }
+
+    fn group_down<'a>(&'a self, group: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let workers = workers.ok_or_else(|| RemoteError::Unsupported { message: "this node takes no group jobs".into() })?;
+            workers.down(group).await
+        })
     }
 
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {

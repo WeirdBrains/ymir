@@ -198,6 +198,10 @@ pub struct ModelSection {
     /// `managed` | `system:/path/to/llama-server` | `off`.
     #[serde(default = "managed")]
     pub llamacpp: String,
+    /// llama.cpp's `rpc-server`, for taking part in a split model: `managed` (next to the
+    /// managed llama-server, else on `PATH`) | `system:/path/to/rpc-server` | `off`.
+    #[serde(default = "managed")]
+    pub rpc_server: String,
     /// `auto` (only where supported) | `system:/path/to/vllm` | `off`.
     #[serde(default = "auto")]
     pub vllm: String,
@@ -206,6 +210,9 @@ pub struct ModelSection {
     pub models_dir: Option<PathBuf>,
     #[serde(default)]
     pub local: Vec<LocalModel>,
+    /// Split models this node can lead (M7); each needs a group to be up before it answers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split: Vec<crate::group::SplitModel>,
 }
 
 fn auto() -> String {
@@ -218,7 +225,17 @@ fn managed() -> String {
 
 impl Default for ModelSection {
     fn default() -> Self {
-        Self { memory_budget: auto(), reserve: None, private_link: None, llamacpp: managed(), vllm: auto(), models_dir: None, local: Vec::new() }
+        Self {
+            memory_budget: auto(),
+            reserve: None,
+            private_link: None,
+            llamacpp: managed(),
+            rpc_server: managed(),
+            vllm: auto(),
+            models_dir: None,
+            local: Vec::new(),
+            split: Vec::new(),
+        }
     }
 }
 
@@ -285,6 +302,9 @@ pub struct InferenceSection {
     pub standin_warm: bool,
     #[serde(default)]
     pub alerts: weirdnet_alerts::AlertsConfig,
+    /// Models that may be split across model nodes (M7). Off unless listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split: Vec<crate::group::SplitPolicy>,
 }
 
 fn standin_after() -> String {
@@ -305,6 +325,7 @@ impl Default for InferenceSection {
             standin_after: standin_after(),
             standin_warm: true,
             alerts: weirdnet_alerts::AlertsConfig::default(),
+            split: Vec::new(),
         }
     }
 }
@@ -414,6 +435,7 @@ impl NodeConfig {
                 bail!("model `{}`: wrap_api_key must be env:NAME or file:/path, not the key itself", m.id);
             }
         }
+        self.validate_splits()?;
         parse_duration(&self.inference.standin_after).context("inference.standin_after")?;
         self.network.hints()?;
         if let Some(s) = &self.inference.standin
@@ -421,6 +443,48 @@ impl NodeConfig {
             && self.roles.model
         {
             bail!("inference.standin `{s}` is not one of this node's [[model.local]] models");
+        }
+        Ok(())
+    }
+
+    fn validate_splits(&self) -> Result<()> {
+        if let Some(l) = &self.model.private_link {
+            crate::group::parse_link(l).map_err(|e| anyhow::anyhow!("model.private_link: {e}"))?;
+        }
+        let mut ids = std::collections::HashSet::new();
+        for s in &self.model.split {
+            if s.id.is_empty() || s.id.contains(char::is_whitespace) {
+                bail!("model.split id `{}` must be non-empty and have no spaces", s.id);
+            }
+            if !ids.insert(&s.id) || self.model.local.iter().any(|m| m.id == s.id) {
+                bail!("model `{}` is listed twice (split models are not also [[model.local]])", s.id);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for p in &self.inference.split {
+            if p.backend != crate::group::BACKEND {
+                bail!("inference.split `{}`: backend `{}` is not built (only `{}`)", p.id, p.backend, crate::group::BACKEND);
+            }
+            if !seen.insert(&p.id) {
+                bail!("inference.split `{}` is listed twice", p.id);
+            }
+            if weirdnet_model::hw::parse_size(&p.size).is_none() {
+                bail!("inference.split `{}`: size `{}` is not a size like 7GiB", p.id, p.size);
+            }
+            if p.nodes.is_empty() {
+                bail!("inference.split `{}` lists no node", p.id);
+            }
+            for n in &p.nodes {
+                crate::group::parse_link(&n.link).map_err(|e| anyhow::anyhow!("inference.split `{}` node `{}`: {e}", p.id, n.node))?;
+                if weirdnet_model::hw::parse_size(&n.memory).is_none() {
+                    bail!("inference.split `{}` node `{}`: memory `{}` is not a size like 10GiB", p.id, n.node, n.memory);
+                }
+            }
+            if let Some(l) = &p.leader
+                && !p.nodes.iter().any(|n| &n.node == l)
+            {
+                bail!("inference.split `{}`: leader `{l}` is not one of its nodes", p.id);
+            }
         }
         Ok(())
     }
@@ -443,6 +507,7 @@ impl NodeConfig {
         crate::coordinator::CoordinatorOptions {
             standin: self.standin(),
             standin_after: parse_duration(&self.inference.standin_after).unwrap_or(std::time::Duration::from_secs(10)),
+            splits: self.inference.split.clone(),
         }
     }
 
@@ -460,6 +525,40 @@ impl NodeConfig {
             out.push(EngineConfig::vllm(p));
         }
         out
+    }
+
+    /// `rpc-server`, when this node can be a worker.
+    pub fn rpc_server(&self, paths: &Paths) -> Option<PathBuf> {
+        resolve_engine(&self.model.rpc_server, "rpc-server", &paths.engines().join("llama.cpp").join("rpc-server"))
+    }
+
+    /// What this node's group workers need (`key`: the leader's `llama-server` key).
+    pub fn worker_config(&self, paths: &Paths, key: String) -> crate::group::WorkerConfig {
+        crate::group::WorkerConfig {
+            rpc_server: self.rpc_server(paths),
+            llama_server: resolve_engine(&self.model.llamacpp, "llama-server", &paths.engines().join("llama.cpp").join("llama-server")),
+            private_link: self.model.private_link.clone(),
+            splits: self.model.split.clone(),
+            models_dir: self.models_dir(),
+            key,
+            log_dir: Some(paths.logs()),
+        }
+    }
+
+    /// Launch specs for `[[model.split]]`: the leader's `llama-server`, which the group starts,
+    /// wrapped like any stock server on loopback (it answers once the group is up).
+    pub fn split_launches(&self, key: &str) -> Vec<ModelLaunch> {
+        self.model
+            .split
+            .iter()
+            .map(|s| {
+                let mut l = ModelLaunch::new(&s.id, EngineKind::Llamacpp, s.file.clone().unwrap_or_default());
+                l.context = s.context;
+                l.slots = s.slots;
+                l.wrap = Some(weirdnet_backends::Wrap { url: format!("http://127.0.0.1:{}", s.serve_port), api_key: Some(key.to_string()) });
+                l
+            })
+            .collect()
     }
 
     /// Launch specs for `[[model.local]]`.

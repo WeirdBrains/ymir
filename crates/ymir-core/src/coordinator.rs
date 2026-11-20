@@ -45,11 +45,13 @@ pub struct CoordinatorOptions {
     pub standin: Option<String>,
     /// Use the stand-in only when the estimated load takes longer than this.
     pub standin_after: Duration,
+    /// Models that may be split across model nodes (M7).
+    pub splits: Vec<crate::group::SplitPolicy>,
 }
 
 impl Default for CoordinatorOptions {
     fn default() -> Self {
-        Self { standin: None, standin_after: Duration::from_secs(10) }
+        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new() }
     }
 }
 
@@ -135,6 +137,8 @@ pub struct Coordinator {
     balance: Balancer,
     /// Per-device cap on batch work (M6).
     fair: crate::fair::Fair,
+    /// Split-model groups that are up, and why the last ones went down (M7).
+    pub(crate) groups: Mutex<crate::group::GroupBook>,
 }
 
 /// Where a request goes.
@@ -186,6 +190,7 @@ impl Coordinator {
             running: Arc::new(AtomicUsize::new(0)),
             balance: Balancer::new(),
             fair: crate::fair::Fair::new(),
+            groups: Mutex::new(crate::group::GroupBook::default()),
         }
     }
 
@@ -208,6 +213,10 @@ impl Coordinator {
     /// Requests this node is answering now.
     pub fn in_flight(&self) -> usize {
         self.running.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn node_named(&self, name: &str) -> Option<Arc<dyn ModelNode>> {
+        self.node(name)
     }
 
     pub fn nodes(&self) -> Vec<Arc<dyn ModelNode>> {

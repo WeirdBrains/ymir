@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -435,6 +436,223 @@ impl GroupWorkers for RpcWorkers {
             let _ = tokio::time::timeout(Duration::from_secs(10), p.child.wait()).await;
         }
         Ok(())
+    }
+}
+
+/// A group that is up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub model: String,
+    pub group: String,
+    pub leader: String,
+    pub members: Vec<String>,
+    pub since_ms: u64,
+}
+
+/// Why a group went down by itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupLoss {
+    pub model: String,
+    pub reason: String,
+    pub at_ms: u64,
+}
+
+/// The coordinator's record of its groups.
+#[derive(Debug, Default)]
+pub struct GroupBook {
+    up: HashMap<String, (GroupInfo, SplitPolicy, Vec<Candidate>)>,
+    lost: Vec<GroupLoss>,
+    /// Models being brought up or down now, so two requests don't race.
+    busy: std::collections::HashSet<String>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+fn unavailable(m: impl Into<String>) -> RemoteError {
+    RemoteError::Unavailable { message: m.into() }
+}
+
+impl crate::Coordinator {
+    fn book(&self) -> std::sync::MutexGuard<'_, GroupBook> {
+        self.groups.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The groups that are up.
+    pub fn groups(&self) -> Vec<GroupInfo> {
+        let mut v: Vec<GroupInfo> = self.book().up.values().map(|(i, ..)| i.clone()).collect();
+        v.sort_by(|a, b| a.model.cmp(&b.model));
+        v
+    }
+
+    /// Groups that went down on their own, newest last.
+    pub fn group_losses(&self) -> Vec<GroupLoss> {
+        self.book().lost.clone()
+    }
+
+    /// Brings up the group for `model`: plans it from the pool policy and the nodes now in the
+    /// pool, starts the workers, then the leader, and has the leader's node advertise the model.
+    pub async fn group_up(&self, model: &str) -> Result<GroupInfo, RemoteError> {
+        let policy = self
+            .options()
+            .splits
+            .iter()
+            .find(|p| p.id == model)
+            .cloned()
+            .ok_or_else(|| RemoteError::Refused { message: format!("`{model}` is not marked `split` in the pool policy ([[inference.split]])") })?;
+        {
+            let mut b = self.book();
+            if let Some((i, ..)) = b.up.get(model) {
+                return Ok(i.clone());
+            }
+            if !b.busy.insert(model.to_string()) {
+                return Err(RemoteError::Busy);
+            }
+        }
+        let result = self.bring_up(&policy).await;
+        let mut b = self.book();
+        b.busy.remove(model);
+        let (info, group) = result?;
+        b.up.insert(model.to_string(), (info.clone(), policy, group));
+        Ok(info)
+    }
+
+    async fn bring_up(&self, policy: &SplitPolicy) -> Result<(GroupInfo, Vec<Candidate>), RemoteError> {
+        let need = weirdnet_model::hw::parse_size(&policy.size).ok_or_else(|| RemoteError::BadRequest { message: format!("size `{}`", policy.size) })?;
+        let mut cands = Vec::new();
+        for n in &policy.nodes {
+            let Some(node) = self.node_named(&n.node) else { continue };
+            let (Some(memory), Ok(link)) = (weirdnet_model::hw::parse_size(&n.memory), parse_link(&n.link)) else { continue };
+            cands.push(Candidate {
+                name: n.node.clone(),
+                memory,
+                link,
+                port: n.port,
+                gbps: n.gbps,
+                group_jobs: node.group_jobs(),
+                draining: node.draining(),
+                drop: n.drop.clone(),
+            });
+        }
+        let group = plan_group(policy, need, &cands).map_err(|e| unavailable(format!("{}: {e}", policy.id)))?;
+        if group.len() < 2 {
+            return Err(RemoteError::Refused { message: format!("{}: it fits on {} alone; no group is needed", policy.id, group[0].name) });
+        }
+        let name = format!("split-{}", policy.id);
+        let mut started: Vec<Arc<dyn crate::ModelNode>> = Vec::new();
+        // Workers first (the leader needs them listening), all at once; then the leader.
+        let mut order: Vec<&Candidate> = group.iter().skip(1).collect();
+        order.push(&group[0]);
+        let mut error = None;
+        'start: for batch in [&order[..order.len() - 1], &order[order.len() - 1..]] {
+            let jobs = batch.iter().map(|c| {
+                let node = self.node_named(&c.name);
+                let plan = plan_for(policy, &group, c);
+                async move {
+                    match node {
+                        Some(n) => {
+                            let r = n.group_up(&plan).await;
+                            (n, r)
+                        }
+                        None => unreachable!("candidates come from nodes in the pool"),
+                    }
+                }
+            });
+            for (n, r) in futures::future::join_all(jobs).await {
+                match r {
+                    Ok(()) => started.push(n),
+                    Err(e) => {
+                        error = Some(format!("{}: {e}", n.name()));
+                    }
+                }
+            }
+            if error.is_some() {
+                break 'start;
+            }
+        }
+        if error.is_none() {
+            let leader = self.node_named(&group[0].name).ok_or_else(|| unavailable("the leader left the pool"))?;
+            if let Err(e) = leader.load(&policy.id, true).await {
+                error = Some(format!("{}: {e}", leader.name()));
+            }
+        }
+        if let Some(e) = error {
+            for n in started {
+                let _ = n.group_down(&name).await;
+            }
+            return Err(unavailable(format!("group {name} did not come up: {e}")));
+        }
+        let info = GroupInfo { model: policy.id.clone(), group: name, leader: group[0].name.clone(), members: group.iter().map(|c| c.name.clone()).collect(), since_ms: now_ms() };
+        tracing::info!(model = %info.model, leader = %info.leader, members = ?info.members, "split model group is up");
+        Ok((info, group))
+    }
+
+    /// Takes the group for `model` down: the leader stops advertising it, then every member stops
+    /// its part. Normal placement resumes.
+    pub async fn group_down(&self, model: &str) -> Result<GroupInfo, RemoteError> {
+        let (info, ..) = self.book().up.remove(model).ok_or_else(|| RemoteError::Refused { message: format!("no group is up for `{model}`") })?;
+        self.tear_down(&info).await;
+        Ok(info)
+    }
+
+    async fn tear_down(&self, info: &GroupInfo) {
+        if let Some(leader) = self.node_named(&info.leader) {
+            let _ = leader.unload(&info.model).await;
+        }
+        for m in &info.members {
+            if let Some(n) = self.node_named(m) {
+                let _ = n.group_down(&info.group).await;
+            }
+        }
+    }
+
+    /// One look at every group that is up: a member that left the pool, started draining or lost
+    /// a process takes the whole group down (NCCL, and RPC, can't survive a lost member). The
+    /// model then falls back to the stand-in; the loss is kept for `ymirctl group status`.
+    pub async fn check_groups(&self) -> Vec<GroupLoss> {
+        let snapshot: Vec<GroupInfo> = self.groups();
+        let mut lost = Vec::new();
+        for info in snapshot {
+            let mut reason = None;
+            for m in &info.members {
+                match self.node_named(m) {
+                    None => reason = Some(format!("{m} left the pool")),
+                    Some(n) if n.draining() => reason = Some(format!("{m} is draining")),
+                    Some(n) if !n.group_alive(&info.group).await => reason = Some(format!("a process of the group on {m} exited")),
+                    _ => {}
+                }
+                if reason.is_some() {
+                    break;
+                }
+            }
+            if let Some(reason) = reason {
+                if self.book().up.remove(&info.model).is_none() {
+                    continue;
+                }
+                tracing::warn!(model = %info.model, "split model group lost: {reason}; taking it down");
+                self.tear_down(&info).await;
+                let loss = GroupLoss { model: info.model.clone(), reason, at_ms: now_ms() };
+                let mut b = self.book();
+                b.lost.push(loss.clone());
+                let n = b.lost.len();
+                b.lost.drain(..n.saturating_sub(8));
+                lost.push(loss);
+            }
+        }
+        lost
+    }
+
+    /// Runs [`Coordinator::check_groups`] every `every`.
+    pub fn spawn_group_watch(self: &Arc<Self>, every: Duration) -> tokio::task::JoinHandle<()> {
+        let me = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(c) = me.upgrade() else { return };
+                c.check_groups().await;
+            }
+        })
     }
 }
 

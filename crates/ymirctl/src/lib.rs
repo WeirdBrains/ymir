@@ -82,6 +82,11 @@ pub enum Cmd {
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
     },
+    /// Split models: a model too big for one node, served by a group of nodes over a private link.
+    Group {
+        #[command(subcommand)]
+        cmd: GroupCmd,
+    },
     /// Spread a list of prompts (one per line of FILE, or stdin with `-`) over the pool at batch
     /// priority; prints each answer in order.
     Batch {
@@ -212,6 +217,16 @@ pub struct SetupArgs {
 }
 
 #[derive(clap::Subcommand, Debug)]
+pub enum GroupCmd {
+    /// Plan and start the group for MODEL (marked `split` in the pool policy).
+    Up { model: String },
+    /// Stop the group; its members return to normal placement.
+    Down { model: String },
+    /// The groups that are up, and why the last ones went down.
+    Status,
+}
+
+#[derive(clap::Subcommand, Debug)]
 pub enum ContextCmd {
     /// List the conversations here, or show one.
     Show { conversation: Option<String> },
@@ -247,6 +262,26 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Nodes => nodes(&paths, out).await,
         Cmd::Drain { node, resume } => admin(&paths, out, ControlRequest::Drain { node, on: !resume }).await,
         Cmd::Context { cmd } => context_cmd(&paths, out, cmd).await,
+        Cmd::Group { cmd } => match cmd {
+            GroupCmd::Up { model } => admin(&paths, out, ControlRequest::Group { action: "up".into(), model: Some(model) }).await,
+            GroupCmd::Down { model } => admin(&paths, out, ControlRequest::Group { action: "down".into(), model: Some(model) }).await,
+            GroupCmd::Status => {
+                let r = control::request(&paths.socket(), &ControlRequest::Group { action: "status".into(), model: None }).await?;
+                if !r.ok {
+                    bail!("{}", r.message.unwrap_or_default());
+                }
+                if r.groups.is_empty() {
+                    writeln!(out, "no group is up")?;
+                }
+                for g in &r.groups {
+                    writeln!(out, "{}  leader {}  members {}", g.model, g.leader, g.members.join(", "))?;
+                }
+                for l in &r.group_losses {
+                    writeln!(out, "lost  {}  {}", l.model, l.reason)?;
+                }
+                Ok(())
+            }
+        },
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
         }
