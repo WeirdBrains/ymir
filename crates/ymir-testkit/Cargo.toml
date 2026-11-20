@@ -10,6 +10,11 @@ authors.workspace = true
 publish = false
 
 [[bin]]
+name = "ymir-mock-rpc"
+path = "src/bin/ymir-mock-rpc.rs"
+test = false
+
+[[bin]]
 name = "ymir-mock-engine"
 path = "src/bin/ymir-mock-engine.rs"
 test = false
