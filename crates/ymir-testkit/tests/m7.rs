@@ -99,7 +99,6 @@ async fn eventually(secs: u64, what: &str, mut f: impl AsyncFnMut() -> Result<bo
     }
 }
 
-
 const MOCK_RPC: &str = env!("CARGO_BIN_EXE_ymir-mock-rpc");
 
 fn free_port() -> u16 {
@@ -117,7 +116,10 @@ fn append(h: &Home, text: &str) -> Result<()> {
 fn member(h: &Home, leader_port: Option<u16>) -> Result<()> {
     let p = h.home.join("node.toml");
     let t = std::fs::read_to_string(&p)?;
-    std::fs::write(&p, t.replacen("vllm = \"off\"\n", &format!("vllm = \"off\"\nprivate_link = \"127.0.0.1\"\nrpc_server = \"system:{MOCK_RPC}\"\n"), 1))?;
+    std::fs::write(
+        &p,
+        t.replacen("vllm = \"off\"\n", &format!("vllm = \"off\"\nprivate_link = \"127.0.0.1\"\nrpc_server = \"system:{MOCK_RPC}\"\n"), 1),
+    )?;
     if let Some(port) = leader_port {
         std::fs::write(h.paths.config().parent().unwrap().join("..").join("models").join("big.gguf"), b"GGUF mock")?;
         append(h, &format!("[[model.split]]\nid = \"big\"\nfile = \"big.gguf\"\nserve_port = {port}\n"))?;
@@ -191,8 +193,7 @@ async fn a_split_model_is_planned_served_and_torn_down() -> Result<()> {
     ctl(&inf_h.home, &["group", "up", "big"]).await?;
     assert!(listening(rpc_port).await);
     work.shutdown().await;
-    eventually(90, "the lost member takes the group down", async || Ok(ctl(&inf_h.home, &["group", "status"]).await?.contains("lost  big")))
-        .await?;
+    eventually(90, "the lost member takes the group down", async || Ok(ctl(&inf_h.home, &["group", "status"]).await?.contains("lost  big"))).await?;
     assert!(ctl(&inf_h.home, &["group", "status"]).await?.contains("no group is up"));
 
     inf.shutdown().await;

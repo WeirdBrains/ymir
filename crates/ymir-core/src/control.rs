@@ -211,10 +211,28 @@ pub struct ConversationView {
 
 impl ControlResponse {
     fn ok(message: impl Into<String>) -> Self {
-        Self { ok: true, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new(), groups: Vec::new(), group_losses: Vec::new() }
+        Self {
+            ok: true,
+            message: Some(message.into()),
+            status: None,
+            chat: None,
+            conversations: Vec::new(),
+            batch: Vec::new(),
+            groups: Vec::new(),
+            group_losses: Vec::new(),
+        }
     }
     fn err(message: impl Into<String>) -> Self {
-        Self { ok: false, message: Some(message.into()), status: None, chat: None, conversations: Vec::new(), batch: Vec::new(), groups: Vec::new(), group_losses: Vec::new() }
+        Self {
+            ok: false,
+            message: Some(message.into()),
+            status: None,
+            chat: None,
+            conversations: Vec::new(),
+            batch: Vec::new(),
+            groups: Vec::new(),
+            group_losses: Vec::new(),
+        }
     }
 }
 
@@ -426,11 +444,17 @@ impl ControlHandler {
                 }
             }
             ControlRequest::Group { action, model } => {
-                let Some(c) = &self.coordinator else { return ControlResponse::err("split models are decided by an inference node; this one has no inference role") };
+                let Some(c) = &self.coordinator else {
+                    return ControlResponse::err("split models are decided by an inference node; this one has no inference role");
+                };
                 match (action.as_str(), model) {
                     ("up", Some(m)) => match c.group_up(&m).await {
                         Ok(i) => {
-                            let mut r = ControlResponse::ok(format!("{m} is up: {} leads, with {}", i.leader, i.members.iter().skip(1).cloned().collect::<Vec<_>>().join(", ")));
+                            let mut r = ControlResponse::ok(format!(
+                                "{m} is up: {} leads, with {}",
+                                i.leader,
+                                i.members.iter().skip(1).cloned().collect::<Vec<_>>().join(", ")
+                            ));
                             r.groups = vec![i];
                             r
                         }

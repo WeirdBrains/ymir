@@ -202,6 +202,9 @@ pub struct ModelSection {
     /// managed llama-server, else on `PATH`) | `system:/path/to/rpc-server` | `off`.
     #[serde(default = "managed")]
     pub rpc_server: String,
+    /// More `rpc-server` arguments (such as `-d CPU` or `-t 8`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rpc_args: Vec<String>,
     /// `auto` (only where supported) | `system:/path/to/vllm` | `off`.
     #[serde(default = "auto")]
     pub vllm: String,
@@ -231,6 +234,7 @@ impl Default for ModelSection {
             private_link: None,
             llamacpp: managed(),
             rpc_server: managed(),
+            rpc_args: Vec::new(),
             vllm: auto(),
             models_dir: None,
             local: Vec::new(),
@@ -536,6 +540,7 @@ impl NodeConfig {
     pub fn worker_config(&self, paths: &Paths, key: String) -> crate::group::WorkerConfig {
         crate::group::WorkerConfig {
             rpc_server: self.rpc_server(paths),
+            rpc_args: self.model.rpc_args.clone(),
             llama_server: resolve_engine(&self.model.llamacpp, "llama-server", &paths.engines().join("llama.cpp").join("llama-server")),
             private_link: self.model.private_link.clone(),
             splits: self.model.split.clone(),

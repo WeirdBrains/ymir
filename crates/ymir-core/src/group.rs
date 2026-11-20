@@ -251,6 +251,8 @@ pub fn leader_args(split: &SplitModel, model_path: &Path, endpoints: &[String]) 
 pub struct WorkerConfig {
     /// `rpc-server`, when this node can be a worker.
     pub rpc_server: Option<PathBuf>,
+    /// More arguments for `rpc-server`.
+    pub rpc_args: Vec<String>,
     /// `llama-server`, when this node can lead.
     pub llama_server: Option<PathBuf>,
     /// This node's private-link address (`[model] private_link`): the only address it binds.
@@ -418,7 +420,8 @@ impl GroupWorkers for RpcWorkers {
             }
             let port = plan.extra.get(&format!("port.{me}")).and_then(|p| p.parse::<u16>().ok()).unwrap_or(default_rpc_port());
             let bin = self.cfg.rpc_server.as_ref().ok_or_else(|| refused("no rpc-server on this node"))?;
-            let args = vec!["-H".to_string(), ip.to_string(), "-p".to_string(), port.to_string()];
+            let mut args = vec!["-H".to_string(), ip.to_string(), "-p".to_string(), port.to_string()];
+            args.extend(self.cfg.rpc_args.iter().cloned());
             let mut p = self.spawn(bin, &args, "worker", &plan.group, None)?;
             if let Err(e) = Self::wait_tcp((ip, port), &mut p, Duration::from_secs(60)).await {
                 let _ = p.child.start_kill();
@@ -494,13 +497,10 @@ impl crate::Coordinator {
     /// Brings up the group for `model`: plans it from the pool policy and the nodes now in the
     /// pool, starts the workers, then the leader, and has the leader's node advertise the model.
     pub async fn group_up(&self, model: &str) -> Result<GroupInfo, RemoteError> {
-        let policy = self
-            .options()
-            .splits
-            .iter()
-            .find(|p| p.id == model)
-            .cloned()
-            .ok_or_else(|| RemoteError::Refused { message: format!("`{model}` is not marked `split` in the pool policy ([[inference.split]])") })?;
+        let policy =
+            self.options().splits.iter().find(|p| p.id == model).cloned().ok_or_else(|| RemoteError::Refused {
+                message: format!("`{model}` is not marked `split` in the pool policy ([[inference.split]])"),
+            })?;
         {
             let mut b = self.book();
             if let Some((i, ..)) = b.up.get(model) {
@@ -519,7 +519,8 @@ impl crate::Coordinator {
     }
 
     async fn bring_up(&self, policy: &SplitPolicy) -> Result<(GroupInfo, Vec<Candidate>), RemoteError> {
-        let need = weirdnet_model::hw::parse_size(&policy.size).ok_or_else(|| RemoteError::BadRequest { message: format!("size `{}`", policy.size) })?;
+        let need =
+            weirdnet_model::hw::parse_size(&policy.size).ok_or_else(|| RemoteError::BadRequest { message: format!("size `{}`", policy.size) })?;
         let mut cands = Vec::new();
         for n in &policy.nodes {
             let Some(node) = self.node_named(&n.node) else { continue };
@@ -583,7 +584,13 @@ impl crate::Coordinator {
             }
             return Err(unavailable(format!("group {name} did not come up: {e}")));
         }
-        let info = GroupInfo { model: policy.id.clone(), group: name, leader: group[0].name.clone(), members: group.iter().map(|c| c.name.clone()).collect(), since_ms: now_ms() };
+        let info = GroupInfo {
+            model: policy.id.clone(),
+            group: name,
+            leader: group[0].name.clone(),
+            members: group.iter().map(|c| c.name.clone()).collect(),
+            since_ms: now_ms(),
+        };
         tracing::info!(model = %info.model, leader = %info.leader, members = ?info.members, "split model group is up");
         Ok((info, group))
     }

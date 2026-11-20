@@ -11,8 +11,8 @@ use weirdnet_backends::{Supervisor, SupervisorOptions};
 use weirdnet_semcache::{AnswerCache, ExactCache, NoCache};
 
 use crate::control::{self, ControlHandler};
-use crate::membership::{Membership, SyncNode};
 use crate::group::{self, RpcWorkers};
+use crate::membership::{Membership, SyncNode};
 use crate::{Coordinator, LocalModelNode, ModelNode, NodeConfig, Paths, host, remote};
 
 /// This device on Weirdnet.
@@ -191,9 +191,17 @@ impl Daemon {
                     weirdnet_model::hw::parse_size(&cfg.model.memory_budget),
                     cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
                 );
-                let (server, service) =
-                    remote::serve_model(&net.node, sup.clone(), &net.membership, 4, 32, Some((hw, budget)), coordinator.is_some(), group_workers.clone().map(|w| w as Arc<dyn weirdnet_backends::node::GroupWorkers>))
-                        .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
+                let (server, service) = remote::serve_model(
+                    &net.node,
+                    sup.clone(),
+                    &net.membership,
+                    4,
+                    32,
+                    Some((hw, budget)),
+                    coordinator.is_some(),
+                    group_workers.clone().map(|w| w as Arc<dyn weirdnet_backends::node::GroupWorkers>),
+                )
+                .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
                 if let Some(n) = &model_node {
                     n.attach_host(service.host().clone());
                 }
