@@ -132,7 +132,7 @@ async fn app_reaches_inference_over_weirdnet() {
     let tmp = tempfile::tempdir().unwrap();
     let inf = Device::start(Membership::create(&tmp.path().join("inf"), "inference").unwrap());
     let app = Device::start(link(&inf.m, &tmp.path().join("app"), "app"));
-    let (_server, _feed) = remote::serve(&inf.node, coordinator("inf"), &inf.m, host::admission(2, 8)).unwrap();
+    let (_server, _feed) = remote::serve(&inf.node, coordinator("inf"), &inf.m, Vec::new(), None, host::admission(2, 8)).unwrap();
     let pool = connect_pool(app.node.clone(), &app.m, &[inf.hint()], &opts());
 
     // Chat: streamed text, joined tool call, usage, and who served it.
@@ -179,7 +179,7 @@ async fn app_reaches_inference_over_weirdnet() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_box_uses_its_own_pool_in_process() {
-    let pool = host::local_pool(coordinator("box"), "box", host::admission(2, 8));
+    let pool = host::local_pool(coordinator("box"), "box", host::admission(2, 8), None);
     let a = answer(&pool, user("local")).await.unwrap();
     assert_eq!((a.text.as_str(), a.node.as_str()), ("box says: local", "box"));
     assert!(pool.catalog().await.unwrap().models.iter().any(|m| m.id == "small"));
@@ -190,7 +190,7 @@ async fn strangers_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let inf = Device::start(Membership::create(&tmp.path().join("inf"), "inference").unwrap());
     let stranger = Device::start(Membership::create(&tmp.path().join("x"), "stranger").unwrap());
-    let (_server, _feed) = remote::serve(&inf.node, coordinator("inf"), &inf.m, host::admission(2, 8)).unwrap();
+    let (_server, _feed) = remote::serve(&inf.node, coordinator("inf"), &inf.m, Vec::new(), None, host::admission(2, 8)).unwrap();
 
     // Another identity's device that knows where the node is: its certificate is not ours.
     let dialer = NetDialer::new(stranger.node.clone());
@@ -226,8 +226,8 @@ async fn fails_over_between_inference_nodes() {
     for d in [&one, &two] {
         d.m.state().lock().unwrap().roster.merge(&app.m.roster(), &app.m.user_key(), &WEIRDNET);
     }
-    let mut s1 = Some(remote::serve(&one.node, coordinator("one"), &one.m, host::admission(2, 8)).unwrap());
-    let mut s2 = Some(remote::serve(&two.node, coordinator("two"), &two.m, host::admission(2, 8)).unwrap());
+    let mut s1 = Some(remote::serve(&one.node, coordinator("one"), &one.m, Vec::new(), None, host::admission(2, 8)).unwrap());
+    let mut s2 = Some(remote::serve(&two.node, coordinator("two"), &two.m, Vec::new(), None, host::admission(2, 8)).unwrap());
     let pool = connect_pool(app.node.clone(), &app.m, &[one.hint(), two.hint()], &opts());
 
     let a = answer(&pool, user("a")).await.unwrap();
@@ -264,7 +264,7 @@ async fn roster_changes_reach_other_devices() {
     let tmp = tempfile::tempdir().unwrap();
     let inf = Device::start(Membership::create(&tmp.path().join("inf"), "inference").unwrap());
     let app = Device::start(link(&inf.m, &tmp.path().join("app"), "app"));
-    let (_server, _feed) = remote::serve(&inf.node, coordinator("inf"), &inf.m, host::admission(2, 8)).unwrap();
+    let (_server, _feed) = remote::serve(&inf.node, coordinator("inf"), &inf.m, Vec::new(), None, host::admission(2, 8)).unwrap();
     // The app device links a third device the inference node has not seen; it is refused
     // there until the roster reaches the inference node.
     let late = Device::start(link(&app.m, &tmp.path().join("late"), "late"));

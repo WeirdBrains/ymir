@@ -138,10 +138,15 @@ impl Daemon {
         // Weirdnet: the roles reach the user's other devices.
         let network = Network::start(&cfg, &paths).await?;
         let ropts = remote::RemoteOptions::default();
+        // Conversations: the inference and app roles keep them and sync them among themselves.
+        let context = network.as_ref().filter(|_| roles.inference || roles.app).map(|n| {
+            n.membership.set_context_sync(true);
+            crate::context::ContextStore::new(n.membership.clone())
+        });
         if let Some(net) = &network {
-            tasks.push(net.sync_loop(std::time::Duration::from_secs(30), stop_rx.clone()));
+            tasks.push(net.sync_loop(std::time::Duration::from_secs(cfg.network.sync_secs.max(1)), stop_rx.clone()));
             if let Some(c) = &coordinator {
-                let (server, feed) = remote::serve(&net.node, c.clone(), &net.membership, host::admission(cfg.network.slots, cfg.network.queue))
+                let (server, feed) = remote::serve(&net.node, c.clone(), &net.membership, net.hints.clone(), context.clone(), host::admission(cfg.network.slots, cfg.network.queue))
                     .map_err(|e| anyhow!("serving the inference role on Weirdnet: {e}"))?;
                 serving.push(Box::new(server));
                 serving.push(Box::new(feed));
@@ -218,9 +223,10 @@ impl Daemon {
 
         // App role: the loopback bridge over the in-process pool.
         let mut bridge_addr = None;
+        let mut app_pool = None;
         if roles.app {
             let pool = match (&coordinator, &network) {
-                (Some(c), _) => host::local_pool(c.clone(), &name, host::admission(cfg.network.slots, cfg.network.queue)),
+                (Some(c), _) => host::local_pool(c.clone(), &name, host::admission(cfg.network.slots, cfg.network.queue), context.clone()),
                 (None, Some(net)) => remote::connect_pool(net.node.clone(), &net.membership, &net.hints, &ropts),
                 (None, None) => {
                     return Err(anyhow!(
@@ -229,6 +235,7 @@ impl Daemon {
                 }
             };
             let pool = Arc::new(pool);
+            app_pool = Some(pool.clone());
             let token = crate::token::load_or_create(&paths)?;
             let bridge = weirdnet_openai::Bridge::bind(weirdnet_openai::BridgeOptions::new(cfg.app.bridge.port, token))
                 .await
@@ -259,6 +266,8 @@ impl Daemon {
             model_node,
             alerter,
             network: network.as_ref().map(|n| (n.membership.clone(), n.node.clone())),
+            context,
+            pool: app_pool,
         });
         tasks.push(tokio::spawn(control::serve(listener, handler, stop_rx)));
         tracing::info!(node = %name, roles = ?roles.names(), "ymird started");

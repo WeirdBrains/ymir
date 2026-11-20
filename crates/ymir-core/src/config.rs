@@ -56,6 +56,13 @@ pub struct NetworkSection {
     pub slots: usize,
     #[serde(default = "queue")]
     pub queue: usize,
+    /// Seconds between sync passes against the user's other devices (roster, conversations).
+    #[serde(default = "sync_secs")]
+    pub sync_secs: u64,
+}
+
+fn sync_secs() -> u64 {
+    30
 }
 
 fn network_port() -> u16 {
@@ -82,6 +89,7 @@ impl Default for NetworkSection {
             peers: Vec::new(),
             slots: slots(),
             queue: queue(),
+            sync_secs: sync_secs(),
         }
     }
 }

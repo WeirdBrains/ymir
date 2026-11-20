@@ -30,7 +30,8 @@ use weirdnet_backends::{Chunk, ChunkStream, ModelHost, ModelStatus, RawInferDial
 use weirdnet_net::{Multiaddr, PeerId, WEIRDNET};
 
 use crate::coordinator::Coordinator;
-use crate::host::{InferenceHost, LiveCatalog, catalog_feed};
+use crate::context::ContextStore;
+use crate::host::{ContextAccess, ContextSync, InferenceHost, LiveCatalog, catalog_feed};
 use crate::membership::{Membership, SyncNode};
 use crate::model_node::{BoxFuture, Embedded, ModelNode};
 
@@ -44,10 +45,18 @@ pub fn roster_auth(m: &Membership) -> Arc<dyn Authorize> {
 
 /// Serves the inference role on `node`: infer/1, infer/2 and catalog/1 to the user's linked
 /// devices, announced as an inference node. Dropping the server stops serving.
-pub fn serve(node: &Arc<SyncNode>, coord: Arc<Coordinator>, m: &Membership, admission: Admission) -> Result<(Server, Arc<LiveCatalog>), RemoteError> {
+pub fn serve(
+    node: &Arc<SyncNode>,
+    coord: Arc<Coordinator>,
+    m: &Arc<Membership>,
+    hints: Hints,
+    store: Option<ContextStore>,
+    admission: Admission,
+) -> Result<(Server, Arc<LiveCatalog>), RemoteError> {
     let auth = roster_auth(m);
     let feed = catalog_feed(coord.clone(), auth.clone(), Duration::from_secs(1));
-    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth));
+    let access = store.map(|store| ContextAccess { store, sync: Some(ContextSync { membership: m.clone(), node: node.clone(), hints }) });
+    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth).with_context(access));
     let server = Server::start(node, Serving { infer: Some((host, admission)), catalog: Some(feed.clone()), announce: true })?;
     Ok((server, feed))
 }

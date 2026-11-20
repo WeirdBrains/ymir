@@ -15,7 +15,9 @@ use weirdnet_agent::remote::{Authorize, Caller, MemoryDialer, RemoteError};
 use weirdnet_agent::{CancelToken, DeltaSink, Message, ModelBackend, ModelError, ModelTurn, ToolCall, ToolSpec};
 use weirdnet_backends::error::engine_error;
 
+use crate::context::ContextStore;
 use crate::coordinator::{Coordinator, Prepared, Sink};
+use crate::membership::{Membership, SyncNode};
 
 /// Everyone: for this box's own bridge, in process.
 pub struct AllowAll;
@@ -26,15 +28,56 @@ impl Authorize for AllowAll {
     }
 }
 
+/// The conversations an inference node answers `ContextRef` requests from, and how it fetches
+/// what a caller has written that it hasn't synced yet.
+#[derive(Clone)]
+pub struct ContextAccess {
+    pub store: ContextStore,
+    /// Pull-on-demand from the caller; `None` for a caller in this process (its store is ours).
+    pub sync: Option<ContextSync>,
+}
+
+#[derive(Clone)]
+pub struct ContextSync {
+    pub membership: Arc<Membership>,
+    pub node: Arc<SyncNode>,
+    pub hints: crate::remote::Hints,
+}
+
+impl ContextAccess {
+    /// The prompt for `r`. A caller on another device is pulled from first, so the newest turn it
+    /// wrote is here even if the periodic pass hasn't run.
+    async fn prompt(&self, caller: &Caller, r: &v2::ContextRef) -> Result<Vec<Message>, RemoteError> {
+        if let Some(sync) = &self.sync
+            && !caller.peer.is_empty()
+        {
+            let (sync, peer) = (sync.clone(), caller.peer.clone());
+            let addrs: Vec<_> = sync.hints.iter().filter(|(p, _)| p.to_string() == peer).flat_map(|(_, a)| a.clone()).collect();
+            let pulled = tokio::task::spawn_blocking(move || sync.membership.pull_context(&sync.node, &peer, &addrs)).await.unwrap_or(false);
+            tracing::debug!(conversation = %r.conversation, pulled, "context: pulled from the caller");
+        }
+        let conv = self.store.load(&r.conversation).ok_or_else(|| RemoteError::unavailable(format!("conversation {} is not on this node (yet)", r.conversation)))?;
+        conv.prompt(r.head.as_deref())
+            .ok_or_else(|| RemoteError::unavailable(format!("conversation {} has no message {} here (yet)", r.conversation, r.head.as_deref().unwrap_or("?"))))
+    }
+}
+
 /// infer/1, infer/2 and embeddings from the coordinator, to the callers `auth` admits.
 pub struct InferenceHost {
     coord: Arc<Coordinator>,
     auth: Arc<dyn Authorize>,
+    context: Option<ContextAccess>,
 }
 
 impl InferenceHost {
     pub fn new(coord: Arc<Coordinator>, auth: Arc<dyn Authorize>) -> Self {
-        Self { coord, auth }
+        Self { coord, auth, context: None }
+    }
+
+    /// Answers `ContextRef` requests from `context` and writes each answer back to it.
+    pub fn with_context(mut self, context: Option<ContextAccess>) -> Self {
+        self.context = context;
+        self
     }
 }
 
@@ -47,9 +90,18 @@ impl InferHost for InferenceHost {
         Ok(Arc::new(TurnBackend { coord: self.coord.clone(), model: model.map(str::to_string) }))
     }
 
-    fn open_request(&self, _caller: &Caller, request: &v2::Request) -> Result<Arc<dyn InferBackend>, RemoteError> {
+    fn open_request(&self, caller: &Caller, request: &v2::Request) -> Result<Arc<dyn InferBackend>, RemoteError> {
+        if matches!(request.input, v2::Input::Context(_)) && self.context.is_none() {
+            return Err(RemoteError::BadRequest { message: "this node holds no conversations".into() });
+        }
         let prepared = self.coord.prepare(request)?;
-        Ok(Arc::new(RoutedBackend { coord: self.coord.clone(), name: prepared.model.clone(), prepared: Mutex::new(Some(prepared)) }))
+        Ok(Arc::new(RoutedBackend {
+            coord: self.coord.clone(),
+            name: prepared.model.clone(),
+            prepared: Mutex::new(Some(prepared)),
+            context: self.context.clone(),
+            caller: caller.clone(),
+        }))
     }
 
     fn open_embed(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
@@ -64,6 +116,30 @@ struct RoutedBackend {
     coord: Arc<Coordinator>,
     name: String,
     prepared: Mutex<Option<Prepared>>,
+    context: Option<ContextAccess>,
+    caller: Caller,
+}
+
+/// Passes text on and keeps it, so the finished answer can be written to the conversation.
+struct Tee<'a> {
+    out: &'a dyn Sink,
+    text: Mutex<String>,
+}
+
+impl Sink for Tee<'_> {
+    fn text(&self, t: String) {
+        self.text.lock().unwrap_or_else(|e| e.into_inner()).push_str(&t);
+        self.out.text(t);
+    }
+    fn reasoning(&self, t: String) {
+        self.out.reasoning(t);
+    }
+    fn tool_call(&self, c: ToolCall) {
+        self.out.tool_call(c);
+    }
+    fn usage(&self, u: Usage) {
+        self.out.usage(u);
+    }
 }
 
 #[async_trait]
@@ -84,7 +160,28 @@ impl InferBackend for RoutedBackend {
             Some(p) => p,
             None => self.coord.prepare(request)?,
         };
-        self.coord.run(prepared, request, out, cancel).await
+        // A conversation reference becomes the assembled messages (raw mode to a model node
+        // never sees one); the answer is written back under the job's id when it completes.
+        let mut resolved = request.clone();
+        let mut conversation = None;
+        if let v2::Input::Context(r) = &request.input {
+            let access = self.context.as_ref().ok_or_else(|| RemoteError::BadRequest { message: "this node holds no conversations".into() })?;
+            resolved.input = v2::Input::Messages(access.prompt(&self.caller, r).await?);
+            conversation = Some((access.store.clone(), r.conversation.clone()));
+        }
+        let tee = Tee { out, text: Mutex::new(String::new()) };
+        let finish = self.coord.run(prepared, &resolved, &tee, cancel).await?;
+        if let Some((store, conv)) = conversation {
+            // What the asker already had (a resume) plus what this attempt streamed: the whole
+            // answer, on whichever node finishes it.
+            let before = request.assistant_prefix.as_ref().map_or("", |p| p.text.as_str());
+            let text = format!("{before}{}", tee.text.into_inner().unwrap_or_else(|e| e.into_inner()));
+            let model = finish.meta.standin.clone().unwrap_or_else(|| self.name.clone());
+            if let Err(e) = store.append(&conv, "assistant", &text, Some(&model), Some(&request.job_id)) {
+                tracing::warn!(conversation = %conv, "writing the answer to the conversation: {e}");
+            }
+        }
+        Ok(finish)
     }
 }
 
@@ -221,9 +318,10 @@ pub fn admission(slots: usize, queue: usize) -> Admission {
 /// This box's own pool, in process: the bridge on an all-roles box reaches the coordinator
 /// without a network hop (the same infer/2 and catalog/1 protocol, over memory channels).
 /// Answers name `node` as the node that served them.
-pub fn local_pool(coord: Arc<Coordinator>, node: &str, admission: Admission) -> Pool {
+pub fn local_pool(coord: Arc<Coordinator>, node: &str, admission: Admission, context: Option<ContextStore>) -> Pool {
     let auth: Arc<dyn Authorize> = Arc::new(AllowAll);
-    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord.clone(), auth.clone()));
+    let access = context.map(|store| ContextAccess { store, sync: None });
+    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord.clone(), auth.clone()).with_context(access));
     let feed = catalog_feed(coord, auth, Duration::from_secs(1));
     let dialer = MemoryDialer::new();
     let me = node.to_string();

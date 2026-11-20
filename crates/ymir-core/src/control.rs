@@ -40,6 +40,35 @@ pub enum ControlRequest {
     PoolRevoke {
         peer: String,
     },
+    /// Add a message to a conversation in this node's context store (it syncs to the user's
+    /// other inference and app nodes).
+    ContextAdd {
+        conversation: String,
+        #[serde(default = "user")]
+        role: String,
+        text: String,
+    },
+    /// The conversations this node holds, or one of them in full.
+    ContextShow {
+        #[serde(default)]
+        conversation: Option<String>,
+    },
+    /// Tombstone a conversation everywhere.
+    ContextDelete {
+        conversation: String,
+    },
+    /// Add `text` to `conversation` as the user and ask the pool to answer it from the
+    /// conversation (a `context_ref`): the inference node that answers writes the answer back.
+    Chat {
+        conversation: String,
+        text: String,
+        #[serde(default)]
+        model: Option<String>,
+    },
+}
+
+fn user() -> String {
+    "user".into()
 }
 
 fn yes() -> bool {
@@ -127,14 +156,36 @@ pub struct ControlResponse {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<StatusReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversations: Vec<ConversationView>,
+}
+
+/// An answer to [`ControlRequest::Chat`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatResult {
+    pub text: String,
+    /// The inference node that finished it.
+    pub node: String,
+    pub model: String,
+    /// How many times the answer moved to another inference node mid-answer.
+    pub resumes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationView {
+    pub id: String,
+    pub title: String,
+    pub messages: Vec<(String, String)>,
 }
 
 impl ControlResponse {
     fn ok(message: impl Into<String>) -> Self {
-        Self { ok: true, message: Some(message.into()), status: None }
+        Self { ok: true, message: Some(message.into()), status: None, chat: None, conversations: Vec::new() }
     }
     fn err(message: impl Into<String>) -> Self {
-        Self { ok: false, message: Some(message.into()), status: None }
+        Self { ok: false, message: Some(message.into()), status: None, chat: None, conversations: Vec::new() }
     }
 }
 
@@ -148,6 +199,10 @@ pub struct ControlHandler {
     pub model_node: Option<Arc<LocalModelNode>>,
     pub alerter: Option<Arc<weirdnet_alerts::Alerter>>,
     pub network: Option<(Arc<crate::membership::Membership>, Arc<crate::membership::SyncNode>)>,
+    /// Conversations (inference and app roles on Weirdnet).
+    pub context: Option<crate::context::ContextStore>,
+    /// The pool the app role asks through.
+    pub pool: Option<Arc<weirdnet_agent::pool::Pool>>,
 }
 
 impl ControlHandler {
@@ -212,6 +267,8 @@ impl ControlHandler {
                 ControlResponse {
                     ok: true,
                     message: None,
+                    chat: None,
+                    conversations: Vec::new(),
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -264,6 +321,56 @@ impl ControlHandler {
                 match m.approve(cert) {
                     Ok(()) => ControlResponse::ok(format!("{label} is linked")),
                     Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::ContextAdd { conversation, role, text } => {
+                let Some(store) = &self.context else { return no_context() };
+                match store.append(&conversation, &role, &text, None, None) {
+                    Ok(id) => ControlResponse::ok(id),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::ContextShow { conversation } => {
+                let Some(store) = &self.context else { return no_context() };
+                let all = match conversation {
+                    Some(id) => match store.load(&id) {
+                        Some(c) => vec![c],
+                        None => return ControlResponse::err(format!("no conversation `{id}` here")),
+                    },
+                    None => store.list(),
+                };
+                let mut r = ControlResponse::ok(format!("{} conversation(s)", all.len()));
+                r.conversations = all
+                    .into_iter()
+                    .map(|c| ConversationView { title: c.meta.title.clone(), messages: c.messages.into_iter().map(|m| (m.role, m.text)).collect(), id: c.id })
+                    .collect();
+                r
+            }
+            ControlRequest::ContextDelete { conversation } => {
+                let Some(store) = &self.context else { return no_context() };
+                match store.delete(&conversation) {
+                    Ok(()) => ControlResponse::ok(format!("{conversation} is deleted")),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::Chat { conversation, text, model } => {
+                let (Some(store), Some(pool)) = (&self.context, &self.pool) else {
+                    return ControlResponse::err("chat needs the app role and a device identity (see `ymirctl pool link`)");
+                };
+                if let Err(e) = store.append(&conversation, "user", &text, None, None) {
+                    return ControlResponse::err(format!("{e:#}"));
+                }
+                let mut request = weirdnet_agent::remote::infer::v2::Request::context(weirdnet_agent::remote::infer::v2::ContextRef::new(&conversation, None));
+                if let Some(m) = model {
+                    request = request.with_model(m);
+                }
+                match pool.infer(request, &weirdnet_agent::pool::NoEvents, &weirdnet_agent::CancelToken::new()).await {
+                    Ok(a) => {
+                        let mut r = ControlResponse::ok("answered");
+                        r.chat = Some(ChatResult { text: a.text, node: a.node, model: a.model, resumes: a.meta.resumes.len() });
+                        r
+                    }
+                    Err(i) => ControlResponse::err(format!("{} (after {} characters)", i.error, i.partial.text.chars().count())),
                 }
             }
             ControlRequest::PoolRevoke { peer } => {
@@ -336,4 +443,8 @@ pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlRespo
     let mut lines = BufReader::new(r).lines();
     let resp = lines.next_line().await?.context("ymird closed the control connection")?;
     Ok(serde_json::from_str(&resp)?)
+}
+
+fn no_context() -> ControlResponse {
+    ControlResponse::err("this node keeps no conversations: it needs the inference or app role and a device identity (see `ymirctl pool link`)")
 }

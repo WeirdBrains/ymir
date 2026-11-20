@@ -59,6 +59,11 @@ pub enum Cmd {
         #[arg(long)]
         resume: bool,
     },
+    /// Conversations kept by the inference and app nodes and synced among them.
+    Context {
+        #[command(subcommand)]
+        cmd: ContextCmd,
+    },
     /// Ask the pool something and stream the answer.
     Chat {
         /// Model id (default: the main model).
@@ -193,6 +198,29 @@ pub struct SetupArgs {
     pub ymird: Option<PathBuf>,
 }
 
+#[derive(clap::Subcommand, Debug)]
+pub enum ContextCmd {
+    /// List the conversations here, or show one.
+    Show { conversation: Option<String> },
+    /// Add a message to a conversation.
+    Add {
+        conversation: String,
+        text: String,
+        #[arg(long, default_value = "user")]
+        role: String,
+    },
+    /// Add a user message, then have the pool answer the conversation; the answer is written back
+    /// and syncs to the other nodes.
+    Ask {
+        conversation: String,
+        text: String,
+        #[arg(long, short)]
+        model: Option<String>,
+    },
+    /// Delete a conversation on every node (a tombstone that syncs).
+    Delete { conversation: String },
+}
+
 pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<()> {
     let paths = cli.home.map(Paths::new).unwrap_or_else(Paths::from_env);
     match cli.cmd {
@@ -205,6 +233,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Nodes => nodes(&paths, out).await,
         Cmd::Drain { node, resume } => admin(&paths, out, ControlRequest::Drain { node, on: !resume }).await,
+        Cmd::Context { cmd } => context_cmd(&paths, out, cmd).await,
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
         }
@@ -488,6 +517,35 @@ async fn models(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             _ => "on disk",
         };
         writeln!(out, "{:<24} {:<10} {}", m["id"].as_str().unwrap_or("?"), m["weirdnet"]["purpose"].as_str().unwrap_or(""), ready)?;
+    }
+    Ok(())
+}
+
+async fn context_cmd(paths: &Paths, out: &mut dyn Write, cmd: ContextCmd) -> Result<()> {
+    let req = match cmd {
+        ContextCmd::Show { conversation } => ControlRequest::ContextShow { conversation },
+        ContextCmd::Add { conversation, text, role } => ControlRequest::ContextAdd { conversation, role, text },
+        ContextCmd::Ask { conversation, text, model } => ControlRequest::Chat { conversation, text, model },
+        ContextCmd::Delete { conversation } => ControlRequest::ContextDelete { conversation },
+    };
+    let r = control::request(&paths.socket(), &req).await?;
+    let msg = r.message.clone().unwrap_or_default();
+    if !r.ok {
+        bail!("{msg}");
+    }
+    if let Some(c) = r.chat {
+        writeln!(out, "{}", c.text)?;
+        let moved = if c.resumes > 0 { format!(", moved {} time(s) mid-answer", c.resumes) } else { String::new() };
+        writeln!(out, "# {} via {}{moved}", c.model, c.node)?;
+    } else if !r.conversations.is_empty() {
+        for c in r.conversations {
+            writeln!(out, "{}  {}  ({} messages)", c.id, if c.title.is_empty() { "-" } else { &c.title }, c.messages.len())?;
+            for (role, text) in c.messages {
+                writeln!(out, "  {role}: {text}")?;
+            }
+        }
+    } else {
+        writeln!(out, "{msg}")?;
     }
     Ok(())
 }
