@@ -19,7 +19,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 1. `weirdnet-backends` 0.2.0 depends on `weirdnet-model` `0.4`, not 0.5, and its `node` API takes model 0.4's `Hardware` and `Budget`. An app on `weirdnet-model` 0.5.0 gets two copies and a type mismatch in `with_hardware`, so Ymir stays on 0.4.3. Needs backends 0.2.1 on model 0.5.
 2. `weirdnet-alerts` 0.1.0's `backends` feature needs `weirdnet-backends` 0.1, which pulls in `weirdnet-agent` 0.4 as a second copy. Ymir drops the feature and carries the engine-event monitor in `ymir-core/src/engine_alerts.rs` (a copy of `weirdnet_alerts::engine`). Needs alerts 0.2 on backends 0.2; then delete that module.
 
-**CI follow-up:** the push token has no `workflow` scope, so `.github/workflows/macos.yml` is unchanged on this branch. It still runs `ymir-testkit --test engine_shim`, which this branch deletes. Before the macOS job can pass, change that step to `cargo test --locked -p ymir-testkit --test mlx` (named "MLX and llama.cpp on one node (mock engines)"). Someone with workflow scope must push that one change.
+**CI follow-up:** `.github/workflows/macos.yml` no longer runs the removed `engine_shim` test; the MLX unit tests in `ymir-core --lib` still run in the step before. There is no replacement end-to-end mock test for MLX plus llama.cpp on one node yet.
 
 **Checks run:** see the commit's push; `cargo fmt --check`, build, clippy `-D warnings` and tests on the whole workspace.
 
