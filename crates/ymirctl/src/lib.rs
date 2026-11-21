@@ -771,6 +771,12 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
         if m.wrapped {
             extra.push_str(", wrapped");
         }
+        if let Some(c) = m.capabilities {
+            let media: Vec<&str> = [(c.vision, "images"), (c.audio, "audio")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect();
+            if !media.is_empty() {
+                extra.push_str(&format!(", takes {}", media.join(" and ")));
+            }
+        }
         if let Some(s) = m.last_load_secs {
             extra.push_str(&format!(", loads in {s:.1}s"));
         }

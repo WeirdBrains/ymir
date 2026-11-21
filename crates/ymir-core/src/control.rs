@@ -128,6 +128,9 @@ pub struct NodeModel {
     /// Engine crashes in the current window.
     #[serde(default)]
     pub crashes: usize,
+    /// What the model takes (chat, embeddings, images, audio), when the node reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<weirdnet_backends::Capabilities>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -293,17 +296,18 @@ impl ControlHandler {
                     .iter()
                     .flat_map(|n| {
                         n.status().into_iter().map(|s| NodeModel {
+                            purpose: if crate::model_node::embeds(&s) { "embedding".into() } else { "chat".into() },
                             node: n.name().to_string(),
                             id: s.id,
                             engine: s.engine,
                             state: s.state,
                             in_flight: s.in_flight,
                             swap_group: s.swap_group,
-                            purpose: if s.embedding { "embedding".into() } else { "chat".into() },
                             pid: s.pid,
                             last_load_secs: s.last_load_secs,
                             wrapped: s.wrapped,
                             crashes: s.crashes,
+                            capabilities: s.capabilities,
                         })
                     })
                     .collect();

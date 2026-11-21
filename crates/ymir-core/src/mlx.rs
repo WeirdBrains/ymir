@@ -5,11 +5,13 @@
 //! unified memory than GGUF through llama.cpp's Metal backend. llama.cpp stays for what MLX-LM's
 //! server cannot do (embeddings), for catalog models without MLX weights, and on Intel Macs.
 //!
-//! MLX-LM is Python. Setup installs a pinned `mlx-lm` into a venv under Ymir's engines dir
-//! (`<home>/engines/mlx`), with `uv` when it is on `PATH` (it fetches its own Python) or else
-//! `python3 -m venv`, and downloads the MLX weights for the proposed models, pinned to a revision,
-//! into `<models_dir>/mlx/<name>`. Loads then need no network. The model runs under `ymir-engine`
-//! (see [`crate::shim`]), so it looks like any other engine to the supervisor and to `ymird`.
+//! MLX-LM is Python. Setup installs the `mlx-lm` that `weirdnet-backends` pins into a venv under
+//! Ymir's engines dir (`<home>/engines/mlx`) with [`install`] (`uv` when it is on `PATH`, else
+//! `python3 -m venv`), and downloads the MLX weights for the proposed models, pinned to a
+//! revision, into `<models_dir>/mlx/<name>`; loads then need no network. The supervisor runs the
+//! model as `EngineKind::Mlx`, behind its own proxy (API key, readiness after the first token,
+//! text only, no embeddings), so it looks like any other engine to `ymird`. Installing and
+//! running are `weirdnet-backends`'; the weights catalog and their download stay here.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,10 +19,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use weirdnet_backends::find_in_path;
 
-/// The `mlx-lm` release setup installs.
-pub const MLX_LM_VERSION: &str = "0.32.2";
-/// The Python `uv` asks for when it makes the venv.
-pub const PYTHON: &str = "3.12";
+pub use weirdnet_backends::mlx::{MLX_LM_VERSION, install, server_in, supported};
 
 /// MLX-format weights for a catalog model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,19 +89,9 @@ pub fn weights(id: &str) -> Option<&'static Weights> {
     WEIGHTS.iter().find(|w| w.id == id)
 }
 
-/// MLX runs on Apple Silicon only.
-pub fn supported(os: &str, arch: &str) -> bool {
-    os == "macos" && arch == "aarch64"
-}
-
 /// The managed venv.
 pub fn venv(engines_dir: &Path) -> PathBuf {
     engines_dir.join("mlx")
-}
-
-/// `mlx_lm.server` in a venv.
-pub fn server_in(venv: &Path) -> PathBuf {
-    venv.join("bin").join("mlx_lm.server")
 }
 
 /// Where `mlx = "managed"` finds `mlx_lm.server`: the managed venv, then `PATH`.
@@ -114,64 +103,17 @@ pub fn resolve(setting: &str, engines_dir: &Path) -> Option<PathBuf> {
     }
 }
 
-fn run(cmd: &mut Command) -> Result<()> {
-    let shown = format!("{cmd:?}");
-    let s = cmd.status().with_context(|| format!("running {shown}"))?;
-    if !s.success() {
-        bail!("{shown} failed ({s})");
-    }
-    Ok(())
-}
-
-/// The commands that install `mlx-lm` into `venv` (with `uv` if given, else `python3`).
-pub fn install_commands(venv: &Path, uv: Option<&Path>) -> Vec<Command> {
-    let spec = format!("mlx-lm=={MLX_LM_VERSION}");
-    let py = venv.join("bin").join("python");
-    match uv {
-        Some(uv) => {
-            let mut a = Command::new(uv);
-            a.args(["venv", "--python", PYTHON]).arg(venv);
-            let mut b = Command::new(uv);
-            b.args(["pip", "install", "--python"]).arg(&py).arg(&spec);
-            vec![a, b]
-        }
-        None => {
-            let mut a = Command::new("python3");
-            a.args(["-m", "venv"]).arg(venv);
-            let mut b = Command::new(&py);
-            b.args(["-m", "pip", "install", "--upgrade", "pip"]);
-            let mut c = Command::new(&py);
-            c.args(["-m", "pip", "install"]).arg(&spec);
-            vec![a, b, c]
-        }
-    }
-}
-
-/// Installs the pinned `mlx-lm` into `venv` and returns `mlx_lm.server`.
-pub fn install(venv: &Path) -> Result<PathBuf> {
-    let uv = find_in_path("uv");
-    if uv.is_none() && find_in_path("python3").is_none() {
-        bail!("installing MLX-LM needs `uv` (https://docs.astral.sh/uv/) or `python3`");
-    }
-    if let Some(parent) = venv.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    for mut c in install_commands(venv, uv.as_deref()) {
-        run(&mut c)?;
-    }
-    let server = server_in(venv);
-    if !server.is_file() {
-        bail!("mlx-lm installed but {} is missing", server.display());
-    }
-    Ok(server)
-}
-
 /// Downloads `w` (at its pinned revision) into `models_dir`, with the venv's `huggingface_hub`.
 pub fn download(venv: &Path, w: &Weights, models_dir: &Path) -> Result<PathBuf> {
     let dest = w.dir(models_dir);
     std::fs::create_dir_all(&dest)?;
     let script = "import sys\nfrom huggingface_hub import snapshot_download\nsnapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])\n";
-    run(Command::new(venv.join("bin").join("python")).args(["-c", script, w.repo, w.revision]).arg(&dest))?;
+    let mut cmd = Command::new(venv.join("bin").join("python"));
+    cmd.args(["-c", script, w.repo, w.revision]).arg(&dest);
+    let s = cmd.status().with_context(|| format!("running {cmd:?}"))?;
+    if !s.success() {
+        bail!("downloading {} failed ({s})", w.repo);
+    }
     Ok(dest)
 }
 
@@ -188,15 +130,6 @@ mod tests {
         }
         assert!(weights("qwen3-embedding-0.6b").is_none());
         assert_eq!(weights("qwen3-8b").unwrap().dir(Path::new("/m")), PathBuf::from("/m/mlx/Qwen3-8B-4bit"));
-    }
-
-    #[test]
-    fn install_uses_uv_when_present() {
-        let c = install_commands(Path::new("/h/engines/mlx"), Some(Path::new("/usr/bin/uv")));
-        let args: Vec<Vec<String>> = c.iter().map(|c| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect()).collect();
-        assert_eq!(args[0], ["venv", "--python", PYTHON, "/h/engines/mlx"]);
-        assert_eq!(args[1].last().unwrap(), &format!("mlx-lm=={MLX_LM_VERSION}"));
-        assert_eq!(install_commands(Path::new("/v"), None)[0].get_program(), "python3");
     }
 
     #[test]

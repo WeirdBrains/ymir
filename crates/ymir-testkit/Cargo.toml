@@ -19,17 +19,11 @@ name = "ymir-mock-engine"
 path = "src/bin/ymir-mock-engine.rs"
 test = false
 
-[[bin]]
-name = "ymir-test-shim"
-path = "src/bin/ymir-test-shim.rs"
-test = false
-
 [dependencies]
 axum.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-ymir-core.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
@@ -48,6 +42,7 @@ weirdnet-update.workspace = true
 semver.workspace = true
 weirdnet-alerts.workspace = true
 ymirctl.workspace = true
+ymir-core.workspace = true
 
 [lints]
 workspace = true

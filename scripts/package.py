@@ -17,7 +17,7 @@ and writes, with PKG = ymir for the default variant and ymir-cuda for the CUDA o
   PKG-bin-PKGVER-1-ARCH.pkg.tar.zst      makepkg on the TAUR recipe with local sources (Arch only)
   PKG-VERSION-1.ARCH.rpm                 only when rpmbuild is installed (skipped with a notice)
   macOS: PKG-VERSION-TRIPLE.tar.gz, .zip (same layout as Linux; Homebrew installs from the tar.gz)
-  Windows: PKG-VERSION-TRIPLE.zip        ymird.exe, ymirctl.exe, ymir-engine.exe and llama.cpp\\ side by side
+  Windows: PKG-VERSION-TRIPLE.zip        ymird.exe, ymirctl.exe and llama.cpp\\ side by side
   SHA256SUMS, and .minisig files when minisign and MINISIGN_KEY are set (else skipped)
 
 ymird finds the engine relative to its own executable, so every layout works without
@@ -45,7 +45,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BINS = ["ymird", "ymirctl", "ymir-engine"]
+BINS = ["ymird", "ymirctl"]
 MAINTAINER = "Weird Brains LLC <m3talsmith@gmail.com>"
 URL = "https://github.com/WeirdBrains/ymir"
 SUMMARY = "Private cloud of LLM models on your own machines (node daemon and CLI)"
@@ -169,14 +169,12 @@ def archive_files(bdir, triple, engine):
         return [
             (f"ymird{sfx}", (bdir / f"ymird{sfx}").read_bytes(), 0o755, None),
             (f"ymirctl{sfx}", (bdir / f"ymirctl{sfx}").read_bytes(), 0o755, None),
-            (f"ymir-engine{sfx}", (bdir / f"ymir-engine{sfx}").read_bytes(), 0o755, None),
             ("README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
             ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644, None),
         ] + engine_entries(engine, "llama.cpp")
     return [
         ("bin/ymird", (bdir / "ymird").read_bytes(), 0o755, None),
         ("bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755, None),
-        ("bin/ymir-engine", (bdir / "ymir-engine").read_bytes(), 0o755, None),
         ("share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
         ("share/icons/hicolor/scalable/apps/ymir.svg", (ROOT / "brand/png/hicolor/scalable/apps/ymir.svg").read_bytes(), 0o644, None),
         ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644, None),
@@ -188,7 +186,6 @@ def system_files(bdir, engine):
     return [
         ("usr/bin/ymird", (bdir / "ymird").read_bytes(), 0o755, None),
         ("usr/bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755, None),
-        ("usr/bin/ymir-engine", (bdir / "ymir-engine").read_bytes(), 0o755, None),
         ("usr/lib/systemd/user/ymird.service", (ROOT / "packaging/systemd/ymird.service").read_bytes(), 0o644, None),
         ("usr/share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
         ("usr/share/doc/ymir/copyright", (ROOT / "LICENSE").read_bytes(), 0o644, None),
@@ -343,7 +340,6 @@ package() {{
   cd "{pkg}-${{_ver}}-${{CARCH}}-unknown-linux-gnu"
   install -Dm755 bin/ymird "${{pkgdir}}/usr/bin/ymird"
   install -Dm755 bin/ymirctl "${{pkgdir}}/usr/bin/ymirctl"
-  install -Dm755 bin/ymir-engine "${{pkgdir}}/usr/bin/ymir-engine"
   # The bundled llama.cpp engine; ymird finds it at ../lib/ymir/llama.cpp from /usr/bin.
   install -d "${{pkgdir}}/usr/lib/ymir"
   cp -a {ENGINE_DIR} "${{pkgdir}}/usr/lib/ymir/"

@@ -419,7 +419,7 @@ devices, link speeds; used for splitting) and what each backend can do here.
 | Backend | Where | Role |
 |---|---|---|
 | llama.cpp `llama-server` (managed by Ymir) | Everywhere: CUDA, ROCm/HIP, Metal, Vulkan, CPU; Linux, macOS, Windows, BSD | Default backend. GGUF models. |
-| MLX-LM `mlx_lm.server` (managed venv, through `ymir-engine`) | macOS on Apple Silicon | Default for chat models there. MLX weights. |
+| MLX-LM `mlx_lm.server` (managed venv, `weirdnet-backends` `EngineKind::Mlx`) | macOS on Apple Silicon | Default for chat models there. MLX weights. |
 | In-process llama.cpp (`weirdnet-model` `llama`) | Everywhere | Tiny models and embeddings without an extra process; Bragi's optional offline model. |
 | vLLM (managed by Ymir, Rust frontend as on server-a/server-b) | Linux, NVIDIA sm_80+ (sm_121 needs the CUDA 13 build), AMD ROCm on vLLM's supported list | Optional. High concurrency, NVFP4/FP8. Never on macOS, Windows or BSD. |
 | vLLM + Ray | Linux nodes with a fast private link | Split models (see big mode). |
@@ -497,30 +497,34 @@ engine build script, so Morph, Bragi and other apps reuse them. Until then the c
 `ymirctl setup` on an arm64 Mac proposes the same catalog models, served by `mlx_lm.server` from
 MLX-format weights (`ymir_core::mlx::WEIGHTS`: each catalog chat model mapped to an
 `mlx-community` 4-bit repo, MXFP4 for gpt-oss, pinned to a commit). `setup --download` installs
-`mlx-lm` (pinned, 0.32.2) into `<home>/engines/mlx` with `uv` when present (it brings its own
-Python), else `python3 -m venv`, and downloads the weights to `<models_dir>/mlx/<name>`, asking
-first for each, so loads need no network. MLX-LM's server is text-only and has no embeddings
-endpoint, so models that take images (Gemma 4, with their projector) and the embedding model stay
-on llama.cpp; config validation rejects `mlx` with `role = "embedding"`, and `ymir-engine` answers
-400 to image or audio parts sent to an MLX model. (`mlx-vlm` would serve images on MLX; not
+`mlx-lm` into `<home>/engines/mlx` with `weirdnet_backends::mlx::install` (the version
+`weirdnet-backends` pins, 0.32.2 in 0.1.3; `uv` when present, else `python3 -m venv`), and
+downloads the weights to `<models_dir>/mlx/<name>`, asking first for each, so loads need no
+network. MLX-LM's server is text-only and has no embeddings endpoint
+(`EngineKind::Mlx.capabilities()` is chat only), so models that take images (Gemma 4, with their
+projector) and the embedding model stay on llama.cpp: setup decides from those capabilities,
+config validation rejects `mlx` with `role = "embedding"`, and the supervisor answers 400 to image
+or audio parts sent to an MLX model. (`mlx-vlm` would serve images on MLX; not
 adopted yet.) `mlx = "managed" | "system:PATH" | "off"` in `[model]`.
 
-**How MLX runs: `ymir-engine`.** `weirdnet-backends` keys engines by kind, one program per kind,
-and has adapters for llama.cpp and vLLM only. Rather than edit it, Ymir ships a small binary,
-`ymir-engine` (`ymir_core::shim`), next to `ymird`. When a node has an `mlx` model, the
-llama.cpp-kind program becomes `ymir-engine`, with the real engines passed as extra arguments. It
-reads the model source: a GGUF path execs `llama-server` with the arguments unchanged; `mlx:<dir>`
-starts `mlx_lm.server` on a private loopback port behind a proxy that speaks `llama-server`'s
-interface to the supervisor and `ymird`: `/health` turns 200 only after the model has produced a
-token (MLX-LM answers `/health` before its weights are in), `/v1/models` lists the alias,
-`LLAMA_API_KEY` is checked as the bearer token, the request's `model` is rewritten to MLX-LM's
-`default_model`, and responses stream through. The engine is still its own process tree, so a
-crash stays out of `ymird`, and restart and failover work as before. Tests:
-`ymir-testkit/tests/engine_shim.rs` (a llama.cpp and an MLX model on one node, mock engines) and
-unit tests in `shim`, `mlx` and `setup`; the macOS workflow runs a setup dry run on Apple Silicon
-(expects MLX) and Intel (expects llama.cpp), and an Apple Silicon job that installs mlx-lm,
-downloads SmolLM2 135M's MLX weights and chats with it (reported but not required, as hosted
-runners may not expose Metal).
+**How MLX runs: `EngineKind::Mlx`.** Since `weirdnet-backends` 0.1.3 MLX-LM is an engine kind
+of its own. When a node has an `mlx` model, `NodeConfig::engines` adds `EngineConfig::mlx` with the
+resolved `mlx_lm.server`, and the model launches as `EngineKind::Mlx` with its weights directory as
+the source. The supervisor starts `mlx_lm.server --model <dir> --max-tokens <context>` on a
+private loopback port behind its own proxy: readiness only after the model has produced a token
+(MLX-LM answers `/health` before its weights are in), the API key checked as the bearer token,
+the request's `model` rewritten to `default_model`, media parts and embeddings refused, responses
+streamed through. The engine is still its own process tree, so a crash stays out of `ymird`, and
+restart and failover work as before. Each model's capabilities (chat, embeddings, images, audio)
+come from the supervisor (`ModelStatus::capabilities`: a llama.cpp model with a projector takes
+images and audio, an MLX model text only); `ymird` uses them to tell embedding models from chat
+ones, falling back to the older `embedding` flag for nodes that don't report them, and `ymirctl
+status` shows what each model takes. (Until 0.1.3 Ymir shipped its own `ymir-engine` wrapper for
+this; it is gone.) Tests: `ymir-testkit/tests/mlx.rs` (a llama.cpp and an MLX model on one node,
+mock engines, capabilities) and unit tests in `mlx` and `setup`; the macOS workflow runs a setup
+dry run on Apple Silicon (expects MLX) and Intel (expects llama.cpp), and an Apple Silicon job
+that installs mlx-lm, downloads SmolLM2 135M's MLX weights and chats with it (reported but not
+required, as hosted runners may not expose Metal).
 
 **mistral.rs was tried and dropped.** Measured on a GPU node against llama.cpp with the same GGUF and
 projector (8k context, one sequence, ~1,450-token prompt, 256 tokens out): Gemma 4 E4B decoded at
@@ -559,26 +563,19 @@ So llama.cpp with projectors covers everything mistral.rs did here and more. mis
 content parts (`video_url`, `audio_url`, `file`) have no llama.cpp counterpart; nothing in Ymir
 sends them.
 
-**Gap: the pool does not carry images yet.** `weirdnet-openai` turns away chat content parts other
-than text (400, "content parts of type `image_url` are not supported"), and `weirdnet-agent`'s
-`Message` and infer/2 carry text only. So an image sent to Ymir's bridge (Jan, Bragi, scripts) is
-refused before it reaches any engine, whichever engine it is. The engines are ready
-(`tests/vision.rs` checks that the engine `ymird` starts takes images, and pins the bridge's
-refusal so it flips when Weirdnet changes). The fix belongs in Weirdnet (proposal below).
-
-**Proposal for `weirdnet-backends` / `weirdnet-agent` / `weirdnet-openai` (Weirdnet lead):**
-
-1. MLX engine kind. Add `EngineKind::Mlx` to `weirdnet-backends` with an adapter: launch
-   `mlx_lm.server --model <dir> --host 127.0.0.1 --port <p> --max-tokens <context>`, readiness
-   only after a one-token completion (its `/health` is 200 before the weights load), requests'
-   `model` set to `default_model`, an API-key check in front (MLX-LM has none), and a pinned
-   `mlx-lm` installed in a uv venv (as vLLM is today). Ymir's `ymir-engine` and `ymir_core::mlx`
-   are the working reference; with this, `ymir-engine` goes away.
-2. Content parts. `weirdnet-agent` `Message` content as text or parts (text, `image_url` with a
-   data URL, `input_audio`), carried by infer/2, `weirdnet-openai` passing parts through instead of
-   refusing them, and the llama.cpp adapter forwarding them to `llama-server` unchanged. Routing
-   should know which models take images (a `vision` capability in the model list), so a request
-   with an image never lands on a text-only model or an MLX one.
+**Images and audio through the pool.** With `weirdnet-agent` 0.5 a message's content is text or
+parts (text, `image_url` with a data URL, `input_audio`), infer/2 carries them, `weirdnet-openai`
+0.2 passes them through the bridge instead of refusing them, and `weirdnet-backends` 0.2 forwards
+them to `llama-server` unchanged. Routing goes by capability: each model's `Capabilities` (from its
+node's record) say what it reads, the catalog/1 entry lists them (`CatalogModel::with_inputs`, the
+union over the nodes that have the model), and the coordinator sends a request with images or audio
+only to a node whose copy of the model takes them. With no model named it uses the main model if
+that takes them, else the best chat model in the pool that does (`Catalog::route`); a named model
+that no node reads them with is a 400 ("does not take images"). A node whose record has no
+capabilities (before `weirdnet-backends` 0.1.3) counts as text only. Answers to requests with media
+are not cached. `tests/vision.rs` checks the bridge end to end (images reach the model with a
+projector, one without is refused) and `tests/nodes.rs` the routing. Remote `https://` image URLs
+are not fetched; data URLs only.
 
 ### Model sizing
 

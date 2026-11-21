@@ -66,7 +66,8 @@ ymirctl setup --name server-a --model /srv/models/gemma.gguf --port 8585 --roles
 
 <h3 id="status"><code>ymirctl status</code></h3>
 <p>Shows the running node: its name and version, roles, the bridge address, the main model, each model's state (loading,
-ready, failed), the model nodes, alerts, and whether it is on Weirdnet. <code>--json</code> prints the full report.</p>
+ready, failed) and what it takes (images, audio), the model nodes, alerts, and whether it is on Weirdnet.
+<code>--json</code> prints the full report.</p>
 <pre><code>ymirctl status
 ymirctl status --json | jq .models</code></pre>
 

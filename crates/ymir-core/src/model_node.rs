@@ -21,6 +21,18 @@ pub type Embedded = (Vec<Vec<f32>>, u64);
 /// What an inference node asks of a model node. [`LocalModelNode`] answers in process;
 /// [`crate::remote::RemoteModelNode`] speaks `/weirdnet-backends/node/1` (capability records,
 /// `Load`, `Unload`) and raw `/weirdnet-agent/infer/2` to a model node on another device.
+/// Whether a model only embeds: from its capabilities when the node reports them
+/// (`weirdnet-backends` 0.1.3 and later), else from the older `embedding` flag.
+pub fn embeds(s: &ModelStatus) -> bool {
+    s.capabilities.map_or(s.embedding, |c| c.embeddings && !c.chat)
+}
+
+/// The inputs beyond text a model takes, from its capabilities when the node reports them
+/// (`weirdnet-backends` 0.1.3 and later); a node that doesn't is taken to read text only.
+pub fn inputs_of(s: &ModelStatus) -> weirdnet_agent::Modalities {
+    s.capabilities.map_or(weirdnet_agent::Modalities::TEXT, |c| c.inputs())
+}
+
 pub trait ModelNode: Send + Sync {
     fn name(&self) -> &str;
     /// The node's models and their states (its capability record).
@@ -113,16 +125,12 @@ impl LocalModelNode {
     /// A clear message for the common setup mistake: the GGUF isn't there.
     fn check_file(&self, model: &str) -> Result<(), RemoteError> {
         match self.sources.iter().find(|(id, ..)| id == model) {
-            Some((_, EngineKind::Llamacpp, src, false)) => match crate::shim::Backend::of(src) {
-                (crate::shim::Backend::Mlx, dir) if Path::new(dir).is_absolute() && !Path::new(dir).is_dir() => Err(unavailable(format!(
-                    "{model}: MLX weights {dir} are missing (download them with `ymirctl setup --download`, or set `file` in node.toml)"
-                ))),
-                (crate::shim::Backend::Mlx, _) => Ok(()),
-                (_, f) if !Path::new(f).is_file() => Err(unavailable(format!(
-                    "{model}: model file {f} is missing (download it with `ymirctl setup --download`, or set `file` in node.toml)"
-                ))),
-                _ => Ok(()),
-            },
+            Some((_, EngineKind::Mlx, dir, false)) if Path::new(dir).is_absolute() && !Path::new(dir).is_dir() => Err(unavailable(format!(
+                "{model}: MLX weights {dir} are missing (download them with `ymirctl setup --download`, or set `file` in node.toml)"
+            ))),
+            Some((_, EngineKind::Llamacpp, f, false)) if !Path::new(f).is_file() => Err(unavailable(format!(
+                "{model}: model file {f} is missing (download it with `ymirctl setup --download`, or set `file` in node.toml)"
+            ))),
             _ => Ok(()),
         }
     }
