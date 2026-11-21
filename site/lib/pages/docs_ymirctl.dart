@@ -129,8 +129,8 @@ restart (<code>--load</code> loads it too). That is in memory only: <code>node.t
 that machine. Set <code>[model] remote_manage = false</code> in a node's <code>node.toml</code> to turn this off there.</p>
 <pre><code>ymirctl models search qwen3 8b --node all
 ymirctl models pull Qwen/Qwen3-8B-GGUF --node auto --serve
-ymirctl models list --node m1
-ymirctl models remove qwen3-8b-q4_k_m --node m1 --yes</code></pre>
+ymirctl models list --node gpu-box
+ymirctl models remove qwen3-8b-q4_k_m --node gpu-box --yes</code></pre>
 <h3 id="load"><code>ymirctl load MODEL [--node NODE]</code></h3>
 <p>Loads a model on a model node. <code>--node</code> picks the node by name (see <code>ymirctl nodes</code>).</p>
 <pre><code>ymirctl load gemma4-e4b
