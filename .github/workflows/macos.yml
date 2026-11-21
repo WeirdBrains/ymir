@@ -46,9 +46,11 @@ jobs:
           out=$(ctl setup --dry-run --name ci)
           echo "$out"
           if [ "${{ matrix.backend }}" = mlx ]; then
-            echo "$out" | grep -q 'backend = "mlx"'
+            # MLX is the backend (the MLX-LM line is only printed for it). A 6 GiB budget picks the Gemma
+            # models, which take images, and MLX-LM's server is text-only, so they and the embedding
+            # model stay on llama.cpp (the unit tests cover the text-only models on MLX).
             echo "$out" | grep -q 'MLX-LM: not installed'
-            # The embedding model stays on llama.cpp.
+            echo "$out" | grep -q 'gemma-4-e4b \[main\] llamacpp'
             echo "$out" | grep -q 'embedding\] llamacpp'
             if ctl setup --dry-run --backend llamacpp | grep -q 'backend = "mlx"'; then echo "--backend llamacpp still used MLX"; exit 1; fi
           else
