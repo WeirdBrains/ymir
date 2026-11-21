@@ -655,6 +655,30 @@ Ymir's process manager has two halves, because models swap across nodes in the c
 
 On a single box both halves run in the same `ymird`.
 
+### MCP server (`ymirctl mcp`)
+
+`ymirctl mcp` serves the node to MCP clients. Code: `crates/ymirctl/src/mcp.rs` (tool table and tools) and
+`mcp/rpc.rs` (protocol front end). JSON-RPC, the tool table, annotations and argument handling come from the published
+`weirdnet-mcp` crate (default features, so no second `weirdnet-agent`). It is stateless and offers tools only.
+
+- **Transports.** stdio (one JSON message per line; requests run concurrently), or `--http [ADDR]`: `POST /mcp`, JSON replies,
+  loopback addresses only, `Authorization: Bearer <bridge token>` (compared in constant time), `Host` and `Origin` limited to
+  this machine, no GET stream (405). The `ymird`-hosted variant is not built; the control socket and bridge are the only
+  backends, so the client side adds nothing a local `ymirctl` could not do.
+- **Tools.** Read: `ymir_status`, `ymir_nodes`, `ymir_devices`, `ymir_models`, `ymir_chat`, `ymir_complete`, `ymir_embed`,
+  `ymir_service_status`, `ymir_models_search`, `ymir_models_local`. Mutating: `ymir_load_model`, `ymir_unload_model`,
+  `ymir_pull_model`, and (only with `--allow-remove`) `ymir_remove_model`. `--read-only` hides all four.
+- **Safety.** Mutating tools say `MUTATES THE POOL` (or `DELETES FILES`) in their description, carry `readOnlyHint: false`
+  (`destructiveHint: true` for unload and remove) and refuse unless the arguments hold `confirm: true` (a string `"true"` does
+  not count). Pull and remove without it return a preview. Nothing edits `node.toml` (`--register` is not exposed). Media files
+  for chat are accepted by extension only, checked before they are read, within 5 MB (image) and 10 MB (audio).
+- **Chat.** `prompt` plus `images` and `audio` build OpenAI content parts (`image_url` data URL, `input_audio`); `messages` takes
+  parts as they are. The pool refuses media for a model that does not take it. `route: weirdnet` sends text only, through the
+  node's synced conversations.
+- **Gaps in `weirdnet-mcp` 0.5.3** worked around in `mcp/rpc.rs`: tools are synchronous (each call runs on a blocking thread);
+  parameters are flat scalars and string lists (richer schemas are patched into `tools/list`); no stdio server loop or HTTP
+  route (both here); no resources or prompts; tool results are text plus `structuredContent` only (no image content).
+
 ## Growing the pool
 
 ### Joining: your own devices only
