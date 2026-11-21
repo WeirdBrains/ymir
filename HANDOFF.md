@@ -36,3 +36,18 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** the status sections in [DESIGN.md](docs/DESIGN.md) still use "partly" and "with gaps" in a few headings.
 
 **What's next:** M6, M7 and M9 work, then wiring up M10 once its Weirdnet crates are verified.
+
+## 2026-11-21: Pool nodes upgraded to main b7e8ade
+
+**What changed**
+
+- The two aarch64 GPU nodes of the pool now run `ymird` and `ymirctl` built from main at `b7e8ade` (`cargo zigbuild --release --locked`, glibc 2.39). They ran the earlier `99fb30f` build before. Each node was upgraded in turn: old binaries kept as `*.0.1.0.bak` next to the new ones, only the `ymird` service restarted, no change to `node.toml`, the node identity, the unit files or the reverse proxy.
+- Both binaries still report `0.1.0`; tell builds apart by SHA-256 (`ymird` `d35eeb77…`, `ymirctl` `b48f20d0…`).
+
+**Checks run:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on main before building. After each upgrade: service active, no warnings in the log. On the main node: `ymirctl nodes` lists all three nodes, `ymirctl pool addresses` works, the bridge `/v1/models` returns 200, one completion served locally and one served by the third node (`qwen3-14b`).
+
+**Not tested:** no rollback was needed, so the `*.bak` restore path was not exercised.
+
+**What's left:** `ymird --version` should carry the commit so builds are identifiable without hashing.
+
+**What's next:** the same upgrade for any new node; then the Weirdnet 0.5 work.
