@@ -2,6 +2,31 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-21: `ymirctl models search | pull | list | remove`, part 1 (LF-30 M1, branch only)
+
+**What changed**
+
+- New `ymirctl models` subcommands, local to the node they run on (plain `ymirctl models` still lists the pool's models):
+  - `search QUERY...`: Hub search for GGUF (and MLX on Apple Silicon, or `--format all`), downloads, likes, and a fit verdict for this node. The verdict sizes the best quant as weights + KV cache at the context (default 32768, capped at the trained length, `--context`) + 0.5 GiB overhead against GPU memory or the unified budget: `fits`, `partial` (spills to RAM) or `too big`. The KV figure comes from the GGUF header (a range request, stopped before the tokenizer), or is estimated when that fails, and the output says so.
+  - `pull REPO [--quant Q] [--file F] [--context N] [--id ID] [--role R] [--register] [--dry-run] [--force] [--dir D]`: picks the highest-quality quant that fits (full precision only as a last resort), downloads every shard of a split GGUF, resumes `.part` files, verifies SHA-256 and size, and checks free disk space first. MLX repos download as a folder under `mlx/`. It prints a `[[model.local]]` entry in the shape `setup` writes; `node.toml` is only touched with `--register`, which appends the entry (a copy is kept as `node.toml.bak`, a duplicate id or an unparsable result writes nothing).
+  - `list`: GGUF files (shards as one entry), MLX folders and unfinished downloads, and whether `node.toml` uses each.
+  - `remove ID`: asks first (`--yes` skips), deletes files only, warns if the model is still registered, and never follows symlinks.
+- The Hub token is read on the node only (`HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `YMIR_HF_TOKEN_FILE`, `state/hf-token`, then Hugging Face's own token file), sent only to the Hub host, prints as `<redacted>` and is never put in an error.
+- The code is in `crates/ymirctl/src/models/` (`hub.rs` Hub client and downloader, `gguf.rs` header reader, `plan.rs` quants, fit and stanza, `local.rs` disk and `node.toml`) so it can be swapped for `weirdnet-model` later. `ymirctl` gained direct `ureq`, `sha2`, `toml`, `serde`, `libc` and `dirs` dependencies (all already in the lock file); no `weirdnet-*` crate was touched and `weirdnet-model` stays on 0.4.3.
+- Docs: the ymirctl guide page, [DESIGN.md](docs/DESIGN.md) ("Searching and pulling models") and the changelog.
+
+**Checks run:** `cargo fmt --check`, `cargo build`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` all pass. New unit tests use a mocked Hub (a local socket server with `Range` support): search parsing and encoding, token only as a header, gated, rate-limit and missing-repo errors, header reading, download, resume after a cut connection, checksum mismatch, quant grouping and choice, split GGUFs, `--register`, `list` and `remove`. One real pull of a small GGUF (about 400 MB) into a throwaway directory on the dev box: downloaded, checksum verified, listed, removed.
+
+**Not tested:** gated repos with a real token; multi-GB and split GGUF downloads against the real Hub (split handling is covered by the mock); MLX pulls on Apple Silicon; Windows free-space check (it reports "unknown" there); the fit verdict on a multi-GPU node.
+
+**What's left (M2, M3)**
+
+- M2: pull onto another pool node (a node/1 download request, so a pool node can fetch for a peer), and a pool-wide search that shows the verdict per node.
+- M3: swap to `weirdnet-model` once `weirdnet-model` has hub search, a quant chooser, token support, remove, split GGUF and a KV-aware fit; vision projector (`mmproj`) download alongside a model; skipping non-chat repos (ASR, embedding) in search; `--json` output.
+- `ymird --version` still reports 0.1.0 for every build.
+
+**What's next:** LF-16, then the rest of the image and audio work.
+
 ## 2026-11-21: Weirdnet 0.5 crates, images and audio through the pool, MLX on `weirdnet-backends` 0.2 (LF-18, branch only)
 
 **What changed**

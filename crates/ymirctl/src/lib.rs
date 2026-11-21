@@ -4,6 +4,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+pub mod models;
 pub mod pool;
 
 use anyhow::{Context, Result, bail};
@@ -72,8 +73,11 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// List the pool's models (the merged catalog).
-    Models,
+    /// List the pool's models (the merged catalog), or search, download and remove model files on this node.
+    Models {
+        #[command(subcommand)]
+        cmd: Option<models::ModelsCmd>,
+    },
     /// Load a model on a model node.
     Load {
         model: String,
@@ -314,7 +318,8 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Hw { json } => hw(out, json),
         Cmd::Setup(args) => setup_cmd(&paths, args, out, input).await,
         Cmd::Status { json } => status(&paths, out, json).await,
-        Cmd::Models => models(&paths, out).await,
+        Cmd::Models { cmd: None } => models(&paths, out).await,
+        Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd),
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
         Cmd::Service { cmd } => service_cmd(cli_home.as_deref(), paths, out, cmd).await,
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),

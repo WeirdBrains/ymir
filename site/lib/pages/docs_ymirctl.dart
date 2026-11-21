@@ -76,6 +76,36 @@ ymirctl status --json | jq .models</code></pre>
 <p>Lists the pool's models (the merged catalog of every model node): id, purpose, and whether it is ready, busy, loading or
 only on disk. Use these ids with every other command and in apps like Jan.</p>
 <pre><code>ymirctl models</code></pre>
+<h3 id="models-search"><code>ymirctl models search QUERY...</code></h3>
+<p>Searches the Hugging Face Hub for GGUF models (and MLX models on Apple Silicon, or with <code>--format all</code>), most
+downloaded first. For each repo it shows the best quant for <em>this</em> node and whether it fits: the file size plus the KV
+cache at the context length (default 32768, or less if the model was trained for less; change it with <code>--context</code>)
+plus about 0.5 GiB of overhead, against this node's GPU or unified memory. A verdict is <em>fits</em>, <em>partial</em> (only
+by spilling layers to RAM, which is slower) or <em>too big</em>. <code>--limit N</code> sets how many repos to show.</p>
+<pre><code>ymirctl models search qwen3 8b
+ymirctl models search --format all --limit 3 gemma</code></pre>
+<h3 id="models-pull"><code>ymirctl models pull REPO</code></h3>
+<p>Downloads a model into this node's model directory (<code>models_dir</code> in <code>node.toml</code>, else the shared
+Weirdnet models folder; <code>--dir</code> overrides it). It takes the best quant that fits, or the one you name with
+<code>--quant Q4_K_M</code> or <code>--file NAME.gguf</code>. Split GGUFs download every shard. Downloads resume if
+interrupted (run the same command again) and are checked against the Hub's SHA-256 before they are renamed into place.
+<code>--dry-run</code> shows the plan and downloads nothing; <code>--force</code> takes the smallest quant even if none fits.</p>
+<p>When it finishes it prints a ready <code>[[model.local]]</code> entry. <code>node.toml</code> is <strong>not</strong>
+changed unless you add <code>--register</code>, which appends the entry (keeping a copy as <code>node.toml.bak</code>). Restart
+<code>ymird</code> afterwards to load it. <code>--id</code>, <code>--role</code> and <code>--context</code> shape the entry; the
+role defaults to <code>main</code> only when the node has no main model yet.</p>
+<p>Gated repos need a token. Ymir reads it on this node only, from <code>HF_TOKEN</code>, <code>HUGGING_FACE_HUB_TOKEN</code>, the
+file named by <code>YMIR_HF_TOKEN_FILE</code>, <code>state/hf-token</code> in the Ymir home, or Hugging Face's own
+<code>~/.cache/huggingface/token</code>. It is only sent to the Hub, and never printed or logged.</p>
+<pre><code>ymirctl models pull Qwen/Qwen3-8B-GGUF
+ymirctl models pull bartowski/Qwen3-8B-GGUF --quant Q5_K_M --register</code></pre>
+<h3 id="models-list"><code>ymirctl models list</code></h3>
+<p>Lists the model files on this node (GGUF, split GGUF as one entry, MLX folders and unfinished downloads) and whether a
+<code>[[model.local]]</code> in <code>node.toml</code> uses each.</p>
+<h3 id="models-remove"><code>ymirctl models remove ID</code></h3>
+<p>Deletes a downloaded model's files after asking (<code>--yes</code> skips the question). It never edits
+<code>node.toml</code>; if the model is registered, remove its entry yourself.</p>
+<p>These commands act on the node they run on. To put a model on another node, run them there.</p>
 <h3 id="load"><code>ymirctl load MODEL [--node NODE]</code></h3>
 <p>Loads a model on a model node. <code>--node</code> picks the node by name (see <code>ymirctl nodes</code>).</p>
 <pre><code>ymirctl load gemma4-e4b

@@ -589,6 +589,20 @@ the usable budget (default 85% of VRAM, or of unified memory after the OS reserv
 
 The operator can change any of them.
 
+### Searching and pulling models (`ymirctl models`)
+
+Beyond the catalog, `ymirctl models search` queries the Hugging Face Hub for GGUF (and MLX) repos
+and gives a per-repo fit verdict for the node it runs on: file size, plus KV cache at the context
+length (read from the GGUF header with a range request, or estimated when that fails), plus about
+0.5 GiB of overhead, against GPU memory or the unified budget. `pull` takes the best quant that
+fits (highest quality, full precision only as a last resort), handles split GGUFs, resumes,
+verifies SHA-256, and reads an optional Hub token from the node's own environment or files. It
+prints the `[[model.local]]` entry; `--register` appends it to `node.toml`, otherwise the file is
+never touched. `list` shows what is on disk and whether it is registered; `remove` deletes files
+only. These commands are local to one node. The Hub client, header reader and quant chooser are in
+`crates/ymirctl/src/models/` as interim code until `weirdnet-model` has them. Pulling to other
+pool nodes and a pool-wide search are later steps.
+
 ### Process manager (replaces llama-swap)
 
 Ymir's process manager has two halves, because models swap across nodes in the cloud:

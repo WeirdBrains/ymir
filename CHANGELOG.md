@@ -21,3 +21,4 @@ All notable changes to Ymir are listed here. The format follows
 - Linux tar.gz, zip, deb and pkg.tar.zst packages, a TAUR recipe and a Nix flake.
 - llama.cpp bundled in every release file, used by `ymirctl setup` by default: `ymir` (CPU and Vulkan) and `ymir-cuda` (CUDA 13 with its runtime).
 - rpm packages, a release workflow for Linux, macOS and Windows, and a smoke test that runs a real model from an unpacked archive.
+- `ymirctl models search`, `pull`, `list` and `remove`: find a model on Hugging Face with a fit verdict for this node, download it (resumable, checksum-verified, split GGUFs, optional token), and print or register its `[[model.local]]` entry.
