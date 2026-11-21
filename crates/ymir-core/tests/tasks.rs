@@ -48,11 +48,12 @@ impl ModelNode for Reader {
             let mut ev = Vec::new();
             match msgs.last() {
                 Some(m) if m.role == Role::Tool => {
-                    let said: Vec<&str> = m.content.lines().filter(|l| !l.starts_with('<') && !l.starts_with('[')).collect();
+                    let body = m.text();
+                    let said: Vec<&str> = body.lines().filter(|l| !l.starts_with('<') && !l.starts_with('[')).collect();
                     ev.push(Chunk::Text(format!("The file says: {}", said.join(" "))));
                 }
                 _ if req.tools.iter().any(|t| t.name == "files.read") => {
-                    let path = msgs.iter().rev().find(|m| m.role == Role::User).map(|m| m.content.clone()).unwrap_or_default();
+                    let path = msgs.iter().rev().find(|m| m.role == Role::User).map(|m| m.text().into_owned()).unwrap_or_default();
                     ev.push(Chunk::Text("Reading. ".into()));
                     ev.push(Chunk::ToolCall {
                         index: 0,

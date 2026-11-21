@@ -218,8 +218,9 @@ NVIDIA GPUs).</li>
 set per model in <code>node.toml</code>.</p>
 <p><strong>Can models read images?</strong> The engines can: catalog models that take images (Gemma 4) come with their
 vision projector, which <code>ymirctl setup --download</code> fetches and <code>ymird</code> hands to llama.cpp. But
-Ymir's bridge and the pool carry text, so Jan, Bragi and other clients can't send images through Ymir;
-support for images is planned with a change in Weirdnet. Models on MLX take text only.</p>
+Ymir's bridge and the pool carry images and audio as content parts, so Jan, Bragi and other clients can send them
+to models that accept them; requests go only to nodes that do. Models on MLX take text only. <code>ymirctl status</code>
+shows which models take images or audio.</p>
 <p><strong>What happens when a model crashes?</strong> Each model runs in its own engine process. If one dies,
 <code>ymird</code> keeps running and starts the model again (a request it had not started answering is retried once);
 a model that keeps crashing is marked failed instead of being restarted forever. With more than one model node, the inference

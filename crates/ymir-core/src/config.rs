@@ -484,7 +484,7 @@ impl NodeConfig {
             {
                 bail!("model `{}`: unknown backend `{b}` (llamacpp, mlx or vllm)", m.id);
             }
-            if m.backend.as_deref() == Some("mlx") && m.is_embedding() {
+            if m.backend.as_deref() == Some("mlx") && m.is_embedding() && !EngineKind::Mlx.capabilities().embeddings {
                 bail!("model `{}`: MLX-LM's server has no embeddings endpoint; use backend = \"llamacpp\" for embedding models", m.id);
             }
             if let Some(t) = &m.idle_ttl {
@@ -579,33 +579,17 @@ impl NodeConfig {
         self.model.models_dir.clone().unwrap_or_else(|| weirdnet_model::ModelStore::from_env().dir().to_path_buf())
     }
 
-    /// The engines this node can run, from `llamacpp`, `mlx` and `vllm`.
-    ///
-    /// llama.cpp and MLX-LM both run as the supervisor's llama.cpp kind: when a model uses MLX-LM,
-    /// the program is `ymir-engine` (see [`crate::shim`]), which runs `llama-server` for GGUF
-    /// sources and MLX-LM for `mlx:` sources.
+    /// The engines this node can run, from `llamacpp`, `mlx` and `vllm`. MLX-LM is configured
+    /// only when a model uses it (it runs on Apple Silicon only).
     pub fn engines(&self, paths: &Paths) -> Vec<EngineConfig> {
         let mut out = Vec::new();
-        let llama = resolve_engine(&self.model.llamacpp, "llama-server", &paths.engines().join("llama.cpp").join("llama-server"));
-        let uses = |b: &str| self.model.local.iter().any(|m| m.backend.as_deref() == Some(b));
-        let mlx = uses("mlx").then(|| crate::mlx::resolve(&self.model.mlx, &paths.engines())).flatten();
-        match crate::shim::locate().filter(|_| uses("mlx")) {
-            Some(shim) => {
-                let mut e = EngineConfig::llamacpp(shim);
-                for (flag, p) in [(crate::shim::LLAMA_FLAG, &llama), (crate::shim::MLX_FLAG, &mlx)] {
-                    if let Some(p) = p {
-                        e.extra_args.extend([flag.to_string(), p.to_string_lossy().into_owned()]);
-                    }
-                }
-                out.push(e);
-            }
-            None => {
-                if uses("mlx") {
-                    tracing::warn!("models use mlx but {} is not installed next to ymird; they will fail to load", crate::shim::PROGRAM);
-                }
-                if let Some(p) = llama {
-                    out.push(EngineConfig::llamacpp(p));
-                }
+        if let Some(p) = resolve_engine(&self.model.llamacpp, "llama-server", &paths.engines().join("llama.cpp").join("llama-server")) {
+            out.push(EngineConfig::llamacpp(p));
+        }
+        if self.model.local.iter().any(|m| m.backend.as_deref() == Some("mlx")) {
+            match crate::mlx::resolve(&self.model.mlx, &paths.engines()) {
+                Some(p) => out.push(EngineConfig::mlx(p)),
+                None => tracing::warn!("models use mlx but MLX-LM is not installed (run `ymirctl setup --download`); they will fail to load"),
             }
         }
         if let Some(p) = resolve_engine(&self.model.vllm, "vllm", &paths.engines().join("vllm").join("bin").join("vllm")) {
@@ -657,9 +641,13 @@ impl NodeConfig {
             .iter()
             .map(|m| {
                 let backend = m.backend.as_deref().unwrap_or("llamacpp");
-                let engine = if backend == "vllm" { EngineKind::Vllm } else { EngineKind::Llamacpp };
+                let engine = match backend {
+                    "vllm" => EngineKind::Vllm,
+                    "mlx" => EngineKind::Mlx,
+                    _ => EngineKind::Llamacpp,
+                };
                 let source = match (&m.file, engine) {
-                    _ if backend == "mlx" => format!("{}{}", crate::shim::MLX, mlx_source(m, &dir)),
+                    (_, EngineKind::Mlx) => mlx_source(m, &dir),
                     (Some(f), EngineKind::Llamacpp) => {
                         let p = Path::new(f);
                         if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }.to_string_lossy().into_owned()

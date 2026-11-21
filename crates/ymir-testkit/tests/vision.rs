@@ -3,9 +3,8 @@
 //! or several; with the projector off it refuses them, as llama-server does. The mock engine
 //! stands in for llama-server (it counts images only when given an existing `--mmproj`).
 //!
-//! The pool path does not carry images yet: `weirdnet-openai` turns away non-text content parts and
-//! `weirdnet-agent` messages are text, so the bridge answers 400. That is pinned here so the test
-//! changes when Weirdnet carries content parts (proposed in docs/DESIGN.md).
+//! The pool carries images as content parts, so the bridge passes them through and only models
+//! that take them are sent them.
 
 use std::time::Duration;
 
@@ -103,8 +102,10 @@ async fn the_engine_ymird_starts_takes_images() -> Result<()> {
     Ok(())
 }
 
+/// Through the bridge and the pool: image parts reach the model that takes them, a model started
+/// without its projector is refused with a 400, and the catalog says which models take images.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_bridge_does_not_carry_images_yet() -> Result<()> {
+async fn the_bridge_carries_images_to_models_that_take_them() -> Result<()> {
     let (dir, models) = setup()?;
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home)?;
@@ -112,15 +113,30 @@ async fn the_bridge_does_not_carry_images_yet() -> Result<()> {
     let daemon = Daemon::start(config(&models), paths.clone()).await?;
     let port = daemon.bridge_addr.unwrap().port();
     let token = ymir_core::token::load(&paths)?.unwrap();
-    let r = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .bearer_auth(&token)
-        .json(&body("gemma-4-e4b", 1, false))
-        .send()
-        .await?;
-    let (status, text) = (r.status(), r.text().await?);
-    daemon.shutdown().await;
+    let post = |model: &'static str, images: usize| {
+        let (token, http) = (token.clone(), reqwest::Client::new());
+        async move {
+            let r = http
+                .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+                .bearer_auth(&token)
+                .json(&body(model, images, false))
+                .send()
+                .await?;
+            let status = r.status();
+            anyhow::Ok((status, r.text().await?))
+        }
+    };
+    let (status, text) = post("gemma-4-e4b", 1).await?;
+    assert!(status.is_success(), "{status} {text}");
+    assert!(text.contains("describe [1 image(s)]"), "{text}");
+    let (status, text) = post("gemma-4-e4b", 3).await?;
+    assert!(status.is_success() && text.contains("describe [3 image(s)]"), "{status} {text}");
+    let (status, text) = post("gemma-blind", 1).await?;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{text}");
-    assert!(text.contains("content parts of type `image_url` are not supported"), "{text}");
+    assert!(text.contains("does not take images"), "{text}");
+    let catalog = daemon.coordinator.as_ref().unwrap().agent_catalog();
+    let takes = |id: &str| catalog.iter().find(|m| m.id == id).map(|m| m.inputs.vision);
+    assert_eq!((takes("gemma-4-e4b"), takes("gemma-blind")), (Some(true), Some(false)));
+    daemon.shutdown().await;
     Ok(())
 }

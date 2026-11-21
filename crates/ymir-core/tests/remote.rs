@@ -49,7 +49,7 @@ impl ModelNode for FakeNode {
             let last = req
                 .inline_messages()
                 .and_then(|m| m.iter().rev().find(|m| m.role == weirdnet_agent::Role::User))
-                .map(|m| m.content.clone())
+                .map(|m| m.text().into_owned())
                 .unwrap_or_default();
             let mut ev = vec![Chunk::Text(format!("{} says: ", self.0)), Chunk::Text(last)];
             if !req.tools.is_empty() {

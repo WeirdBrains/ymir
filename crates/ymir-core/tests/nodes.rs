@@ -11,7 +11,7 @@ use serde_json::json;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::catalog::ModelState as AgentState;
 use weirdnet_agent::remote::infer::v2::{Prefix, Request, Usage};
-use weirdnet_agent::{CancelToken, Message, ToolCall};
+use weirdnet_agent::{CancelToken, ContentPart, Message, Modalities, ToolCall};
 use weirdnet_backends::{Chunk, ChunkStream, ModelState, ModelStatus};
 use weirdnet_semcache::NoCache;
 use ymir_core::coordinator::{Coordinator, Sink};
@@ -49,6 +49,8 @@ struct Scripted {
     load_fails: AtomicBool,
     /// Milliseconds a chat takes to start answering.
     delay_ms: AtomicUsize,
+    /// Whether its models take images and audio.
+    media: AtomicBool,
 }
 
 impl Scripted {
@@ -63,6 +65,7 @@ impl Scripted {
             loads: AtomicUsize::new(0),
             load_fails: AtomicBool::new(false),
             delay_ms: AtomicUsize::new(0),
+            media: AtomicBool::new(false),
         })
     }
     fn set(&self, m: Mode) {
@@ -83,7 +86,16 @@ impl ModelNode for Scripted {
         &self.name
     }
     fn status(&self) -> Vec<ModelStatus> {
-        self.models.iter().map(|(id, e, s)| status(id, *e, s.clone())).collect()
+        self.models
+            .iter()
+            .map(|(id, e, s)| {
+                let mut st = status(id, *e, s.clone());
+                if self.media.load(Ordering::SeqCst) {
+                    st.capabilities = Some(weirdnet_backends::Capabilities::text().with_vision(true).with_audio(true));
+                }
+                st
+            })
+            .collect()
     }
     fn load<'a>(&'a self, _model: &'a str, _force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
@@ -423,4 +435,47 @@ async fn replicas_share_a_burst_and_a_slow_one_gets_less() {
     }
     let got: Vec<usize> = nodes.iter().map(|n| n.chats.load(Ordering::SeqCst)).collect();
     assert!(got[0] < got[1] && got[0] < got[2], "the slow replica gets the least: {got:?}");
+}
+
+fn with_image() -> Request {
+    Request::messages(vec![Message::user(vec![ContentPart::text("what is this"), ContentPart::image("data:image/png;base64,AAAA")])])
+}
+
+#[tokio::test]
+async fn images_and_audio_go_only_to_nodes_that_take_them() {
+    // The same model name on two nodes, but only b's copy has a projector.
+    let a = Scripted::new("a", &[("alpha", false, READY)]);
+    let b = Scripted::new("b", &[("alpha", false, READY)]);
+    b.media.store(true, Ordering::SeqCst);
+    let c = coordinator(&[&a, &b]);
+
+    let alpha = c.merged_catalog().remove(0);
+    assert_eq!(alpha.inputs, Modalities::new(true, true), "the entry lists what some node takes");
+    assert_eq!(c.agent_catalog()[0].inputs, Modalities::new(true, true));
+
+    for _ in 0..8 {
+        let (r, text) = say(&c, with_image().with_model("alpha")).await;
+        r.unwrap();
+        assert_eq!(text, "b says alpha");
+    }
+    assert_eq!(a.chats.load(Ordering::SeqCst), 0, "a text-only node never saw an image");
+
+    // Text is not restricted: it may go to either node.
+    ask(&c, "alpha").await.unwrap();
+
+    // With no model named, the pool picks one that takes images, even if the main model doesn't.
+    let text_only = Scripted::new("t", &[("alpha", false, READY)]);
+    let vision = Scripted::new("v", &[("gemma", false, READY)]);
+    vision.media.store(true, Ordering::SeqCst);
+    let c = coordinator(&[&text_only, &vision]);
+    let (r, text) = say(&c, with_image()).await;
+    r.unwrap();
+    assert_eq!(text, "v says gemma");
+
+    // A model that no node reads media with is refused, not tried.
+    let c = coordinator(&[&text_only]);
+    let e = c.prepare(&with_image().with_model("alpha")).err().expect("refused");
+    assert!(matches!(&e, RemoteError::BadRequest { message } if message.contains("does not take images")), "{e:?}");
+    let e = c.prepare(&with_image()).err().expect("no model reads it");
+    assert!(matches!(e, RemoteError::BadRequest { .. }), "{e:?}");
 }

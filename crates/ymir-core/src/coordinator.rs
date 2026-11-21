@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt;
+use weirdnet_agent::Modalities;
 use weirdnet_agent::remote::RemoteError;
-use weirdnet_agent::remote::catalog::{CatalogModel as AgentModel, ModelState as AgentState, Purpose};
+use weirdnet_agent::remote::catalog::{Catalog as AgentCatalog, CatalogModel as AgentModel, ModelState as AgentState, Purpose};
 use weirdnet_agent::remote::infer::v2::{Finish, Prefix, Request, Usage};
 
 /// Counts a request in flight while it lives.
@@ -63,6 +64,8 @@ pub struct CatalogRow {
     /// The nodes (among `nodes`) that are draining: they finish what they have and take no more.
     pub draining: Vec<String>,
     pub embedding: bool,
+    /// The inputs beyond text that at least one node's copy takes (images, audio).
+    pub inputs: Modalities,
 }
 
 impl CatalogRow {
@@ -268,8 +271,10 @@ impl Coordinator {
                     id: s.id.clone(),
                     nodes: Vec::new(),
                     draining: Vec::new(),
-                    embedding: s.embedding,
+                    embedding: crate::model_node::embeds(&s),
+                    inputs: Modalities::TEXT,
                 });
+                row.inputs = row.inputs.union(crate::model_node::inputs_of(&s));
                 row.nodes.push((node.name().to_string(), s.state.clone()));
                 if node.draining() {
                     row.draining.push(node.name().to_string());
@@ -296,7 +301,7 @@ impl Coordinator {
                 };
                 let purpose = if m.embedding { Purpose::Embedding } else { Purpose::Chat };
                 let ready = states.iter().filter(|s| ***s == ModelState::Ready).count() as u32;
-                let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready);
+                let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready).with_inputs(m.inputs);
                 if !m.embedding {
                     c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
                 }
@@ -309,20 +314,32 @@ impl Coordinator {
     /// predicted completion time ([`Balancer`]); else the first node that has it (it gets
     /// loaded). `embedding` says which kind of model the caller wants. Draining nodes and the
     /// ones in `exclude` (already tried for this request) are skipped.
-    fn pick(&self, model: &str, embedding: bool, exclude: &HashSet<String>) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+    fn pick(
+        &self,
+        model: &str,
+        embedding: bool,
+        needed: Modalities,
+        exclude: &HashSet<String>,
+    ) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
         let mut ready: Vec<(Arc<dyn ModelNode>, ModelStatus)> = Vec::new();
         let mut fallback = None;
         let mut known = false;
         let mut draining = false;
+        let mut lacking = None;
         for node in self.nodes() {
             if let Some(s) = node.status().into_iter().find(|s| s.id == model) {
                 known = true;
-                if s.embedding != embedding {
-                    return Err(bad_request(if s.embedding {
+                if crate::model_node::embeds(&s) != embedding {
+                    return Err(bad_request(if crate::model_node::embeds(&s) {
                         format!("{model} is an embedding model; use /v1/embeddings")
                     } else {
                         format!("{model} is not an embedding model")
                     }));
+                }
+                // Images and audio go only to nodes whose copy of the model takes them.
+                if let Some(what) = crate::model_node::inputs_of(&s).lacking(needed) {
+                    lacking = Some(what);
+                    continue;
                 }
                 if node.draining() {
                     draining = true;
@@ -350,6 +367,13 @@ impl Coordinator {
         let best = self.balance.choose(model, &cands).map(|i| ready.swap_remove(i));
         match best.or(fallback) {
             Some(found) => Ok(found),
+            None if known && lacking.is_some() && exclude.is_empty() => Err(bad_request(format!(
+                "model `{model}` does not take {}; pick one whose catalog entry lists them",
+                lacking.unwrap_or("this input")
+            ))),
+            None if known && lacking.is_some() => {
+                Err(unavailable(format!("no other node that takes {} can answer with {model}", lacking.unwrap_or("this input"))))
+            }
             None if known && draining && exclude.is_empty() => Err(unavailable(format!("{model} is only on nodes that are draining"))),
             None if known => Err(unavailable(format!("no other node can answer with {model}"))),
             None => Err(unknown_model(model)),
@@ -399,7 +423,7 @@ impl Coordinator {
             Some(name) => self.node(name).ok_or_else(|| unavailable(format!("no model node `{name}`")))?,
             None => {
                 let embedding = self.is_embedding(model)?;
-                self.pick(model, embedding, &HashSet::new())?.0
+                self.pick(model, embedding, Modalities::TEXT, &HashSet::new())?.0
             }
         };
         n.load(model, force).await?;
@@ -407,7 +431,12 @@ impl Coordinator {
     }
 
     fn is_embedding(&self, model: &str) -> Result<bool, RemoteError> {
-        self.nodes().iter().flat_map(|n| n.status()).find(|s| s.id == model).map(|s| s.embedding).ok_or_else(|| unknown_model(model))
+        self.nodes()
+            .iter()
+            .flat_map(|n| n.status())
+            .find(|s| s.id == model)
+            .map(|s| crate::model_node::embeds(&s))
+            .ok_or_else(|| unknown_model(model))
     }
 
     /// Unloads `model` everywhere it is resident.
@@ -436,14 +465,30 @@ impl Coordinator {
         }
     }
 
+    /// The model for a request carrying images or audio. A named model stays as it is (a node that
+    /// can't read the media is refused in [`Self::pick`]); with none named, the main model if it
+    /// takes them, else the best chat model in the pool that does ([`AgentCatalog::route`]).
+    fn resolve_for(&self, model: Option<&str>, needed: Modalities) -> Result<String, RemoteError> {
+        let catalog = AgentCatalog::new(0, self.agent_catalog());
+        match model {
+            None | Some("default") | Some("ymir") => {
+                if let Some(main) = self.main.as_deref().filter(|m| catalog.find(m).is_some_and(|c| c.accepts(needed))) {
+                    return Ok(main.to_string());
+                }
+                catalog.route(None, needed)?.ok_or_else(|| bad_request("no model in this pool takes that input"))
+            }
+            Some(m) => Ok(m.to_string()),
+        }
+    }
+
     /// Picks the node for a chat without waiting: a ready one, or the stand-in (whose model then
     /// loads in the background), or a cold node (`true`: load it first).
-    fn choose(&self, model: &str, wait: bool) -> Result<(Target, bool), RemoteError> {
-        let (node, status) = self.pick(model, false, &HashSet::new())?;
+    fn choose(&self, model: &str, wait: bool, needed: Modalities) -> Result<(Target, bool), RemoteError> {
+        let (node, status) = self.pick(model, false, needed, &HashSet::new())?;
         if status.state == ModelState::Ready {
             return Ok((Target { node, model: model.into(), standin: None }, false));
         }
-        if !wait && let Some(t) = self.standin_for(model, &node, &status) {
+        if !wait && let Some(t) = self.standin_for(model, &node, &status, needed) {
             self.load_in_background(node, model.to_string());
             return Ok((t, false));
         }
@@ -453,22 +498,25 @@ impl Coordinator {
     /// Decides where a chat goes (see [`Prepared`]). `raw` requests skip the cache and the
     /// stand-in.
     pub fn prepare(&self, req: &Request) -> Result<Prepared, RemoteError> {
-        let model = self.resolve(req.model.as_deref())?;
+        let needed = req.needs();
+        let model = if needed.is_text() { self.resolve(req.model.as_deref())? } else { self.resolve_for(req.model.as_deref(), needed)? };
         // A request that continues a prefix is never answered from the cache, and waits for its
         // own model (a stand-in would continue another model's text).
         let continuing = req.assistant_prefix.is_some();
+        // Answers to images and audio are not cached: the key does not cover the media.
         if !req.raw
             && !continuing
+            && needed.is_text()
             && let Some(hit) = self.cache.get(&model, req)
         {
             return Ok(Prepared { model, standin: None, raw: false, route: Route::Cached(hit) });
         }
-        let (t, cold) = self.choose(&model, req.wait_for_model || req.raw || continuing)?;
+        let (t, cold) = self.choose(&model, req.wait_for_model || req.raw || continuing, needed)?;
         Ok(Prepared { model: t.model, standin: t.standin, raw: req.raw, route: Route::Node { node: t.node, cold } })
     }
 
     /// The stand-in, when policy allows it for this cold `model` on `node`.
-    fn standin_for(&self, model: &str, node: &Arc<dyn ModelNode>, status: &ModelStatus) -> Option<Target> {
+    fn standin_for(&self, model: &str, node: &Arc<dyn ModelNode>, status: &ModelStatus, needed: Modalities) -> Option<Target> {
         let standin = self.opts.standin.as_deref().filter(|s| *s != model)?;
         let estimate = Self::estimate_load(status);
         if estimate <= self.opts.standin_after {
@@ -478,7 +526,12 @@ impl Coordinator {
             let Some(s) = n.status().into_iter().find(|s| s.id == standin) else { continue };
             // Loading the model would unload a stand-in in its swap group on the same node.
             let evicted = Arc::ptr_eq(&n, node) && s.swap_group.is_some() && s.swap_group == status.swap_group;
-            if s.state == ModelState::Ready && !s.embedding && !evicted && !n.draining() {
+            if s.state == ModelState::Ready
+                && !crate::model_node::embeds(&s)
+                && crate::model_node::inputs_of(&s).covers(needed)
+                && !evicted
+                && !n.draining()
+            {
                 tracing::info!(model = %model, standin, estimate_secs = estimate.as_secs_f32(), "cold start: answering with the stand-in");
                 return Some(Target { node: n.clone(), model: standin.into(), standin: Some(standin.into()) });
             }
@@ -547,7 +600,7 @@ impl Coordinator {
                 }
             }
             tried.insert(node.name().to_string());
-            match self.pick(&p.model, false, &tried) {
+            match self.pick(&p.model, false, req.needs(), &tried) {
                 Ok((next, status)) => {
                     tracing::warn!(model = %p.model, from = node.name(), to = next.name(), resumed_after_chars = shown.chars().count(), "{err}; moving the request to another node");
                     cold = status.state != ModelState::Ready;
@@ -673,7 +726,7 @@ impl Coordinator {
         let mut tried: HashSet<String> = HashSet::new();
         let mut reloaded = false;
         loop {
-            let (node, status) = self.pick(model, true, &tried)?;
+            let (node, status) = self.pick(model, true, Modalities::TEXT, &tried)?;
             let attempt = async {
                 if status.state != ModelState::Ready {
                     tracing::info!(model = %model, node = node.name(), "cold start: loading");
@@ -690,7 +743,7 @@ impl Coordinator {
                 return Err(err);
             }
             tried.insert(node.name().to_string());
-            if self.pick(model, true, &tried).is_ok() {
+            if self.pick(model, true, Modalities::TEXT, &tried).is_ok() {
                 tracing::warn!(model = %model, node = node.name(), "{err}; trying another node");
             } else if !reloaded && matches!(err, RemoteError::Unavailable { .. }) {
                 tracing::warn!(model = %model, node = node.name(), "{err}; reloading once");
