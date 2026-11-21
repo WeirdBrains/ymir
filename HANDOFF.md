@@ -166,3 +166,17 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** `feature/mcp-v2` needs this merged in before it lands.
 
 **What's next:** merge the MCP server.
+
+## 2026-11-21: MCP server merged to main
+
+**What changed**
+
+- `feature/mcp-v2` (head `52c540f`) is merged into main with a merge commit: `ymirctl mcp` (stdio and loopback HTTP). Before the merge, main was merged into the branch and `mcp.rs` was adapted to the async `models::run` and the new `--node` args from model search. The branch is kept.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on the branch head, whose tree equals the merge result.
+
+**Not tested:** `ymir_models_search` and `ymir_pull_model` through MCP against the real Hub.
+
+**What's left:** `feature/pool-bench` conflicts with main in HANDOFF.md only.
+
+**What's next:** the pool bench merge.
