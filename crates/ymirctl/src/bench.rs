@@ -323,8 +323,6 @@ fn request_extra(max_tokens: u64) -> Map<String, Value> {
     m.insert("temperature".into(), Value::from(0.0));
     m.insert("max_tokens".into(), Value::from(max_tokens));
     m.insert("seed".into(), Value::from(seed()));
-    // Wait for the model instead of taking the stand-in's answer.
-    m.insert("wait_for_model".into(), Value::Bool(true));
     m
 }
 
@@ -439,7 +437,7 @@ impl Bench<'_> {
         let code_ok = !self.args.no_code_exec && python_available();
         for check in quality_suite() {
             run.requests += 1;
-            match self.ask(&run.id, check.prompt, 512, false).await {
+            match self.ask(&run.id, check.prompt, 2048, false).await {
                 Ok(r) => {
                     let node = r.served_by.clone().unwrap_or_else(|| "unknown".into());
                     run.quality.push((check.name, node, judge(&check, &r.text, code_ok)));

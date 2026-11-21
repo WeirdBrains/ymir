@@ -1880,6 +1880,17 @@ The pieces of workload spreading that need only published crates (`weirdnet-agen
 - **Batch fan-out** (`ymir-core::batch`, `ymirctl batch FILE`). One prompt per line, spread over the pool at
   batch priority with a concurrency cap, per-task retries under one job id (`Busy` included, so the fan-out
   slows to what the pool takes), results in prompt order.
+- **Pool benchmark** (`ymirctl bench`, `crates/ymirctl/src/bench.rs`). A client of the loopback bridge, so
+  every request takes the normal pool route. It lists the pool's models, then takes them one at a time
+  (a busy or loading model is re-checked, then skipped; a model that is not loaded is skipped unless
+  `--include-cold`). Per model: warm-up, then N repeats of three fixed prompts (short, a 200-word story,
+  a long prompt) with time to first token, decode tok/s, prompt tok/s and total latency as median and p90,
+  then eight deterministic checks at temperature 0 (arithmetic, JSON format, two Python functions run
+  with CPU, memory and time limits and no network where `unshare` allows, exact-match facts).
+  Every request has its own seed and nonce so neither the answer cache nor a prefix cache is hit. The bridge
+  cannot pin a node, so each request records the node that answered (`served_by`) and a model on several
+  nodes gets a row per node. Output is a timestamped `.json` and `.md`; nodes are labelled node-a, node-b
+  unless `--real-names`. Embedding models get a latency check instead.
 - **Several inference nodes active-active.** Each routes on its own; the app's pool already spreads and fails
   over between them (M4/M5).
 

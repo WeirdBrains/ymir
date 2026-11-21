@@ -82,6 +82,8 @@ impl BridgeClient {
             .http
             .post(format!("{}/chat/completions", self.base))
             .bearer_auth(&self.token)
+            // Wait for the model to load instead of taking a stand-in's answer.
+            .header("x-wait", "1")
             .json(&body)
             .send()
             .await
