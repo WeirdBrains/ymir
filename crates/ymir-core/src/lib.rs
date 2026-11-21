@@ -21,6 +21,7 @@ pub mod host;
 pub mod membership;
 pub mod mlx;
 pub mod model_node;
+pub mod models;
 pub mod paths;
 pub mod remote;
 pub mod service;

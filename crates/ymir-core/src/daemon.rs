@@ -150,6 +150,7 @@ impl Daemon {
             tasks.push(c.spawn_group_watch(std::time::Duration::from_secs(5)));
         }
         let mut serving: Vec<Box<dyn std::any::Any + Send + Sync>> = Vec::new();
+        let mut models_service = None;
 
         // Weirdnet: the roles reach the user's other devices.
         let network = Network::start(&cfg, &paths).await?;
@@ -220,6 +221,16 @@ impl Daemon {
                 }
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));
+                if cfg.model.remote_manage {
+                    // The owner's devices manage this node's model files (models/1); a pulled model is
+                    // added to the supervisor in memory. node.toml is never touched from here.
+                    let store = crate::models::store(cfg.models_dir(), &paths.state());
+                    let (server, svc) =
+                        remote::serve_models(&net.node, sup.clone(), &net.membership, store, budget, weirdnet_backends::EngineKind::Llamacpp)
+                            .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                    models_service = Some(svc);
+                }
                 tracing::info!(
                     "model role: serving the user's inference nodes on Weirdnet{}",
                     if coordinator.is_some() { " (alongside the inference role)" } else { "" }
@@ -309,6 +320,7 @@ impl Daemon {
             model_node,
             alerter,
             network: network.as_ref().map(|n| (n.membership.clone(), n.node.clone())),
+            models: network.as_ref().map(|n| Arc::new(remote::models_hub(&n.node, &n.membership, &n.hints, &ropts, &name, models_service))),
             context,
             pool: app_pool,
             exit: exit.clone(),

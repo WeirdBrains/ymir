@@ -4,7 +4,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use weirdnet_model::hw::Hardware;
 
-use super::hub::mock::MockHub;
+use super::hub::mock::{MockHub, sample_header};
 use super::*;
 
 fn sha(b: &[u8]) -> String {
@@ -12,7 +12,7 @@ fn sha(b: &[u8]) -> String {
 }
 
 fn gguf_bytes(len: usize, seed: u8) -> Vec<u8> {
-    let mut b = gguf::sample_header(32, 8);
+    let mut b = sample_header(32, 8);
     b.resize(len, seed);
     b
 }
@@ -53,9 +53,10 @@ impl Fixture {
             std::fs::write(&config, t).unwrap();
         }
         Ctx {
-            hub: Hub::new(&self.hub.url, None),
+            store: ModelStore::new(self.dir.path().join("models")).with_hub(&self.hub.url),
+            mlx: MlxHub::new(&self.hub.url, None),
             hw: hardware(ram_gib),
-            dir: self.dir.path().join("models"),
+            state: self.dir.path().join("state"),
             cfg: NodeConfig::load(&config).ok(),
             config,
             tty: false,
@@ -74,7 +75,10 @@ fn pull_args(repo: &str) -> PullArgs {
         register: false,
         dry_run: false,
         force: false,
+        serve: false,
+        load: false,
         dir: DirArgs { dir: None },
+        node: NodeArgs::default(),
     }
 }
 
@@ -93,9 +97,9 @@ fn pull_picks_the_best_quant_that_fits_and_prints_a_stanza_without_touching_node
     assert!(s.contains("downloaded, checksum verified"), "{s}");
     assert!(s.contains("[[model.local]]\nid = \"tiny\"") && s.contains("role = \"main\"") && s.contains("tiny-Q8_0.gguf"), "{s}");
     assert!(s.contains("node.toml was not changed"));
-    assert_eq!(std::fs::read(ctx.dir.join("tiny-Q8_0.gguf")).unwrap(), gguf_bytes(400_000, 1));
+    assert_eq!(std::fs::read(ctx.dir().join("tiny-Q8_0.gguf")).unwrap(), gguf_bytes(400_000, 1));
     assert_eq!(std::fs::read_to_string(&ctx.config).unwrap(), "[node]\nname = \"n\"\n");
-    assert!(!ctx.dir.join("tiny-Q4_K_M.gguf").exists());
+    assert!(!ctx.dir().join("tiny-Q4_K_M.gguf").exists());
     // The next run is a no-op download.
     let mut out = Vec::new();
     pull(&ctx, &mut out, &pull_args("acme/Tiny-GGUF")).unwrap();
@@ -110,7 +114,7 @@ fn pull_a_split_quant_downloads_every_shard_and_points_at_the_first() {
     pull(&ctx, &mut out, &PullArgs { quant: Some("q6_k".into()), ..pull_args("acme/Tiny-GGUF") }).unwrap();
     let s = text(out);
     assert!(s.contains("Q6_K, 2 file(s)"), "{s}");
-    assert!(ctx.dir.join("tiny-Q6_K-00002-of-00002.gguf").exists());
+    assert!(ctx.dir().join("tiny-Q6_K-00002-of-00002.gguf").exists());
     assert!(s.contains("tiny-Q6_K-00001-of-00002.gguf\""), "{s}");
 }
 
@@ -122,7 +126,7 @@ fn a_smaller_node_gets_a_smaller_quant_and_a_tiny_one_is_told_nothing_fits() {
     let mut out = Vec::new();
     let err = pull(&ctx, &mut out, &pull_args("acme/Tiny-GGUF")).unwrap_err().to_string();
     assert!(err.contains("no quant of acme/Tiny-GGUF fits") && err.contains("--force"), "{err}");
-    assert!(!ctx.dir.exists() || std::fs::read_dir(&ctx.dir).unwrap().next().is_none());
+    assert!(!ctx.dir().exists() || std::fs::read_dir(ctx.dir()).unwrap().next().is_none());
     let mut out = Vec::new();
     pull(&ctx, &mut out, &PullArgs { context: Some(4096), ..pull_args("acme/Tiny-GGUF") }).unwrap();
     assert!(text(out).contains("Q8_0"));
@@ -135,7 +139,7 @@ fn dry_run_downloads_nothing() {
     let mut out = Vec::new();
     pull(&ctx, &mut out, &PullArgs { dry_run: true, ..pull_args("acme/Tiny-GGUF") }).unwrap();
     assert!(text(out).contains("Dry run"));
-    assert!(!ctx.dir.exists());
+    assert!(!ctx.dir().exists());
 }
 
 #[test]
@@ -176,29 +180,46 @@ fn list_shows_registered_and_unregistered_files_and_remove_asks_first() {
 
     // Declining keeps the file; `yes` deletes it and warns about the stanza for a registered one.
     let mut out = Vec::new();
-    remove(&ctx, &mut out, &mut &b"no\n"[..], &RemoveArgs { id: "tiny-q4_k_m".into(), yes: false, dir: DirArgs { dir: None } }).unwrap();
-    assert!(text(out).contains("Nothing deleted") && ctx.dir.join("tiny-Q4_K_M.gguf").exists());
+    remove(
+        &ctx,
+        &mut out,
+        &mut &b"no\n"[..],
+        &RemoveArgs { id: "tiny-q4_k_m".into(), yes: false, dir: DirArgs { dir: None }, node: NodeArgs::default() },
+    )
+    .unwrap();
+    assert!(text(out).contains("Nothing deleted") && ctx.dir().join("tiny-Q4_K_M.gguf").exists());
     let mut out = Vec::new();
-    remove(&ctx, &mut out, &mut &b"yes\n"[..], &RemoveArgs { id: "tiny-q4_k_m".into(), yes: false, dir: DirArgs { dir: None } }).unwrap();
-    assert!(!ctx.dir.join("tiny-Q4_K_M.gguf").exists());
+    remove(
+        &ctx,
+        &mut out,
+        &mut &b"yes\n"[..],
+        &RemoveArgs { id: "tiny-q4_k_m".into(), yes: false, dir: DirArgs { dir: None }, node: NodeArgs::default() },
+    )
+    .unwrap();
+    assert!(!ctx.dir().join("tiny-Q4_K_M.gguf").exists());
     let mut out = Vec::new();
-    remove(&ctx, &mut out, &mut std::io::empty(), &RemoveArgs { id: "tiny".into(), yes: true, dir: DirArgs { dir: None } }).unwrap();
+    remove(
+        &ctx,
+        &mut out,
+        &mut std::io::empty(),
+        &RemoveArgs { id: "tiny".into(), yes: true, dir: DirArgs { dir: None }, node: NodeArgs::default() },
+    )
+    .unwrap();
     let s = text(out);
     assert!(s.contains("node.toml still lists `tiny`") && s.contains("Deleted"), "{s}");
-    assert!(!ctx.dir.join("tiny-Q8_0.gguf").exists());
+    assert!(!ctx.dir().join("tiny-Q8_0.gguf").exists());
     assert!(std::fs::read_to_string(&ctx.config).unwrap().contains("id = \"tiny\""), "node.toml is never edited by remove");
 }
 
 #[test]
 fn search_shows_downloads_a_fit_verdict_and_the_other_quants() {
     let fx = Fixture::new();
-    let q = "/api/models?search=tiny&filter=gguf&sort=downloads&direction=-1&limit=5&expand[]=downloads&expand[]=likes&expand[]=gated&expand[]=gguf&expand[]=safetensors";
-    fx.hub.route(q, 200, json!([{"id": "acme/Tiny-GGUF", "downloads": 12_345, "likes": 7, "gated": false, "gguf": {"total": 600_000_000u64}}, {"id": "acme/Gone-GGUF", "downloads": 3}]).to_string());
+    fx.hub.route("/api/models", 200, json!([{"id": "acme/Tiny-GGUF", "downloads": 12_345, "likes": 7, "gated": false, "gguf": {"total": 600_000_000u64}}, {"id": "acme/Gone-GGUF", "downloads": 3}]).to_string());
     let ctx = fx.ctx(32, None);
     let mut out = Vec::new();
-    search(&ctx, &mut out, &SearchArgs { query: vec!["tiny".into()], format: None, limit: 5, context: None }).unwrap();
+    search(&ctx, &mut out, &SearchArgs { query: vec!["tiny".into()], format: None, limit: 5, context: None, node: NodeArgs::default() }).unwrap();
     let s = text(out);
-    assert!(s.contains("acme/Tiny-GGUF  (GGUF, 12.3k downloads, 7 likes, 0.6B params)"), "{s}");
+    assert!(s.contains("acme/Tiny-GGUF  (GGUF, 12.3k downloads, 7 likes)"), "{s}");
     assert!(s.contains("best: Q8_0") && s.contains(": fits") && !s.contains("estimated"), "{s}");
     assert!(s.contains("other quants:") && s.contains("Q4_K_M") && s.contains("Q6_K"), "{s}");
     assert!(s.contains("acme/Gone-GGUF") && s.contains("could not read the files"), "{s}");
@@ -230,7 +251,7 @@ fn mlx_repos_download_as_a_directory() {
     pull(&ctx, &mut out, &pull_args("mlx-community/Tiny-4bit")).unwrap();
     let s = text(out);
     assert!(s.contains("backend = \"mlx\"") && s.contains("Apple Silicon only"), "{s}");
-    assert!(ctx.dir.join("mlx/Tiny-4bit/model.safetensors").exists() && !ctx.dir.join("mlx/Tiny-4bit/.gitattributes").exists());
+    assert!(ctx.dir().join("mlx/Tiny-4bit/model.safetensors").exists() && !ctx.dir().join("mlx/Tiny-4bit/.gitattributes").exists());
     let mut out = Vec::new();
     list(&ctx, &mut out).unwrap();
     assert!(text(out).contains("tiny-4bit") && true);

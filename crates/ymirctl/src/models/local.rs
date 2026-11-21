@@ -1,13 +1,11 @@
-//! The model files on this node: what is downloaded, whether `node.toml` points at it, removing
-//! it, and appending a stanza to `node.toml`.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use weirdnet_model::{ModelStore, StoredModel};
 use ymir_core::NodeConfig;
 use ymir_core::config::LocalModel;
 
-use super::plan::{id_for_file, shard_of};
+use super::plan::id_for_file;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -29,6 +27,8 @@ pub struct Entry {
     pub partial: Option<u64>,
     /// The id of the `[[model.local]]` that uses it.
     pub registered: Option<String>,
+    /// The store's record of a GGUF, which deletes it with `ModelStore::remove_local`.
+    pub stored: Option<StoredModel>,
 }
 
 fn dir_size(p: &Path) -> u64 {
@@ -55,32 +55,37 @@ fn resolved(m: &LocalModel, dir: &Path) -> Option<PathBuf> {
     }
 }
 
-pub fn scan(dir: &Path, cfg: Option<&NodeConfig>) -> Vec<Entry> {
-    let mut gguf: std::collections::BTreeMap<String, Vec<(PathBuf, u64)>> = Default::default();
-    let mut parts: Vec<(PathBuf, u64)> = Vec::new();
-    let mut out = Vec::new();
+/// `.part` files (unfinished downloads) in `dir` and one folder down.
+fn part_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let (path, name) = (e.path(), e.file_name().to_string_lossy().into_owned());
+        let (path, name) = (e.path(), e.file_name().to_string_lossy().to_ascii_lowercase());
         let Ok(meta) = e.metadata() else { continue };
-        if meta.is_file() && name.to_ascii_lowercase().ends_with(".gguf") {
-            gguf.entry(shard_of(&name).map_or_else(|| name.clone(), |(b, _, n)| format!("{b}/{n}"))).or_default().push((path, meta.len()));
-        } else if meta.is_file() && name.to_ascii_lowercase().ends_with(".gguf.part") {
-            parts.push((path, meta.len()));
+        if meta.is_file() && name.ends_with(".gguf.part") {
+            out.push((path, meta.len()));
+        } else if meta.is_dir() && depth < 1 && name != "mlx" && !e.file_type().is_ok_and(|t| t.is_symlink()) {
+            part_files(&path, depth + 1, out);
         }
     }
-    for (_, mut files) in gguf {
-        files.sort();
-        let main = files[0].0.clone();
+}
+
+pub fn scan(store: &ModelStore, cfg: Option<&NodeConfig>) -> Vec<Entry> {
+    let dir = store.dir();
+    let mut out = Vec::new();
+    for m in store.list() {
+        let paths: Vec<PathBuf> = m.files.iter().map(|f| dir.join(f)).collect();
         out.push(Entry {
-            id: id_for_file(&main.to_string_lossy()),
+            id: m.id.to_ascii_lowercase(),
             kind: Kind::Gguf,
-            size: files.iter().map(|f| f.1).sum(),
-            paths: files.into_iter().map(|f| f.0).collect(),
-            main,
+            size: m.size,
+            main: paths[0].clone(),
+            paths,
             partial: None,
             registered: None,
+            stored: Some(m),
         });
     }
+    let mut parts = Vec::new();
+    part_files(dir, 0, &mut parts);
     for (path, len) in parts {
         let whole = PathBuf::from(path.to_string_lossy().trim_end_matches(".part").to_string());
         if out.iter().any(|e| e.paths.contains(&whole)) {
@@ -94,6 +99,7 @@ pub fn scan(dir: &Path, cfg: Option<&NodeConfig>) -> Vec<Entry> {
             size: len,
             partial: Some(len),
             registered: None,
+            stored: None,
         });
     }
     for e in std::fs::read_dir(dir.join("mlx")).into_iter().flatten().flatten() {
@@ -107,6 +113,7 @@ pub fn scan(dir: &Path, cfg: Option<&NodeConfig>) -> Vec<Entry> {
                 main: path,
                 partial: None,
                 registered: None,
+                stored: None,
             });
         }
     }
@@ -140,7 +147,12 @@ pub fn find<'a>(entries: &'a [Entry], key: &str) -> Result<&'a Entry> {
 }
 
 /// Deletes the entry's files (and the `.part` of each). Files only: `node.toml` is not touched.
-pub fn remove(dir: &Path, e: &Entry) -> Result<()> {
+pub fn remove(store: &ModelStore, e: &Entry) -> Result<()> {
+    if let Some(m) = &e.stored {
+        store.remove_local(m).with_context(|| format!("deleting {}", e.id))?;
+        return Ok(());
+    }
+    let dir = store.dir();
     let root = std::fs::canonicalize(dir)?;
     for p in &e.paths {
         let meta = std::fs::symlink_metadata(p).with_context(|| format!("reading {}", p.display()))?;
@@ -207,13 +219,13 @@ mod tests {
         touch(&d.path().join("half-Q4_K_M.gguf.part"), 3);
         touch(&d.path().join("mlx/Some-Model-4bit/model.safetensors"), 7);
         let cfg = cfg_with(d.path(), &[("alpha", "a-Q8_0.gguf"), ("big", "big-Q4_K_M-00001-of-00002.gguf")]);
-        let e = scan(d.path(), Some(&cfg));
+        let e = scan(&ModelStore::new(d.path()), Some(&cfg));
         let row = |id: &str| e.iter().find(|x| x.id == id).unwrap();
         assert_eq!(row("a-q8_0").registered.as_deref(), Some("alpha"));
         assert_eq!((row("big-q4_k_m").size, row("big-q4_k_m").paths.len(), row("big-q4_k_m").registered.as_deref()), (11, 2, Some("big")));
         assert_eq!(row("half-q4_k_m").partial, Some(3));
         assert_eq!((row("some-model-4bit").kind, row("some-model-4bit").size), (Kind::Mlx, 7));
-        assert!(scan(d.path(), None).iter().all(|x| x.registered.is_none()));
+        assert!(scan(&ModelStore::new(d.path()), None).iter().all(|x| x.registered.is_none()));
     }
 
     #[test]
@@ -222,7 +234,7 @@ mod tests {
         touch(&d.path().join("a-Q8_0.gguf"), 1);
         touch(&d.path().join("b-Q8_0.gguf"), 1);
         let cfg = cfg_with(d.path(), &[("alpha", "a-Q8_0.gguf")]);
-        let e = scan(d.path(), Some(&cfg));
+        let e = scan(&ModelStore::new(d.path()), Some(&cfg));
         assert_eq!(find(&e, "alpha").unwrap().id, "a-q8_0");
         assert_eq!(find(&e, "B-Q8_0").unwrap().id, "b-q8_0");
         assert_eq!(find(&e, "b-Q8_0.gguf").unwrap().id, "b-q8_0");
@@ -236,9 +248,9 @@ mod tests {
         touch(&d.path().join("big-Q4_K_M-00002-of-00002.gguf"), 6);
         touch(&d.path().join("keep.gguf"), 1);
         touch(&d.path().join("mlx/m/w.safetensors"), 1);
-        let e = scan(d.path(), None);
-        remove(d.path(), find(&e, "big-q4_k_m").unwrap()).unwrap();
-        remove(d.path(), find(&e, "m").unwrap()).unwrap();
+        let e = scan(&ModelStore::new(d.path()), None);
+        remove(&ModelStore::new(d.path()), find(&e, "big-q4_k_m").unwrap()).unwrap();
+        remove(&ModelStore::new(d.path()), find(&e, "m").unwrap()).unwrap();
         let left: Vec<_> = std::fs::read_dir(d.path()).unwrap().flatten().map(|x| x.file_name().to_string_lossy().into_owned()).collect();
         assert!(left.contains(&"keep.gguf".to_string()) && !left.iter().any(|n| n.starts_with("big")), "{left:?}");
         assert!(!d.path().join("mlx/m").exists());
@@ -252,7 +264,7 @@ mod tests {
         touch(&outside.path().join("real.gguf"), 1);
         std::os::unix::fs::symlink(outside.path().join("real.gguf"), d.path().join("link.gguf")).unwrap();
         // A symlink is not listed, so `remove` can never be pointed at it or through it.
-        let e = scan(d.path(), None);
+        let e = scan(&ModelStore::new(d.path()), None);
         assert!(e.is_empty());
         let fake = Entry {
             id: "link".into(),
@@ -262,8 +274,9 @@ mod tests {
             size: 1,
             partial: None,
             registered: None,
+            stored: None,
         };
-        assert!(remove(d.path(), &fake).unwrap_err().to_string().contains("symlink"));
+        assert!(remove(&ModelStore::new(d.path()), &fake).unwrap_err().to_string().contains("symlink"));
         assert!(outside.path().join("real.gguf").exists());
     }
 

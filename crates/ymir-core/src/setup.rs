@@ -254,6 +254,27 @@ mod tests {
         Hardware { os: "macos".into(), arch: "aarch64".into(), cpu_threads: 8, ram_bytes: 24 * GIB, gpus: Vec::new() }
     }
 
+    /// A hosted macOS runner (7 GiB, a 6 GiB budget): the catalog picks the Gemma models, which take
+    /// images, so they stay on llama.cpp (MLX-LM's server is text-only) while MLX is still the backend.
+    #[test]
+    fn a_small_mac_keeps_image_models_on_llamacpp_and_names_mlx_the_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SetupOptions {
+            models_dir: Some(dir.path().into()),
+            engines_dir: Some(dir.path().join("engines")),
+            memory_budget: Some("6GiB".into()),
+            reserve: Some("1GiB".into()),
+            ..Default::default()
+        };
+        let hw = Hardware { ram_bytes: 7 * GIB, cpu_threads: 3, ..mac() };
+        let p = propose(hw, &opts);
+        assert_eq!(p.backend, "mlx");
+        assert!(p.mlx_download.is_empty());
+        let main = p.config.model.local.iter().find(|m| m.role.as_deref() == Some("main")).unwrap();
+        assert_eq!(main.id, "gemma-4-e4b");
+        assert!(p.config.model.local.iter().all(|m| m.backend.as_deref() == Some("llamacpp")));
+    }
+
     #[test]
     fn apple_silicon_serves_chat_models_with_mlx() {
         let dir = tempfile::tempdir().unwrap();

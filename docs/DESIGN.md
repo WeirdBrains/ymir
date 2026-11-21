@@ -593,15 +593,53 @@ The operator can change any of them.
 
 Beyond the catalog, `ymirctl models search` queries the Hugging Face Hub for GGUF (and MLX) repos
 and gives a per-repo fit verdict for the node it runs on: file size, plus KV cache at the context
-length (read from the GGUF header with a range request, or estimated when that fails), plus about
-0.5 GiB of overhead, against GPU memory or the unified budget. `pull` takes the best quant that
-fits (highest quality, full precision only as a last resort), handles split GGUFs, resumes,
-verifies SHA-256, and reads an optional Hub token from the node's own environment or files. It
-prints the `[[model.local]]` entry; `--register` appends it to `node.toml`, otherwise the file is
-never touched. `list` shows what is on disk and whether it is registered; `remove` deletes files
-only. These commands are local to one node. The Hub client, header reader and quant chooser are in
-`crates/ymirctl/src/models/` as interim code until `weirdnet-model` has them. Pulling to other
-pool nodes and a pool-wide search are later steps.
+length (read from the GGUF header with a range request, or estimated when that fails), plus 10%
+for compute buffers (`weirdnet_model::fit`, the same sum every node uses), against GPU memory or
+the unified budget. `pull` takes the best quant that fits (highest quality, full precision only as
+a last resort), handles split GGUFs, resumes, verifies SHA-256, and reads an optional Hub token from
+the node's own environment or files. It prints the `[[model.local]]` entry; `--register` appends it
+to `node.toml`, otherwise the file is never touched. `list` shows what is on disk and whether it is
+registered; `remove` deletes files only. Without `--node` these run on the machine itself and need no
+daemon.
+
+Hub search, repo files, GGUF headers, the downloader, the model store and the fit are
+`weirdnet-model`'s (`hf::Hub`, `fit`, `download_parts`, `ModelStore`); `crates/ymirctl/src/models/`
+keeps what the crate does not cover: MLX repos, the quality-first quant choice, the `fits` /
+`partial` / `too big` verdict, `node.toml` handling and the output.
+
+#### Over Weirdnet (`--node`)
+
+Each model node serves `/weirdnet-backends/models/1` (`weirdnet-backends` 0.3) next to the node
+protocol, to the owner only: the same roster check as every other Ymir protocol
+(`remote::roster_auth`), so only the user's linked, unrevoked devices are answered and a stranger
+gets a refusal before anything runs. `[model] remote_manage = false` turns it off on a node.
+
+`ymirctl models search | pull | list | remove --node <name|peer-id|auto|all>` sends the request to
+the `ymird` on the machine it runs on (`ControlRequest::Models`, answered as a stream of lines), and
+that `ymird` (`crates/ymir-core/src/models.rs`, `ModelsHub`) resolves the node and runs it with a
+`ModelsClient` that presents this device's certificate. `--node` takes a device label from
+`ymirctl pool list` (any case), a peer id (or its start), `all` (every model node) or
+`auto`. A pull streams its progress back (`ModelsReply::Progress`), one line per node.
+
+- `auto` (pulls only) asks every model node how the repo fits it (`Files`: the node ranks the repo's
+  models against its own memory budget with `fit::rank`) and takes the node that can hold the biggest
+  model, the larger budget on a tie. It says which node it picked and why. `--quant` / `--file` narrow
+  the model first.
+- `pull --serve` (or `--load`) adds the model to the node's supervisor when the download finishes
+  (`Supervisor::add_model`), so it starts serving without a restart. It lives in memory only: nothing
+  edits another node's `node.toml`. The pull prints the `[[model.local]]` entry to add to keep it
+  across a restart (`file` is relative to that node's models directory). `--register` is local only.
+- `remove --node` stops serving the model (`Supervisor::remove_model`) and deletes its files.
+- The Hub token is read on the node that downloads (`HF_TOKEN`, `YMIR_HF_TOKEN_FILE`,
+  `state/hf-token`, ...) and is not part of any message.
+- An older `ymird` (without models/1) answers "does not take model management"; the node then needs
+  an upgrade, or the commands run on that machine without `--node`.
+- A node with the model role off is not a candidate; the machine running the command can manage its
+  own model role in process (`--node <its name>`).
+
+Gaps are listed in HANDOFF.md ("Gaps for the Weirdnet Lead"): launch settings for a served pull
+(`-fa`, `--jinja`, `gpu_layers`, `idle_ttl`), MLX in `weirdnet-model`, `SearchHit` parameter counts,
+and a per-device owner role.
 
 ### Process manager (replaces llama-swap)
 

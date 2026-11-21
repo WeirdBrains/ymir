@@ -323,7 +323,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Setup(args) => setup_cmd(&paths, args, out, input).await,
         Cmd::Status { json } => status(&paths, out, json).await,
         Cmd::Models { cmd: None } => models(&paths, out).await,
-        Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd),
+        Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd).await,
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
         Cmd::Service { cmd } => service_cmd(cli_home.as_deref(), paths, out, cmd).await,
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),

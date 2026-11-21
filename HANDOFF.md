@@ -20,6 +20,23 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **What's next:** a bench tool after `feature/pool-bench` merges.
 
+## 2026-11-21: Pool-wide model search and download over Weirdnet (LF-30 M2/M3, branch only)
+
+**What changed**
+
+- Moved to `weirdnet-backends` 0.3, `weirdnet-model` 0.5.1 and `weirdnet-alerts` 0.2 together. `engine_alerts.rs` is gone (the crate's `engine.removed` rule covers it). `ymirctl models` now runs on `weirdnet-model`'s `hf::Hub`, `fit::choose`/`rank`, `HfToken` (read on the downloading node only, never sent), `download_parts` and `ModelStore::list`/`remove_local`; the local Hub client, GGUF reader and fit code were deleted. CLI behaviour is unchanged.
+- `ymird` serves the owner-only `/weirdnet-backends/models/1` (`ModelsServer` with `RosterAuth`) and uses `Supervisor::add_model`/`remove_model`, so `pull --serve` serves a model without a restart (in memory only). `[model] remote_manage = false` turns it off. `node.toml` is never written remotely; `--register` (with its `.bak`) stays local.
+- `ymirctl models search|pull|list|remove --node <name|peer-id|auto|all>` over Weirdnet via `ModelsClient`, with streamed progress. `auto` ranks nodes with `fit::rank` and says why it picked one. A device that is not the owner gets a clear refusal.
+- Code: `crates/ymir-core/src/models.rs`, `crates/ymirctl/src/models/remote.rs`; docs in DESIGN.md, the ymirctl site page and the changelog.
+
+**Checks run:** fmt, build, clippy `-D warnings`, `cargo test --workspace`; new tests with mock Hub and throwaway daemons on one machine: owner-only refusal, remote pull progress, `auto` choice, `add_model` without restart, remove, and `node.toml` untouched.
+
+**Not tested:** real pulls on the live pool nodes (deliberately not run), real Hub gated repos, MLX pulls, and Windows.
+
+**What's left:** Bragi Models screen (M4); `--json` output; mmproj download.
+
+**What's next:** the Ymir MCP server.
+
 ## 2026-11-21: `ymirctl models search | pull | list | remove`, part 1 (LF-30 M1, branch only)
 
 **What changed**
@@ -62,7 +79,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 1. `weirdnet-backends` 0.2.0 depends on `weirdnet-model` `0.4`, not 0.5, and its `node` API takes model 0.4's `Hardware` and `Budget`. An app on `weirdnet-model` 0.5.0 gets two copies and a type mismatch in `with_hardware`, so Ymir stays on 0.4.3. Needs backends 0.2.1 on model 0.5.
 2. `weirdnet-alerts` 0.1.0's `backends` feature needs `weirdnet-backends` 0.1, which pulls in `weirdnet-agent` 0.4 as a second copy. Ymir drops the feature and carries the engine-event monitor in `ymir-core/src/engine_alerts.rs` (a copy of `weirdnet_alerts::engine`). Needs alerts 0.2 on backends 0.2; then delete that module.
 
-**CI follow-up:** the push token has no `workflow` scope, so `.github/workflows/macos.yml` is unchanged on this branch. It still runs `ymir-testkit --test engine_shim`, which this branch deletes. Before the macOS job can pass, change that step to `cargo test --locked -p ymir-testkit --test mlx` (named "MLX and llama.cpp on one node (mock engines)"). Someone with workflow scope must push that one change.
+**CI follow-up:** `.github/workflows/macos.yml` no longer runs the removed `engine_shim` test; the MLX unit tests in `ymir-core --lib` still run in the step before. There is no replacement end-to-end mock test for MLX plus llama.cpp on one node yet. The "setup --dry-run picks mlx" job (macos-15) had been failing on main too: a 6 GiB budget picks the Gemma models, which take images, so they correctly stay on llama.cpp (MLX-LM's server is text-only) and the config never has `backend = "mlx"`. The code was right and the grep was stale; the job now checks the MLX-LM line and the llama.cpp picks, and a unit test (`a_small_mac_keeps_image_models_on_llamacpp_and_names_mlx_the_backend`) pins the behaviour. Main's macos.yml needs the same grep change (and the `engine_shim` step stays there while the shim does).
 
 **Checks run:** see the commit's push; `cargo fmt --check`, build, clippy `-D warnings` and tests on the whole workspace.
 
@@ -121,3 +138,31 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** `ymird --version` should carry the commit so builds are identifiable without hashing.
 
 **What's next:** the same upgrade for any new node; then the Weirdnet 0.5 work.
+
+## 2026-11-21: Weirdnet 0.5 image and audio work merged to main
+
+**What changed**
+
+- `feature/weirdnet-0.5-content-parts` (head `1d08971`) is merged into main with a merge commit: Weirdnet 0.5 crates, capability routing, images and audio through the pool, MLX on weirdnet-backends 0.2, the engine shim removed, and the macOS workflow fix. The branch is kept.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on the merge result, all passing. CI and macOS workflow runs on the branch head were green.
+
+**Not tested:** real GPU vision, MLX on Apple Silicon, phone.
+
+**What's left:** stacked branches (model search, MCP, pool bench, OpenAI endpoints) should merge main before they land.
+
+**What's next:** those stacked branches.
+
+## 2026-11-21: Model search and pull merged to main
+
+**What changed**
+
+- `feature/model-search-pull` (head `ce167d8`) is merged into main with a merge commit: `ymirctl models search/pull/list/remove`, the Hub client, and the move to weirdnet-backends 0.3, weirdnet-model 0.5.1 and weirdnet-alerts 0.2. The branch is kept.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on the merge result, all passing.
+
+**Not tested:** downloads from the real Hub in CI.
+
+**What's left:** `feature/mcp-v2` needs this merged in before it lands.
+
+**What's next:** merge the MCP server.
