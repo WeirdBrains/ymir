@@ -83,6 +83,14 @@ pub enum ControlRequest {
         #[serde(default)]
         retries: Option<u32>,
     },
+    /// Manage model files on the user's model nodes over Weirdnet (`ymirctl models --node`). The
+    /// answer is a stream of [`crate::models::ModelsLine`]s (a pull's progress, then the result), not
+    /// one [`ControlResponse`].
+    Models {
+        /// A roster label, a peer id, `auto` (best fit, pulls only) or `all`.
+        node: String,
+        request: crate::models::ModelsOp,
+    },
     /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
     /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
     Shutdown,
@@ -257,6 +265,8 @@ pub struct ControlHandler {
     pub context: Option<crate::context::ContextStore>,
     /// The pool the app role asks through.
     pub pool: Option<Arc<weirdnet_agent::pool::Pool>>,
+    /// Model management over Weirdnet (needs a device identity).
+    pub models: Option<Arc<crate::models::ModelsHub>>,
     /// Woken by [`ControlRequest::Shutdown`]; `ymird` waits on it next to its signals.
     pub exit: Arc<tokio::sync::Notify>,
 }
@@ -283,8 +293,34 @@ impl ControlHandler {
         }
     }
 
+    /// Runs a models request and writes its lines to `w` as they happen.
+    async fn stream_models<W: AsyncWrite + Unpin>(&self, node: String, op: crate::models::ModelsOp, w: &mut W) -> Result<()> {
+        use crate::models::ModelsLine;
+        let Some(hub) = self.models.clone() else {
+            let line = ModelsLine::Failed {
+                message: "model management over Weirdnet needs a device identity on this node (see `ymirctl pool link`)".into(),
+            };
+            return write_line(w, &line).await;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let done = hub.run(&node, op, &tx).await;
+            let _ = tx.send(match done {
+                Ok(d) => ModelsLine::Done(Box::new(d)),
+                Err(message) => ModelsLine::Failed { message },
+            });
+        });
+        while let Some(line) = rx.recv().await {
+            write_line(w, &line).await?;
+        }
+        let _ = task.await;
+        Ok(())
+    }
+
     pub async fn handle(&self, req: ControlRequest) -> ControlResponse {
         match req {
+            // Streamed by `stream_models`, which `connection` calls instead.
+            ControlRequest::Models { .. } => ControlResponse::err("models requests are streamed"),
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -614,6 +650,10 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, handl
     let mut lines = BufReader::new(r.take(64 * 1024)).lines();
     while let Some(line) = lines.next_line().await? {
         let resp = match serde_json::from_str::<ControlRequest>(&line) {
+            Ok(ControlRequest::Models { node, request }) => {
+                handler.stream_models(node, request, &mut w).await?;
+                continue;
+            }
             Ok(req) => handler.handle(req).await,
             Err(e) => ControlResponse::err(format!("bad request: {e}")),
         };
@@ -648,6 +688,41 @@ async fn connect(socket: &Path) -> Result<tokio::net::windows::named_pipe::Named
             Err(e) => return Err(e).with_context(|| format!("opening control pipe {name} (an elevated prompt is needed for a system service)")),
         }
     }
+}
+
+async fn write_line<W: AsyncWrite + Unpin>(w: &mut W, line: &impl Serialize) -> Result<()> {
+    let mut out = serde_json::to_vec(line)?;
+    out.push(b'\n');
+    w.write_all(&out).await?;
+    Ok(())
+}
+
+/// Sends a models request to the `ymird` at `socket` and calls `on_line` for each progress line.
+/// Returns the final answer.
+pub async fn request_models(
+    socket: &Path,
+    node: &str,
+    op: crate::models::ModelsOp,
+    mut on_line: impl FnMut(&crate::models::ModelsLine),
+) -> Result<crate::models::ModelsDone> {
+    use crate::models::ModelsLine;
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    write_line(&mut w, &ControlRequest::Models { node: node.to_string(), request: op }).await?;
+    let mut lines = BufReader::new(r).lines();
+    while let Some(line) = lines.next_line().await? {
+        match serde_json::from_str::<ModelsLine>(&line) {
+            Ok(ModelsLine::Done(d)) => return Ok(*d),
+            Ok(ModelsLine::Failed { message }) => bail!("{message}"),
+            Ok(p) => on_line(&p),
+            // An older ymird answers an unknown request with one `ControlResponse` error.
+            Err(_) => match serde_json::from_str::<ControlResponse>(&line) {
+                Ok(r) if !r.ok => bail!("this ymird does not manage models over Weirdnet (upgrade it): {}", r.message.unwrap_or_default()),
+                _ => bail!("ymird sent something this ymirctl does not understand (are they the same version?)"),
+            },
+        }
+    }
+    bail!("ymird closed the control connection")
 }
 
 /// Sends one request to the `ymird` at `socket`.

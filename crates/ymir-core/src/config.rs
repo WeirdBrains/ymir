@@ -200,6 +200,11 @@ pub struct ModelSection {
     /// linked device, an app included; set it to the inference nodes' peer ids so apps must go through them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
+    /// Let the owner's linked devices search, pull, list and remove models on this node over Weirdnet
+    /// (`ymirctl models --node`, `/weirdnet-backends/models/1`). Pulled models are served in memory
+    /// only (`node.toml` is never edited remotely). `false` turns the protocol off.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub remote_manage: bool,
     /// `managed` | `system:/path/to/llama-server` | `off`.
     #[serde(default = "managed")]
     pub llamacpp: String,
@@ -235,6 +240,10 @@ fn managed() -> String {
     "managed".into()
 }
 
+fn is_yes(b: &bool) -> bool {
+    *b
+}
+
 fn is_managed(s: &str) -> bool {
     s == "managed"
 }
@@ -246,6 +255,7 @@ impl Default for ModelSection {
             reserve: None,
             private_link: None,
             callers: Vec::new(),
+            remote_manage: true,
             llamacpp: managed(),
             rpc_server: managed(),
             rpc_args: Vec::new(),
