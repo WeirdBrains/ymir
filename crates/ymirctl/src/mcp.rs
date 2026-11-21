@@ -26,7 +26,7 @@ use weirdnet_mcp::{Param, ParamType as T, Server, ServerInfo, ToolError, ToolSpe
 use ymir_core::Paths;
 use ymir_core::control::{self, ControlRequest, ModelState, StatusReport};
 
-use crate::models::{DirArgs, ModelsCmd, PullArgs, RemoveArgs, SearchArgs};
+use crate::models::{DirArgs, ListArgs, ModelsCmd, NodeArgs, PullArgs, RemoveArgs, SearchArgs};
 use crate::{ServiceArgs, ServiceCmd};
 pub use rpc::{Rpc, loopback_addr, serve_http, serve_stdio};
 
@@ -499,7 +499,9 @@ impl YmirTools {
                 Ok(json!({"lines": lines}))
             }
             "ymir_models_search" => self.search(args).await,
-            "ymir_models_local" => self.models_cmd(ModelsCmd::List(DirArgs { dir: None })).await.map(|t| json!({"text": t})),
+            "ymir_models_local" => {
+                self.models_cmd(ModelsCmd::List(ListArgs { dir: DirArgs { dir: None }, node: NodeArgs::default() })).await.map(|t| json!({"text": t}))
+            }
             "ymir_load_model" => {
                 confirmed(args, &format!("loading {} uses node memory and", str_arg(args, "model").unwrap_or("a model")))?;
                 let req = ControlRequest::Load { model: req_str(args, "model")?.to_string(), node: str_arg(args, "node").map(str::to_string) };
@@ -736,9 +738,10 @@ impl YmirTools {
     /// read from the terminal: a prompt gets an empty answer, which every command treats as "no".
     async fn models_cmd(&self, cmd: ModelsCmd) -> Result<String> {
         let paths = self.ctx.paths.clone();
+        let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
-            let r = crate::models::run(&paths, &mut out, &mut std::io::empty(), cmd);
+            let r = handle.block_on(crate::models::run(&paths, &mut out, &mut std::io::empty(), cmd));
             let text = tidy(out);
             match r {
                 Ok(()) => Ok(text),
@@ -762,6 +765,7 @@ impl YmirTools {
             format,
             limit: args["limit"].as_u64().map_or(5, |n| n.clamp(1, 25) as usize),
             context: args["context"].as_u64(),
+            node: NodeArgs::default(),
         };
         Ok(json!({"text": self.models_cmd(ModelsCmd::Search(a)).await?}))
     }
@@ -778,7 +782,10 @@ impl YmirTools {
             register: false,
             dry_run,
             force: args["force"].as_bool() == Some(true),
+            serve: false,
+            load: false,
             dir: DirArgs { dir: None },
+            node: NodeArgs::default(),
         })
     }
 
@@ -796,7 +803,12 @@ impl YmirTools {
     }
 
     async fn remove(&self, args: &Value) -> Result<Value> {
-        let a = RemoveArgs { id: req_str(args, "id")?.to_string(), yes: args["confirm"].as_bool() == Some(true), dir: DirArgs { dir: None } };
+        let a = RemoveArgs {
+            id: req_str(args, "id")?.to_string(),
+            yes: args["confirm"].as_bool() == Some(true),
+            dir: DirArgs { dir: None },
+            node: NodeArgs::default(),
+        };
         let deleting = a.yes;
         let text = self.models_cmd(ModelsCmd::Remove(a)).await?;
         if deleting {
