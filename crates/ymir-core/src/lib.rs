@@ -15,7 +15,6 @@ pub mod control;
 pub mod coordinator;
 pub mod daemon;
 pub mod engine;
-pub mod engine_alerts;
 pub mod fair;
 pub mod group;
 pub mod host;

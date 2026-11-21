@@ -257,7 +257,7 @@ impl Daemon {
                         }
                     }
                     let every = std::time::Duration::from_secs(cfg.inference.alerts.probe_secs.max(5));
-                    tasks.push(tokio::spawn(crate::engine_alerts::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
+                    tasks.push(tokio::spawn(weirdnet_alerts::engine::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
                 }
                 Err(e) => tracing::error!("alerts are off: {e}"),
             }

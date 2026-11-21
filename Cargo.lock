@@ -5151,9 +5151,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-alerts"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1017ee9add1fbaee7047bd415009b4d44c2b655fe743f6d2a91adef51e5fd214"
+checksum = "28024c2cfa4afe9c236126144f18d6acc09bcd13fde6166b93f0954aa05ed2cf"
 dependencies = [
  "chrono",
  "futures",
@@ -5168,14 +5168,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "weirdnet-backends",
  "weirdnet-rules",
 ]
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a8500fb34a886822c99a325cc02d14381d006f24869766df9f9788274287dc0"
+checksum = "5d66a7a3d58beac4b0b6bf471e67a0692843b5c1052fec9daec5467edc1d5206"
 dependencies = [
  "async-trait",
  "axum",
@@ -5242,9 +5243,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-model"
-version = "0.4.3"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ddd78061d00ee871ee93aab6239375f542c04a1f70727190b096625f130137"
+checksum = "ca6fae6824c09cb00cd8540e94beb9bc4d1fc27938749e31aa69e302ec0efbfd"
 dependencies = [
  "dirs",
  "minijinja",
