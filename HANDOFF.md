@@ -2,7 +2,7 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
-## 2026-11-21: `ymirctl bench` over Weirdnet, a node×model matrix (work in progress)
+## 2026-11-21: `ymirctl bench` over Weirdnet, a node×model matrix
 
 **What changed**
 
@@ -10,7 +10,12 @@ A running log of finished work, newest first. Each entry says what changed, the 
 - New: `--node` and `-m` (repeatable or `all`), `--suite quick|standard|hard`, `--context`, `--max-tokens`, `--quality-tokens`, `--cold` (warns, asks unless `--yes`), `bench list`, `bench compare A.json B.json`, CSV next to JSON and Markdown, side-by-side matrices.
 - Still strictly one request at a time, busy or loading models skipped.
 
-**Status:** code and tests done; the real three-node run and the final write-up follow in the next commit.
+- A device with a model role (`/weirdnet-backends/node/1`) is measured on that hardware through `RemoteModelNode`; one with only an inference role goes through a one-peer `Pool` (catalog/1, infer/2). `bench list` shows the role of each node.
+- Needs `--hint` for nodes that are not in `[network] peers` (tailnet addresses from `ymirctl pool addresses` on the node).
+
+**Tested for real** (hard suite, warm models only, 2 repeats, 1 warm-up, one request at a time): two nodes reached directly, one model on both. Every model scored 15/15, so the hard suite still does not separate these models; speed does. A node whose model role only allows listed callers refuses this device (`not-an-allowed-caller`); the node's `[model] callers` would need this device, a config change not made here. A node placing a model on another node reports `served_by`.
+
+**Not done:** pinning that node (needs its `[model] callers` to list this device), `--cold` runs against live nodes, harder suites.
 
 ## 2026-11-21: `ymirctl bench`, a benchmark that compares every model on the pool
 

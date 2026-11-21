@@ -166,6 +166,8 @@ pub struct Target {
     /// The node's name; `routed` over the bridge.
     pub node: String,
     pub peer: Option<String>,
+    /// `model` (the hardware itself), `inference` (an inference node) or `routed` (the bridge).
+    pub role: String,
     pub model: String,
     pub purpose: String,
     pub state: String,
@@ -215,6 +217,7 @@ impl Backend for BridgeBackend {
             l.targets.push(Target {
                 node: "routed".into(),
                 peer: None,
+                role: "routed".into(),
                 model: id.into(),
                 purpose: w["purpose"].as_str().unwrap_or("chat").into(),
                 state: w["state"].as_str().unwrap_or("unknown").into(),
@@ -264,6 +267,7 @@ impl Backend for DirectBackend {
                         l.targets.push(Target {
                             node: name.clone(),
                             peer: Some(n.peer.clone()),
+                            role: n.role.into(),
                             model: m.id,
                             purpose: if m.embedding { "embedding".into() } else { "chat".into() },
                             state: m.state.into(),
@@ -386,6 +390,7 @@ pub struct QualityResult {
 pub struct TargetRun {
     pub model: String,
     pub node: String,
+    pub role: String,
     pub purpose: String,
     pub state_at_start: String,
     pub replicas: u64,
@@ -751,15 +756,16 @@ pub fn compare(args: &CompareArgs, out: &mut dyn Write) -> Result<()> {
 pub async fn list(backend: &dyn Backend, real_names: bool, out: &mut dyn Write) -> Result<()> {
     let l = backend.listing().await?;
     let mut namer = report::Namer::new(real_names, &l.nodes);
-    writeln!(out, "| node | model | kind | state | replicas | context |")?;
-    writeln!(out, "|---|---|---|---|---|---|")?;
+    writeln!(out, "| node | role | model | kind | state | replicas | context |")?;
+    writeln!(out, "|---|---|---|---|---|---|---|")?;
     let mut ts = l.targets.clone();
     ts.sort_by(|a, b| (&a.node, &a.model).cmp(&(&b.node, &b.model)));
     for t in &ts {
         writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} |",
             namer.name(&t.node),
+            t.role,
             t.model,
             t.purpose,
             t.state,
@@ -768,7 +774,7 @@ pub async fn list(backend: &dyn Backend, real_names: bool, out: &mut dyn Write) 
         )?;
     }
     for (name, why) in &l.unreachable {
-        writeln!(out, "| {} | - | - | unreachable: {why} | - | - |", namer.name(name))?;
+        writeln!(out, "| {} | - | - | - | unreachable: {} | - | - |", namer.name(name), report::scrub(why, real_names))?;
     }
     if !backend.pinned() {
         writeln!(out, "\nOver the bridge the pool picks the node, so models are listed once; use `--via weirdnet` to see each node.")?;

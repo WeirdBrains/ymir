@@ -169,6 +169,7 @@ fn target(node: &str, model: &str, state: &str, purpose: &str) -> Target {
     Target {
         node: node.into(),
         peer: Some(format!("peer-{node}")),
+        role: "model".into(),
         model: model.into(),
         purpose: purpose.into(),
         state: state.into(),

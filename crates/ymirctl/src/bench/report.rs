@@ -186,7 +186,7 @@ fn rows(args: &BenchArgs, runs: &[TargetRun], namer: &mut Namer) -> Vec<Row> {
                 })
                 .collect();
             let json = json!({
-                "model": r.model, "node": node, "served_by": served, "purpose": r.purpose, "state_at_start": r.state_at_start,
+                "model": r.model, "node": node, "role": r.role, "served_by": served, "purpose": r.purpose, "state_at_start": r.state_at_start,
                 "replicas": r.replicas, "context": r.context, "cold_load_ms": r.cold_load_ms.map(round1), "requests": r.requests,
                 "samples": ss.len(), "ttft_ms": stats(&ttft), "decode_tps": stats(&decode), "prompt_tps": stats(&prompt),
                 "total_ms": stats(&total), "by_prompt": by_prompt, "quality": quality, "errors": r.errors.iter().map(|e| scrub(e, args.real_names)).collect::<Vec<_>>(),
