@@ -134,3 +134,17 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** stacked branches (model search, MCP, pool bench, OpenAI endpoints) should merge main before they land.
 
 **What's next:** those stacked branches.
+
+## 2026-11-21: Model search and pull merged to main
+
+**What changed**
+
+- `feature/model-search-pull` (head `ce167d8`) is merged into main with a merge commit: `ymirctl models search/pull/list/remove`, the Hub client, and the move to weirdnet-backends 0.3, weirdnet-model 0.5.1 and weirdnet-alerts 0.2. The branch is kept.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on the merge result, all passing.
+
+**Not tested:** downloads from the real Hub in CI.
+
+**What's left:** `feature/mcp-v2` needs this merged in before it lands.
+
+**What's next:** merge the MCP server.
