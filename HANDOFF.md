@@ -225,3 +225,17 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** none.
 
 **What's next:** none.
+
+## 2026-11-21: Ymir MCP server on weirdnet-mcp 0.6 merged
+
+**What changed**
+
+- Merged `feature/mcp-weirdnet-0.6` into main with a merge commit. `ymirctl mcp` now uses the published `weirdnet-mcp` 0.6 and the local JSON-RPC module is gone.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on the merged tree.
+
+**Not tested:** Windows locally; main's CI is the check.
+
+**What's left:** none.
+
+**What's next:** none.
