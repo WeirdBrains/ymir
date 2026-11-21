@@ -2,6 +2,20 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-21: `ymirctl bench`, a harder `hard` suite and hints from a file
+
+**What changed**
+
+- `--suite hard` now separates models: multi-step math and logic, Python functions whose output is run and compared, strict-format instructions, long-context retrieval (sized by `--context`) and tool-call checks. Every check is scored by exact match, parsed JSON or code run in the sandbox, at temperature 0, so a rerun gives the same score for the same answers. `quick` and `standard` are unchanged. Results show a pass rate per category.
+- Hints no longer have to be typed. `--hint ADDR` still repeats; `--hint @FILE` reads one address per line (`#` comments); and the file `bench-hints` in the Ymir home is read when it exists. `ymirctl pool addresses` on another node, piped into `ymirctl bench hints add`, fills that file (only dialable addresses are kept: no loopback, link-local or relay circuits). `ymirctl bench hints list` shows what will be dialled. The file lives in the user's home, never in the repo.
+- A node whose `[model] callers` is set only serves the devices listed. The benchmark's own peer id is the one `ymirctl pool devices` marks `this node` on the machine running it; add that id to the node's `callers` list.
+
+**Checks run:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo build --workspace --locked`, `cargo test --workspace --locked`. New tests cover the hint parser, the file and default-file merge, and the scoring of each new hard check.
+
+**Not tested / limits:** the hard suite's difficulty is only judged against the models on one pool; a stronger model may still score near the top. `--cold` runs against live nodes were not tried.
+
+**What's next:** keep the JSON from each run to spot regressions after an engine upgrade.
+
 ## 2026-11-21: `ymirctl bench` over Weirdnet, a node×model matrix
 
 **What changed**
