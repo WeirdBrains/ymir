@@ -168,8 +168,10 @@ pub fn id_for_repo(repo: &str) -> String {
 
 /// A model id for a local file: its lower-case stem without a shard suffix.
 pub fn id_for_file(file: &str) -> String {
-    let stem = file.rsplit('/').next().unwrap_or(file).trim_end_matches(".gguf").trim_end_matches(".GGUF");
-    split_part(file).map_or_else(|| stem.to_ascii_lowercase(), |(b, _, _)| b.to_ascii_lowercase())
+    // Both separators: a Windows path has backslashes.
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let stem = name.trim_end_matches(".gguf").trim_end_matches(".GGUF");
+    split_part(name).map_or_else(|| stem.to_ascii_lowercase(), |(b, _, _)| b.to_ascii_lowercase())
 }
 
 #[derive(Serialize)]

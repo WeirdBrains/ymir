@@ -115,7 +115,8 @@ fn pull_a_split_quant_downloads_every_shard_and_points_at_the_first() {
     let s = text(out);
     assert!(s.contains("Q6_K, 2 file(s)"), "{s}");
     assert!(ctx.dir().join("tiny-Q6_K-00002-of-00002.gguf").exists());
-    assert!(s.contains("tiny-Q6_K-00001-of-00002.gguf\""), "{s}");
+    // The path is a TOML string: basic (`"`) on Unix, literal (`'`) when it holds Windows backslashes.
+    assert!(s.contains("tiny-Q6_K-00001-of-00002.gguf\"") || s.contains("tiny-Q6_K-00001-of-00002.gguf'"), "{s}");
 }
 
 #[test]
@@ -255,4 +256,11 @@ fn mlx_repos_download_as_a_directory() {
     let mut out = Vec::new();
     list(&ctx, &mut out).unwrap();
     assert!(text(out).contains("tiny-4bit") && true);
+}
+
+#[test]
+fn ids_come_from_the_file_name_for_unix_and_windows_paths() {
+    assert_eq!(plan::id_for_file("/srv/m/Tiny-Q8_0.gguf"), "tiny-q8_0");
+    assert_eq!(plan::id_for_file(r"C:\models\Tiny-Q8_0.gguf"), "tiny-q8_0");
+    assert_eq!(plan::id_for_file(r"C:\models\big-Q4_K_M-00001-of-00002.gguf"), "big-q4_k_m");
 }

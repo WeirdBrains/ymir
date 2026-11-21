@@ -162,7 +162,20 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
         #[allow(clippy::useless_conversion)]
         Some(u64::from(s.f_bavail).saturating_mul(u64::from(s.f_frsize)))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        // kernel32 is always linked on Windows, so no extra crate is needed for this one call.
+        unsafe extern "system" {
+            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut available = 0u64;
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path; `available` is a valid out pointer and the two optional ones are null.
+        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(available)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = dir;
         None

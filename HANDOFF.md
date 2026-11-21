@@ -194,3 +194,19 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** other branches carry the old pins until they merge main.
 
 **What's next:** none.
+
+## 2026-11-21: Windows fixes for model search
+
+**What changed**
+
+- `models::hub::free_bytes` now works on Windows (`GetDiskFreeSpaceExW`); it returned `None` there before, so the fit check never saw free disk space.
+- `plan::id_for_file` takes the file name after either `/` or a backslash; on Windows it used the whole path as the model id, so scans and registered-model matching broke. A new unit test covers both path styles.
+- The split-quant pull test accepts the TOML literal-string quote that Windows paths produce.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace`, and `cargo clippy -p ymir-core -p ymirctl -p ymird --all-targets --target x86_64-pc-windows-gnu -D warnings`, all passing.
+
+**Not tested:** the Windows tests were not run locally; the Windows CI job is the check.
+
+**What's left:** none.
+
+**What's next:** none.
