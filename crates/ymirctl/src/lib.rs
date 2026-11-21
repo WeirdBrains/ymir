@@ -4,6 +4,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+pub mod mcp;
 pub mod models;
 pub mod pool;
 
@@ -141,6 +142,9 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: pool::PoolCmd,
     },
+    /// Serve this node to MCP clients (Cursor, Claude Desktop, VS Code): pool status, models, chat
+    /// (text, images, audio), completions, embeddings and model search as tools. Stdio by default.
+    Mcp(mcp::McpArgs),
     /// The loopback bridge.
     Bridge {
         #[command(subcommand)]
@@ -373,6 +377,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             writeln!(out, "# {}", r.message.unwrap_or_default())?;
             Ok(())
         }
+        Cmd::Mcp(args) => mcp::run(cli_home, paths, args).await,
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;
             pool::run(&paths, &cfg, cmd, out, input).await
@@ -666,6 +671,14 @@ fn service_paths(explicit_home: Option<&std::path::Path>, paths: Paths, scope: S
 }
 
 async fn service_cmd(explicit_home: Option<&std::path::Path>, paths: Paths, out: &mut dyn Write, cmd: ServiceCmd) -> Result<()> {
+    for l in service_lines(explicit_home, paths, cmd).await? {
+        writeln!(out, "{l}")?;
+    }
+    Ok(())
+}
+
+/// Runs a `service` subcommand and returns what it did, one line each.
+pub(crate) async fn service_lines(explicit_home: Option<&std::path::Path>, paths: Paths, cmd: ServiceCmd) -> Result<Vec<String>> {
     let args = match &cmd {
         ServiceCmd::Install { args, .. }
         | ServiceCmd::Start { args }
@@ -715,10 +728,7 @@ async fn service_cmd(explicit_home: Option<&std::path::Path>, paths: Paths, out:
             log
         }
     };
-    for l in lines {
-        writeln!(out, "{l}")?;
-    }
-    Ok(())
+    Ok(lines)
 }
 
 /// ` --home DIR` when the service's node directory isn't the one `ymirctl` uses by default.
@@ -749,7 +759,7 @@ fn confirm(out: &mut dyn Write, input: &mut dyn BufRead, prompt: &str) -> Result
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-fn load_cfg(paths: &Paths) -> Result<NodeConfig> {
+pub(crate) fn load_cfg(paths: &Paths) -> Result<NodeConfig> {
     NodeConfig::load(&paths.config()).with_context(|| "run `ymirctl setup` first")
 }
 
@@ -828,7 +838,7 @@ async fn nodes(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     write_nodes(out, &s.nodes)
 }
 
-async fn bridge(paths: &Paths) -> Result<BridgeClient> {
+pub(crate) async fn bridge(paths: &Paths) -> Result<BridgeClient> {
     let cfg = load_cfg(paths)?;
     let mut client = BridgeClient::for_node(paths, &cfg)?;
     // The running daemon knows the real port (it may differ from node.toml when that says 0).

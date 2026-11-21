@@ -25,6 +25,10 @@ weirdnet-model.workspace = true
 weirdnet-net.workspace = true
 weirdnet-update.workspace = true
 semver.workspace = true
+axum.workspace = true
+weirdnet-mcp.workspace = true
+getrandom.workspace = true
+base64 = "0.22"
 ymir-core.workspace = true
 
 [dev-dependencies]
