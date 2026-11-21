@@ -5151,9 +5151,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-alerts"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28024c2cfa4afe9c236126144f18d6acc09bcd13fde6166b93f0954aa05ed2cf"
+checksum = "1437ccd70e657b3fd11d454f805222eb3798cae837d5c190b22f3e4340354414"
 dependencies = [
  "chrono",
  "futures",
@@ -5198,9 +5198,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-device-link"
-version = "0.3.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b898943c727395e7996c5687cac277c69f3c2fef0ff841b31b87bbd936d0189e"
+checksum = "e50aec13f18c9aaa3bb53748c993343059bee335a60ade77ce3e565792cd072a"
 dependencies = [
  "base64 0.22.1",
  "cbor4ii",
@@ -5269,9 +5269,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-net"
-version = "0.8.0"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df77cf3385bdf7eebef2770a3f3a46c660d83a6be73feac04a61a88a16f471cf"
+checksum = "75a48adc55905fdd8343424eaf56fcf74ddbd0933e447c940a7a982d4af4586f"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -5280,7 +5280,9 @@ dependencies = [
  "futures",
  "hex",
  "hickory-resolver",
+ "jni-sys",
  "libp2p",
+ "ndk-context",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -5310,9 +5312,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-rules"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11ddc00986aa04c4bc6026425af5c619d4aba01c3bb18595a1f7af204744e779"
+checksum = "998798622ddf9d6af16729d4325fb1a078a1f5a737755eeab3b0e8c3e01783e1"
 dependencies = [
  "chrono",
  "serde",

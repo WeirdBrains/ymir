@@ -180,3 +180,17 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** `feature/pool-bench` conflicts with main in HANDOFF.md only.
 
 **What's next:** the pool bench merge.
+
+## 2026-11-21: Yanked Weirdnet crate versions replaced
+
+**What changed**
+
+- Exact pins moved to the patch releases that replace the yanked ones: `weirdnet-device-link` =0.3.0 → =0.3.2, `weirdnet-net` =0.8.0 → =0.8.2, `weirdnet-rules` =0.1.0 → =0.1.1. `weirdnet-alerts` moved 0.2.0 → 0.2.1 in Cargo.lock only, because 0.2.0 required the yanked `weirdnet-rules` =0.1.0. No source changes.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace`, all passing.
+
+**Not tested:** the live pool on the new crate versions.
+
+**What's left:** other branches carry the old pins until they merge main.
+
+**What's next:** none.
