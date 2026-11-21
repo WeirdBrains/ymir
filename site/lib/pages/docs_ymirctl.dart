@@ -291,7 +291,7 @@ trial, or a rollback) and print its path. With <code>--exec</code> it runs it, p
 ymirctl update stage ./ymir-0.2.0-bundle
 sudo systemctl restart ymird        # or restart the user service
 ymirctl update status</code></pre>
-<p>Nothing from Ymir is released yet, so there are no public bundles to stage today.</p>
+<p>Stage a bundle directory you built or received from the release signer.</p>
 
 <h2 id="recipes">Common tasks at a glance</h2>
 <table>

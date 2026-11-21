@@ -13,13 +13,11 @@ jaspr build --sitemap-domain https://weirdbrains.github.io/ymir   # github.io bu
 
 ## Hosting and the custom domain
 
-Today: https://weirdbrains.github.io/ymir/ (base `/ymir/`).
+The site is live at [ymir.weirdbrains.com](https://ymir.weirdbrains.com/). The repository variable `CUSTOM_DOMAIN=ymir.weirdbrains.com` makes the Pages workflow build with
+`SITE_BASE=/`, `SITE_URL=https://ymir.weirdbrains.com`, `SIBLING_URL=https://bragi.weirdbrains.com/` and write a `CNAME` file.
+Without the variable the build is the [github.io project page](https://weirdbrains.github.io/ymir/) (base `/ymir/`).
 
-Custom domain `ymir.weirdbrains.com` (approved, DNS not added yet). To switch, in order:
+## Checks
 
-1. DNS: add `CNAME ymir -> weirdbrains.github.io.` (and nothing else; Pages issues the certificate).
-2. Set the custom domain in the repo's Pages settings (`gh api -X PUT repos/WeirdBrains/ymir/pages -f cname=ymir.weirdbrains.com`), after DNS resolves.
-3. Set the repository variable `CUSTOM_DOMAIN=ymir.weirdbrains.com` and re-run the Pages workflow. The build then uses
-   `SITE_BASE=/`, `SITE_URL=https://ymir.weirdbrains.com`, `SIBLING_URL=https://bragi.weirdbrains.com/` and writes a `CNAME`
-   file. Switch both sites together so the cross-links work.
-4. Enforce HTTPS in the Pages settings once the certificate is issued.
+CI runs `python3 tool/gen_roadmap.py --check` (the roadmap pages match `roadmap.toml`) and `python3 tool/check_links.py`
+(every reference to another document or URL in the page sources and READMEs is a link).

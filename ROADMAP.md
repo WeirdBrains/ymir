@@ -2,13 +2,13 @@
 
 <!-- Generated from roadmap.toml by site/tool/gen_roadmap.py. Edit roadmap.toml, not this file. -->
 
-Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from docs/DESIGN.md.
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc.
 
-Updated 2026-11-19. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
+Updated 2026-11-20. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
 ## M0 Design (Done)
 
-The repo, the names, the three roles and the decisions, written down in docs/DESIGN.md and reviewed by the Weirdnet lead.
+The repo, the names, the three roles and the decisions, written down in the design doc and reviewed by the Weirdnet lead.
 
 Weirdnet crates: none new.
 
@@ -44,30 +44,30 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## M6 Workload spreading (In progress)
 
-Load balancing across replicas, moving models around the cloud, fair sharing between devices, priority classes, batch jobs, a shared answer cache, and several inference nodes active at once. Balancing, the per-device cap, priorities and batch fan-out are built; placement and the shared cache are not.
+Load balancing across replicas, fair sharing between devices, priority classes and batch jobs that fan out across nodes are built. Next: moving models between nodes, placement, and a shared answer cache.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
 
 ## M7 Split models (In progress)
 
-A model too big for one machine is split across several (vLLM with Ray, or llama.cpp RPC), reproducing the big mode on two large-memory machines. The llama.cpp RPC path is built and tested on one machine over loopback, with a real model: opt-in pool policy, private-link-only planning, group up and down, teardown on member loss.
+A model too big for one machine is split across several with llama.cpp RPC: an opt-in pool policy, private-link-only planning, group up and down, and teardown when a member is lost. Next: vLLM with Ray groups.
 
 Weirdnet crates: `weirdnet-backends`.
 
-## M8 Move existing servers onto Ymir (Planned)
+## M8 Move existing servers onto Ymir (Done)
 
-The servers that serve models today move to Ymir, one step at a time, with the owner approving each step.
+The servers that served models before now run on Ymir. The move was made one step at a time, with the owner approving each step.
 
 Weirdnet crates: none new.
 
 ## M9 Breadth and hardening (In progress)
 
-Built: self-update with rollback on weirdnet-update (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, and a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Not built: push wake-ups, the Windows service, BSD packages, a bundle fetcher. The four upstream issues are still open. Revoked model nodes are now refused and `[model] callers` takes peer ids only.
+Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher.
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 
 ## M10 Cert-only server link (Planned)
 
-Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. m3talsmith approved the design on 2026-11-20. Most of the crates are now published (weirdnet-sync 0.7.0, weirdnet-device-link 0.4.0, weirdnet-agent 0.4.4, weirdnet-backends 0.1.2); the Weirdnet lead is still verifying them, and weirdnet-update 0.2.1 and the adoption notes come later. Ymir wires M10 up after that. A majority-vote lease follows as weirdnet-sync 0.8.0 after M10.
+Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. The design is approved and the Weirdnet crates are published; Ymir wires it up next. A majority-vote lease follows as weirdnet-sync 0.8.0.
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.

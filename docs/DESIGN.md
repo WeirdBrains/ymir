@@ -1503,7 +1503,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models.** Group jobs: vLLM + Ray over RoCE, llama.cpp RPC over Ethernet; big mode on
   server-a/server-b reproduced as a group job.
-- **M8 server-a/server-b migration** (steps above, each approved by m3talsmith).
+- **M8 server-a/server-b migration** (done 2026-11-20; each step approved by m3talsmith).
 - **M9 Breadth and hardening.** Self-update via `weirdnet-update` with rollback; push via the
   embedded `weirdnet-push` senders (once its Weirdnet front end exists); Windows service (done
   2026-11-20, see [Running as a service](#running-as-a-service)), BSD packages, a security review of the roster check,

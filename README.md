@@ -10,9 +10,10 @@
 **A cloud of LLM models: a private, self-hosted model cloud.** Start with one machine. Add
 more over Weirdnet. The pool acts as one endpoint, and the models are spread across it.
 
-> Status: M2 (2026-11-19): one box runs all three roles in one `ymird`, with llama.cpp and vLLM
-> (managed or a wrapped stock server), stand-in cold start, idle unload, crash backoff, alerts and a
-> user service. Roles over Weirdnet (M3), more machines and context sync come next. Read [docs/DESIGN.md](docs/DESIGN.md).
+> Status: M2 to M5 and M8 done; M6, M7 and M9 in progress; M10 next (see the [roadmap](ROADMAP.md) and the [design doc](docs/DESIGN.md)).
+> One box runs all three roles in one `ymird`, with llama.cpp and vLLM (managed or a wrapped stock server), stand-in
+> cold start, idle unload, crash backoff, alerts and a service. The roles talk over Weirdnet across devices, with several
+> model nodes, context sync and mid-answer failover, and the servers that served models before now run on Ymir.
 
 Ymir turns a computer with a decent GPU (a DGX Spark, a gaming PC, a Mac, a workstation, or a
 CPU-only box) into part of your own model cloud with one command. Machines join over
@@ -47,7 +48,7 @@ package, `ymirctl setup --download --yes --service`, done. There are two builds:
 MLX instead: `setup --download` installs MLX-LM and the MLX weights (`--backend llamacpp` keeps llama.cpp). The
 [deployment guide](https://ymir.weirdbrains.com/docs/guides/deployment/) has the details.
 
-Nothing is released yet, so build from source (Rust 1.99) and put the pinned llama.cpp build
+Ymir has no tagged release yet, so build from source (Rust 1.99) and put the pinned llama.cpp build
 (`packaging/engines/llama.cpp.toml`) next to the binaries, where `ymird` looks for it.
 `python3 scripts/package.py [--variant cuda]` builds the release files themselves into `dist/`.
 

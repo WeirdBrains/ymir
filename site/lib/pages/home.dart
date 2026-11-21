@@ -54,7 +54,7 @@ class Home extends StatelessComponent {
             _card(
               'Inference nodes',
               'Coordinate the pool: one model catalog, routing, a stand-in model while a big one loads, and failover. '
-                  'Load balancing, cloud-wide swapping and synced context are still planned.',
+                  'Load balancing and synced context are built; cloud-wide swapping is planned.',
             ),
             _card(
               'App nodes',
@@ -68,17 +68,17 @@ class Home extends StatelessComponent {
         div(classes: 'wrap', [
           div(classes: 'section-head', [
             h2([Component.text('What works today')]),
-            p([Component.text('Status from the design doc, $roadmapUpdated. Nothing is released yet.')]),
+            p([Component.text('Status from the design doc, $roadmapUpdated.')]),
           ]),
           ul(classes: 'checks', [
             li([Component.text('One box runs all three roles in one ymird, with llama.cpp and vLLM (managed, or wrapping a server that is already running).')]),
             li([Component.text('An OpenAI-compatible endpoint on loopback: chat, completions and embeddings, so Jan and scripts work.')]),
             li([Component.text('A small stand-in model answers while a big one loads, clearly marked; models unload when idle and restart with backoff after a crash.')]),
-            li([Component.text('Roles talk across devices over Weirdnet, and only devices in your own roster are let in. So far this has been tested on one computer, not across real machines.')]),
+            li([Component.text('Roles talk across devices over Weirdnet, and only devices in your own roster are let in.')]),
             li([Component.text('Milestones done: $done. In progress: $current.')]),
           ]),
           p([
-            Component.text('Linux packages (tar.gz, zip, .deb and a TAUR recipe) build locally; nothing is published. '),
+            Component.text('Linux packages (tar.gz, zip, .deb and a TAUR recipe) build with the release workflow. '),
             a(href: siteLink('/roadmap'), [Component.text('See the full roadmap.')]),
           ]),
         ]),

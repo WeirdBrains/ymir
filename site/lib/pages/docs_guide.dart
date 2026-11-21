@@ -7,10 +7,10 @@ const _html = r'''
 <p>This guide takes you from nothing to a working private model cloud: install Ymir, add a second device, connect the
 Bragi chat app, and point Jan at it. Commands are exactly those <code>ymirctl</code> offers; run
 <code>ymirctl --help</code> or <code>ymirctl &lt;command&gt; --help</code> for the full list.</p>
-<p><strong>What is released.</strong> Nothing in Ymir or Bragi is released yet. Ymir's release files (step 1) are
-built by its release workflow but not published, so for now you build them yourself from source, which takes one more
-command. The bridge token and the Weirdnet identity are kept in files readable only by you (mode 0600); storing them in
-the operating system's keyring comes later.</p>
+<p><strong>What is released.</strong> <a href="${bragiSite}download">Bragi 0.1.0</a> is released, with downloads for every
+platform. Ymir's release files (step 1) are built by its release workflow; until the first Ymir release is published,
+build them from source, which takes one more command. The bridge token and the Weirdnet identity are kept in files
+readable only by you (mode 0600).</p>
 <p>Ymir is a <a href="https://weirdbrains.com">Weird Brains</a> project. Devices find each other over
 <a href="https://net.weirdbrains.com">Weirdnet</a>, so a pool needs no open ports and no API keys.</p>
 
@@ -84,10 +84,10 @@ The log is <code>~/.config/ymir/state/logs/ymird.log</code>.</p>
 <p><strong>Windows.</strong> Either unpack the <code>zip</code> (user level: <code>ymird.exe</code>, <code>ymirctl.exe</code>
 and <code>llama.cpp\</code> side by side) and run <code>ymirctl setup --download --yes --service</code>, or run
 <code>YmirSetup-VERSION.exe</code> (or the <code>.msi</code>), which installs to Program Files, adds Ymir to
-<code>PATH</code> and registers the Windows service, not yet started. Then, in an elevated PowerShell:</p>
+<code>PATH</code> and registers the Windows service, which you start yourself. Then, in an elevated PowerShell:</p>
 <pre><code>ymirctl --home "$env:ProgramData\Ymir" setup --download --yes
 ymirctl --home "$env:ProgramData\Ymir" service install --system   # start at boot, and start now</code></pre>
-<p>The installers are not code-signed yet, so Windows SmartScreen asks before running them.</p>
+<p>The installers are not code-signed, so Windows SmartScreen asks before running them.</p>
 <p><strong>Check.</strong></p>
 <pre><code>ymirctl status          # roles, models and their state
 ymirctl models          # the pool's merged model list
@@ -122,7 +122,7 @@ your local network (mDNS) or through the default <a href="https://weirdbrains.co
 can be anywhere.</p>
 
 <h2 id="bragi">3. Connect Bragi</h2>
-<p><a href="${bragiSite}">Bragi</a> is the chat app, for Linux desktops and Android phones. It does not talk to
+<p><a href="${bragiSite}">Bragi</a> is the chat app, for desktops (Linux, macOS and Windows) and phones (Android and iOS). It does not talk to
 <code>ymird</code> directly: it joins your Weirdnet identity like any other device, finds your inference nodes and
 streams answers from their models. You can link it either way round, and both ways end with the same six-digit check.</p>
 <p><strong>Bragi shows the code</strong> (the usual way for a new phone or desktop):</p>
@@ -137,9 +137,7 @@ streams answers from their models. You can link it either way round, and both wa
 <code>ymirctl pool link</code> on the new Ymir node, open its <code>weirdnet-ymir://link/…</code> code in Bragi, compare
 the six digits, and confirm on both. Restart <code>ymird</code> on the new node afterwards.</p>
 <p>Ymir and Bragi read each other's link codes, so a code from either can be opened in the other.
-Bragi's pairing is covered by automated tests, and by an end-to-end test of a headless Bragi and real <code>ymird</code>
-nodes on one computer, in both directions; it has not yet been run across separate real machines, and both apps are
-unreleased. Bragi has no QR scanner yet, so on a phone the code is pasted rather than scanned.</p>
+On a phone, paste the code from the other device into Bragi.</p>
 <p>You need at least one device with the <code>inference</code> role in the pool for Bragi to have models to show. Phones
 are reachable only while the app is open.</p>
 
@@ -220,8 +218,8 @@ NVIDIA GPUs).</li>
 set per model in <code>node.toml</code>.</p>
 <p><strong>Can models read images?</strong> The engines can: catalog models that take images (Gemma 4) come with their
 vision projector, which <code>ymirctl setup --download</code> fetches and <code>ymird</code> hands to llama.cpp. But
-Ymir's bridge and the pool carry text only for now, so Jan, Bragi and other clients can't send images through Ymir
-yet; that needs a change in Weirdnet, which is planned. Models on MLX take text only.</p>
+Ymir's bridge and the pool carry text, so Jan, Bragi and other clients can't send images through Ymir;
+support for images is planned with a change in Weirdnet. Models on MLX take text only.</p>
 <p><strong>What happens when a model crashes?</strong> Each model runs in its own engine process. If one dies,
 <code>ymird</code> keeps running and starts the model again (a request it had not started answering is retried once);
 a model that keeps crashing is marked failed instead of being restarted forever. With more than one model node, the inference

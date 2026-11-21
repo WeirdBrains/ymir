@@ -5,9 +5,8 @@ import '../site.dart';
 
 const _html = r'''
 <h2 id="build">Build it</h2>
-<p>Ymir's release files include llama.cpp, so a server needs nothing else (see the
-<a href="${guide}#install">deployment guide</a>). Nothing is released yet, so build from source with Rust 1.99, and put
-the pinned llama.cpp build next to the binaries, where <code>ymird</code> looks for it:</p>
+<p>Build from source with Rust 1.99, and put the pinned llama.cpp build next to the binaries, where
+<code>ymird</code> looks for it (the <a href="${guide}#install">deployment guide</a> covers the packaged install):</p>
 <pre><code>git clone https://github.com/WeirdBrains/ymir && cd ymir
 cargo build --release -p ymird -p ymirctl
 python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --out target/release/llama.cpp
@@ -47,8 +46,8 @@ wrap_api_key = "env:VLLM_API_KEY"</code></pre>
 <h2 id="more">More machines</h2>
 <p>Machines join over Weirdnet by being linked to your own identity: <code>ymirctl pool link</code> on a node prints a
 code, and you open it on the other device (Morph, or <code>ymirctl pool add</code>). Both sides show the same six
-digits to compare. Roles over Weirdnet work today, but they have so far only been tested on one computer. Several model
-nodes in one pool (M4) is in progress; see the <a href="${roadmapUrl}">roadmap</a>.</p>
+digits to compare. Several model nodes can share one pool, with failover and synced context; see the
+<a href="${roadmapUrl}">roadmap</a>.</p>
 ''';
 
 class QuickstartPage extends StatelessComponent {

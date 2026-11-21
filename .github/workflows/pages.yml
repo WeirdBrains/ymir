@@ -5,9 +5,9 @@ name: Pages
 on:
   push:
     branches: ['main']
-    paths: ['site/**', 'roadmap.toml', 'ROADMAP.md', 'brand/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/pages.yml']
+    paths: ['site/**', 'README.md', 'HANDOFF.md', 'roadmap.toml', 'ROADMAP.md', 'brand/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/pages.yml']
   pull_request:
-    paths: ['site/**', 'roadmap.toml', 'ROADMAP.md', 'brand/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/pages.yml']
+    paths: ['site/**', 'README.md', 'HANDOFF.md', 'roadmap.toml', 'ROADMAP.md', 'brand/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -34,6 +34,8 @@ jobs:
       - run: dart analyze
       - name: The roadmap pages match roadmap.toml
         run: python3 tool/gen_roadmap.py --check
+      - name: Every reference to another document or URL is a link
+        run: python3 tool/check_links.py
       - name: Build the static site
         # CUSTOM_DOMAIN (a repository variable) switches to the custom domain: root-relative links,
         # the sibling site's domain and a CNAME file. Unset, the site is the github.io project page.
