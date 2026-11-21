@@ -114,7 +114,7 @@ fn handshake_tools_and_errors_over_stdio() {
     assert!(r["content"][0]["text"].as_str().unwrap().contains("confirm=true"), "{r}");
     // Unknown tools are protocol errors; unknown methods too; ping works.
     assert!(c.rpc("tools/call", json!({"name": "nope"}))["error"]["message"].as_str().unwrap().contains("unknown tool"));
-    assert_eq!(c.rpc("resources/list", json!({}))["error"]["code"], -32601);
+    assert_eq!(c.rpc("nope/nothing", json!({}))["error"]["code"], -32601);
     assert_eq!(c.rpc("ping", json!({}))["result"], json!({}));
     // Garbage gets a parse error and the server keeps going.
     c.send_raw("{not json");
@@ -152,4 +152,22 @@ fn contradicting_flags_fail() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("contradict"));
+}
+
+#[test]
+fn resources_list_and_read() {
+    let mut c = Client::start(&[]);
+    init(&mut c);
+    let list = c.rpc("resources/list", json!({}));
+    let uris: Vec<&str> = list["result"]["resources"].as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap()).collect();
+    assert_eq!(uris, ["ymir://status", "ymir://nodes", "ymir://models", "ymir://models/local"]);
+    // Unknown URI: not found. Known URI with no ymird: an error that says why, not an empty list.
+    assert_eq!(c.rpc("resources/read", json!({"uri": "ymir://nope"}))["error"]["code"], -32002);
+    let r = c.rpc("resources/read", json!({"uri": "ymir://status"}));
+    assert!(r["error"]["message"].as_str().unwrap().contains("not answering"), "{r}");
+    // The model files on this node need no daemon.
+    let r = c.rpc("resources/read", json!({"uri": "ymir://models/local"}));
+    assert_eq!(r["result"]["contents"][0]["mimeType"], "application/json", "{r}");
+    assert!(r["result"]["contents"][0]["text"].as_str().unwrap().contains("text"));
+    c.finish();
 }

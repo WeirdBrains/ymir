@@ -272,6 +272,8 @@ addressed to another host name or sent from a web page is refused.</li>
 model takes: images, audio), <code>ymir_chat</code> (text, images up to 5&nbsp;MB and audio up to 10&nbsp;MB, as files or content
 parts), <code>ymir_complete</code>, <code>ymir_embed</code>, <code>ymir_service_status</code>, <code>ymir_models_search</code> and
 <code>ymir_models_local</code>.</p>
+<p>Resources (read-only, for clients that show them): <code>ymir://status</code>, <code>ymir://nodes</code>,
+<code>ymir://models</code> and <code>ymir://models/local</code>.</p>
 <p>Changing, marked <strong>MUTATES</strong> in their description, with <code>readOnlyHint: false</code>, and doing nothing unless
 the call says <code>confirm: true</code>: <code>ymir_load_model</code>, <code>ymir_unload_model</code> and
 <code>ymir_pull_model</code> (without <code>confirm</code> it only shows what would be downloaded). <code>ymir_remove_model</code>

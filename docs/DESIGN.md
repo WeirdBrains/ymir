@@ -657,13 +657,14 @@ On a single box both halves run in the same `ymird`.
 
 ### MCP server (`ymirctl mcp`)
 
-`ymirctl mcp` serves the node to MCP clients. Code: `crates/ymirctl/src/mcp.rs` (tool table and tools) and
-`mcp/rpc.rs` (protocol front end). JSON-RPC, the tool table, annotations and argument handling come from the published
-`weirdnet-mcp` crate (default features, so no second `weirdnet-agent`). It is stateless and offers tools only.
+`ymirctl mcp` serves the node to MCP clients. Code: `crates/ymirctl/src/mcp.rs` (tool table, tools, resources and the
+loopback bind check). JSON-RPC, the tool table and its schemas, annotations, the stdio loop, the HTTP route and guard, and
+resources come from the published `weirdnet-mcp` 0.6 crate (features `stdio-server` and `axum`, so no second
+`weirdnet-agent`). It is stateless. It speaks MCP 2026-07-28 and still answers older `initialize` clients.
 
 - **Transports.** stdio (one JSON message per line; requests run concurrently), or `--http [ADDR]`: `POST /mcp`, JSON replies,
-  loopback addresses only, `Authorization: Bearer <bridge token>` (compared in constant time), `Host` and `Origin` limited to
-  this machine, no GET stream (405). The `ymird`-hosted variant is not built; the control socket and bridge are the only
+  `Authorization: Bearer <bridge token>`, `Host` and `Origin` limited to this machine (`Guard::loopback`). The guard does not
+  look at the bind address, so `ymirctl` refuses non-loopback addresses itself (`loopback_addr`, and again on the listener). The `ymird`-hosted variant is not built; the control socket and bridge are the only
   backends, so the client side adds nothing a local `ymirctl` could not do.
 - **Tools.** Read: `ymir_status`, `ymir_nodes`, `ymir_devices`, `ymir_models`, `ymir_chat`, `ymir_complete`, `ymir_embed`,
   `ymir_service_status`, `ymir_models_search`, `ymir_models_local`. Mutating: `ymir_load_model`, `ymir_unload_model`,
@@ -675,9 +676,11 @@ On a single box both halves run in the same `ymird`.
 - **Chat.** `prompt` plus `images` and `audio` build OpenAI content parts (`image_url` data URL, `input_audio`); `messages` takes
   parts as they are. The pool refuses media for a model that does not take it. `route: weirdnet` sends text only, through the
   node's synced conversations.
-- **Gaps in `weirdnet-mcp` 0.5.3** worked around in `mcp/rpc.rs`: tools are synchronous (each call runs on a blocking thread);
-  parameters are flat scalars and string lists (richer schemas are patched into `tools/list`); no stdio server loop or HTTP
-  route (both here); no resources or prompts; tool results are text plus `structuredContent` only (no image content).
+- **Resources (read-only).** `ymir://status`, `ymir://nodes`, `ymir://models` and `ymir://models/local`, each the same JSON
+  as the matching read tool; an unknown URI is a not-found error.
+- **Schemas.** Chat `messages` (array of `{role, content}`), `route` and search `format` (enums), `embed` `input` (a string or a
+  list) and `max_tokens >= 1` are in the tool table itself (`ParamType::Array`/`Object`/`Enum`/`AnyOf`/`Json`); a unit test
+  runs `ToolSpec::check` on it. Tools are async (`call_async`), so nothing blocks a thread.
 
 ## Growing the pool
 

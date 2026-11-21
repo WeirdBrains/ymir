@@ -2,6 +2,21 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-21: `ymirctl mcp` moves to `weirdnet-mcp` 0.6 (LF-16 follow-up, branch `feature/mcp-weirdnet-0.6`, based on main 0536020)
+
+**What changed**
+
+- `weirdnet-mcp = { version = "0.6", features = ["stdio-server", "axum"] }`. `crates/ymirctl/src/mcp/rpc.rs` (205 lines) is deleted: tools are `call_async`, the stdio loop is `weirdnet_mcp::stdio::serve`, HTTP is `weirdnet_mcp::http::router("/mcp", .., Guard::loopback(Auth::token(bridge_token)))`. The schema patching is gone; `messages`, `route`, `format`, `input` and `max_tokens >= 1` live in the tool table.
+- Kept: every tool, the `confirm` gates, `--read-only`, `--allow-remove`, images and audio in chat, and our own loopback bind check (the guard checks `Host` and `Origin`, not the bind address). HTTP error bodies are now JSON-RPC errors, and a GET is no longer our hand-made 405.
+- New: read-only resources `ymir://status`, `ymir://nodes`, `ymir://models`, `ymir://models/local`.
+- Tests: `ToolSpec::check` on the table; scripted stdio session and resources (`crates/ymirctl/tests/mcp_stdio.rs`); HTTP with token, Host, Origin and loopback refusal against the real binary (`tests/mcp_http.rs`); the fake-pool tests in `ymir-testkit/tests/mcp.rs` moved to `handle_async` and gained a resources test.
+
+**Checks run:** fmt, build, clippy -D warnings and the workspace tests; a read-only stdio smoke test against the real pool (tools/list, nodes, resources, models and one chat).
+
+**Not tested:** a real MCP client (Cursor, Claude, VS Code) and a 2026-07-28 client; Windows (CI on the branch is the check).
+
+**What's next:** merge on Michael's OK; a bench tool after `feature/pool-bench` merges.
+
 ## 2026-11-21: `ymirctl mcp`, an MCP server (LF-16, branch `feature/mcp-v2`, based on `feature/model-search-pull` b0a425a)
 
 **What changed**

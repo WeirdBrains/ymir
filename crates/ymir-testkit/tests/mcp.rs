@@ -7,9 +7,13 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use weirdnet_mcp::Server;
 use ymir_core::{Daemon, NodeConfig, Paths, vision};
-use ymirctl::mcp::{Policy, Rpc, YmirTools};
+use ymirctl::mcp::{Policy, YmirTools};
+
+type Rpc = Server<YmirTools>;
 
 const MOCK: &str = env!("CARGO_BIN_EXE_ymir-mock-engine");
 
@@ -50,8 +54,8 @@ async fn node() -> Result<Node> {
 }
 
 impl Node {
-    fn rpc(&self, policy: Policy) -> Rpc<YmirTools> {
-        ymirctl::mcp::server(YmirTools::new(self.paths.clone(), Some(self.home.clone()), policy))
+    fn rpc(&self, policy: Policy) -> Arc<Rpc> {
+        Arc::new(ymirctl::mcp::server(YmirTools::new(self.paths.clone(), Some(self.home.clone()), policy)))
     }
 
     async fn stop(mut self) {
@@ -60,25 +64,25 @@ impl Node {
 }
 
 /// Calls a JSON-RPC method and returns the whole reply.
-async fn call_rpc(rpc: &Rpc<YmirTools>, method: &str, params: Value) -> Value {
-    rpc.handle(None, json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params})).await.expect("a reply")
+async fn call_rpc(rpc: &Rpc, method: &str, params: Value) -> Value {
+    rpc.handle_async(None, json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params})).await.expect("a reply")
 }
 
 /// A tool's structured answer; fails the test on a tool error.
-async fn ok(rpc: &Rpc<YmirTools>, name: &str, args: Value) -> Value {
+async fn ok(rpc: &Rpc, name: &str, args: Value) -> Value {
     let r = call_rpc(rpc, "tools/call", json!({"name": name, "arguments": args})).await;
     assert_eq!(r["result"]["isError"], false, "{name} failed: {r}");
     r["result"]["structuredContent"].clone()
 }
 
 /// A tool's error text; fails the test when the tool succeeds.
-async fn err(rpc: &Rpc<YmirTools>, name: &str, args: Value) -> String {
+async fn err(rpc: &Rpc, name: &str, args: Value) -> String {
     let r = call_rpc(rpc, "tools/call", json!({"name": name, "arguments": args})).await;
     assert_eq!(r["result"]["isError"], true, "{name} should fail: {r}");
     r["result"]["content"][0]["text"].as_str().unwrap().to_string()
 }
 
-async fn tool_names(rpc: &Rpc<YmirTools>) -> Vec<String> {
+async fn tool_names(rpc: &Rpc) -> Vec<String> {
     call_rpc(rpc, "tools/list", json!({})).await["result"]["tools"]
         .as_array()
         .unwrap()
@@ -319,6 +323,28 @@ async fn streamable_http_on_loopback_with_the_bridge_token() -> Result<()> {
     assert!(ymirctl::mcp::loopback_addr("0.0.0.0:8485").is_err());
     let _ = stop_tx.send(());
     task.await??;
+    n.stop().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resources_show_the_pool_read_only() -> Result<()> {
+    let n = node().await?;
+    let rpc = n.rpc(Policy::default());
+    let init =
+        call_rpc(&rpc, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})).await;
+    assert!(init["result"]["capabilities"]["resources"].is_object(), "{init}");
+    let read = |uri: &'static str| {
+        let rpc = rpc.clone();
+        async move { call_rpc(&rpc, "resources/read", json!({"uri": uri})).await }
+    };
+    let text = |r: &Value| serde_json::from_str::<Value>(r["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    let nodes = text(&read("ymir://nodes").await);
+    assert_eq!(nodes["nodes"][0]["models"], 5);
+    assert!(text(&read("ymir://status").await)["models"].is_array());
+    assert!(text(&read("ymir://models").await)["models"].as_array().is_some_and(|m| !m.is_empty()));
+    assert!(text(&read("ymir://models/local").await)["text"].is_string());
+    assert_eq!(read("ymir://nope").await["error"]["code"], -32002);
     n.stop().await;
     Ok(())
 }
