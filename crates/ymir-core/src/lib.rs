@@ -14,6 +14,7 @@ pub mod context;
 pub mod control;
 pub mod coordinator;
 pub mod daemon;
+pub mod direct;
 pub mod engine;
 pub mod fair;
 pub mod group;

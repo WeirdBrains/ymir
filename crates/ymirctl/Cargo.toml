@@ -20,6 +20,7 @@ weirdnet-net.workspace = true
 weirdnet-update.workspace = true
 semver.workspace = true
 tempfile.workspace = true
+async-trait.workspace = true
 ymir-core.workspace = true
 
 [dev-dependencies]

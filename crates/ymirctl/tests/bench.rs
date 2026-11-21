@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 use ymir_core::client::BridgeClient;
-use ymirctl::bench::{BenchArgs, run};
+use ymirctl::bench::{BenchArgs, BridgeBackend, Suite, Via, run};
 
 fn answer_for(prompt: &str) -> &'static str {
     if prompt.contains("17 * 23") {
@@ -54,37 +54,43 @@ async fn benchmarks_each_model_and_hides_node_names() {
 
     let dir = tempfile::tempdir().unwrap();
     let args = BenchArgs {
-        model: vec![],
+        via: Via::Bridge,
+        suite: Suite::Standard,
         repeats: 2,
-        warmup: 1,
-        include_cold: false,
-        skip_quality: false,
-        no_code_exec: false,
         timeout: 20,
         busy_retries: 0,
         busy_wait: 0,
         out_dir: dir.path().to_path_buf(),
-        real_names: false,
+        ..Default::default()
     };
-    let client = BridgeClient::new(port, "0123456789abcdef0123");
+    let backend = BridgeBackend(BridgeClient::new(port, "0123456789abcdef0123"));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let (json_path, md_path) = run(&client, &args, &mut out, &mut err).await.unwrap();
+    let (json_path, md_path, csv_path) = run(&backend, &args, &mut out, &mut err).await.unwrap();
 
     let report: Value = serde_json::from_str(&std::fs::read_to_string(json_path).unwrap()).unwrap();
     let md = std::fs::read_to_string(md_path).unwrap();
-    assert!(!md.contains("real-host-1") && !report.to_string().contains("real-host-1"), "node names are anonymised by default");
+    let csv = std::fs::read_to_string(csv_path).unwrap();
+    assert!(
+        !md.contains("real-host-1") && !report.to_string().contains("real-host-1") && !csv.contains("real-host-1"),
+        "node names are anonymised by default"
+    );
     assert!(md.contains("node-a"));
-    let models = report["models"].as_array().unwrap();
-    let chatty = models.iter().find(|m| m["model"] == "chatty").unwrap();
-    assert_eq!(chatty["nodes"][0]["samples"], 6);
-    assert!(chatty["nodes"][0]["decode_tps_long"]["median"].as_f64().unwrap() > 0.0);
+    let rows = report["rows"].as_array().unwrap();
+    let chatty = rows.iter().find(|m| m["model"] == "chatty").unwrap();
+    assert_eq!(chatty["samples"], 6);
+    assert!(chatty["decode_tps"]["median"].as_f64().unwrap() > 0.0);
     let q = &chatty["quality"];
     assert_eq!(q["ran"], 8);
     let passed = q["passed"].as_u64().unwrap();
     // arithmetic_1, json, fib (if python3 exists) and the capital are answered right; the rest are not.
     assert!((3..=4).contains(&passed), "passed {passed}");
-    let cold = models.iter().find(|m| m["model"] == "cold").unwrap();
+    let cold = rows.iter().find(|m| m["model"] == "cold").unwrap();
     assert!(cold["skipped"].as_str().unwrap().contains("not loaded"));
-    let vec = models.iter().find(|m| m["model"] == "vec").unwrap();
+    let vec = rows.iter().find(|m| m["model"] == "vec").unwrap();
     assert_eq!(vec["embedding"]["dims"], 4);
+
+    // Over the bridge the pool picks the node, so asking for one is refused.
+    let mut pinned = args.clone();
+    pinned.node = vec!["m1".into()];
+    assert!(run(&backend, &pinned, &mut Vec::new(), &mut Vec::new()).await.is_err());
 }

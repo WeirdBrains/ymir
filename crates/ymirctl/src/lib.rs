@@ -133,9 +133,11 @@ pub enum Cmd {
         #[arg(long)]
         retries: Option<u32>,
     },
-    /// Compare every model on the pool: time to first token, tokens per second, latency and a few
-    /// deterministic quality checks. One model at a time; saves a timestamped JSON and Markdown report.
-    Bench(bench::BenchArgs),
+    /// Benchmark the pool's models on each node (a node×model matrix over Weirdnet, or through the
+    /// bridge): time to first token, tokens per second, latency and deterministic quality checks. One
+    /// request at a time; saves timestamped JSON, Markdown and CSV. `bench list` shows what can run,
+    /// `bench compare A.json B.json` compares two results.
+    Bench(bench::BenchCmd),
     /// This node's place in your Weirdnet: link it, link other devices, revoke.
     Pool {
         #[command(subcommand)]
@@ -372,10 +374,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             writeln!(out, "# {}", r.message.unwrap_or_default())?;
             Ok(())
         }
-        Cmd::Bench(args) => {
-            let client = bridge(&paths).await?;
-            bench::run(&client, &args, out, &mut std::io::stderr()).await.map(|_| ())
-        }
+        Cmd::Bench(cmd) => bench_cmd(&paths, cmd, out).await,
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;
             pool::run(&paths, &cfg, cmd, out, input).await
@@ -823,6 +822,34 @@ async fn nodes(paths: &Paths, out: &mut dyn Write) -> Result<()> {
         writeln!(out, "No model nodes (this node has neither the inference nor the model role).")?;
     }
     write_nodes(out, &s.nodes)
+}
+
+/// The backend `--via` names: each node over Weirdnet, or the loopback bridge.
+async fn bench_backend(paths: &Paths, via: bench::Via, hints: &[String]) -> Result<Box<dyn bench::Backend>> {
+    let cfg = load_cfg(paths)?;
+    Ok(match via {
+        bench::Via::Bridge => Box::new(bench::BridgeBackend(bridge(paths).await?)),
+        bench::Via::Weirdnet => {
+            let direct = ymir_core::direct::Direct::start(&cfg, paths, hints, std::time::Duration::from_secs(15))
+                .await
+                .context("could not reach Weirdnet as this device (use `--via bridge` to go through the local ymird instead)")?;
+            Box::new(bench::DirectBackend { direct })
+        }
+    })
+}
+
+async fn bench_cmd(paths: &Paths, cmd: bench::BenchCmd, out: &mut dyn Write) -> Result<()> {
+    match cmd.sub {
+        Some(bench::BenchSub::Compare(a)) => bench::compare(&a, out),
+        Some(bench::BenchSub::List(a)) => {
+            let backend = bench_backend(paths, a.via, &a.hint).await?;
+            bench::list(backend.as_ref(), a.real_names, out).await
+        }
+        None => {
+            let backend = bench_backend(paths, cmd.run.via, &cmd.run.hint).await?;
+            bench::run(backend.as_ref(), &cmd.run, out, &mut std::io::stderr()).await.map(|_| ())
+        }
+    }
 }
 
 async fn bridge(paths: &Paths) -> Result<BridgeClient> {

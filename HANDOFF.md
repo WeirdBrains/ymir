@@ -2,6 +2,16 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-21: `ymirctl bench` over Weirdnet, a node×model matrix (work in progress)
+
+**What changed**
+
+- `ymirctl bench` now talks to each inference node directly over Weirdnet (`ymir_core::direct::Direct`): a probe node with this device's identity, ephemeral ports, no discovery or relays, then a `Pool` whose node list is the one peer (catalog/1 for models, infer/2 for answers). That is a real node pin, with no `weirdnet-*` change. `--via bridge` keeps the old loopback path.
+- New: `--node` and `-m` (repeatable or `all`), `--suite quick|standard|hard`, `--context`, `--max-tokens`, `--quality-tokens`, `--cold` (warns, asks unless `--yes`), `bench list`, `bench compare A.json B.json`, CSV next to JSON and Markdown, side-by-side matrices.
+- Still strictly one request at a time, busy or loading models skipped.
+
+**Status:** code and tests done; the real three-node run and the final write-up follow in the next commit.
+
 ## 2026-11-21: `ymirctl bench`, a benchmark that compares every model on the pool
 
 **What changed**
