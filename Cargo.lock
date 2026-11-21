@@ -5243,11 +5243,15 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-mcp"
-version = "0.5.3"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42fceae889f2a2691ce501bee499d9a931665d7ed1ff4727076cb67e6f785c9a"
+checksum = "5680956396892c615245e4404f276b266ef217e8484da7ab9d8537dcd99d19f2"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "http",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -5764,6 +5768,7 @@ dependencies = [
  "weirdnet-agent",
  "weirdnet-alerts",
  "weirdnet-backends",
+ "weirdnet-mcp",
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",

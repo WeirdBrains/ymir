@@ -12,9 +12,10 @@
 //!   `--read-only` hides every mutating tool.
 //!
 //! Everything goes through the same control socket, bridge and `models` code `ymirctl` uses;
-//! nothing here reimplements the pool. The protocol layer is `rpc` (over `weirdnet-mcp`).
-
-pub mod rpc;
+//! nothing here reimplements the pool. The protocol layer (JSON-RPC, stdio, HTTP guard, resources)
+//! is `weirdnet-mcp` 0.6.
+//!
+//! Resources (read-only): `ymir://status`, `ymir://nodes`, `ymir://models` and `ymir://models/local`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,13 +23,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use serde_json::{Value, json};
-use weirdnet_mcp::{Param, ParamType as T, Server, ServerInfo, ToolError, ToolSpec, Tools};
+use std::net::SocketAddr;
+use weirdnet_mcp::http::{Auth, Guard};
+use weirdnet_mcp::{
+    CallToolResult, Param, ParamType as T, Resource, ResourceContents, ResourceError, Server, ServerInfo, ToolError, ToolSpec, Tools,
+};
 use ymir_core::Paths;
 use ymir_core::control::{self, ControlRequest, ModelState, StatusReport};
 
 use crate::models::{DirArgs, ListArgs, ModelsCmd, NodeArgs, PullArgs, RemoveArgs, SearchArgs};
 use crate::{ServiceArgs, ServiceCmd};
-pub use rpc::{Rpc, loopback_addr, serve_http, serve_stdio};
+
+/// Where the streamable HTTP endpoint lives.
+pub const HTTP_PATH: &str = "/mcp";
 
 /// The default `--http` address.
 pub const DEFAULT_HTTP: &str = "127.0.0.1:8485";
@@ -59,7 +66,7 @@ pub async fn run(explicit_home: Option<PathBuf>, paths: Paths, args: McpArgs) ->
         bail!("--read-only and --allow-remove contradict each other");
     }
     let tools = YmirTools::new(paths.clone(), explicit_home, Policy { read_only: args.read_only, allow_remove: args.allow_remove });
-    let rpc = server(tools);
+    let server = Arc::new(server(tools));
     let mode = if args.read_only {
         ", read-only"
     } else if args.allow_remove {
@@ -70,7 +77,7 @@ pub async fn run(explicit_home: Option<PathBuf>, paths: Paths, args: McpArgs) ->
     match args.http {
         None => {
             eprintln!("ymirctl {}: MCP server on stdio{mode}", env!("CARGO_PKG_VERSION"));
-            serve_stdio(rpc, tokio::io::stdin(), tokio::io::stdout()).await
+            serve_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await
         }
         Some(addr) => {
             let addr = loopback_addr(&addr)?;
@@ -80,9 +87,9 @@ pub async fn run(explicit_home: Option<PathBuf>, paths: Paths, args: McpArgs) ->
                 "ymirctl {}: MCP server on http://{}{}{mode} (bearer token: `ymirctl bridge token`)",
                 env!("CARGO_PKG_VERSION"),
                 listener.local_addr()?,
-                rpc::HTTP_PATH
+                HTTP_PATH
             );
-            serve_http(listener, rpc, token, async {
+            serve_http(listener, server, token, async {
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await
@@ -90,8 +97,8 @@ pub async fn run(explicit_home: Option<PathBuf>, paths: Paths, args: McpArgs) ->
     }
 }
 
-/// The protocol front end for `tools`.
-pub fn server(tools: YmirTools) -> Rpc<YmirTools> {
+/// The protocol server for `tools`.
+pub fn server(tools: YmirTools) -> Server<YmirTools> {
     let info = ServerInfo {
         name: "ymir".into(),
         title: "Ymir".into(),
@@ -101,7 +108,47 @@ pub fn server(tools: YmirTools) -> Rpc<YmirTools> {
             has agreed to that exact change."
             .into(),
     };
-    Rpc::new(Server::new(info, tools), schema_patch)
+    Server::new(info, tools)
+}
+
+/// Serves newline-delimited JSON-RPC on `input` and `output` until `input` ends and every request
+/// has been answered. Requests run concurrently, so a slow chat does not block a ping.
+pub async fn serve_stdio<R, W>(server: Arc<Server<YmirTools>>, input: R, output: W) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    weirdnet_mcp::stdio::serve(server, input, output).await.context("serving the MCP client")
+}
+
+/// Parses `--http ADDR` and refuses anything but a loopback address.
+pub fn loopback_addr(s: &str) -> Result<SocketAddr> {
+    let s = s.trim();
+    let addr: SocketAddr = match s.strip_prefix("localhost:") {
+        Some(port) => SocketAddr::from(([127, 0, 0, 1], port.parse().with_context(|| format!("bad port in {s}"))?)),
+        None => s.parse().with_context(|| format!("`{s}` is not an address like 127.0.0.1:8485"))?,
+    };
+    if !addr.ip().is_loopback() {
+        bail!("the MCP server only listens on loopback addresses (127.0.0.1 or ::1), not {}", addr.ip());
+    }
+    Ok(addr)
+}
+
+/// Serves stateless streamable HTTP at `/mcp` on `listener`, which must be bound to a loopback
+/// address, until `shutdown`. `weirdnet-mcp`'s guard checks `Host`, `Origin` and the bearer token;
+/// the loopback bind check is ours (the guard does not look at the bind address).
+pub async fn serve_http(
+    listener: tokio::net::TcpListener,
+    server: Arc<Server<YmirTools>>,
+    token: String,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    if !listener.local_addr()?.ip().is_loopback() {
+        bail!("refusing to serve MCP on {}: loopback only", listener.local_addr()?);
+    }
+    let app = weirdnet_mcp::http::router(HTTP_PATH, server, Guard::loopback(Auth::token(token)));
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+    Ok(())
 }
 
 /// What the server offers and allows.
@@ -131,9 +178,14 @@ const fn spec(
 
 const NO_PARAMS: &[Param] = &[];
 
+/// An integer of at least 1.
+const POSITIVE_INT: T = T::Json(r#"{"type":"integer","minimum":1}"#);
+
+const MESSAGE: &[Param] = &[Param::required("role", T::String, ""), Param::required("content", T::Any, "")];
+
 const SAMPLING: [Param; 2] = [
     Param::optional("temperature", T::Number, "Sampling temperature."),
-    Param::optional("max_tokens", T::Integer, "Longest answer, in tokens (at least 1)."),
+    Param::optional("max_tokens", POSITIVE_INT, "Longest answer, in tokens (at least 1)."),
 ];
 
 const CHAT_PARAMS: &[Param] = &[
@@ -142,6 +194,11 @@ const CHAT_PARAMS: &[Param] = &[
     Param::optional("model", T::String, "Model id (see ymir_models). Default: the pool's main model."),
     SAMPLING[0],
     SAMPLING[1],
+    Param::optional(
+        "messages",
+        T::Array(&T::Object(MESSAGE)),
+        "OpenAI-style messages ({role, content}); the last one is the user's turn. content is a string, or a list of parts: {type:text,text}, {type:image_url,image_url:{url:<data: URL>}}, {type:input_audio,input_audio:{data:<base64>,format:wav|mp3}}. Use this or `prompt`.",
+    ),
     Param::optional(
         "images",
         T::StringArray,
@@ -155,7 +212,7 @@ const CHAT_PARAMS: &[Param] = &[
     Param::optional("wait", T::Boolean, "Wait for the model to load instead of taking a stand-in's answer (bridge route)."),
     Param::optional(
         "route",
-        T::String,
+        T::Enum(&["bridge", "weirdnet"]),
         "bridge (default): through this node's loopback OpenAI bridge. weirdnet: straight to the pool's inference nodes over Weirdnet as a synced conversation (text only; needs a linked device identity).",
     ),
     Param::optional("conversation", T::String, "weirdnet route: continue this conversation (send only the new messages). Default: a new one."),
@@ -165,7 +222,7 @@ const COMPLETE_PARAMS: &[Param] =
     &[Param::required("prompt", T::String, "Text to continue."), Param::optional("model", T::String, "Model id."), SAMPLING[0], SAMPLING[1]];
 
 const EMBED_PARAMS: &[Param] = &[
-    Param::required("input", T::String, "A string, or a list of strings, to embed."),
+    Param::required("input", T::AnyOf(&[T::String, T::StringArray]), "A string or a list of strings to embed."),
     Param::optional("model", T::String, "An embedding model. Default: the pool's embedding model."),
 ];
 
@@ -173,7 +230,7 @@ const SERVICE_PARAMS: &[Param] = &[Param::optional("system", T::Boolean, "The ma
 
 const SEARCH_PARAMS: &[Param] = &[
     Param::required("query", T::String, "Words to search the Hugging Face Hub for, such as `qwen3 8b`."),
-    Param::optional("format", T::String, "gguf, mlx or all (default: GGUF, plus MLX on Apple Silicon)."),
+    Param::optional("format", T::Enum(&["gguf", "mlx", "all"]), "gguf, mlx or all (default: GGUF, plus MLX on Apple Silicon)."),
     Param::optional("limit", T::Integer, "Repos to show per format (default 5)."),
     Param::optional("context", T::Integer, "Context length to size the memory estimate for (default 32768)."),
 ];
@@ -302,28 +359,6 @@ const REMOVE_TOOL: ToolSpec = spec(
     false,
 );
 
-/// Adds what `Param` cannot express to a tool's `inputSchema`.
-fn schema_patch(tool: &str, schema: &mut Value) {
-    let props = &mut schema["properties"];
-    match tool {
-        "ymir_chat" => {
-            props["messages"] = json!({
-                "type": "array",
-                "description": "OpenAI-style messages ({role, content}); the last one is the user's turn. content is a string, or a list of parts: {type:text,text}, {type:image_url,image_url:{url:<data: URL>}}, {type:input_audio,input_audio:{data:<base64>,format:wav|mp3}}. Use this or `prompt`.",
-                "items": {"type": "object", "properties": {"role": {"type": "string"}, "content": {}}, "required": ["role", "content"]}
-            });
-            props["route"]["enum"] = json!(["bridge", "weirdnet"]);
-            props["max_tokens"]["minimum"] = json!(1);
-        }
-        "ymir_complete" => props["max_tokens"]["minimum"] = json!(1),
-        "ymir_embed" => {
-            props["input"] = json!({"description": "A string or a list of strings to embed.", "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]})
-        }
-        "ymir_models_search" => props["format"]["enum"] = json!(["gguf", "mlx", "all"]),
-        _ => {}
-    }
-}
-
 /// The names of the tools that change anything.
 pub fn mutating_tools() -> Vec<&'static str> {
     MUTATING_TOOLS.iter().chain([&REMOVE_TOOL]).map(|t| t.name).collect()
@@ -332,8 +367,20 @@ pub fn mutating_tools() -> Vec<&'static str> {
 struct Ctx {
     paths: Paths,
     explicit_home: Option<PathBuf>,
-    rt: tokio::runtime::Handle,
 }
+
+/// Read-only resources: URI, name, description and the read tool that produces each.
+const RESOURCES: &[(&str, &str, &str, &str)] = &[
+    (
+        "ymir://status",
+        "Pool status",
+        "This node: roles, main model, the models it knows with their state, model nodes, alerts and identity.",
+        "ymir_status",
+    ),
+    ("ymir://nodes", "Model nodes", "The model nodes the pool routes to: serving or draining, models ready, requests in flight.", "ymir_nodes"),
+    ("ymir://models", "Pool models", "The pool's models: purpose, state, replicas, what each takes and where it is placed.", "ymir_models"),
+    ("ymir://models/local", "Local model files", "The model files downloaded on this node and whether node.toml uses each.", "ymir_models_local"),
+];
 
 /// The tool table for one node.
 pub struct YmirTools {
@@ -452,14 +499,30 @@ impl Tools for YmirTools {
         &self.specs
     }
 
-    fn call(&self, tool: &ToolSpec, args: &Value, _token: Option<&str>) -> Result<Value, ToolError> {
-        // The caller is a blocking thread (see `Rpc::handle`), where `block_on` is allowed.
-        self.ctx.rt.block_on(self.dispatch(tool.name, args)).map_err(|e| ToolError(format!("{e:#}")))
+    async fn call_async(&self, tool: &ToolSpec, args: &Value, _token: Option<&str>) -> Result<CallToolResult, ToolError> {
+        self.dispatch(tool.name, args).await.map(|v| CallToolResult::json(&v)).map_err(|e| ToolError(format!("{e:#}")))
+    }
+
+    fn has_resources(&self) -> bool {
+        true
+    }
+
+    async fn list_resources(&self, _token: Option<&str>) -> Result<Vec<Resource>, ResourceError> {
+        Ok(RESOURCES
+            .iter()
+            .map(|(uri, name, description, _)| Resource::new(*uri, *name).with_description(*description).with_mime_type("application/json"))
+            .collect())
+    }
+
+    async fn read_resource(&self, uri: &str, _token: Option<&str>) -> Result<Vec<ResourceContents>, ResourceError> {
+        let (_, _, _, tool) = RESOURCES.iter().find(|r| r.0 == uri).ok_or(ResourceError::NotFound)?;
+        let v = self.dispatch(tool, &json!({})).await.map_err(|e| ResourceError::Failed(format!("{e:#}")))?;
+        Ok(vec![ResourceContents::json(uri, &v)])
     }
 }
 
 impl YmirTools {
-    /// The tools `policy` allows, for the node at `paths`. Must be called inside a Tokio runtime.
+    /// The tools `policy` allows, for the node at `paths`.
     pub fn new(paths: Paths, explicit_home: Option<PathBuf>, policy: Policy) -> Self {
         let mut specs = READ_TOOLS.to_vec();
         if !policy.read_only {
@@ -468,7 +531,7 @@ impl YmirTools {
                 specs.push(REMOVE_TOOL);
             }
         }
-        Self { ctx: Arc::new(Ctx { paths, explicit_home, rt: tokio::runtime::Handle::current() }), specs }
+        Self { ctx: Arc::new(Ctx { paths, explicit_home }), specs }
     }
 
     async fn status_report(&self) -> Result<StatusReport> {
@@ -854,16 +917,30 @@ mod tests {
     }
 
     #[test]
-    fn schema_additions() {
-        let mut s = ToolSpec::to_json(&READ_TOOLS[4])["inputSchema"].clone();
-        schema_patch("ymir_chat", &mut s);
+    fn schema_check_and_shapes() {
+        let checked = ToolSpec::check(&all_specs().copied().collect::<Vec<_>>());
+        assert!(checked.is_ok(), "{checked:?}");
+        let s = ToolSpec::to_json(&READ_TOOLS[4])["inputSchema"].clone();
         assert_eq!(s["properties"]["messages"]["type"], "array");
+        assert_eq!(s["properties"]["messages"]["items"]["required"], json!(["role", "content"]));
         assert_eq!(s["properties"]["route"]["enum"], json!(["bridge", "weirdnet"]));
         assert_eq!(s["properties"]["images"]["items"]["type"], "string");
-        let mut e = ToolSpec::to_json(&READ_TOOLS[6])["inputSchema"].clone();
-        schema_patch("ymir_embed", &mut e);
+        assert_eq!(s["properties"]["max_tokens"]["minimum"], 1);
+        let e = ToolSpec::to_json(&READ_TOOLS[6])["inputSchema"].clone();
         assert!(e["properties"]["input"]["anyOf"].is_array());
         assert_eq!(e["required"], json!(["input"]));
+        let f = ToolSpec::to_json(&READ_TOOLS[8])["inputSchema"].clone();
+        assert_eq!(f["properties"]["format"]["enum"], json!(["gguf", "mlx", "all"]));
+    }
+
+    #[test]
+    fn only_loopback_addresses() {
+        assert_eq!(loopback_addr("127.0.0.1:9").unwrap().port(), 9);
+        assert!(loopback_addr("[::1]:9").is_ok());
+        assert!(loopback_addr("localhost:9").is_ok());
+        assert!(loopback_addr("0.0.0.0:9").is_err());
+        assert!(loopback_addr("192.0.2.10:9").is_err());
+        assert!(loopback_addr("nonsense").is_err());
     }
 
     #[test]

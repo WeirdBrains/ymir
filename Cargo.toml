@@ -35,8 +35,8 @@ weirdnet-sync = "0.5.2"
 weirdnet-alerts = { version = "0.2.0", features = ["backends"] }
 weirdnet-rules = "=0.1.1"
 weirdnet-update = "0.2.0"
-# MCP server core (JSON-RPC, tool tables, annotations); default features only, no weirdnet-agent.
-weirdnet-mcp = "0.5.3"
+# MCP server (JSON-RPC, tool tables, stdio and HTTP transports, resources); no weirdnet-agent.
+weirdnet-mcp = { version = "0.6", features = ["stdio-server", "axum"] }
 
 anyhow = "1"
 axum = "0.8"

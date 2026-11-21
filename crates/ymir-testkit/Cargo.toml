@@ -35,6 +35,7 @@ clap.workspace = true
 weirdnet-agent.workspace = true
 weirdnet-backends.workspace = true
 weirdnet-model.workspace = true
+weirdnet-mcp.workspace = true
 weirdnet-net.workspace = true
 weirdnet-openai.workspace = true
 weirdnet-sync.workspace = true
