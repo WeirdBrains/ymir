@@ -2,6 +2,23 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-21: Pool-wide model search and download over Weirdnet (LF-30 M2/M3, branch only)
+
+**What changed**
+
+- Moved to `weirdnet-backends` 0.3, `weirdnet-model` 0.5.1 and `weirdnet-alerts` 0.2 together. `engine_alerts.rs` is gone (the crate's `engine.removed` rule covers it). `ymirctl models` now runs on `weirdnet-model`'s `hf::Hub`, `fit::choose`/`rank`, `HfToken` (read on the downloading node only, never sent), `download_parts` and `ModelStore::list`/`remove_local`; the local Hub client, GGUF reader and fit code were deleted. CLI behaviour is unchanged.
+- `ymird` serves the owner-only `/weirdnet-backends/models/1` (`ModelsServer` with `RosterAuth`) and uses `Supervisor::add_model`/`remove_model`, so `pull --serve` serves a model without a restart (in memory only). `[model] remote_manage = false` turns it off. `node.toml` is never written remotely; `--register` (with its `.bak`) stays local.
+- `ymirctl models search|pull|list|remove --node <name|peer-id|auto|all>` over Weirdnet via `ModelsClient`, with streamed progress. `auto` ranks nodes with `fit::rank` and says why it picked one. A device that is not the owner gets a clear refusal.
+- Code: `crates/ymir-core/src/models.rs`, `crates/ymirctl/src/models/remote.rs`; docs in DESIGN.md, the ymirctl site page and the changelog.
+
+**Checks run:** fmt, build, clippy `-D warnings`, `cargo test --workspace`; new tests with mock Hub and throwaway daemons on one machine: owner-only refusal, remote pull progress, `auto` choice, `add_model` without restart, remove, and `node.toml` untouched.
+
+**Not tested:** real pulls on the live pool nodes (deliberately not run), real Hub gated repos, MLX pulls, and Windows.
+
+**What's left:** Bragi Models screen (M4); `--json` output; mmproj download.
+
+**What's next:** the Ymir MCP server.
+
 ## 2026-11-21: `ymirctl models search | pull | list | remove`, part 1 (LF-30 M1, branch only)
 
 **What changed**

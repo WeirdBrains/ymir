@@ -220,8 +220,10 @@ mod tests {
         assert_eq!(label(pick(&ms, Some(100_000), 8192, &cap).unwrap()), "Q8_0");
         // A 1 MB/token cache at 32k is 32 GiB of KV: nothing fits.
         assert!(pick(&ms, Some(1 << 20), 32_768, &cap).is_none());
-        // 128 KiB/token at 32k is 4 GiB of KV: only Q4_K_M leaves room (4 + 4 + 10% = 8.8 <= 12; Q6_K is 11 + ... > 12).
-        assert_eq!(label(pick(&ms, Some(128 * 1024), 32_768, &cap).unwrap()), "Q4_K_M");
+        // 192 KiB/token at 32k is 6 GiB of KV: Q6_K would need 6 + 6 + overhead > 12, so only Q4_K_M fits.
+        assert_eq!(label(pick(&ms, Some(192 * 1024), 32_768, &cap).unwrap()), "Q4_K_M");
+        // 128 KiB/token is 4 GiB of KV, and Q6_K (6 + 4 + overhead) still fits.
+        assert_eq!(label(pick(&ms, Some(128 * 1024), 32_768, &cap).unwrap()), "Q6_K");
         assert_eq!(label(smallest(&ms).unwrap()), "Q4_K_M");
     }
 

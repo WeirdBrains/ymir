@@ -285,9 +285,8 @@ fn search(ctx: &Ctx, out: &mut dyn Write, a: &SearchArgs) -> Result<()> {
             shown += 1;
             writeln!(out, "\n{}", describe(h, label))?;
             if lib == "gguf" {
-                match print_gguf(ctx, out, &h.id, a.context) {
-                    Err(e) => writeln!(out, "    (could not read the files: {e})")?,
-                    Ok(()) => {}
+                if let Err(e) = print_gguf(ctx, out, &h.id, a.context) {
+                    writeln!(out, "    (could not read the files: {e})")?;
                 }
             } else {
                 match ctx.mlx.repo(&h.id) {
@@ -468,6 +467,8 @@ fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs) -> Result<()> {
             let need = plan::footprint_of(size, None, ctxlen);
             let dest = ctx.dir().join("mlx").join(name);
             let store = ymir_core::models::store(&dest, &ctx.state);
+            // Follow this node's Hub (the one the repo was read from), not only the environment's.
+            let store = if store.hub() == ctx.store.hub() { store } else { ModelStore::new(&dest).with_hub(ctx.store.hub()) };
             let specs = files
                 .iter()
                 .map(|f| ModelSpec {

@@ -234,15 +234,15 @@ async fn the_pool_searches_pulls_serves_and_removes_models_over_weirdnet() -> Re
     assert!(status.contains("m-Q4_0"), "the node's own status lists the new model: {status}");
 
     // Only a node that fits is asked to take a model it cannot hold.
-    let err = ctl(&ctl_h.home, &["models", "pull", "o/n", "--node", "tiny"]).await.unwrap_err().to_string();
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "pull", "o/n", "--node", "tiny"]).await.unwrap_err());
     assert!(err.contains("could not do it"), "{err}");
 
     // A name that is not on the roster, and options that only make sense locally.
-    let err = ctl(&ctl_h.home, &["models", "list", "--node", "nobody"]).await.unwrap_err().to_string();
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "list", "--node", "nobody"]).await.unwrap_err());
     assert!(err.contains("no device named `nobody`"), "{err}");
-    let err = ctl(&ctl_h.home, &["models", "pull", "o/n", "--node", "big", "--register"]).await.unwrap_err().to_string();
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "pull", "o/n", "--node", "big", "--register"]).await.unwrap_err());
     assert!(err.contains("--register edits node.toml on the machine you run it on"), "{err}");
-    let err = ctl(&ctl_h.home, &["models", "pull", "o/n", "--serve"]).await.unwrap_err().to_string();
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "pull", "o/n", "--serve"]).await.unwrap_err());
     assert!(err.contains("--serve and --load need --node"), "{err}");
 
     // Remove stops serving and deletes the files.
