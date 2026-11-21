@@ -27,23 +27,70 @@ fn answers_are_judged_strictly_but_ignore_reasoning_and_decoration() {
 }
 
 fn hard(name: &str) -> suites::Check {
-    suites::quality_suite(Suite::Hard).into_iter().find(|c| c.name == name).unwrap()
+    suites::quality_suite(Suite::Hard, Some(600)).into_iter().find(|c| c.name == name).unwrap()
 }
 
 #[test]
 fn hard_checks_judge_shapes_exactly() {
     let j = |n: &str, a: &str| judge(&hard(n), a, true);
-    assert_eq!(j("reason_order", "Tom, Lee, Sam, Ria, Joe"), Some(true));
-    assert_eq!(j("reason_order", "Tom, Sam, Lee, Ria, Joe"), Some(false));
-    assert_eq!(j("reason_clock", "16:50"), Some(true));
-    assert_eq!(j("reason_change", "1965"), Some(true));
+    assert_eq!(j("logic_seats", "B"), Some(true));
+    assert_eq!(j("logic_seats", "C."), Some(false));
+    assert_eq!(j("math_change", "1965"), Some(true));
     assert_eq!(j("follow_lines", "ALPHA\n6\nammag\n"), Some(true));
     assert_eq!(j("follow_lines", "ALPHA\n6\ngamma"), Some(false));
-    assert_eq!(j("follow_json", "{\"total\": 54, \"items\": [4, 9, 16, 25]}"), Some(true));
-    assert_eq!(j("follow_json", "{\"total\": 54, \"items\": [4, 9, 16]}"), Some(false));
-    assert_eq!(j("follow_words", "swift silver snakes sleep"), Some(true));
-    assert_eq!(j("follow_words", "Swift silver snakes sleep"), Some(false));
-    assert_eq!(j("follow_words", "swift silver snakes"), Some(false));
+    let ok = "Waves roll over the sand and whisper gently to every sleeping shell.";
+    assert_eq!(j("follow_ocean", ok), Some(true));
+    assert_eq!(j("follow_ocean", "Waves roll over the sand and whisper gently to every sleeping shell"), Some(false));
+    assert_eq!(j("follow_ocean", "Waves roll over the blue sand and whisper to every sleeping shell."), Some(false));
+    assert_eq!(j("follow_coffee", "- Dark roast wakes sleepy minds\n- BREW IT HOT EVERY MORNING\n- Sugar softens bitter edges slowly"), Some(true));
+    assert_eq!(j("follow_coffee", "- Dark roast wakes sleepy minds\n- brew it hot every morning\n- Sugar softens bitter edges slowly"), Some(false));
+    assert_eq!(j("follow_bwords", "babble,baboon,bagels,bakery,ballad"), Some(true));
+    assert_eq!(j("follow_bwords", "bakery,babble,baboon,bagels,ballad"), Some(false));
+    assert_eq!(j("follow_acrostic", "Calm tides arrive\nOcean breathes slowly\nDrifting salt air\nEvening settles in"), Some(true));
+    assert_eq!(j("follow_acrostic", "Calm tides arrive\nWaves breathe slowly\nDrifting salt air\nEvening settles in"), Some(false));
+    let two = "Bread rises because yeast eats sugar and releases small bubbles of gas inside the dough. Those bubbles stretch the gluten and make it light!";
+    assert_eq!(j("follow_two", two), Some(true));
+    assert_eq!(j("follow_two", &two.replace("light!", "light.")), Some(false));
+    let call = |n: &str, a: &str| judge(&hard(n), a, true);
+    assert_eq!(call("tool_weather", "```json\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Oslo\",\"units\":\"f\"}}\n```"), Some(true));
+    assert_eq!(call("tool_weather", "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Oslo\",\"units\":\"F\"}}"), Some(false));
+    assert_eq!(
+        call("tool_table", "{\"name\":\"book_table\",\"arguments\":{\"restaurant\":\"Luigi's\",\"party_size\":4,\"time\":\"19:00\"}}"),
+        Some(true)
+    );
+    assert_eq!(
+        call("tool_table", "{\"name\":\"book_table\",\"arguments\":{\"restaurant\":\"Luigi's\",\"party_size\":\"4\",\"time\":\"19:00\"}}"),
+        Some(false)
+    );
+    assert_eq!(call("tool_alarm", "{\"name\":\"set_alarm\",\"arguments\":{\"hour\":18,\"minute\":45,\"label\":\"gym\"}}"), Some(true));
+    assert_eq!(call("tool_none", "{\"name\": null, \"arguments\": {}}"), Some(true));
+    assert_eq!(call("tool_none", "Paris"), Some(false));
+    assert_eq!(
+        call("schema_movie", "{\"title\":\"Arrival\",\"year\":2016,\"genres\":[\"science fiction\",\"drama\",\"mystery\"],\"rating\":null}"),
+        Some(true)
+    );
+}
+
+#[test]
+fn needles_scale_with_context_and_sit_at_three_depths() {
+    let small = suites::quality_suite(Suite::Hard, Some(800));
+    let big = suites::quality_suite(Suite::Hard, Some(8000));
+    let find = |v: &[suites::Check], n: &str| v.iter().find(|c| c.name == n).unwrap().prompt.len();
+    assert!(find(&big, "recall_middle") > 5 * find(&small, "recall_middle"));
+    for n in ["recall_start", "recall_middle", "recall_end"] {
+        let c = hard(n);
+        assert_eq!(c.category, "retrieval");
+        let secret = if n == "recall_start" {
+            "violet-anchor-4821"
+        } else if n == "recall_middle" {
+            "crimson-willow-7302"
+        } else {
+            "indigo-compass-1957"
+        };
+        assert_eq!(judge(&c, &format!("The passcode is {secret}."), true), Some(true));
+        assert_eq!(judge(&c, "amber-falcon-1234", true), Some(false));
+        assert_eq!(c.prompt.matches(secret).count(), 1, "the needle appears once, in the list");
+    }
 }
 
 #[test]
@@ -53,10 +100,6 @@ fn the_hard_suite_expectations_hold_up() {
     }
     // Reference solutions pass their own tests, so a failing model is the model's fault.
     let solutions = [
-        (
-            "code_roman",
-            "def roman_to_int(s):\n    v = {'I':1,'V':5,'X':10,'L':50,'C':100,'D':500,'M':1000}\n    t = 0\n    for i, c in enumerate(s):\n        t += -v[c] if i + 1 < len(s) and v[c] < v[s[i+1]] else v[c]\n    return t",
-        ),
         (
             "code_intervals",
             "def merge_intervals(iv):\n    out = []\n    for a, b in sorted(iv):\n        if out and a <= out[-1][1]:\n            out[-1][1] = max(out[-1][1], b)\n        else:\n            out.append([a, b])\n    return out",
@@ -69,19 +112,43 @@ fn the_hard_suite_expectations_hold_up() {
             "code_lru",
             "from collections import OrderedDict\nclass LRUCache:\n    def __init__(self, capacity):\n        self.c = capacity\n        self.d = OrderedDict()\n    def get(self, k):\n        if k not in self.d:\n            return -1\n        self.d.move_to_end(k)\n        return self.d[k]\n    def put(self, k, v):\n        self.d[k] = v\n        self.d.move_to_end(k)\n        if len(self.d) > self.c:\n            self.d.popitem(last=False)",
         ),
+        (
+            "code_substring",
+            "def longest_unique(s):\n    seen = {}\n    best = start = 0\n    for i, ch in enumerate(s):\n        if ch in seen and seen[ch] >= start:\n            start = seen[ch] + 1\n        seen[ch] = i\n        best = max(best, i - start + 1)\n    return best",
+        ),
+        (
+            "code_coins",
+            "def min_coins(coins, amount):\n    inf = amount + 1\n    dp = [0] + [inf] * amount\n    for a in range(1, amount + 1):\n        for c in coins:\n            if c <= a and dp[a - c] + 1 < dp[a]:\n                dp[a] = dp[a - c] + 1\n    return dp[amount] if dp[amount] != inf else -1",
+        ),
+        (
+            "code_islands",
+            "def count_islands(grid):\n    seen = set()\n    n = 0\n    for r in range(len(grid)):\n        for c in range(len(grid[r])):\n            if grid[r][c] == '1' and (r, c) not in seen:\n                n += 1\n                st = [(r, c)]\n                seen.add((r, c))\n                while st:\n                    y, x = st.pop()\n                    for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):\n                        a, b = y + dy, x + dx\n                        if 0 <= a < len(grid) and 0 <= b < len(grid[a]) and grid[a][b] == '1' and (a, b) not in seen:\n                            seen.add((a, b))\n                            st.append((a, b))\n    return n",
+        ),
+        (
+            "code_decode",
+            "def num_decodings(s):\n    if not s or s[0] == '0':\n        return 0\n    a, b = 1, 1\n    for i in range(1, len(s)):\n        c = 0\n        if s[i] != '0':\n            c += b\n        if 10 <= int(s[i-1:i+1]) <= 26:\n            c += a\n        a, b = b, c\n    return b",
+        ),
+        (
+            "code_rain",
+            "def trap(h):\n    if not h:\n        return 0\n    l, r = 0, len(h) - 1\n    lm = rm = t = 0\n    while l < r:\n        if h[l] < h[r]:\n            lm = max(lm, h[l])\n            t += lm - h[l]\n            l += 1\n        else:\n            rm = max(rm, h[r])\n            t += rm - h[r]\n            r -= 1\n    return t",
+        ),
     ];
     for (name, code) in solutions {
         let check = hard(name);
         assert_eq!(judge(&check, &format!("```python\n{code}\n```"), true), Some(true), "{name}");
+        // And a stub fails, so the tests do test something.
+        assert_eq!(judge(&check, "```python\ndef nothing(*a):\n    return None\n```", true), Some(false), "{name} stub");
     }
     // The arithmetic behind the number answers.
     assert_eq!(pow_last_digit(7, 222), 9);
-    assert_eq!((50..100).filter(|n| (2..*n).all(|d| n % d != 0)).count(), 10);
     assert_eq!(((12 / 3) * 240 + 5 * 415), 3035);
     assert_eq!(5000 - 3035, 1965);
-    assert_eq!("excellence".matches('e').count(), 4);
-    assert_eq!(49 % 9 + 1, 5);
-    assert_eq!(49 * 7 + 3, 346);
+    assert_eq!((480 - 90) / (12 - 6), 65);
+    assert_eq!((1..=200).filter(|n| n % 3 == 0 || n % 5 == 0).sum::<i32>(), 9368);
+    assert_eq!((1..).find(|n| n % 5 == 2 && n % 7 == 3 && n % 9 == 4), Some(157));
+    assert_eq!(3600 / 180, 20);
+    assert_eq!(150 * 60 / 30, 300);
+    assert_eq!(80 * 125 / 100 * 80 / 100 - 6, 74);
 }
 
 fn pow_last_digit(b: u64, e: u32) -> u64 {

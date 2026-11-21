@@ -841,12 +841,27 @@ async fn bench_backend(paths: &Paths, via: bench::Via, hints: &[String]) -> Resu
 async fn bench_cmd(paths: &Paths, cmd: bench::BenchCmd, out: &mut dyn Write) -> Result<()> {
     match cmd.sub {
         Some(bench::BenchSub::Compare(a)) => bench::compare(&a, out),
+        Some(bench::BenchSub::Hints(h)) => match h.action {
+            bench::HintsAction::Add => {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                let n = bench::hints::add(&bench::hints::default_file(paths), &text)?;
+                writeln!(out, "Saved {n} new address{} in {}.", if n == 1 { "" } else { "es" }, bench::hints::default_file(paths).display())?;
+                Ok(())
+            }
+            bench::HintsAction::List => {
+                for a in bench::hints::resolve(paths, &[])? {
+                    writeln!(out, "{a}")?;
+                }
+                Ok(())
+            }
+        },
         Some(bench::BenchSub::List(a)) => {
-            let backend = bench_backend(paths, a.via, &a.hint).await?;
+            let backend = bench_backend(paths, a.via, &bench::hints::resolve(paths, &a.hint)?).await?;
             bench::list(backend.as_ref(), a.real_names, out).await
         }
         None => {
-            let backend = bench_backend(paths, cmd.run.via, &cmd.run.hint).await?;
+            let backend = bench_backend(paths, cmd.run.via, &bench::hints::resolve(paths, &cmd.run.hint)?).await?;
             bench::run(backend.as_ref(), &cmd.run, out, &mut std::io::stderr()).await.map(|_| ())
         }
     }

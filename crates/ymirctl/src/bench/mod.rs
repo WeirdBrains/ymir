@@ -13,6 +13,7 @@
 //! its own seed and a nonce, so neither the answer cache nor a node's prefix cache flatters the numbers.
 
 mod compare;
+pub mod hints;
 mod report;
 mod score;
 mod suites;
@@ -51,9 +52,15 @@ pub struct BenchArgs {
     /// How to reach the nodes.
     #[arg(long, value_enum, default_value_t = Via::Weirdnet)]
     pub via: Via,
-    /// Extra address to dial a node at (`/ip4/…/tcp/…/p2p/PEER`), repeatable; `[network] peers` is used too.
+    /// Extra address to dial a node at (`/ip4/…/tcp/…/p2p/PEER`), or `@FILE` with one per line;
+    /// repeatable. `[network] peers` and the `bench-hints` file in the Ymir home are used too (see
+    /// `bench hints add`).
     #[arg(long)]
     pub hint: Vec<String>,
+    /// Seconds the quality checks of one model may take before the rest are left unrun (default: hard
+    /// 480, others no limit; 0 for no limit).
+    #[arg(long)]
+    pub quality_budget: Option<u64>,
     /// Which prompts: quick (smoke test), standard, hard (built to tell models apart).
     #[arg(long, value_enum, default_value_t = Suite::Standard)]
     pub suite: Suite,
@@ -109,6 +116,7 @@ impl Default for BenchArgs {
             model: Vec::new(),
             via: Via::Weirdnet,
             hint: Vec::new(),
+            quality_budget: None,
             suite: Suite::Standard,
             context: None,
             max_tokens: None,
@@ -133,7 +141,7 @@ pub struct ListArgs {
     /// How to reach the nodes.
     #[arg(long, value_enum, default_value_t = Via::Weirdnet)]
     pub via: Via,
-    /// Extra address to dial a node at, repeatable.
+    /// Extra address to dial a node at, or `@FILE`; repeatable (and the `bench-hints` file).
     #[arg(long)]
     pub hint: Vec<String>,
     /// Name nodes as they are (otherwise node-a, node-b, ...).
@@ -147,6 +155,22 @@ pub enum BenchSub {
     List(ListArgs),
     /// Two saved results side by side, with the change in each number.
     Compare(CompareArgs),
+    /// Addresses to dial nodes at: `hints add` reads `ymirctl pool addresses` output from stdin.
+    Hints(HintsArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct HintsArgs {
+    #[command(subcommand)]
+    pub action: HintsAction,
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum HintsAction {
+    /// Save the dialable addresses piped in (`ssh NODE ymirctl pool addresses | ymirctl bench hints add`).
+    Add,
+    /// The saved addresses.
+    List,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -542,7 +566,23 @@ impl Bench<'_> {
     async fn quality(&mut self, t: &Target, pinned: Option<&str>, run: &mut TargetRun) {
         let code_ok = !self.args.no_code_exec && python_available();
         let tokens = self.args.quality_tokens.unwrap_or_else(|| self.args.suite.quality_tokens());
-        for check in quality_suite(self.args.suite) {
+        let budget = match self.args.quality_budget {
+            Some(0) => None,
+            Some(s) => Some(Duration::from_secs(s)),
+            None => (self.args.suite == Suite::Hard).then_some(Duration::from_secs(480)),
+        };
+        let started = std::time::Instant::now();
+        for check in quality_suite(self.args.suite, self.args.context) {
+            if budget.is_some_and(|b| started.elapsed() > b) {
+                run.quality.push(QualityResult {
+                    check: check.name,
+                    category: check.category,
+                    node: pinned.unwrap_or("unknown").to_string(),
+                    passed: None,
+                    got: Some("not run: over the quality time budget".into()),
+                });
+                continue;
+            }
             run.requests += 1;
             match self.ask(t, &check.prompt, tokens, false).await {
                 Ok(r) => {

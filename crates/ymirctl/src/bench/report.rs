@@ -168,8 +168,8 @@ fn rows(args: &BenchArgs, runs: &[TargetRun], namer: &mut Namer) -> Vec<Row> {
                 }
             }
             let quality = (q_ran > 0).then(|| {
-                json!({"passed": q_pass, "ran": q_ran,
-                    "by_category": by_category.iter().map(|(k, (p, n))| (k.to_string(), json!({"passed": p, "ran": n}))).collect::<Map>(),
+                json!({"passed": q_pass, "ran": q_ran, "percent": percent(q_pass, q_ran),
+                    "by_category": by_category.iter().map(|(k, (p, n))| (k.to_string(), json!({"passed": p, "ran": n, "percent": percent(*p, *n)}))).collect::<Map>(),
                     "checks": qs.iter().map(|q| {
                         let mut c = json!({"check": q.check, "category": q.category, "passed": q.passed});
                         if let Some(g) = &q.got { c["got"] = json!(g); }
@@ -295,7 +295,7 @@ pub fn build(args: &BenchArgs, runs: &[TargetRun], meta: &Meta) -> Report {
     }
     let categories: BTreeSet<&str> = rows.iter().flat_map(|r| r.by_category.keys().copied()).collect();
     if !categories.is_empty() {
-        md.push_str("\n## Quality by category (passed/ran)\n\n| model | node |");
+        md.push_str("\n## Quality by category (percent, passed/ran)\n\n| model | node |");
         for c in &categories {
             md.push_str(&format!(" {c} |"));
         }
@@ -308,11 +308,11 @@ pub fn build(args: &BenchArgs, runs: &[TargetRun], meta: &Meta) -> Report {
             md.push_str(&format!("| {} | {} |", r.model, r.node));
             for c in &categories {
                 md.push_str(&match r.by_category.get(c) {
-                    Some((p, n)) => format!(" {p}/{n} |"),
+                    Some((p, n)) => format!(" {} |", pct(*p, *n)),
                     None => " - |".to_string(),
                 });
             }
-            md.push_str(&format!(" {}/{} |\n", r.q_pass, r.q_ran));
+            md.push_str(&format!(" {} |\n", pct(r.q_pass, r.q_ran)));
         }
     }
     md.push_str("\nTTFT is for the short prompt. Decode tok/s is from the story (tokens after the first, divided by the time after it). Prompt tok/s is from the long prompt (tokens not served from a prefix cache, divided by TTFT, so it includes queueing and the network). Quality is checks passed over checks run, scored by exact match, parsed JSON or tests run in a sandbox.\n");
@@ -377,4 +377,13 @@ pub fn build(args: &BenchArgs, runs: &[TargetRun], meta: &Meta) -> Report {
         "skipped": skipped,
     });
     Report { json, markdown: md, csv }
+}
+
+fn percent(p: usize, n: usize) -> f64 {
+    if n == 0 { 0.0 } else { (1000.0 * p as f64 / n as f64).round() / 10.0 }
+}
+
+/// `73% (8/11)`.
+fn pct(p: usize, n: usize) -> String {
+    format!("{:.0}% ({p}/{n})", percent(p, n))
 }

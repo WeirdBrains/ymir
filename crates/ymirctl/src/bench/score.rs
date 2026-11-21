@@ -115,7 +115,6 @@ pub fn python_available() -> bool {
 /// `Some(passed)`, or `None` when the check could not run.
 pub fn judge(check: &Check, answer: &str, code_ok: bool) -> Option<bool> {
     match &check.kind {
-        Kind::Words(w) => Some(words(answer) == *w),
         Kind::JsonEq(j) => Some(serde_json::from_str::<Value>(&extract_block(answer)).is_ok_and(|v| v == expected_json(j))),
         Kind::Lines(l) => {
             let t = strip_think(answer);
@@ -123,6 +122,7 @@ pub fn judge(check: &Check, answer: &str, code_ok: bool) -> Option<bool> {
             Some(got == *l)
         }
         Kind::Func(f) => Some(f(answer)),
+        Kind::Has(w) => Some(strip_think(answer).to_lowercase().contains(&w.to_lowercase())),
         Kind::Exact(ok) => Some(ok.contains(&normalize(answer).as_str())),
         Kind::Number(n) => Some(last_number(answer) == Some(*n)),
         Kind::Json => Some(json_ok(answer)),
@@ -151,6 +151,7 @@ pub fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
 
+#[cfg(test)]
 /// The letters-only words of the answer, lower case, joined by single spaces.
 pub fn words(s: &str) -> String {
     strip_think(s).split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>().join(" ")
