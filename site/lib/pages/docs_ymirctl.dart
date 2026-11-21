@@ -105,7 +105,32 @@ ymirctl models pull bartowski/Qwen3-8B-GGUF --quant Q5_K_M --register</code></pr
 <h3 id="models-remove"><code>ymirctl models remove ID</code></h3>
 <p>Deletes a downloaded model's files after asking (<code>--yes</code> skips the question). It never edits
 <code>node.toml</code>; if the model is registered, remove its entry yourself.</p>
-<p>These commands act on the node they run on. To put a model on another node, run them there.</p>
+<p>Without <code>--node</code> these commands act on the machine they run on and need no daemon.</p>
+<h3 id="models-node"><code>--node</code>: manage models on your other devices</h3>
+<p><code>search</code>, <code>pull</code>, <code>list</code> and <code>remove</code> take
+<code>--node &lt;name|peer-id|auto|all&gt;</code> and then run on your model nodes over Weirdnet instead. The request goes
+through the <code>ymird</code> on this machine (it must be running and linked to your devices, see
+<a href="#pool"><code>ymirctl pool</code></a>), which asks each node over
+<code>/weirdnet-backends/models/1</code>. A node answers only devices linked to its owner (you); any other device gets a refusal
+and nothing is downloaded. The Hugging Face token stays on the node that downloads and is never sent.</p>
+<ul>
+<li><code>--node NAME</code>: a device name from <code>ymirctl pool list</code> (any case), a peer id, or the start of one.
+<code>all</code> means every model node.</li>
+<li><code>pull REPO --node auto</code>: asks every model node how the repo fits its memory and takes the one that can hold the
+biggest model (the one with more memory on a tie), and says which it picked. <code>--quant</code> or <code>--file</code> narrow
+the model first.</li>
+<li><code>pull ... --serve</code>: the node's running <code>ymird</code> starts serving the model as soon as the download ends, with no
+restart (<code>--load</code> loads it too). That is in memory only: <code>node.toml</code> on another node is never edited. The pull prints the
+<code>[[model.local]]</code> entry to add there to keep it after a restart.</li>
+<li>A pull streams its progress, one line per node. <code>remove --node</code> stops serving the model and deletes its files.</li>
+<li><code>search --node all</code> shows each node's own fit verdict for every repo.</li>
+</ul>
+<p>A node running an older <code>ymird</code> answers that it does not take model management: upgrade it, or run the command on
+that machine. Set <code>[model] remote_manage = false</code> in a node's <code>node.toml</code> to turn this off there.</p>
+<pre><code>ymirctl models search qwen3 8b --node all
+ymirctl models pull Qwen/Qwen3-8B-GGUF --node auto --serve
+ymirctl models list --node m1
+ymirctl models remove qwen3-8b-q4_k_m --node m1 --yes</code></pre>
 <h3 id="load"><code>ymirctl load MODEL [--node NODE]</code></h3>
 <p>Loads a model on a model node. <code>--node</code> picks the node by name (see <code>ymirctl nodes</code>).</p>
 <pre><code>ymirctl load gemma4-e4b

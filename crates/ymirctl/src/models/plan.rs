@@ -1,121 +1,45 @@
-//! Choosing what to pull: grouping a repo's files into quants (split GGUFs stay together), a
-//! quality ranking, the memory a quant needs at a context length, and the `[[model.local]]`
-//! stanza. Pure functions; no network and no disk.
-
-use std::collections::BTreeMap;
+//! Choosing what to pull: a quality ranking, which quant runs fully from fast memory (the memory
+//! a quant needs comes from `weirdnet_model::fit`), and the `[[model.local]]` stanza. Pure
+//! functions; no network and no disk. File grouping, quant tags and split GGUFs are
+//! `weirdnet_model::hf`'s.
 
 use serde::Serialize;
-use weirdnet_model::hw::{Accel, Hardware, budget};
+use weirdnet_model::fit::{self, Fit, FitOptions};
+use weirdnet_model::hf::{RepoModel, split_part};
+use weirdnet_model::hw::{Accel, Budget, Hardware, budget};
 use ymir_core::config::LocalModel;
 
+pub use weirdnet_model::fit::KvSource;
+
 pub const GIB: u64 = 1 << 30;
-/// Compute buffers and the runtime's own overhead on top of weights and KV cache.
-pub const OVERHEAD: u64 = GIB / 2;
 /// The context a pulled model is sized and registered for unless `--context` says otherwise.
 pub const DEFAULT_CONTEXT: u64 = 32_768;
 
-/// One file of a Hub repo.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoFile {
-    pub name: String,
-    pub size: u64,
-    pub sha256: Option<String>,
+/// `Q4_K_M`, `UD-Q4_K_XL`, `BF16`, ... or the model id when the name has no quant tag.
+pub fn label(m: &RepoModel) -> String {
+    m.quant.clone().unwrap_or_else(|| m.id.clone())
 }
 
-/// All the files of one quant: a single GGUF, or every shard of a split one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuantSet {
-    /// `Q4_K_M`, `UD-Q4_K_XL`, `BF16`, ... or the file stem when the name has no quant tag.
-    pub label: String,
-    /// Shards in order; the first is the file llama.cpp is pointed at.
-    pub files: Vec<RepoFile>,
-    pub size: u64,
+pub fn full_precision(m: &RepoModel) -> bool {
+    matches!(label(m).to_ascii_uppercase().as_str(), "F32" | "F16" | "BF16")
 }
 
-impl QuantSet {
-    pub fn full_precision(&self) -> bool {
-        matches!(self.label.to_ascii_uppercase().as_str(), "F32" | "F16" | "BF16")
+/// Memory for weights of `size` bytes (no file list, as for an MLX folder) at `context` tokens: the
+/// same sum as [`measure`], with the crate's KV estimate unless `kv_per_token` is known.
+pub fn footprint_of(size: u64, kv_per_token: Option<u64>, context: u64) -> u64 {
+    let kv = kv_per_token.unwrap_or_else(|| fit::estimate_kv_bytes_per_token(size));
+    let total = size.saturating_add(kv.saturating_mul(context));
+    total.saturating_add(total / 10)
+}
+
+/// `model` sized at `context` tokens: the header's KV figure when known, else the crate's estimate.
+/// Weights + KV cache + 10%, as the pool's other nodes measure it.
+pub fn measure(model: &RepoModel, kv_per_token: Option<u64>, context: u64) -> Fit {
+    let mut opts = FitOptions::default().with_context(context.min(u64::from(u32::MAX)) as u32);
+    if let Some(kv) = kv_per_token {
+        opts = opts.with_kv_bytes_per_token(kv);
     }
-}
-
-fn basename(name: &str) -> &str {
-    name.rsplit('/').next().unwrap_or(name)
-}
-
-/// `(stem without the shard suffix, index, count)` for `name-00002-of-00005.gguf`.
-pub fn shard_of(file: &str) -> Option<(String, u32, u32)> {
-    let stem = basename(file).strip_suffix(".gguf").or_else(|| basename(file).strip_suffix(".GGUF"))?;
-    let (rest, total) = stem.rsplit_once("-of-")?;
-    let (base, idx) = rest.rsplit_once('-')?;
-    if idx.len() < 3 || total.len() < 3 {
-        return None;
-    }
-    Some((base.to_string(), idx.parse().ok()?, total.parse().ok()?))
-}
-
-fn is_quant_token(t: &str) -> bool {
-    let t = t.to_ascii_uppercase();
-    if matches!(t.as_str(), "F32" | "F16" | "BF16" | "MXFP4" | "MXFP4_MOE" | "NVFP4") {
-        return true;
-    }
-    let t = t.strip_prefix('I').unwrap_or(&t);
-    let Some(rest) = t.strip_prefix('Q').or_else(|| t.strip_prefix("TQ")) else { return false };
-    let digits = rest.chars().take_while(char::is_ascii_digit).count();
-    digits > 0 && rest[digits..].starts_with('_') && rest[digits..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// The quant tag in a GGUF file name (`Qwen3-8B-Q4_K_M.gguf` is `Q4_K_M`; an Unsloth `UD-` prefix
-/// stays part of the tag).
-pub fn quant_of(file: &str) -> Option<String> {
-    let stem = basename(file).trim_end_matches(".gguf").trim_end_matches(".GGUF");
-    let stem = shard_of(file).map_or_else(|| stem.to_string(), |(b, _, _)| b);
-    let tokens: Vec<&str> = stem.split(['-', '.']).collect();
-    let i = tokens.iter().rposition(|t| is_quant_token(t))?;
-    let tag = tokens[i].to_ascii_uppercase();
-    Some(if i > 0 && tokens[i - 1].eq_ignore_ascii_case("ud") { format!("UD-{tag}") } else { tag })
-}
-
-fn skipped(name: &str) -> bool {
-    let l = basename(name).to_ascii_lowercase();
-    !l.ends_with(".gguf") || l.starts_with("mmproj") || l.contains("imatrix") || l.starts_with("mtp-")
-}
-
-/// (folder, file stem without shard suffix)
-type GroupKey = (String, String);
-
-/// Groups GGUF files into quants. Projectors, imatrix and draft files are left out, and so is a
-/// split whose shards are not all there. Sorted smallest first.
-pub fn quant_sets(files: &[RepoFile]) -> Vec<QuantSet> {
-    let mut groups: BTreeMap<GroupKey, Vec<(u32, u32, &RepoFile)>> = BTreeMap::new();
-    for f in files.iter().filter(|f| !skipped(&f.name)) {
-        let dir = f.name.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
-        match shard_of(&f.name) {
-            Some((base, i, n)) => groups.entry((dir, base)).or_default().push((i, n, f)),
-            None => {
-                let stem = basename(&f.name).trim_end_matches(".gguf").trim_end_matches(".GGUF").to_string();
-                groups.entry((dir, stem)).or_default().push((1, 1, f));
-            }
-        }
-    }
-    let mut out: Vec<QuantSet> = groups
-        .into_values()
-        .filter_map(|mut v| {
-            v.sort_by_key(|(i, _, _)| *i);
-            let n = v[0].1;
-            let complete = v.len() as u32 == n && v.iter().enumerate().all(|(k, (i, m, _))| *i == k as u32 + 1 && *m == n);
-            if !complete {
-                return None;
-            }
-            let files: Vec<RepoFile> = v.into_iter().map(|(_, _, f)| f.clone()).collect();
-            let label = quant_of(&files[0].name).unwrap_or_else(|| {
-                let b = basename(&files[0].name);
-                b.trim_end_matches(".gguf").to_string()
-            });
-            Some(QuantSet { size: files.iter().map(|f| f.size).sum(), label, files })
-        })
-        .collect();
-    out.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.label.cmp(&b.label)));
-    out
+    fit::measure(model, &Budget { pool_bytes: 0, reserve_bytes: 0, usable_bytes: u64::MAX }, &opts)
 }
 
 /// Rough bits per weight; higher is better quality. Unknown tags fall back to their leading digit.
@@ -208,28 +132,6 @@ pub fn verdict(need: u64, cap: &Capacity) -> Verdict {
     }
 }
 
-/// How the KV cache was sized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvSource {
-    /// From the file's own GGUF header.
-    Header,
-    /// A guess from the file size, because the header could not be read.
-    Estimate,
-}
-
-/// Bytes of KV cache per token: the header's figure, or about 32 KiB per GiB of weights.
-pub fn kv_per_token(header: Option<u64>, weights: u64) -> (u64, KvSource) {
-    match header {
-        Some(b) => (b, KvSource::Header),
-        None => ((weights / GIB).max(1) * 32 * 1024, KvSource::Estimate),
-    }
-}
-
-/// Weights + KV cache at `context` + overhead.
-pub fn need(weights: u64, kv_per_token: u64, context: u64) -> u64 {
-    weights + kv_per_token.saturating_mul(context) + OVERHEAD
-}
-
 /// The context to size for: the request or [`DEFAULT_CONTEXT`], capped at what the model was
 /// trained for when that is known.
 pub fn context_for(requested: Option<u64>, trained: Option<u64>) -> u64 {
@@ -242,19 +144,20 @@ pub fn context_for(requested: Option<u64>, trained: Option<u64>) -> u64 {
 
 /// The best quant that runs fully from fast memory: highest quality, full precision only when
 /// nothing else fits. `None` when nothing fits fast; then use [`smallest`].
-pub fn pick<'a>(sets: &'a [QuantSet], kv: u64, context: u64, cap: &Capacity) -> Option<&'a QuantSet> {
-    let fits = |s: &&QuantSet| verdict(need(s.size, kv, context), cap) == Verdict::Fits;
+pub fn pick<'a>(models: &'a [RepoModel], kv: Option<u64>, context: u64, cap: &Capacity) -> Option<&'a RepoModel> {
+    let fits = |m: &&RepoModel| verdict(measure(m, kv, context).footprint, cap) == Verdict::Fits;
     let best = |full: bool| {
-        sets.iter()
-            .filter(|s| s.full_precision() == full)
+        models
+            .iter()
+            .filter(|m| full_precision(m) == full)
             .filter(fits)
-            .max_by(|a, b| quality(&a.label).total_cmp(&quality(&b.label)).then(b.size.cmp(&a.size)))
+            .max_by(|a, b| quality(&label(a)).total_cmp(&quality(&label(b))).then(b.size.cmp(&a.size)))
     };
     best(false).or_else(|| best(true))
 }
 
-pub fn smallest(sets: &[QuantSet]) -> Option<&QuantSet> {
-    sets.iter().min_by_key(|s| s.size)
+pub fn smallest(models: &[RepoModel]) -> Option<&RepoModel> {
+    models.iter().min_by_key(|m| m.size)
 }
 
 /// A model id for a repo: its name in lower case without the `-GGUF` suffix.
@@ -265,8 +168,8 @@ pub fn id_for_repo(repo: &str) -> String {
 
 /// A model id for a local file: its lower-case stem without a shard suffix.
 pub fn id_for_file(file: &str) -> String {
-    let stem = basename(file).trim_end_matches(".gguf").trim_end_matches(".GGUF");
-    shard_of(file).map_or_else(|| stem.to_ascii_lowercase(), |(b, _, _)| b.to_ascii_lowercase())
+    let stem = file.rsplit('/').next().unwrap_or(file).trim_end_matches(".gguf").trim_end_matches(".GGUF");
+    split_part(file).map_or_else(|| stem.to_ascii_lowercase(), |(b, _, _)| b.to_ascii_lowercase())
 }
 
 #[derive(Serialize)]
@@ -301,68 +204,34 @@ pub fn local_model(id: &str, backend: &str, role: &str, file: &str, context: u64
 
 #[cfg(test)]
 mod tests {
+    use weirdnet_model::hf::{RepoFile, group_files};
+
     use super::*;
 
-    fn f(name: &str, size: u64) -> RepoFile {
-        RepoFile { name: name.into(), size, sha256: None }
-    }
-
-    #[test]
-    fn finds_the_quant_tag() {
-        for (name, want) in [
-            ("Qwen3-8B-Q4_K_M.gguf", Some("Q4_K_M")),
-            ("model.IQ4_XS.gguf", Some("IQ4_XS")),
-            ("Qwen3-8B-UD-Q4_K_XL.gguf", Some("UD-Q4_K_XL")),
-            ("sub/Model-7B-BF16.gguf", Some("BF16")),
-            ("gpt-oss-20b-MXFP4.gguf", Some("MXFP4")),
-            ("big-Q8_0-00001-of-00004.gguf", Some("Q8_0")),
-            ("Qwen3-0.6B.gguf", None),
-        ] {
-            assert_eq!(quant_of(name).as_deref(), want, "{name}");
-        }
-    }
-
-    #[test]
-    fn groups_shards_and_drops_incomplete_sets_projectors_and_imatrix() {
-        let files = vec![
-            f("m-Q8_0-00001-of-00002.gguf", 10),
-            f("m-Q8_0-00002-of-00002.gguf", 10),
-            f("m-Q4_K_M.gguf", 9),
-            f("m-Q6_K-00001-of-00002.gguf", 8),
-            f("mmproj-m-f16.gguf", 1),
-            f("m.imatrix.gguf", 1),
-            f("README.md", 1),
-        ];
-        let sets = quant_sets(&files);
-        assert_eq!(sets.iter().map(|s| (s.label.as_str(), s.size, s.files.len())).collect::<Vec<_>>(), [("Q4_K_M", 9, 1), ("Q8_0", 20, 2)]);
-        assert_eq!(sets[1].files[0].name, "m-Q8_0-00001-of-00002.gguf");
-    }
-
-    #[test]
-    fn same_quant_in_two_folders_stays_two_sets() {
-        let sets = quant_sets(&[f("a/m-Q4_K_M.gguf", 5), f("b/m-Q4_K_M.gguf", 6)]);
-        assert_eq!(sets.len(), 2);
+    fn models(files: &[(&str, u64)]) -> Vec<RepoModel> {
+        let files: Vec<RepoFile> = files.iter().map(|(n, s)| RepoFile { name: (*n).into(), size: *s, sha256: None }).collect();
+        group_files(&files).into_iter().filter(|m| m.complete).collect()
     }
 
     #[test]
     fn picks_the_best_quant_that_fits_with_the_kv_cache() {
-        let sets = quant_sets(&[f("m-Q8_0.gguf", 8 * GIB), f("m-Q6_K.gguf", 6 * GIB), f("m-Q4_K_M.gguf", 4 * GIB), f("m-F16.gguf", 16 * GIB)]);
-        let cap = Capacity { fast: 10 * GIB, total: 10 * GIB, accelerated: true };
-        assert_eq!(pick(&sets, 100_000, 8192, &cap).unwrap().label, "Q8_0");
+        let ms = models(&[("m-Q8_0.gguf", 8 * GIB), ("m-Q6_K.gguf", 6 * GIB), ("m-Q4_K_M.gguf", 4 * GIB), ("m-F16.gguf", 16 * GIB)]);
+        let cap = Capacity { fast: 12 * GIB, total: 12 * GIB, accelerated: true };
+        assert_eq!(label(pick(&ms, Some(100_000), 8192, &cap).unwrap()), "Q8_0");
         // A 1 MB/token cache at 32k is 32 GiB of KV: nothing fits.
-        assert!(pick(&sets, 1 << 20, 32_768, &cap).is_none());
-        // 128 KiB/token at 32k is 4 GiB of KV: only Q4_K_M leaves room (4 + 4 + 0.5 <= 10; Q6_K is 10.5).
-        assert_eq!(pick(&sets, 128 * 1024, 32_768, &cap).unwrap().label, "Q4_K_M");
-        assert_eq!(smallest(&sets).unwrap().label, "Q4_K_M");
+        assert!(pick(&ms, Some(1 << 20), 32_768, &cap).is_none());
+        // 128 KiB/token at 32k is 4 GiB of KV: only Q4_K_M leaves room (4 + 4 + 10% = 8.8 <= 12; Q6_K is 11 + ... > 12).
+        assert_eq!(label(pick(&ms, Some(128 * 1024), 32_768, &cap).unwrap()), "Q4_K_M");
+        assert_eq!(label(smallest(&ms).unwrap()), "Q4_K_M");
     }
 
     #[test]
     fn full_precision_is_a_last_resort() {
-        let sets = quant_sets(&[f("m-Q4_K_M.gguf", 4 * GIB), f("m-F16.gguf", 2 * GIB)]);
+        let ms = models(&[("m-Q4_K_M.gguf", 4 * GIB), ("m-F16.gguf", 2 * GIB)]);
         let cap = Capacity { fast: 100 * GIB, total: 100 * GIB, accelerated: false };
-        assert_eq!(pick(&sets, 1000, 4096, &cap).unwrap().label, "Q4_K_M");
+        assert_eq!(label(pick(&ms, Some(1000), 4096, &cap).unwrap()), "Q4_K_M");
         let tight = Capacity { fast: 3 * GIB, total: 3 * GIB, accelerated: false };
-        assert_eq!(pick(&sets, 1000, 4096, &tight).unwrap().label, "F16");
+        assert_eq!(label(pick(&ms, Some(1000), 4096, &tight).unwrap()), "F16");
     }
 
     #[test]
@@ -378,8 +247,9 @@ mod tests {
         assert_eq!(context_for(None, Some(8192)), 8192);
         assert_eq!(context_for(None, None), DEFAULT_CONTEXT);
         assert_eq!(context_for(Some(65_536), Some(8192)), 65_536);
-        assert_eq!(kv_per_token(Some(5), 10 * GIB), (5, KvSource::Header));
-        assert_eq!(kv_per_token(None, 10 * GIB), (10 * 32 * 1024, KvSource::Estimate));
+        let m = &models(&[("m-Q4_K_M.gguf", 10 * GIB)])[0];
+        assert_eq!(measure(m, Some(5), 1000).kv_source, KvSource::Header);
+        assert_eq!(measure(m, None, 1000).kv_source, KvSource::Estimate);
     }
 
     #[test]

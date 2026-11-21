@@ -25,8 +25,9 @@ use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Caller, Dialer, RemoteError};
 use weirdnet_agent::serve::{RosterAuth, Server, Serving};
+use weirdnet_backends::models::{ModelsClient, ModelsServer, ModelsService};
 use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer, NodeServerOptions, NodeService, Update, Verifier};
-use weirdnet_backends::{Chunk, ChunkStream, ModelHost, ModelStatus, RawInferDialer, Supervisor};
+use weirdnet_backends::{Chunk, ChunkStream, EngineKind, ModelHost, ModelStatus, RawInferDialer, Supervisor};
 use weirdnet_net::{Multiaddr, PeerId, WEIRDNET};
 
 use crate::context::ContextStore;
@@ -34,6 +35,7 @@ use crate::coordinator::Coordinator;
 use crate::host::{ContextAccess, ContextSync, InferenceHost, LiveCatalog, catalog_feed};
 use crate::membership::{Membership, SyncNode};
 use crate::model_node::{BoxFuture, Embedded, ModelNode};
+use crate::models::{Directory, ModelsHub, Target};
 
 /// Addresses to reach devices at (the config's `peers`; LAN discovery and relays find the rest).
 pub type Hints = Vec<(PeerId, Vec<Multiaddr>)>;
@@ -141,6 +143,102 @@ pub fn serve_model(
     let service = Arc::new(service);
     let server = NodeServer::start_with(node, service.clone(), NodeServerOptions::default().with_legacy_infer2(!combined))?;
     Ok((server, service))
+}
+
+/// Whether `peer` announces [`MODEL_NODE_APP`]: connects to it first if needed and waits up to `wait`
+/// to learn what it announces.
+pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec<Multiaddr>, wait: Duration) -> bool {
+    let n = node.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut apps = n.peer_apps(peer);
+        if apps.is_none() {
+            let _ = n.connect(peer, &addrs);
+            let until = std::time::Instant::now() + wait;
+            while apps.is_none() && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(25));
+                apps = n.peer_apps(peer);
+            }
+        }
+        apps.is_some_and(|a| a.iter().any(|a| a == MODEL_NODE_APP))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Serves `/weirdnet-backends/models/1` on `node`: the owner (the user's linked, unrevoked devices;
+/// [`roster_auth`]) searches the Hugging Face Hub, sees what fits this node, pulls models into
+/// `store` (and serves them through `supervisor` without a restart when the request says so),
+/// lists and removes what is on disk. Nothing here edits `node.toml`. Dropping the server stops it.
+pub fn serve_models(
+    node: &Arc<SyncNode>,
+    supervisor: Supervisor,
+    m: &Membership,
+    store: weirdnet_model::ModelStore,
+    budget: weirdnet_model::hw::Budget,
+    engine: EngineKind,
+) -> Result<(ModelsServer, Arc<ModelsService>), RemoteError> {
+    let service = Arc::new(ModelsService::new(store, supervisor, roster_auth(m)).with_budget(budget).with_engine(engine));
+    let server = ModelsServer::start(node, service.clone())?;
+    Ok((server, service))
+}
+
+/// The devices on `m`'s roster, and which of them announce a model node.
+pub struct NetDirectory {
+    node: Arc<SyncNode>,
+    membership: Arc<Membership>,
+    hints: HashMap<PeerId, Vec<Multiaddr>>,
+    wait: Duration,
+    /// This device's name for itself (the roster label may differ).
+    me: String,
+}
+
+impl NetDirectory {
+    pub fn new(node: Arc<SyncNode>, membership: Arc<Membership>, hints: Hints, wait: Duration, me: impl Into<String>) -> Self {
+        Self { node, membership, hints: hints.into_iter().collect(), wait, me: me.into() }
+    }
+}
+
+impl Directory for NetDirectory {
+    fn devices(&self) -> Vec<Target> {
+        let me = self.node.peer_id().to_string();
+        self.membership
+            .roster()
+            .active()
+            .map(|c| Target {
+                peer: c.peer_id.clone(),
+                label: if c.peer_id == me { self.me.clone() } else { c.label.clone() },
+                local: c.peer_id == me,
+            })
+            .collect()
+    }
+
+    fn model_nodes(&self) -> futures::future::BoxFuture<'_, Vec<Target>> {
+        Box::pin(async move {
+            let peers: Vec<Target> = self.devices().into_iter().filter(|t| !t.local).collect();
+            let checks = peers.iter().map(|t| async {
+                let Ok(peer) = PeerId::from_str(&t.peer) else { return false };
+                announces_model_node(&self.node, peer, self.hints.get(&peer).cloned().unwrap_or_default(), self.wait).await
+            });
+            let found = futures::future::join_all(checks).await;
+            peers.into_iter().zip(found).filter_map(|(t, ok)| ok.then_some(t)).collect()
+        })
+    }
+}
+
+/// The `ymird` side of `ymirctl models --node`: this node's own model role (when it has one) in
+/// process, the others over models/1 presenting this device's certificate.
+pub fn models_hub(
+    node: &Arc<SyncNode>,
+    m: &Arc<Membership>,
+    hints: &Hints,
+    opts: &RemoteOptions,
+    name: &str,
+    local: Option<Arc<ModelsService>>,
+) -> ModelsHub {
+    let client = ModelsClient::new(Arc::new(dialer(node, hints))).with_cert(Some(encode_cert(&m.our_cert())));
+    let dir = Arc::new(NetDirectory::new(node.clone(), m.clone(), hints.clone(), opts.find_wait, name));
+    let me = Target { peer: node.peer_id().to_string(), label: name.to_string(), local: true };
+    ModelsHub::new(local.map(|s| (me, s)), dir, client)
 }
 
 /// A model node on another of the user's devices.
@@ -402,21 +500,7 @@ pub fn discover_model_nodes(
                     continue;
                 }
                 let Ok(peer) = PeerId::from_str(&p) else { continue };
-                let (n, addrs, wait) = (node.clone(), hints.get(&peer).cloned().unwrap_or_default(), opts.find_wait);
-                let announced = tokio::task::spawn_blocking(move || {
-                    let mut apps = n.peer_apps(peer);
-                    if apps.is_none() {
-                        let _ = n.connect(peer, &addrs);
-                        let until = std::time::Instant::now() + wait;
-                        while apps.is_none() && std::time::Instant::now() < until {
-                            std::thread::sleep(Duration::from_millis(25));
-                            apps = n.peer_apps(peer);
-                        }
-                    }
-                    apps.is_some_and(|a| a.iter().any(|a| a == MODEL_NODE_APP))
-                })
-                .await
-                .unwrap_or(false);
+                let announced = announces_model_node(&node, peer, hints.get(&peer).cloned().unwrap_or_default(), opts.find_wait).await;
                 if !announced {
                     continue;
                 }
