@@ -78,3 +78,17 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** `ymird --version` should carry the commit so builds are identifiable without hashing.
 
 **What's next:** the same upgrade for any new node; then the Weirdnet 0.5 work.
+
+## 2026-11-21: Weirdnet 0.5 image and audio work merged to main
+
+**What changed**
+
+- `feature/weirdnet-0.5-content-parts` (head `1d08971`) is merged into main with a merge commit: Weirdnet 0.5 crates, capability routing, images and audio through the pool, MLX on weirdnet-backends 0.2, the engine shim removed, and the macOS workflow fix. The branch is kept.
+
+**Checks run:** `cargo fmt --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` on the merge result, all passing. CI and macOS workflow runs on the branch head were green.
+
+**Not tested:** real GPU vision, MLX on Apple Silicon, phone.
+
+**What's left:** stacked branches (model search, MCP, pool bench, OpenAI endpoints) should merge main before they land.
+
+**What's next:** those stacked branches.
