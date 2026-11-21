@@ -2,7 +2,7 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
-## 2026-11-21: `ymirctl mcp`, an MCP server (LF-16, branch `feature/mcp`)
+## 2026-11-21: `ymirctl mcp`, an MCP server (LF-16, branch `feature/mcp-v2`, based on `feature/model-search-pull` b0a425a)
 
 **What changed**
 
@@ -16,7 +16,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **Not tested:** `ymir_models_search` and `ymir_pull_model` through MCP against the real Hub (the `models` code has mock-Hub tests); real Cursor, Claude or VS Code clients; audio with a real audio model; `ymirctl bench` as a tool (it is on `feature/pool-bench`, not in this branch's base); a `ymird`-hosted MCP endpoint (not built).
 
-**What's left:** the tools above once `weirdnet-mcp` has them; rebase onto the branch bump of the Weirdnet crates.
+**What's left:** the tools above once `weirdnet-mcp` has them. Already rebased onto the Weirdnet crate bump (`feature/mcp` is the earlier, superseded push; `feature/mcp-v2` is the one to use).
 
 **What's next:** a bench tool after `feature/pool-bench` merges.
 
