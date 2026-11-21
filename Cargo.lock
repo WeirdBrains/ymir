@@ -5766,7 +5766,9 @@ name = "ymirctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "futures",
  "semver",
  "serde_json",
  "tempfile",

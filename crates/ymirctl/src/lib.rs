@@ -4,6 +4,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+pub mod bench;
 pub mod pool;
 
 use anyhow::{Context, Result, bail};
@@ -132,6 +133,9 @@ pub enum Cmd {
         #[arg(long)]
         retries: Option<u32>,
     },
+    /// Compare every model on the pool: time to first token, tokens per second, latency and a few
+    /// deterministic quality checks. One model at a time; saves a timestamped JSON and Markdown report.
+    Bench(bench::BenchArgs),
     /// This node's place in your Weirdnet: link it, link other devices, revoke.
     Pool {
         #[command(subcommand)]
@@ -367,6 +371,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             }
             writeln!(out, "# {}", r.message.unwrap_or_default())?;
             Ok(())
+        }
+        Cmd::Bench(args) => {
+            let client = bridge(&paths).await?;
+            bench::run(&client, &args, out, &mut std::io::stderr()).await.map(|_| ())
         }
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;

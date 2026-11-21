@@ -87,10 +87,8 @@ impl BridgeClient {
             .await
             .context("the bridge is not reachable; is ymird running?")?;
         let r = check(r).await?;
-        let mut out = TimedChat {
-            standin: r.headers().get("x-weirdnet-standin").and_then(|v| v.to_str().ok()).map(str::to_string),
-            ..Default::default()
-        };
+        let mut out =
+            TimedChat { standin: r.headers().get("x-weirdnet-standin").and_then(|v| v.to_str().ok()).map(str::to_string), ..Default::default() };
         let mut parser = SseParser::default();
         let mut bytes = r.bytes_stream();
         let mut done = false;

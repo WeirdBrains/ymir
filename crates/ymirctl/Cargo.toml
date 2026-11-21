@@ -19,10 +19,12 @@ weirdnet-model.workspace = true
 weirdnet-net.workspace = true
 weirdnet-update.workspace = true
 semver.workspace = true
+tempfile.workspace = true
 ymir-core.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+axum.workspace = true
+futures.workspace = true
 
 [lints]
 workspace = true
