@@ -50,6 +50,20 @@ impl BridgeClient {
         check(r).await?.json().await.context("bad /v1/models response")
     }
 
+    /// Posts an OpenAI request (`chat/completions`, `completions` or `embeddings`) without streaming
+    /// and returns the JSON answer.
+    pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
+        let r = self
+            .http
+            .post(format!("{}/{}", self.base, path.trim_start_matches('/')))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .context("the bridge is not reachable; is ymird running?")?;
+        check(r).await?.json().await.with_context(|| format!("bad /v1/{path} response"))
+    }
+
     /// Streams a chat answer, calling `on_text` with each piece.
     pub async fn chat_stream(
         &self,

@@ -229,6 +229,49 @@ systemctl --user restart ymird</code></pre>
 The <a href="${deployment}#jan">deployment guide</a> walks through it, including how to reach the bridge from other
 machines over HTTPS.</p>
 
+<h2 id="mcp">MCP server for Cursor, Claude and VS Code</h2>
+<p><code>ymirctl mcp</code> turns this node into a <a href="https://modelcontextprotocol.io">Model Context Protocol</a> server,
+so an AI tool can look at your pool and use its models. It talks to the same <code>ymird</code> control socket and bridge as
+the other commands, so <code>ymird</code> must be running.</p>
+<h3 id="mcp-run"><code>ymirctl mcp [--http [ADDR]] [--read-only] [--allow-remove]</code></h3>
+<ul>
+<li><strong>stdio (default).</strong> The client starts <code>ymirctl mcp</code> itself and speaks JSON-RPC on stdin and stdout.</li>
+<li><strong><code>--http [ADDR]</code>.</strong> Serves streamable HTTP at <code>http://127.0.0.1:8485/mcp</code> instead. Only loopback
+addresses are accepted, requests must carry the bridge token (<code>ymirctl bridge token</code>) as a bearer token, and a request
+addressed to another host name or sent from a web page is refused.</li>
+<li><strong><code>--read-only</code>.</strong> Hides every tool that changes anything.</li>
+<li><strong><code>--allow-remove</code>.</strong> Also offers <code>ymir_remove_model</code>. Off by default.</li>
+</ul>
+<h3 id="mcp-tools">Tools</h3>
+<p>Reading: <code>ymir_status</code>, <code>ymir_nodes</code>, <code>ymir_devices</code>, <code>ymir_models</code> (with what each
+model takes: images, audio), <code>ymir_chat</code> (text, images up to 5&nbsp;MB and audio up to 10&nbsp;MB, as files or content
+parts), <code>ymir_complete</code>, <code>ymir_embed</code>, <code>ymir_service_status</code>, <code>ymir_models_search</code> and
+<code>ymir_models_local</code>.</p>
+<p>Changing, marked <strong>MUTATES</strong> in their description, with <code>readOnlyHint: false</code>, and doing nothing unless
+the call says <code>confirm: true</code>: <code>ymir_load_model</code>, <code>ymir_unload_model</code> and
+<code>ymir_pull_model</code> (without <code>confirm</code> it only shows what would be downloaded). <code>ymir_remove_model</code>
+deletes downloaded files and needs <code>--allow-remove</code> as well as <code>confirm</code>. No tool edits
+<code>node.toml</code>. <code>ymirctl bench</code> is not a tool yet.</p>
+<h3 id="mcp-clients">Add it to your tools</h3>
+<p><strong>Cursor</strong> (<code>~/.cursor/mcp.json</code>) and <strong>Claude Desktop</strong>
+(<code>claude_desktop_config.json</code>):</p>
+<pre><code>{
+  "mcpServers": {
+    "ymir": { "command": "ymirctl", "args": ["mcp"] }
+  }
+}</code></pre>
+<p><strong>VS Code</strong> (<code>.vscode/mcp.json</code>, or the <em>MCP: Add Server</em> command):</p>
+<pre><code>{
+  "servers": {
+    "ymir": { "type": "stdio", "command": "ymirctl", "args": ["mcp"] }
+  }
+}</code></pre>
+<p><strong>Claude Code:</strong> <code>claude mcp add ymir -- ymirctl mcp</code>. Use the full path to <code>ymirctl</code> if your tool
+does not see your shell's <code>PATH</code>, add <code>"--home", "DIR"</code> to the arguments for a node folder that is not the default, and
+add <code>"--read-only"</code> to keep a tool from loading or pulling models. For the HTTP form, start
+<code>ymirctl mcp --http</code> and point the client at <code>http://127.0.0.1:8485/mcp</code> with the header
+<code>Authorization: Bearer TOKEN</code>.</p>
+
 <h2 id="services">Run as a service</h2>
 <p><code>ymirctl service</code> runs <code>ymird</code> in the background, the same way on every OS. By default it is a
 <em>user-level</em> service that runs as you, with your <code>YMIR_HOME</code>, and needs no root or admin rights:</p>
@@ -334,6 +377,7 @@ ymirctl update status</code></pre>
 <tr><td>take a node out for maintenance</td><td><code>ymirctl drain server-a</code> … <code>--resume</code></td></tr>
 <tr><td>add a device</td><td><code>ymirctl pool link</code> on it, <code>ymirctl pool add CODE</code> on a linked one</td></tr>
 <tr><td>get or change the API key</td><td><code>ymirctl bridge token</code>, <code>--rotate</code>, then restart <code>ymird</code></td></tr>
+<tr><td>use the pool from Cursor, Claude or VS Code</td><td><a href="#mcp"><code>ymirctl mcp</code></a></td></tr>
 <tr><td>run many prompts</td><td><code>ymirctl batch prompts.txt</code></td></tr>
 </tbody></table>
 

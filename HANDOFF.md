@@ -2,6 +2,24 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-21: `ymirctl mcp`, an MCP server (LF-16, branch `feature/mcp`)
+
+**What changed**
+
+- `ymirctl mcp` (stdio) and `ymirctl mcp --http [ADDR]` (loopback streamable HTTP with the bridge token). Ten read tools and the mutating `ymir_load_model`, `ymir_unload_model`, `ymir_pull_model`; `ymir_remove_model` only with `--allow-remove`; `--read-only` hides every mutating tool. Mutating tools need `confirm: true`. Chat takes images and audio (files or content parts). See [DESIGN.md](docs/DESIGN.md) ("MCP server") and the [ymirctl guide](site/lib/pages/docs_ymirctl.dart) for tools and client config.
+- Built on `weirdnet-mcp` 0.5.3 (default features; one `weirdnet-agent` in the lock). The protocol front end is `crates/ymirctl/src/mcp/rpc.rs`, kept small so it can be replaced. Replaces the earlier interrupted `rmcp` attempt (kept as a patch in the dev box scratch folder, not used).
+- `BridgeClient::post` (non-streaming OpenAI calls); `service_lines`, `load_cfg` and `bridge` in `ymirctl` are `pub(crate)`.
+
+**Needed from `weirdnet-mcp` (for the Weirdnet Lead):** (1) async `Tools::call`, now each call blocks a thread; (2) `ParamType::Object`, array-of-objects, `enum` and `anyOf`, now patched into `tools/list` here; (3) a server stdio loop and an HTTP route helper with the loopback and bearer rules, now in `rpc.rs`; (4) resources (`resources/list`, `read`), which the earlier attempt had for models and nodes; (5) `image` and `audio` content in tool results.
+
+**Checks run:** see the commit message; unit tests, a scripted stdio client against the real `ymirctl` binary (`crates/ymirctl/tests/mcp_stdio.rs`), and an integration test against a fake pool with mock engines (`crates/ymir-testkit/tests/mcp.rs`): read tools, images, confirm gating, remove, the stdio loop with concurrent requests and batches, and HTTP (token, host, origin).
+
+**Not tested:** `ymir_models_search` and `ymir_pull_model` through MCP against the real Hub (the `models` code has mock-Hub tests); real Cursor, Claude or VS Code clients; audio with a real audio model; `ymirctl bench` as a tool (it is on `feature/pool-bench`, not in this branch's base); a `ymird`-hosted MCP endpoint (not built).
+
+**What's left:** the tools above once `weirdnet-mcp` has them; rebase onto the branch bump of the Weirdnet crates.
+
+**What's next:** a bench tool after `feature/pool-bench` merges.
+
 ## 2026-11-21: `ymirctl models search | pull | list | remove`, part 1 (LF-30 M1, branch only)
 
 **What changed**
