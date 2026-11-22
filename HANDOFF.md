@@ -2,6 +2,11 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-22: LF-38 follow-up, video design corrected (branch `feature/video-design`)
+
+**What changed** in [`docs/design/video.md`](docs/design/video.md): no default frame count or size anywhere; Ymir reports per-model limits (context in use, `max_images`, image token cost and edge, audio length, later native video limits) as reported-or-absent, measured at model load where possible, with operator overrides in `node.toml`. That is now milestone 1 and the prerequisite for Bragi's video. Wish list updated. Docs only.
+
+
 ## 2026-11-22: LF-38, post-v1 video design, server and node side (branch `feature/video-design`)
 
 **What changed**
