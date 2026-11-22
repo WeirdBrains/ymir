@@ -293,6 +293,36 @@ fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// Runs `tasks` on `model` through the `ymird` on `socket` (one control request), waiting for the
+/// model rather than a stand-in, and returns one outcome per task, in order.
+pub async fn ask(
+    socket: &Path,
+    tasks: &[BatchTask],
+    model: &str,
+    job: &str,
+    concurrency: Option<usize>,
+    retries: Option<u32>,
+    cache: CachePolicy,
+) -> Result<Vec<BatchItem>> {
+    let req = ControlRequest::BatchTasks {
+        tasks: tasks.to_vec(),
+        model: Some(model.to_string()),
+        concurrency,
+        retries,
+        job: Some(job.to_string()),
+        wait_for_model: true,
+        cache,
+    };
+    let r = control::request(socket, &req).await?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    if r.batch.len() != tasks.len() {
+        bail!("ymird answered {} of {} rows", r.batch.len(), tasks.len());
+    }
+    Ok(r.batch)
+}
+
 /// Checks the license given for the teacher.
 pub fn check_license(license: &str, allow_unknown: bool) -> Result<()> {
     let l = license.trim();
@@ -368,24 +398,9 @@ pub async fn generate(socket: &Path, g: &Generate, progress: &mut dyn FnMut(usiz
     let mut sent = 0;
     progress(0, total);
     for chunk in todo.chunks(CHUNK) {
-        let req = ControlRequest::BatchTasks {
-            tasks: chunk.to_vec(),
-            model: Some(g.teacher.clone()),
-            concurrency: g.concurrency,
-            retries: g.retries,
-            job: Some(job.clone()),
-            wait_for_model: true,
-            cache: g.cache,
-        };
-        let r = control::request(socket, &req).await?;
-        if !r.ok {
-            bail!("{}", r.message.unwrap_or_default());
-        }
-        if r.batch.len() != chunk.len() {
-            bail!("ymird answered {} of {} rows", r.batch.len(), chunk.len());
-        }
+        let items = ask(socket, chunk, &g.teacher, &job, g.concurrency, g.retries, g.cache).await?;
         let mut buf = Vec::new();
-        for (t, item) in chunk.iter().zip(r.batch) {
+        for (t, item) in chunk.iter().zip(items) {
             let row = OutputRow::new(t, item, &g.teacher);
             serde_json::to_writer(&mut buf, &row)?;
             buf.push(b'\n');

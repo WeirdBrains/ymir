@@ -126,3 +126,46 @@ async fn jsonl_generation_marks_rows_writes_a_manifest_and_resumes() -> Result<(
     daemon.shutdown().await;
     Ok(())
 }
+
+const EVAL_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks-eval.jsonl");
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eval_scores_models_with_checks_and_a_judge() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (home, daemon) = node(dir.path()).await?;
+    let out = dir.path().join("eval.jsonl");
+    let o = out.display().to_string();
+    let args = ["eval", EVAL_FIXTURE, "--model", "teacher", "--model", "other", "--judge", "other", "--out", &o, "--concurrency", "1"];
+    let said = ctl(&home, &args).await?;
+    // The mock echoes the prompt: ev-1 contains its word, ev-2 is not the exact answer, and the
+    // mock judge never says PASS or FAIL.
+    let line = |m: &str| said.lines().find(|l| l.starts_with(m)).unwrap_or_default().split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    assert_eq!(line("teacher "), ["teacher", "1/2", "-", "0", "0", "0"], "{said}");
+    assert_eq!(line("other "), ["other", "1/2", "-", "0", "0", "0"], "{said}");
+    assert!(said.contains("is also a model under test"), "{said}");
+    assert!(said.contains("teacher: the judge gave no clear PASS/FAIL on 1 row(s)"), "{said}");
+    let rows: Vec<Value> = rows(&out);
+    assert_eq!(rows.len(), 6);
+    let ev1 = rows.iter().find(|r| r["model"] == "teacher" && r["id"] == "ev-1").unwrap();
+    assert_eq!((ev1["check"].as_bool(), ev1["cache_hit"].as_bool()), (Some(true), Some(false)), "{ev1}");
+    let ev3 = rows.iter().find(|r| r["model"] == "teacher" && r["id"] == "ev-3").unwrap();
+    assert!(
+        ev3.get("check").is_none() && ev3.get("judge").is_none() && ev3["judge_reply"].as_str().unwrap().starts_with("Hello from other!"),
+        "{ev3}"
+    );
+
+    // Run again: every answer is deterministic, so the answer cache replays them (no bypass on the
+    // wire yet), and the report says so.
+    let said = ctl(&home, &args).await?;
+    assert_eq!(line_of(&said, "teacher "), ["teacher", "1/2", "-", "0", "3", "0"], "{said}");
+
+    // No judge: rubric rows are noted and scored by `expect` only.
+    let said = ctl(&home, &["eval", EVAL_FIXTURE, "--model", "teacher"]).await?;
+    assert!(said.contains("have a rubric but no --judge"), "{said}");
+    daemon.shutdown().await;
+    Ok(())
+}
+
+fn line_of(said: &str, m: &str) -> Vec<String> {
+    said.lines().find(|l| l.starts_with(m)).unwrap_or_default().split_whitespace().map(str::to_string).collect()
+}

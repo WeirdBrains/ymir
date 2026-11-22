@@ -972,6 +972,21 @@ that device, under `weirdnet-agent`'s policy); a subtask that needs anything out
 approval from the submitting device up to a timeout (default 10 minutes) and is then **denied**, and
 the job carries on without it. A subtask never gains tools the parent didn't have.
 
+### Data generation and evals (training plan P1)
+
+Built 2026-11-22 (see [docs/design/training.md](design/training.md)). `ymirctl batch --jsonl` sends rows with their own
+messages, sampling and seed (`ControlRequest::BatchTasks`, `ymir_core::batch::BatchTask`) in chunks of 32, waits for the
+teacher model (no stand-in), and writes JSONL rows plus `OUT.manifest.json` (`ymir_core::dataset`): teacher, the
+operator's `--license` (required; `unknown` only with `--allow-unknown-license`), input hash, counts and the models that
+answered. A row is `usable` only when it answered fresh from the teacher; cache hits and stand-ins are read from the
+answer's `Meta`. `--resume` skips rows already answered and keeps the job id. `ymirctl eval` scores models on rows with
+`expect` (the bench scorers) and/or `rubric` (graded by `--judge`), at temperature 0 with a fixed seed.
+
+Cache seam: `batch::CachePolicy::Bypass` is the default for both, but infer/2 has no per-request cache mode yet
+(requested from `weirdnet-agent`), so `batch::apply_cache_policy` leaves the request unchanged and the exact cache still
+replays deterministic requests; such rows are marked. When the mode ships, only `apply_cache_policy` and
+`CachePolicy::supported` change.
+
 ### Shared semantic cache
 
 `weirdnet-semcache` (new) generalizes the RedisVL `rvl-cache`:

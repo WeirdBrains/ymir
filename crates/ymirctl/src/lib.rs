@@ -5,6 +5,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 pub mod bench;
+pub mod eval;
 pub mod mcp;
 pub mod models;
 pub mod pool;
@@ -147,6 +148,9 @@ pub enum Cmd {
     /// request at a time; saves timestamped JSON, Markdown and CSV. `bench list` shows what can run,
     /// `bench compare A.json B.json` compares two results.
     Bench(bench::BenchCmd),
+    /// Score models of the pool on a held-out JSONL file: deterministic checks (`expect`, with the
+    /// bench scorers) and, with `--judge`, rubric grading by another model.
+    Eval(eval::EvalArgs),
     /// This node's place in your Weirdnet: link it, link other devices, revoke.
     Pool {
         #[command(subcommand)]
@@ -435,6 +439,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         }
         Cmd::Mcp(args) => mcp::run(cli_home, paths, args).await,
         Cmd::Bench(cmd) => bench_cmd(&paths, cmd, out).await,
+        Cmd::Eval(a) => eval::run(&paths, a, out).await,
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;
             pool::run(&paths, &cfg, cmd, out, input).await
