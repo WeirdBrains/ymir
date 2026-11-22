@@ -3,11 +3,20 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+
+## 2026-11-22: training plan, white paper reference fixed (branch `feature/training-plan-whitepaper-ref`)
+
+**What changed:** the white paper is not on main yet, so [`docs/design/training.md`](docs/design/training.md) refers to its "Training and fine-tuning (proposal)" section by title instead of linking a file that isn't there (the previous entry's links would not have resolved). Docs only.
+
+**Checks:** none needed (docs only).
+
+**What's next:** link the section's source once the white paper is on main.
+
 ## 2026-11-22: training plan, decisions (branch `feature/training-plan-answers`)
 
 **What changed:** [`docs/design/training.md`](docs/design/training.md) records m3talsmith's answers to the open questions (llama.cpp finetune as the trainer; first topic "Decentralized networks: how they work"; Bragi's training toggle after v1; version weights in Ymir's `balance`, with alternatives proposed) and links the white paper's training section. [DESIGN.md](docs/DESIGN.md#non-goals): the non-goal now reads "Ymir feeds, schedules and serves a separate trainer". Docs only.
 
-**Checks:** none needed (docs only). The white paper link points at `docs/whitepaper/sections/10-training.tex`, which resolves once the white paper commit is on main.
+**Checks:** none needed (docs only).
 
 ## 2026-11-22: training plan (branch `feature/training-plan`)
 

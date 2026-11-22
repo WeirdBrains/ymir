@@ -1,8 +1,8 @@
 # Training and fine-tuning around Ymir: implementation plan
 
 Status: plan, 2026-11-22. Nothing here is built. This document turns the four training proposals in the
-white paper's "Training and fine-tuning (proposal)" section
-([`docs/whitepaper/sections/10-training.tex`](../whitepaper/sections/10-training.tex)) into work items, maps each onto the modules
+white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
+repository yet) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
 m3talsmith answered the open questions the same day (see "Decisions").
 
@@ -210,8 +210,8 @@ serve it as an adapter, and score it against the base through the pool.
 4. **Conversation training flag (P2):** the Bragi toggle comes after Bragi v1; the Ymir side of P2 can be built
    before it, but nothing is exported until a conversation can be flagged.
 5. **Version traffic weights (P4b):** in Ymir's `balance` for now (see the proposal below).
-6. **White paper:** committed under [`docs/whitepaper/`](../whitepaper/README.md); the training section is
-   [`sections/10-training.tex`](../whitepaper/sections/10-training.tex).
+6. **White paper:** to be committed under `docs/whitepaper/` by m3talsmith. Until it is on main, this plan refers to
+   its "Training and fine-tuning (proposal)" section by title; a link to the section's source replaces this note then.
 
 ### Proposal: where version weights could live later
 
