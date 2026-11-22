@@ -211,7 +211,8 @@ No dataset is built in.</p>
 <tr><td><code>--resume</code></td><td>Continue an interrupted run: rows already answered are skipped, failed rows are tried again.</td></tr>
 <tr><td><code>--system TEXT</code></td><td>System prompt for rows without one.</td></tr>
 <tr><td><code>--temperature</code>, <code>--top-p</code>, <code>--max-tokens</code>, <code>--seed</code></td><td>Defaults for rows that don't set their own.</td></tr>
-<tr><td><code>--cache bypass|use</code></td><td><code>bypass</code> (default) asks for fresh answers. The pool can't skip its answer cache yet, so rows it answers from the cache are marked unusable either way.</td></tr>
+<tr><td><code>--sources FILE</code></td><td>A sources manifest (JSON: a <code>topic</code>, and each source's <code>id</code>, <code>title</code>, <code>url</code> and <code>license</code>). Every row then names its <code>source</code>, and the dataset's manifest records the sources and rows per source.</td></tr>
+<tr><td><code>--cache bypass|refresh|use</code></td><td><code>bypass</code> (default) asks for fresh answers; <code>refresh</code> also lets them refresh the cache; <code>use</code> lets the cache answer. The pool can't skip its answer cache yet, so rows it answers from the cache are marked unusable either way.</td></tr>
 </tbody></table>
 <pre><code>ymirctl batch prompts.jsonl --jsonl --model teacher-model --license apache-2.0 --out data.jsonl --temperature 0.7</code></pre>
 <h3 id="eval"><code>ymirctl eval FILE</code>: score models</h3>

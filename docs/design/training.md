@@ -45,9 +45,10 @@ Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weird
 ### P1. Data generation, distillation and evals through the bridge and batch (path built, use proposed)
 
 **Status (2026-11-22).** First slice built: `ymirctl batch --jsonl` (rows with system prompt, sampling and seed;
-wait-for-model; `usable`, `cache_hit` and `standin` per row; manifest with the operator's license; `--resume`) and
-`ymirctl eval` (bench scorers, optional judge). Left: the cache bypass on the wire (waits for `weirdnet-agent`), the
-license read from the Hub, and the synced job record.
+wait-for-model; `usable`, `cache_hit` and `standin` per row; manifest with the operator's license; a sources
+manifest with each source's license; `--resume`) and `ymirctl eval` (bench scorers, optional judge). Left: the cache
+mode on the wire (built in `weirdnet-agent`, not yet published), the teacher license read from the Hub, turning
+fetched sources into seed prompts, and the synced job record.
 
 **Scope.** A teacher model in the pool answers or labels a file of prompts; the answers become a dataset for a
 student. The same path scores a candidate model on held-out prompts, optionally with a second model as judge.

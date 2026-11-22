@@ -982,10 +982,15 @@ answered. A row is `usable` only when it answered fresh from the teacher; cache 
 answer's `Meta`. `--resume` skips rows already answered and keeps the job id. `ymirctl eval` scores models on rows with
 `expect` (the bench scorers) and/or `rubric` (graded by `--judge`), at temperature 0 with a fixed seed.
 
-Cache seam: `batch::CachePolicy::Bypass` is the default for both, but infer/2 has no per-request cache mode yet
-(requested from `weirdnet-agent`), so `batch::apply_cache_policy` leaves the request unchanged and the exact cache still
-replays deterministic requests; such rows are marked. When the mode ships, only `apply_cache_policy` and
-`CachePolicy::supported` change.
+Sources: `--sources FILE` takes a sources manifest (`dataset::Sources`: a topic, and each source's id, title, URL and
+license; Ymir fetches nothing). Every row then names its `source`, unknown ids are refused before anything runs, and
+the dataset's manifest records the sources, their hash and rows per source.
+
+Cache seam: `batch::CacheMode` (`Use`, `Bypass`, `Refresh`) has the names of `weirdnet-agent`'s infer/2 `CacheMode`,
+which is built but not yet published. `Bypass` is the default for both commands, but until Ymir moves to that release
+`batch::with_cache` leaves the request unchanged (`batch::cache_mode_supported` is false for anything but `Use`), so
+the exact cache still replays deterministic requests and those rows are marked from `Meta::cache_hit`. The switch is
+the dependency bump plus `with_cache` calling `Request::with_cache` and the enum becoming a re-export.
 
 ### Shared semantic cache
 
