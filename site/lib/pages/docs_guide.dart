@@ -57,7 +57,7 @@ ymirctl setup --download                     # catalog models that fit; asks bef
 ymirctl setup --model /path/to/model.gguf    # your own GGUF; repeat --model, the first is the main model</code></pre>
 <p>Useful options: <code>--name</code> (this node's name), <code>--memory-budget 10GiB</code>,
 <code>--reserve 12GiB</code> (memory kept for the OS), <code>--models-dir</code>, <code>--port</code> (bridge port on
-127.0.0.1, default 8484) and <code>--force</code> to replace an existing <code>node.toml</code>.</p>
+127.0.0.1, default 8484) and <code>--force</code> to replace an existing <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md#config-format-one-file-per-node"><code>node.toml</code></a>.</p>
 <p><strong>Roles.</strong> One <code>ymird</code> can be three things, and <code>--roles</code> picks which (default
 <code>model,inference,app</code>):</p>
 <ul>
@@ -195,7 +195,7 @@ one inference node somewhere, which can be the same machine as a model node. Mac
 need Ymir:</p>
 <ul>
 <li><a href="${bragiSite}">Bragi</a> joins your Weirdnet identity on its own and talks to your inference nodes (step 3).</li>
-<li>Apps built on <code>weirdnet-agent</code> do the same.</li>
+<li>Apps built on <a href="https://crates.io/crates/weirdnet-agent"><code>weirdnet-agent</code></a> do the same.</li>
 <li>Plain OpenAI clients, such as Jan or a script, use the bridge: on the machine that runs it at
 <code>http://127.0.0.1:8484/v1</code> (step 4), or from another device through an HTTPS address on a private network,
 with the bridge token as the API key (step 5).</li>

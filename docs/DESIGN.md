@@ -4,7 +4,7 @@ Date: 2026-11-19. Status: design settled; every open question was answered on 20
 [Decisions](#decisions-2026-11-19)). **M1 is built** (single box, all three roles in one `ymird`;
 see [M1 status](#m1-status-built-2026-11-19)).
 Reference build: a two-server deployment (deployment configs and a plan snapshot are kept off-repo).
-This doc follows the collective `weirdnet-agents/AGENTS.md`.
+This doc follows the shared Weirdnet conventions.
 
 ## Vision: a cloud of LLM models
 
@@ -48,7 +48,7 @@ Both schemes are registered in `weirdnet-schemes`.
 | Design decisions and naming | m3talsmith | |
 
 When Ymir or Bragi needs something generic, we file it with the Weirdnet lead and build against
-Weirdnet main until it ships (AGENTS.md); we don't build it inside the app.
+Weirdnet main until it ships (see the repository's [AGENTS.md](../AGENTS.md)); we don't build it inside the app.
 
 ## Goals
 

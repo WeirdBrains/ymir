@@ -16,9 +16,9 @@ const _html = r'''
 <tr><td><code>crates/ymird</code></td><td>The node daemon.</td></tr>
 <tr><td><code>crates/ymirctl</code></td><td>The command-line front end (<code>setup</code>, <code>service</code>, <code>pool</code>, <code>status</code>, <code>chat</code>, <code>bridge</code>, …).</td></tr>
 <tr><td><code>crates/ymir-testkit</code></td><td>Helpers for tests, including a mock engine.</td></tr>
-<tr><td><code>site/</code>, <code>roadmap.toml</code>, <code>ROADMAP.md</code></td><td>This website (Jaspr) and the roadmap it is generated from.</td></tr>
+<tr><td><code>site/</code>, <a href="${repo}/blob/main/roadmap.toml"><code>roadmap.toml</code></a>, <a href="${repo}/blob/main/ROADMAP.md"><code>ROADMAP.md</code></a></td><td>This website (Jaspr) and the roadmap it is generated from.</td></tr>
 <tr><td><code>packaging/</code>, <code>scripts/package.py</code></td><td>The systemd unit, the Arch recipe, the Homebrew template and the packager.</td></tr>
-<tr><td><code>brand/</code>, <code>BRAND.md</code></td><td>Logo, icons and usage rules.</td></tr>
+<tr><td><code>brand/</code>, <a href="${repo}/blob/main/BRAND.md"><code>BRAND.md</code></a></td><td>Logo, icons and usage rules.</td></tr>
 </tbody>
 </table>
 <p>Generic pieces (networking, auth, routing, backends, the OpenAI bridge, the answer cache, hardware detection) live in
@@ -27,7 +27,7 @@ something is reusable, it is proposed to the Weirdnet crates, not built here. Th
 <a href="${api}">API reference</a> covers the Ymir crates themselves.</p>
 
 <h2 id="roles">Architecture in short</h2>
-<p>One <code>ymird</code> runs up to three roles, each an independent toggle in <code>node.toml</code>:</p>
+<p>One <code>ymird</code> runs up to three roles, each an independent toggle in <a href="${repo}/blob/main/docs/DESIGN.md#config-format-one-file-per-node"><code>node.toml</code></a>:</p>
 <ul>
 <li><strong>Model</strong> nodes run engines (llama.cpp, vLLM or a wrapped stock server), advertise their models, and load or unload on command.</li>
 <li><strong>Inference</strong> nodes keep one catalog, balance load, place models and fail over mid-answer.</li>
@@ -36,7 +36,7 @@ something is reusable, it is proposed to the Weirdnet crates, not built here. Th
 <p>The protocols are the same whether a peer is local or remote; the in-process path is only a fast path. Apps never talk
 to model nodes directly. Devices are linked to a Weirdnet identity (<code>ymirctl pool</code>), and what a linked device
 may do is decided by signed grants in the device roster. Protocol ids are <code>/ymir/…</code>, and the link scheme is
-<code>weirdnet-ymir://</code>. Read DESIGN.md for the details.</p>
+<code>weirdnet-ymir://</code>. Read <a href="${repo}/blob/main/docs/DESIGN.md">DESIGN.md</a> for the details.</p>
 
 <h2 id="build">Build and test</h2>
 <p>You need Rust 1.99. Point the build output at a scratch directory and clean it afterwards if disk is tight.</p>
@@ -54,9 +54,9 @@ never download a model, start a GPU backend or touch the real network; tests tha
 
 <h2 id="contribute">Contributing</h2>
 <ul>
-<li>Follow the shared conventions in the Weirdnet agents guide (<code>AGENTS.md</code>), then the repository's own <code>AGENTS.md</code>.</li>
+<li>Follow the shared conventions in the shared Weirdnet conventions, then <a href="${repo}/blob/main/AGENTS.md">the repository's own <code>AGENTS.md</code></a>.</li>
 <li>Work on <code>main</code>, in small logical commits, after <code>git pull --rebase</code>. Don't force-push or skip hooks.</li>
-<li>Keep DESIGN.md current in the same change as the code.</li>
+<li>Keep <a href="${repo}/blob/main/docs/DESIGN.md">DESIGN.md</a> current in the same change as the code.</li>
 <li>No secrets in configs, logs, docs or commits. Config refers to secrets with <code>env:</code> or <code>file:</code>.</li>
 <li>Public content (docs, site, comments, fixtures) uses placeholder hosts and addresses such as <code>server-a</code> and <code>192.0.2.x</code>, never real machines.</li>
 <li>Ymir is BSD-3-Clause, copyright <a href="https://weirdbrains.com">Weird Brains</a> LLC; every crate sets <code>license = "BSD-3-Clause"</code>.</li>
@@ -64,7 +64,7 @@ never download a model, start a GPU backend or touch the real network; tests tha
 
 <h2 id="release">Releasing</h2>
 <p>Releases use the shared release script vendored as <code>scripts/weirdnet_release.py</code> and configured in
-<code>release.toml</code>; never edit the vendored copy and don't write a per-project release flow. In order:</p>
+<a href="${repo}/blob/main/release.toml"><code>release.toml</code></a>; never edit the vendored copy and don't write a per-project release flow. In order:</p>
 <ol>
 <li>Dry run: <code>python3 scripts/weirdnet_release.py --dry-run</code>. It refuses a dirty tree, the wrong branch, being behind origin or an existing tag, and runs the checks listed in <code>release.toml</code>.</li>
 <li>Release for real: the script bumps the versions, updates the changelog, commits <code>release: vX.Y.Z</code>, tags <code>vX.Y.Z</code> and pushes main and the tag in one non-forced push.</li>

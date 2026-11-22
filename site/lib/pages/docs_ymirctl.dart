@@ -21,7 +21,7 @@ running. <code>models</code> and <code>chat</code> also use the local bridge and
 <code>setup</code>, <code>update</code>, <code>service</code> and <code>bridge token</code> work on files and need no daemon.</li>
 <li><strong>Where it looks.</strong> Config and state live in one folder, <code>~/.config/ymir</code> by default. Change it
 with the global <code>--home DIR</code> flag or the <code>YMIR_HOME</code> environment variable; the flag wins. Inside it:
-<code>node.toml</code> (the config), and <code>state/</code> with <code>ymird.sock</code>, <code>bridge.token</code>,
+<a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md#config-format-one-file-per-node"><code>node.toml</code></a> (the config), and <code>state/</code> with <code>ymird.sock</code>, <code>bridge.token</code>,
 <code>pool/</code> (this device's identity and linked devices) and <code>logs/</code>.</li>
 <li><strong>Global flags.</strong> Only <code>--home</code>, plus <code>--help</code> and <code>--version</code>.</li>
 </ul>

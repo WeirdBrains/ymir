@@ -60,7 +60,7 @@ class QuickstartPage extends StatelessComponent {
       pageHero(
         eyebrow: 'Quickstart',
         title: 'Set up one box',
-        lede: 'From the README: build from source, set up, and point Jan at the loopback bridge.',
+        lede: 'Build from source, set up, and point Jan at the loopback bridge.',
       ),
       prose(_html.replaceAll(r'${roadmapUrl}', siteLink('/roadmap')).replaceAll(r'${guide}', siteLink('/docs/guides/deployment'))),
     ]);

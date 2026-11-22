@@ -32,6 +32,8 @@ jobs:
         run: dart pub global activate jaspr_cli 0.24.0-beta.1
       - run: dart pub get
       - run: dart analyze
+      - name: References to files, URLs and crates in the site content are links
+        run: python3 tool/check_links.py
       - name: The roadmap pages match roadmap.toml
         run: python3 tool/gen_roadmap.py --check
       - name: Build the static site
@@ -64,7 +66,12 @@ jobs:
           mkdir -p site/build/jaspr/docs/reference/ymirctl
           cargo run --locked -q -p ymirctl --example cli_reference > site/build/jaspr/docs/reference/ymirctl/index.html
       - name: Check the output
+        env:
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
+          # No dead internal links (CUSTOM_DOMAIN serves from /, the github.io page from /ymir/)
+          base=/ymir/; [ -z "$CUSTOM_DOMAIN" ] || base=/
+          python3 tool/check_links.py --dist build/jaspr --base "$base"
           test -f build/jaspr/index.html
           test -f build/jaspr/roadmap/index.html
           test -f build/jaspr/docs/index.html

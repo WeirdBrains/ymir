@@ -13,7 +13,7 @@ jaspr build --sitemap-domain https://weirdbrains.github.io/ymir   # github.io bu
 
 ## Hosting and the custom domain
 
-Today: https://weirdbrains.github.io/ymir/ (base `/ymir/`).
+Today: <https://weirdbrains.github.io/ymir/> (base `/ymir/`).
 
 Custom domain `ymir.weirdbrains.com` (approved, DNS not added yet). To switch, in order:
 

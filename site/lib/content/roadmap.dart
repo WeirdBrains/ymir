@@ -6,13 +6,13 @@ class Milestone {
   final List<String> crates;
 }
 
-const roadmapIntro = 'Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from docs/DESIGN.md.';
+const roadmapIntro = 'Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design document.';
 const roadmapUpdated = '2026-11-19';
 const roadmapDesignUrl = 'https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md';
 const unpublishedCrates = <String>['weirdnet-push'];
 
 const milestones = <Milestone>[
-  Milestone('M0', 'Design', 'done', 'The repo, the names, the three roles and the decisions, written down in docs/DESIGN.md and reviewed by the Weirdnet lead.', []),
+  Milestone('M0', 'Design', 'done', 'The repo, the names, the three roles and the decisions, written down in [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md) and reviewed by the Weirdnet lead.', []),
   Milestone('M1', 'One box, three roles in one daemon', 'done', 'One machine runs the model, inference and app roles in a single `ymird`. It detects the hardware, picks models that fit, runs llama.cpp, and serves an OpenAI-compatible endpoint on loopback so Jan and scripts work. `ymirctl setup` writes the config.', ['weirdnet-model', 'weirdnet-backends', 'weirdnet-openai', 'weirdnet-semcache']),
   Milestone('M2', 'Model-node parity with existing llama-swap servers', 'done', 'vLLM as a second engine (managed, or wrapping a server that is already running), idle unload, restart with backoff after a crash, a small stand-in model that answers while a big one loads, alerts, a user service and Linux packages.', ['weirdnet-backends', 'weirdnet-alerts', 'weirdnet-model']),
   Milestone('M3', 'Roles over Weirdnet', 'done', 'The same three roles talk across devices over Weirdnet. An app node reaches inference nodes, inference nodes drive model nodes, and only devices in your own roster are let in. `ymirctl` and Jan work on another machine through that machine\'s own loopback endpoint.', ['weirdnet-agent', 'weirdnet-net', 'weirdnet-sync', 'weirdnet-device-link', 'weirdnet-backends', 'weirdnet-model']),

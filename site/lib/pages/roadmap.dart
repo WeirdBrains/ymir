@@ -7,13 +7,25 @@ import '../site.dart';
 
 const _labels = {'done': 'Done', 'in-progress': 'In progress', 'planned': 'Planned'};
 
-/// Inline `code` spans in the roadmap file's plain text.
+/// Inline `code` spans and [text](https://url) links in the roadmap file's plain text.
 List<Component> _inline(String s) {
-  final parts = s.split('`');
-  return [
-    for (var i = 0; i < parts.length; i++)
-      if (parts[i].isNotEmpty) i.isOdd ? code([Component.text(parts[i])]) : Component.text(parts[i]),
-  ];
+  final link = RegExp(r'\[([^\]]+)\]\((https?://[^)\s]+)\)');
+  final out = <Component>[];
+  var at = 0;
+  void plain(String t) {
+    final parts = t.split('`');
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].isNotEmpty) out.add(i.isOdd ? code([Component.text(parts[i])]) : Component.text(parts[i]));
+    }
+  }
+
+  for (final m in link.allMatches(s)) {
+    plain(s.substring(at, m.start));
+    out.add(a(href: m.group(2)!, [Component.text(m.group(1)!)]));
+    at = m.end;
+  }
+  plain(s.substring(at));
+  return out;
 }
 
 /// The milestone list, generated from `roadmap.toml` (see `tool/gen_roadmap.py`).

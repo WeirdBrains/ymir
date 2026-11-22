@@ -68,7 +68,7 @@ ymirctl service stop / start / status        # --system: a system unit, launchd 
 
 The bridge serves `/v1/models`, `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`.
 While a big model loads, a stand-in can answer (flagged with `x-weirdnet-standin`; send
-`x-wait: true`, or `ymirctl chat --wait`, to wait for the real model). Some `node.toml` settings:
+`x-wait: true`, or `ymirctl chat --wait`, to wait for the real model). Some [`node.toml`](docs/DESIGN.md#config-format-one-file-per-node) settings:
 
 ```toml
 [[model.local]]
@@ -97,16 +97,16 @@ password = "file:/home/you/.config/ymir/smtp.pass"
 
 A chat GGUF used for embeddings needs `args = ["--pooling", "mean"]` on llama-server.
 
-Linux packages (tar.gz, zip, .deb, and the `ymir-bin` TAUR package) are built with
-`scripts/package.py` from release binaries; see `release.toml` for the platform matrix.
+Linux packages (tar.gz, zip, .deb, and the `ymir-bin` [TAUR](https://pkg.taur.weirdbrains.com) package) are built with
+[`scripts/package.py`](scripts/package.py) from release binaries; see [`release.toml`](release.toml) for the platform matrix.
 
 `YMIR_HOME` moves the config and state (default `~/.config/ymir`); `WEIRDNET_MODELS_DIR` moves the
 model files.
 
-Brand assets and rules are in `brand/` and [BRAND.md](BRAND.md). The roadmap is [ROADMAP.md](ROADMAP.md), generated from `roadmap.toml` with the website in `site/` (Jaspr; `python3 site/tool/gen_roadmap.py` after editing).
+Brand assets and rules are in [`brand/`](brand/) and [BRAND.md](BRAND.md). The roadmap is [ROADMAP.md](ROADMAP.md), generated from [`roadmap.toml`](roadmap.toml) with the website in [`site/`](site/) (Jaspr; `python3 site/tool/gen_roadmap.py` after editing).
 
 Crates: `ymir-core`, `ymird`, `ymirctl` (the app), `ymir-testkit` (tests). Backends, the OpenAI bridge, the answer
-cache, alerts, hardware detection and the request types come from the published `weirdnet-*` crates.
+cache, alerts, hardware detection and the request types come from the published [`weirdnet-*` crates](https://crates.io/search?q=weirdnet).
 
 ## License
 
