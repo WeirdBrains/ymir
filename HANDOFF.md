@@ -2,6 +2,14 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-22: training plan (branch `feature/training-plan`)
+
+**What changed:** new [`docs/design/training.md`](docs/design/training.md), the implementation plan for the white paper's four training proposals (data generation and evals through batch and the bridge, consented conversation export, fine-tuning as a pool job, adapter serving and versioned rollout). Each has its scope, the modules it maps onto, what it needs from Weirdnet crates, data and compute, risks, and a suggested order with the smallest end-to-end slice first (JSONL batch and `ymirctl eval`, then LoRA adapters on a loaded base). Docs only: no code. Training stays a separate program; the plan proposes rewording the non-goal once approved.
+
+**Checks:** none needed (docs only).
+
+**What's next:** review of the order by the project lead, then slice 1 on its own branch.
+
 ## 2026-11-22: LF-38 follow-up, video design corrected (branch `feature/video-design`)
 
 **What changed** in [`docs/design/video.md`](docs/design/video.md): no default frame count or size anywhere; Ymir reports per-model limits (context in use, `max_images`, image token cost and edge, audio length, later native video limits) as reported-or-absent, measured at model load where possible, with operator overrides in `node.toml`. That is now milestone 1 and the prerequisite for Bragi's video. Wish list updated. Docs only.
