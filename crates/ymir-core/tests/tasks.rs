@@ -52,6 +52,14 @@ impl ModelNode for Reader {
                     let said: Vec<&str> = body.lines().filter(|l| !l.starts_with('<') && !l.starts_with('[')).collect();
                     ev.push(Chunk::Text(format!("The file says: {}", said.join(" "))));
                 }
+                _ if req.tools.iter().any(|t| t.name == "demo.echo") => {
+                    ev.push(Chunk::ToolCall {
+                        index: 0,
+                        id: Some("m1".into()),
+                        name: Some("demo.echo".into()),
+                        arguments: json!({ "text": "from the outside server" }).to_string(),
+                    });
+                }
                 _ if req.tools.iter().any(|t| t.name == "files.read") => {
                     let path = msgs.iter().rev().find(|m| m.role == Role::User).map(|m| m.text().into_owned()).unwrap_or_default();
                     ev.push(Chunk::Text("Reading. ".into()));
@@ -218,4 +226,95 @@ async fn without_a_workspace_the_task_has_no_tools_and_strangers_are_refused() {
     inf.m.revoke(&app.peer()).unwrap();
     let (r, _) = run(&app, &inf, "assistant", "hi", ApprovalAnswer::Deny).await;
     assert!(r.is_err(), "revoked");
+}
+
+/// A demo MCP server on loopback HTTP that wants a bearer token and has one tool, `echo`.
+struct Demo;
+
+const DEMO_TOOLS: &[weirdnet_mcp::ToolSpec] = &[weirdnet_mcp::ToolSpec {
+    name: "echo",
+    description: "Repeats the text.",
+    params: &[weirdnet_mcp::Param::required("text", weirdnet_mcp::ParamType::String, "Text")],
+    auth: false,
+    read_only: true,
+    destructive: false,
+    open_world: false,
+}];
+
+impl weirdnet_mcp::Tools for Demo {
+    fn specs(&self) -> &[weirdnet_mcp::ToolSpec] {
+        DEMO_TOOLS
+    }
+    fn call(&self, _tool: &weirdnet_mcp::ToolSpec, a: &serde_json::Value, _token: Option<&str>) -> Result<serde_json::Value, weirdnet_mcp::ToolError> {
+        Ok(json!({ "echo": a["text"] }))
+    }
+}
+
+async fn demo_server(token: &str) -> String {
+    use weirdnet_mcp::http::{Auth, Guard};
+    let server = Arc::new(weirdnet_mcp::Server::new(
+        weirdnet_mcp::ServerInfo { name: "demo".into(), title: "Demo".into(), version: "1".into(), instructions: String::new() },
+        Demo,
+    ));
+    let app = weirdnet_mcp::http::router("/mcp", server, Guard::loopback(Auth::token(token)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+fn demo_cfg(url: &str, token_ref: &str) -> ymir_core::mcp_servers::McpServerConfig {
+    use ymir_core::mcp_servers::{McpServerConfig, McpTransport};
+    McpServerConfig {
+        id: "demo".into(),
+        enabled: true,
+        transport: McpTransport::Http,
+        command: None,
+        args: vec![],
+        cwd: None,
+        env: Default::default(),
+        url: Some(url.into()),
+        bearer: Some(token_ref.into()),
+        headers: Default::default(),
+        timeout_secs: 10,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_uses_an_outside_mcp_servers_tool_after_the_card_is_approved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let url = demo_server("s3cret-token").await;
+    let tok = tmp.path().join("tok");
+    std::fs::write(&tok, "s3cret-token\n").unwrap();
+
+    let inf = Device::start(Membership::create(&tmp.path().join("inf"), "inference").unwrap());
+    let app = Device::start(link(&inf.m, &tmp.path().join("app"), "app"));
+    let mut cfg = AgentSection::default();
+    cfg.mcp.push(demo_cfg(&url, &format!("file:{}", tok.display())));
+    // A second server that is down is left out; the node and the demo's tools carry on.
+    let mut dead = demo_cfg("http://127.0.0.1:1/mcp", &format!("file:{}", tok.display()));
+    dead.id = "dead".into();
+    cfg.mcp.push(dead);
+    let _t = ymir_core::tasks::serve(&inf.node, coordinator(), remote::roster_auth(&inf.m), "inf", &cfg).await.unwrap();
+
+    let (r, seen) = run(&app, &inf, "assistant", "hi", ApprovalAnswer::Approve { scope: Scope::Once }).await;
+    let out = r.unwrap();
+    assert!(out.outcome.text.contains("from the outside server"), "{}", out.outcome.text);
+    assert_eq!(seen, ["demo.echo", "demo.echo:ok"]);
+
+    // Declined: the outside server is never called.
+    let (r, seen) = run(&app, &inf, "assistant", "hi", ApprovalAnswer::Deny).await;
+    assert!(!r.unwrap().outcome.text.contains("from the outside server"));
+    assert_eq!(seen, ["demo.echo"], "asked, never ran");
+
+    // A wrong token: the server is left out, so the model sees no tools.
+    std::fs::write(&tok, "wrong").unwrap();
+    let mut bad = AgentSection::default();
+    bad.mcp.push(demo_cfg(&url, &format!("file:{}", tok.display())));
+    let inf2 = Device::start(Membership::create(&tmp.path().join("inf2"), "inference").unwrap());
+    let app2 = Device::start(link(&inf2.m, &tmp.path().join("app2"), "app"));
+    let _t2 = ymir_core::tasks::serve(&inf2.node, coordinator(), remote::roster_auth(&inf2.m), "inf2", &bad).await.unwrap();
+    let (r, seen) = run(&app2, &inf2, "assistant", "hi", ApprovalAnswer::Approve { scope: Scope::Once }).await;
+    assert_eq!(r.unwrap().outcome.text, "I have no tools here.");
+    assert!(seen.is_empty());
 }

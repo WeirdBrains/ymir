@@ -414,6 +414,10 @@ pub struct AgentSection {
     /// Largest file `files.read` returns, in KiB.
     #[serde(default = "max_file_kib")]
     pub max_file_kib: u64,
+    /// Outside MCP servers whose tools tasks may use (`[[inference.agent.mcp]]`). Every call
+    /// asks the user's approval on the asking device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<crate::mcp_servers::McpServerConfig>,
 }
 
 fn max_file_kib() -> u64 {
@@ -422,7 +426,7 @@ fn max_file_kib() -> u64 {
 
 impl Default for AgentSection {
     fn default() -> Self {
-        Self { enabled: true, workspace: None, max_file_kib: max_file_kib() }
+        Self { enabled: true, workspace: None, max_file_kib: max_file_kib(), mcp: Vec::new() }
     }
 }
 
@@ -509,6 +513,7 @@ impl NodeConfig {
                 bail!("model `{}`: wrap_api_key must be env:NAME or file:/path, not the key itself", m.id);
             }
         }
+        crate::mcp_servers::validate(&self.inference.agent.mcp)?;
         self.validate_splits()?;
         parse_duration(&self.inference.standin_after).context("inference.standin_after")?;
         self.network.hints()?;

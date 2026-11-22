@@ -27,6 +27,7 @@ tracing.workspace = true
 weirdnet-agent.workspace = true
 weirdnet-backends.workspace = true
 weirdnet-device-link.workspace = true
+weirdnet-mcp = { workspace = true, features = ["agent"] }
 weirdnet-model.workspace = true
 weirdnet-net.workspace = true
 weirdnet-openai.workspace = true
@@ -37,6 +38,7 @@ weirdnet-update.workspace = true
 semver.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -19,6 +19,7 @@ pub mod engine;
 pub mod fair;
 pub mod group;
 pub mod host;
+pub mod mcp_servers;
 pub mod membership;
 pub mod mlx;
 pub mod model_node;

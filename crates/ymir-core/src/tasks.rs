@@ -3,7 +3,8 @@
 //! is `files.read` on a directory the operator names, and it asks for approval on every call.
 //!
 //! Only the user's linked devices get a task (the same roster check as every other protocol), a
-//! task never gets more than the tools below, and a path that leaves the workspace (`..`, an
+//! task never gets more than the tools below (plus the tools of the outside MCP servers the operator
+//! lists in `[[inference.agent.mcp]]`, each call approved on the asking device), and a path that leaves the workspace (`..`, an
 //! absolute path, or a link pointing out of it) is refused.
 
 use std::path::{Component, Path, PathBuf};
@@ -43,6 +44,19 @@ pub async fn serve(
     if let Some(dir) = cfg.workspace.as_deref().filter(|d| !d.is_empty()) {
         let root = std::fs::canonicalize(dir).map_err(|e| RemoteError::Failed { message: format!("agent workspace {dir}: {e}") })?;
         registry.add_source(Arc::new(LocalTools::new("files").with(FilesRead { root, max_bytes: cfg.max_file_kib.max(1) * 1024 })));
+    }
+    for server in cfg.mcp.iter().filter(|s| s.enabled) {
+        // A server that won't start or list its tools is left out; the node and the other tools carry on.
+        match server.connect().await {
+            Ok(source) => match source.client().list_tools().await {
+                Ok(tools) => {
+                    tracing::info!(server = %server.id, tools = tools.len(), "mcp server ready");
+                    registry.add_source(Arc::new(source));
+                }
+                Err(e) => tracing::warn!(server = %server.id, "mcp server left out: tools/list failed: {e:?}"),
+            },
+            Err(e) => tracing::warn!("mcp server left out: {e}"),
+        }
     }
     registry.refresh().await.map_err(|e| RemoteError::Failed { message: e.to_string() })?;
     let host: Arc<dyn TaskHost> = Arc::new(Tasks { coord, tools: Arc::new(registry), label: label.to_string() });
