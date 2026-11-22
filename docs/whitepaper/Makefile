@@ -1,18 +1,25 @@
-# Build the Ymir white paper.  Needs a TeX distribution with latexmk, pgfplots and TikZ.
+# Build the Ymir white paper.  Needs TeX Live with TikZ and pgfplots.
+# Uses latexmk when it is installed, otherwise pdflatex + bibtex.
 MAIN := ymir-whitepaper
+LATEXMK := $(shell command -v latexmk 2>/dev/null)
+PDFLATEX := pdflatex -interaction=nonstopmode -halt-on-error
 
 .PHONY: all pdf manual clean distclean
 all: pdf
 
 pdf:
-	latexmk -pdf $(MAIN).tex
+ifneq ($(LATEXMK),)
+	latexmk -pdf -interaction=nonstopmode -halt-on-error $(MAIN).tex
+else
+	$(MAKE) manual
+endif
 
 # Without latexmk: pdflatex, bibtex, then pdflatex twice.
 manual:
-	pdflatex $(MAIN) && bibtex $(MAIN) && pdflatex $(MAIN) && pdflatex $(MAIN)
+	$(PDFLATEX) $(MAIN) && bibtex $(MAIN) && $(PDFLATEX) $(MAIN) && $(PDFLATEX) $(MAIN)
 
 clean:
-	latexmk -c $(MAIN).tex
+	rm -f $(MAIN).aux $(MAIN).bbl $(MAIN).blg $(MAIN).fdb_latexmk $(MAIN).fls $(MAIN).log $(MAIN).out $(MAIN).toc $(MAIN).lof $(MAIN).lot $(MAIN).synctex.gz
 
-distclean:
-	latexmk -C $(MAIN).tex
+distclean: clean
+	rm -f $(MAIN).pdf

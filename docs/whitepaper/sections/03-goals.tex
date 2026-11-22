@@ -13,14 +13,14 @@ Local OpenAI clients work & Jan, editors and scripts use a bridge bound to 127.0
 Everything else optional & Redis, Tailscale and a second node are never required. \\
 Any Weirdnet app can use the cloud & Pool discovery and remote inference live in \code{weirdnet-agent}, not in Ymir or Bragi. \\
 Thin apps & Generic parts go in published \code{weirdnet-*} crates (BSD-3-Clause). \\
+Training on your own nodes & Ymir feeds, schedules and serves training, starting with llama.cpp finetune, following the plan in \code{docs/design/training.md} (Section~\ref{sec:training}). Being implemented; nothing is built yet \planned. \\
 \bottomrule
 \end{xltabular}
 
 \noindent Explicit non-goals, as written in the design doc:
 \begin{enumerate}
-  \item Training or fine-tuning.
   \item Other users: no tenants, teammates, shared pools, invites, membership roles or quotas.
-  \item Any HTTPS or API-key endpoint, on a LAN or in public, and no vendor-run gateway.
+  \item HTTPS or API-key endpoints, on a LAN or in public, and no vendor-run gateways.
   \item A new inference engine: Ymir drives llama.cpp, vLLM and MLX-LM.
   \item llama-swap: replaced by Ymir's own process manager.
   \item Carrying tensor-parallel traffic (NCCL, Ray, llama.cpp RPC) over Weirdnet; it stays on a fast private link.

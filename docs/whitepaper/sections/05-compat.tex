@@ -21,7 +21,7 @@ Capability records (\code{node/1}) & Nodes on older \code{weirdnet-backends} tha
 Model management (\code{models/1}) & An older \code{ymird} that lacks it answers with a clear ``does not take model management'' naming that node \\
 \code{catalog/1}, \code{sync/2}, \code{task/1}, \code{coord/1}, \code{control/1} & Versioned names; a future version is meant to be served alongside, as with infer \\
 Weirdnet profile & Ymir and Bragi copy the standard Weirdnet profile and change only their link scheme, so certificates verify and all apps share one network \\
-Shared sync group & Needs Morph v0.3 or later on every device; the Morph 0.2 line cannot join, so devices move together \\
+Shared sync group & Ymir's roster and sync come from \code{weirdnet-sync}, so Ymir needs no other app. A user who also runs Morph on the same identity shares one roster and sync group with it, which needs Morph v0.3 or later on those devices; Morph 0.2.x speaks the older sync protocol \\
 OpenAI bridge & Existing tools use standard \code{/v1} endpoints unchanged; Ymir-specific signals ride in extra headers they can ignore \\
 MCP & Speaks MCP 2026-07-28 and still answers older initialize requests \\
 Stock engines & A node can wrap an already running \code{vllm serve} or \code{llama-server} instead of replacing it \\

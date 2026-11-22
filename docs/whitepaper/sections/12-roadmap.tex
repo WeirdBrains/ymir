@@ -37,9 +37,11 @@ planned.
 Beyond the milestones, the changelog's unreleased section records work that has landed alongside
 them: Windows MSI and setup installers, rpm packages and a release workflow for Linux, macOS and
 Windows, bundled llama.cpp in every release file, \code{ymirctl models search}, \code{pull},
-\code{list} and \code{remove} on any node over Weirdnet, and the \code{ymirctl mcp} server.
+\code{list} and \code{remove} on any node over Weirdnet, the \code{ymirctl mcp} server, and \code{ymirctl bench} for comparing models across nodes. Video is
+designed for after v1, and training is being implemented per \code{docs/design/training.md}; neither
+is built yet \planned.
 
-\subsection{Bragi milestones B1 to B6}\label{sec:roadmap-bragi}
+\subsection{Bragi milestones B1 to B7}\label{sec:roadmap-bragi}
 
 \begin{rowlist}
   \item[B1 Core and both shells \status{Done}] Pair with your own devices, list the cloud's models, stream a chat, stop and continue it, and keep local history, in the Linux desktop app (GPUI) and the Android app (Flutter) on one shared Rust core.
@@ -48,4 +50,5 @@ Windows, bundled llama.cpp in every release file, \code{ymirctl models search}, 
   \item[B4 Sync and optional extras \status{In progress}] Chat history on the shared context store, so a conversation follows you between devices, is built on both shells. Next: push wake-ups and an optional on-device model.
   \item[B5 Breadth \status{In progress}] Text, image and audio attachments and agent mode (tool calls with approval cards) are built on both shells. Next: BSD support, once the desktop toolkit builds there.
   \item[B6 Your own endpoints \status{In progress}] Any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback; keys sealed on the device and never synced; per-chat targets and folders. Built in the core and the Flutter app; the GPUI desktop shell is next.
+  \item[B7 Models on your pool \status{In progress}] A Models screen on both shells: search the Hugging Face Hub with a fit badge for each of your Ymir nodes, pull a model to one node, the best-fitting one or all of them with progress and cancel, see what each node has, and remove with a confirm. It runs over Weirdnet with the device's own identity, and nodes accept it only from devices linked to their owner. Crates: \code{weirdnet-backends}, \code{weirdnet-model}.
 \end{rowlist}

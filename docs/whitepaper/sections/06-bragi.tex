@@ -2,10 +2,13 @@
 
 Bragi is the chat app for your own cloud. It is an app node: it links to the owner's identity with a QR and
 short-authentication-string check, finds inference nodes through the \code{weirdnet-agent} pool,
-and never talks to model nodes or needs the bridge \footnoteref{footnote:bridge}.
+and never talks to model nodes or needs the bridge\footnote{\label{footnote:bridge}The bridge is a simple HTTP server, bound to 127.0.0.1, that translates the standard OpenAI API endpoints (\code{/v1/...}) into pool calls for local tools on the same machine,
+and marks stand-in and resumed answers with \code{x-weirdnet-*} headers.
+It serves only OpenAI-compatible endpoints, not Claude or Gemini APIs.}.
 
-It can, however, use the bridge to reach the pool from other devices and use OpenAI compatible endpoints;
-making Bragi good for other APIs like Claude, Gemini, and others.
+It can, however, also use any OpenAI-compatible endpoint next to the pool or as a fallback (milestone B6);
+making Bragi good for other providers like Claude, Gemini, and others that offer OpenAI-compatible APIs.
+This is built in the core and the mobile app; the desktop app is next \planned.
 
 \begin{table}[htbp]
 \centering\small
@@ -16,6 +19,9 @@ Layer & What \\
 \code{bragi-core} & All behaviour: pairing, pool client, catalog, routing, streaming, cancel, history on the shared context store \\
 \code{bragi-desktop} & GPUI shell on Linux, macOS and Windows; calls the core in-process \\
 \code{bragi-bridge} + Flutter app & Android and iOS shell over \code{flutter_rust_bridge}; same actions and events \\
+\code{bragi-tui} & Terminal shell, locally or over SSH, with the desktop's features plus a code mode for suggestions and rewrites \\
+\code{bragi serve} & Token-protected local API on 127.0.0.1 for editors and other local tools (also \code{bragi-serve}, headless) \\
+\code{bragi-mcp} & \code{bragi mcp}: Bragi as an MCP server over stdio or loopback HTTP with a token; writes and deletes only when allowed \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -25,7 +31,14 @@ status, streaming tokens with a stop button, automatic mid-answer failover with 
 saying which node continued, and history that syncs between devices. Tokens cross to Dart as a
 stream of chat events that mirror the \code{infer/2} frames, coalesced so the UI is not flooded.
 An optional on-device model, off by default, can answer when no node is reachable.
+Files attached to a message or written by an answer appear as cards with a preview and Save, and audio
+files play on their card, on desktop and phone. A Models screen on both apps searches Hugging Face with
+a fit badge for each of your Ymir nodes and pulls, lists and removes models on them over Weirdnet
+(milestone B7).
 
-\footnote{\label{footnote:bridge}The bridge is a simple HTTP server that translates the standard OpenAI API endpoints into pool calls,
-and marks stand-in and resumed answers with \code{x-weirdnet-*} headers.
-It also provides a simple API for other APIs like Claude, Gemini, and others to use.}
+The terminal app, \code{bragi-tui}, links as a device of its own and adds a code mode: files and folders
+as context, suggestions, and rewrites reviewed hunk by hunk with undo (\code{bragi PATH} opens it on a
+folder or file). Bragi also has its own local API, \code{bragi serve} on 127.0.0.1, separate from Ymir's
+bridge; the VS Code and Cursor extension uses it for inline suggestions and rewrites reviewed hunk by
+hunk, and the terminal app and the extension start it when it is not running. Video in chats is
+designed for after v1 \planned.

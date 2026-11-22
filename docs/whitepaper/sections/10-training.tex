@@ -1,33 +1,43 @@
-\section{Training and fine-tuning (proposal)}\label{sec:training}
+\section[Training and fine-tuning]{Training and fine-tuning {\mdseries\planned}}\label{sec:training}
 
 \begin{callout}
-\textbf{Nothing in this section is built.} Ymir's design doc lists training and fine-tuning as a
-non-goal, with the note that a separate trainer stays separate. A search of the Ymir code and docs
-finds no LoRA, adapter, dataset or eval support, and Bragi's README and roadmap mention none. What
-follows is a proposal for how a separate trainer could use Ymir, built on parts that do exist
-today.
+\textbf{Training is on the roadmap and being implemented; no pieces are built yet.} Ymir feeds,
+schedules and serves training, with a separate trainer (llama.cpp finetune to start) doing the
+training itself, following the plan in \code{docs/design/training.md}. What follows is how it will
+work, built on parts that already exist today.
 \end{callout}
 
 \begin{figure}[htbp]
 \centering
 \fig{training-loop}
-\caption{\textsc{Proposal}: a training loop that uses Ymir for data, evals and serving. Each step
-says whether it is built or proposed.}
+\caption{\textsc{Planned}: a training loop that uses Ymir for data, evals and serving. Each step
+says whether it is built or planned.}
 \end{figure}
 
 \begin{rowlist}
-  \item[1. Data generation and distillation through the bridge and batch \status{Path built, use proposed}]
-  A larger teacher model in the pool answers or labels thousands of prompts, and those answers become training data for a smaller student model. Any script using the OpenAI API can do this against the loopback bridge today, and \code{ymirctl batch} already fans a file of prompts across every node at batch priority with retries, so the work spreads over all your GPUs without starving interactive chat. The same path runs evals: score a candidate model on held-out prompts, with a second model as judge if wanted. Check each model's license before training on its outputs.
+  \item[1. Data generation and distillation through the bridge and batch \status{Path built, use planned}]
+  A larger teacher model in the pool answers or labels thousands of prompts, and those answers become training data for a smaller student model. Any script using the OpenAI API can do this against the loopback bridge today, and \code{ymirctl batch} already fans a file of prompts across every node at batch priority with retries, so the work spreads over all your GPUs without starving interactive chat. The same path runs evals: score a candidate model on held-out prompts, with a second model as judge if wanted. Check each model's license before training on its outputs. The deterministic scorers in \code{ymirctl bench} are the start of this eval harness.
 
-  \item[2. Conversations from synced context, with consent \status{Proposal}]
+  \item[2. Conversations from synced context, with consent \status{Planned}]
   Your chats already sync, encrypted, among your linked devices. A trainer running as a linked device could read only conversations you mark for training (for example a per-conversation opt-in flag), strip what you choose, and export them as a dataset. Model nodes never hold conversations, and nothing would leave your devices. Neither the flag nor the export exists today.
 
-  \item[3. Fine-tuning as a pool job \status{Proposal}]
+  \item[3. Fine-tuning as a pool job \status{Planned}]
   A LoRA or QLoRA run trains small adapter weights on top of a frozen base model, which fits on one capable GPU (QLoRA keeps the base model 4-bit). The trainer would run it as a background-priority job on a node with spare GPU memory, unloading or pausing serving there, with its job record and checkpoints synced so another capable node can resume from the last checkpoint if the first one goes down. That builds on the synced job record already planned for batch hand-off.
 
   \item[4. Distribution, hot swap and versioned rollout \status{Partly built}]
-  Built today: \code{ymirctl models pull} downloads a model from Hugging Face (including private repos with a token) onto any node over Weirdnet and serves it without a restart, so a fine-tune merged into a GGUF can already be rolled out by hand. Proposed: serve LoRA adapters on top of a loaded base (llama.cpp and vLLM both support adapters, but Ymir does not wire this up), name versions in the catalog, send a small share of traffic to a new version first, and roll back by moving traffic to the previous version, which stays loaded until the new one proves itself.
+  Built today: \code{ymirctl models pull} downloads a model from Hugging Face (including private repos with a token) onto any node over Weirdnet and serves it without a restart, so a fine-tune merged into a GGUF can already be rolled out by hand. Planned: serve LoRA adapters on top of a loaded base (llama.cpp and vLLM both support adapters; a LoRA can be passed to llama-server by hand as an engine argument today, but the catalog does not know about it), name versions in the catalog, send a small share of traffic to a new version first, and roll back by moving traffic to the previous version, which stays loaded until the new one proves itself.
 \end{rowlist}
+
+\noindent The implementation plan sets this order, all planned \planned:
+\begin{enumerate}
+  \item Data generation and evals: JSON-lines batch with teacher checks, a dataset manifest, resume, and \code{ymirctl eval}.
+  \item LoRA adapters served on a loaded base, llama.cpp first.
+  \item Consented conversation export, with the opt-in kept in its own record; the Bragi toggle comes after Bragi v1.
+  \item Reserve one node and run the trainer there, with no hand-off.
+  \item Versions, canary weights (in Ymir's balancer) and rollback, gated by the evals.
+  \item A synced training job record and resume from the last checkpoint.
+  \item Optional, later: two-node data-parallel LoRA over a private link, never over Weirdnet.
+\end{enumerate}
 
 \begin{lstlisting}[language=Python, caption={Sketch only: distil through the loopback bridge with any OpenAI client.}]
 from openai import OpenAI
@@ -68,20 +78,20 @@ their full gradients once per step and no overlap with compute. LoRA is far ligh
 the adapter's gradients move and an adapter is usually well under 1 percent of the model, so
 two-machine data parallel LoRA can be practical on a 10\,Gb/s private link. Over Weirdnet's
 relayed or internet paths, any multi-machine training would spend most of its time waiting on the
-network, so the proposal trains on one GPU node and uses the pool only for data, evals and
+network, so the plan trains on one GPU node and uses the pool only for data, evals and
 serving.
 
 {\small
 \begin{xltabular}{\linewidth}{@{}L{2.9cm}YY@{}}
 \toprule
- & Data-center training & Ymir proposal \\
+ & Data-center training & Ymir plan \\
 \midrule
 \endhead
 Hardware & Thousands of identical GPUs & One capable GPU in your pool \\
 Network & NVLink in a server, InfiniBand or RoCE between servers & None during training; private link only for two-node LoRA \\
 Parallelism & Data, tensor and pipeline parallel, sharded optimizer state & None, or two-node data parallel on a private link \\
 Scale of job & Pretraining and full fine-tunes & LoRA or QLoRA adapters on open-weight models \\
-Scheduling and recovery & Cluster scheduler, checkpoints to shared storage & Background-priority pool job, synced checkpoints (proposal) \\
+Scheduling and recovery & Cluster scheduler, checkpoints to shared storage & Background-priority pool job, synced checkpoints (planned) \\
 Data & Curated corpora on shared storage & Pool-generated data and consented chats on your devices \\
 \bottomrule
 \end{xltabular}

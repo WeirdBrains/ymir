@@ -5,7 +5,7 @@ Each machine is its own island. Clients must know which box holds which model, a
 loses the answer, and every open port is attack surface.
 
 Ymir solves this by turning the machines you already own (a GPU workstation, a gaming PC, a Mac, a DGX
-Spark-class box, or a CPU-only server) into one private model cloud with a simple single-software \footnoteref{footnote:setup} setup. It starts on a single
+Spark-class box, or a CPU-only server) into one private model cloud with a simple single-software\footnote{\label{footnote:setup}llama.cpp is bundled and used out of the box. You can add additional engines (e.g. vLLM or MLX-LM) by configuring them, either managed by Ymir or wrapping a server you already run, and Ymir will then advertise and route to them.} setup. It starts on a single
 machine with one command and grows by linking more of your own devices over Weirdnet, a private,
 peer-to-peer network keyed to your identity. The pool behaves as one endpoint: requests go to a
 node that has the model ready, models are spread across the pool, and only devices linked to the owner's identity can use or command the pool.
@@ -23,5 +23,3 @@ Release state & No tagged Ymir release yet; build from source \\
 \bottomrule
 \end{tabularx}
 \end{table}
-
-\footnote{\label{footnote:setup}You can add additional engines (e.g. vLLM, llama-cpp, etc.) and Ymir will automatically use them.}

@@ -1,14 +1,14 @@
-% PROPOSAL, not built: a training loop that uses Ymir for data, evals and serving.
+% PLANNED, not built yet: a training loop that uses Ymir for data, evals and serving.
 \begin{tikzpicture}[node distance=5mm]
   \node[fterm] (seed) {\textbf{Seed prompts and tasks}};
   \node[fbox, below=of seed] (gen) {\textbf{Generate and label through the pool}\\OpenAI bridge or \code{ymirctl batch}, at batch priority (built)};
   \node[fbox, below=8mm of gen] (ds) {\textbf{Training dataset on the trainer's machine}};
-  \node[fbox=3.4cm, left=8mm of ds, yshift=6mm] (conv) {\textbf{Consented conversations}\\exported from synced, encrypted context (proposal)};
-  \node[fbox, below=of ds] (train) {\textbf{LoRA or QLoRA job on one GPU node}\\separate trainer, background priority, synced job record (proposal)};
-  \node[fbox, below=of train] (eval) {\textbf{Evals fanned across the pool}\\held-out prompts through \code{ymirctl batch} (built path, proposal use)};
+  \node[fbox=3.4cm, left=8mm of ds, yshift=6mm] (conv) {\textbf{Consented conversations}\\exported from synced, encrypted context (planned)};
+  \node[fbox, below=of ds] (train) {\textbf{LoRA or QLoRA job on one GPU node}\\separate trainer, background priority, synced job record (planned)};
+  \node[fbox, below=of train] (eval) {\textbf{Evals fanned across the pool}\\held-out prompts through \code{ymirctl batch} (built path, planned use)};
   \node[fdec, below=of eval] (pass) {\textbf{Better than the current version?}};
   \node[fbox, below=7mm of pass] (pub) {\textbf{Publish adapter or merged model}\\pulled onto model nodes with \code{ymirctl models pull} (built for whole models)};
-  \node[fterm, below=of pub] (roll) {\textbf{Versioned rollout, rollback if worse} (proposal)};
+  \node[fterm, below=of pub] (roll) {\textbf{Versioned rollout, rollback if worse} (planned)};
   \draw[arr] (seed) -- (gen); \draw[arr] (gen) -- (ds);
   \draw[darr] (conv) |- (ds.west);
   \draw[arr] (ds) -- (train); \draw[arr] (train) -- (eval); \draw[arr] (eval) -- (pass);

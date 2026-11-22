@@ -125,7 +125,7 @@ background & Prefix warming, re-placement (designed) & Lowest; counted against t
 
 The design also specifies cloud-wide swap and placement: a scheduler lease held by one inference
 node, a signed and synced placement plan, replication of popular models when queue wait exceeds
-a target, prefix warming, and a pool-wide semantic cache.
+a target, prefix warming, and a pool-wide semantic cache. These are designed but not built yet (milestone M6) \planned.
 
 % ---------------------------------------------------------------------------
 \subsection{Failover and continuation}\label{sec:failover}
@@ -213,7 +213,8 @@ Semantic cache entries & No; pooled separately by \code{weirdnet-semcache} (desi
 Records are sealed under the roster's sync key (XChaCha20-Poly1305), which rotates when a device
 is unlinked, so a revoked device cannot read new context even through a relay. Deleting a
 conversation writes a tombstone that every device honours. Ymir records use their own
-\code{ymir.} namespace inside a sync group shared with Morph, another Weirdnet app, but each
+\code{ymir.} namespace inside the identity's sync group, which comes from \code{weirdnet-sync}; if
+the same identity also runs Morph, another Weirdnet app, the group is shared with it, but each
 device opts into only the record types it needs, so a GPU server never holds browsing data.
 Bragi's chat history is this same store; there is no separate Bragi history database.
 
@@ -277,7 +278,9 @@ what llama-swap did per machine: swap groups decide which models may be resident
 models unload after a TTL, crashed engines restart with backoff, a model with requests in flight
 is drained before it is stopped, and a small stand-in model can answer, flagged, while a large one
 cold-starts. A node can also wrap a stock \code{vllm serve} or \code{llama-server} already running
-on loopback. Images and audio route only to nodes whose copy of a model takes them.
+on loopback. Images and audio route only to nodes whose copy of a model takes them. Video is designed
+for after v1: first as frames and audio the client samples, within limits each node reports for its
+models (never invented defaults), then native video for models that read it \planned.
 
 A model too big for any one machine can be split across a group of model nodes with llama.cpp RPC
 (milestone M7, in progress). It is opt-in per model through pool policy, requires a declared
@@ -303,7 +306,7 @@ on the CPU and every token crossed the RPC link.}
 \code{ymirctl group up} checks the policy and links, starts the workers first, then the leader,
 and rolls back if a step fails. A watcher checks every 5 seconds and takes the whole group down if
 any member leaves, drains or crashes, after which the model returns to normal routing. Starting
-groups automatically on demand is coming soon \planned.
+groups automatically on demand is not built yet \planned.
 
 % ---------------------------------------------------------------------------
 \subsection{Batch fan-out, bridge and MCP}\label{sec:batch}
@@ -316,7 +319,7 @@ groups automatically on demand is coming soon \planned.
 
 Because the per-device cap answers Busy, a big batch slows itself to what the pool will take
 instead of crowding out interactive chat. Today the submitting machine must stay up while the job
-runs; handing a job to another node from a synced job record is coming soon \planned.
+runs; handing a job to another node from a synced job record is not built yet \planned.
 
 \begin{figure}[htbp]
 \centering
@@ -329,3 +332,13 @@ The bridge translates \code{/v1/models}, \code{/v1/chat/completions}, \code{/v1/
 resumed answers with \code{x-weirdnet-*} headers. \code{ymirctl mcp} offers the same pool to MCP
 clients over stdio or loopback HTTP; tools that change the pool refuse to run without
 \code{confirm: true}.
+
+\code{ymirctl bench} compares every model on the pool, on every node that serves it. By default it
+asks each inference node directly over Weirdnet (\code{ymir-core::direct}), pinning the node so the
+same model can be compared across machines; \code{--via bridge} goes through the loopback bridge
+instead and records the node that answered. Per model it measures time to first token, decode and
+prompt speed and total latency (median and p90 after a warm-up), then scores deterministic quality
+checks at temperature 0 (arithmetic, JSON, code run in a sandbox, facts, and a harder suite). It runs
+one request at a time, skips a busy or loading model, skips a model that is not loaded unless
+\code{--cold}, and gives every request its own seed and nonce so no cache flatters the numbers.
+Results are saved as JSON and Markdown, and runs can be compared or exported as CSV.
