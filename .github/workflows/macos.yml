@@ -39,6 +39,8 @@ jobs:
         run: cargo build --locked -p ymird -p ymirctl
       - name: Unit tests (engines, setup, MLX)
         run: cargo test --locked -p ymir-core --lib
+      - name: MLX and llama.cpp on one node (mock engines)
+        run: cargo test --locked -p ymir-testkit --test mlx
       - name: setup --dry-run picks ${{ matrix.backend }}
         run: |
           # Hosted runners have 7 GiB; give setup room for a chat model as on a real Mac.
