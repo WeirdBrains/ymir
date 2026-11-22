@@ -2,6 +2,15 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-22: LF-38, post-v1 video design, server and node side (branch `feature/video-design`)
+
+**What changed**
+- New [`docs/design/video.md`](docs/design/video.md): what Ymir does for video. Phase 1 needs nothing for Bragi (frames and sound travel as image and audio parts); suggested small additions are a request-size setting, `max_images` and per-image cost in `Capabilities`, and a transcription role. Phase 2 is a `video` modality and capability flag, routing with a frames fallback hint, backend pass-through, and content roots for large clips. Also opt-in server-side expansion for OpenAI-only clients, `ymirctl mcp` video inputs, privacy, testing, milestones and the Weirdnet wish list. Cross-linked with Bragi's doc.
+- Docs only: no code.
+
+**Checks:** none needed (docs only).
+
+
 ## 2026-11-22: `feature/pool-bench` merged into main (`ymirctl bench`)
 
 **What changed**
