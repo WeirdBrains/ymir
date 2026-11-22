@@ -2,6 +2,17 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-22: `feature/pool-bench` merged into main (`ymirctl bench`)
+
+**What changed**
+
+- Merged `feature/pool-bench` (a0f93de) into main with `--no-ff`: `ymirctl bench` (node×model matrix over Weirdnet, suites quick/standard/hard, `bench list`, `bench compare`, `bench hints`, hints from `--hint @FILE` or the `bench-hints` file) next to main's `ymirctl mcp` and `models`.
+- Conflicts resolved by keeping both sides: `README.md`, `HANDOFF.md`, `crates/ymirctl/Cargo.toml`, `crates/ymirctl/src/lib.rs` (modules, the `Mcp` and `Bench` commands, `bridge` stays `pub(crate)`), `crates/ymir-core/src/client.rs` (`post` and the timed chat/embedding calls) and `Cargo.lock` (regenerated).
+
+**Checks run:** `cargo fmt --all --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` (results in the merge commit message of the push).
+
+**Not tested:** nothing new beyond the branch's own tests; no release, tag or publish.
+
 ## 2026-11-21: `ymirctl mcp` moves to `weirdnet-mcp` 0.6 (LF-16 follow-up, branch `feature/mcp-weirdnet-0.6`, based on main 0536020)
 
 **What changed**
@@ -103,6 +114,67 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** the two crate gaps above; `weirdnet-model` 0.5 once backends follows; remote `https://` image URLs are not fetched.
 
 **What's next:** LF-16, the Ymir MCP server.
+
+## 2026-11-21: `ymirctl bench`, a harder `hard` suite and hints from a file
+
+**What changed**
+
+- `--suite hard` now separates models: multi-step math and logic, Python functions whose output is run and compared, strict-format instructions, long-context retrieval (sized by `--context`) and tool-call checks. Every check is scored by exact match, parsed JSON or code run in the sandbox, at temperature 0, so a rerun gives the same score for the same answers. `quick` and `standard` are unchanged. Results show a pass rate per category.
+- Hints no longer have to be typed. `--hint ADDR` still repeats; `--hint @FILE` reads one address per line (`#` comments); and the file `bench-hints` in the Ymir home is read when it exists. `ymirctl pool addresses` on another node, piped into `ymirctl bench hints add`, fills that file (only dialable addresses are kept: no loopback, link-local or relay circuits). `ymirctl bench hints list` shows what will be dialled. The file lives in the user's home, never in the repo.
+- A node whose `[model] callers` is set only serves the devices listed. The benchmark's own peer id is the one `ymirctl pool devices` marks `this node` on the machine running it; add that id to the node's `callers` list.
+
+**Checks run:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo build --workspace --locked`, `cargo test --workspace --locked`. New tests cover the hint parser, the file and default-file merge, and the scoring of each new hard check.
+
+**Not tested / limits:** the hard suite's difficulty is only judged against the models on one pool; a stronger model may still score near the top. `--cold` runs against live nodes were not tried.
+
+**What's next:** keep the JSON from each run to spot regressions after an engine upgrade.
+
+## 2026-11-21: `ymirctl bench` over Weirdnet, a node×model matrix
+
+**What changed**
+
+- `ymirctl bench` now talks to each inference node directly over Weirdnet (`ymir_core::direct::Direct`): a probe node with this device's identity, ephemeral ports, no discovery or relays, then a `Pool` whose node list is the one peer (catalog/1 for models, infer/2 for answers). That is a real node pin, with no `weirdnet-*` change. `--via bridge` keeps the old loopback path.
+- New: `--node` and `-m` (repeatable or `all`), `--suite quick|standard|hard`, `--context`, `--max-tokens`, `--quality-tokens`, `--cold` (warns, asks unless `--yes`), `bench list`, `bench compare A.json B.json`, CSV next to JSON and Markdown, side-by-side matrices.
+- Still strictly one request at a time, busy or loading models skipped.
+
+- A device with a model role (`/weirdnet-backends/node/1`) is measured on that hardware through `RemoteModelNode`; one with only an inference role goes through a one-peer `Pool` (catalog/1, infer/2). `bench list` shows the role of each node.
+- Needs `--hint` for nodes that are not in `[network] peers` (tailnet addresses from `ymirctl pool addresses` on the node).
+
+**Tested for real** (hard suite, warm models only, 2 repeats, 1 warm-up, one request at a time): two nodes reached directly, one model on both. Every model scored 15/15, so the hard suite still does not separate these models; speed does. A node whose model role only allows listed callers refuses this device (`not-an-allowed-caller`); the node's `[model] callers` would need this device, a config change not made here. A node placing a model on another node reports `served_by`.
+
+**Not done:** pinning that node (needs its `[model] callers` to list this device), `--cold` runs against live nodes, harder suites.
+
+## 2026-11-21: `ymirctl bench`, a benchmark that compares every model on the pool
+
+**What changed**
+
+- New command `ymirctl bench` ([bench.rs](crates/ymirctl/src/bench.rs)) and a timed streaming client in `ymir-core` (`BridgeClient::chat_timed`, `embed_timed`). It goes through the loopback bridge, so every request takes the normal pool route. It lists the pool's models, then runs them one at a time: a busy or loading model is re-checked and then skipped, and a model that is not loaded is skipped unless `--include-cold`.
+- Per model: one warm-up, then N repeats (default 3) of three fixed prompts (short, a 200-word story, a long prompt) measuring time to first token, decode tok/s, prompt tok/s and total latency (median and p90). Then eight deterministic checks at temperature 0: two arithmetic, JSON format, two Python functions that are executed (CPU, memory and time limits, empty environment, no network where `unshare` allows; `--no-code-exec` skips them) and three exact-match facts. Embedding models get a latency check.
+- Each request has its own seed and a nonce, so neither the answer cache nor a node's prefix cache flatters the numbers. Requests send `x-wait: 1`, so a cold model loads instead of a stand-in answering (a stand-in answer counts as an error).
+- Output is a timestamped `bench-<time>.json` and `.md` in `--out-dir`. Nodes are labelled node-a, node-b, ... unless `--real-names`. Docs: [DESIGN.md](docs/DESIGN.md) and the [README](README.md).
+
+**How to run:** `ymirctl bench` on a node with the app role (needs the bridge); `--include-cold` to load unloaded models, `-m MODEL` to pick some, `--repeats N`.
+
+**First run** (warm-up 1, 2 repeats, one model at a time).
+
+| model | node | TTFT ms (median) | decode tok/s | prompt tok/s | quality |
+|---|---|---|---|---|---|
+| gemma-4-e2b | node-a | 307 | 202.0 | 4245 | 8/8 |
+| gemma4-e4b | node-b | 293 | 64.9 | 2645 | 8/8 |
+| qwen3-14b | node-a | 353 | 46.8 | 1361 | 8/8 |
+| qwen3.6-35b-a3b | node-b | 290 | 63.1 | 1865 | 8/8 |
+| qwen3.8-27b-nvfp4 | node-c | 284 | 12.5 | 2551 | 8/8 |
+| qwen3-embedding-0.6b | not recorded | embedding, 1024 dims, 172 ms for 3 inputs | | | |
+
+(Node labels are per run, not stable names.)
+
+**Checks run:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` all pass. New tests: scoring and statistics units, the Python sandbox (a runaway loop is killed), and an end-to-end run against a mock bridge (anonymised names, cold model skipped, embedding row).
+
+**Not tested / limits:** the bridge cannot pin a node, so a model on several nodes is only measured on whichever node routing picks (rows are split by the node that answered). Thinking models spend tokens on reasoning, so their quality score uses 2048 tokens per check. With two repeats the p90 is the larger of two samples. The embedding path does not record which node answered. Running the benchmark loads cold models, which can evict others in the same swap group.
+
+**What's left:** a node pin (a header or a `ymirctl bench --node`) needs support in the bridge, which is a `weirdnet-*` change; embeddings throughput by batch size; image and audio models once they exist.
+
+**What's next:** run it on a schedule and keep the JSON to spot regressions after a node or engine upgrade.
 
 ## 2026-11-21: A new node joined the pool
 

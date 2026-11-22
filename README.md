@@ -63,6 +63,7 @@ ymirctl chat "Hello"                         # streams through the loopback brid
 ymirctl status                               # roles, models and their state
 ymirctl load <model> / ymirctl unload <model>
 ymirctl mcp                                  # MCP server for Cursor, Claude Desktop and VS Code (stdio; --http for loopback HTTP)
+ymirctl bench                                # compare every model on the pool: speed and quality, saved as JSON and Markdown
 ymirctl bridge token                         # API key for Jan: base URL http://127.0.0.1:8484/v1
 ymirctl service install                      # or `setup --service`: systemd user unit, launchd agent or Windows logon task
 ymirctl service stop / start / status        # --system: a system unit, launchd daemon or the Windows service
