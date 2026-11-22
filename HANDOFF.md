@@ -4,6 +4,14 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 
 
+## 2026-11-22: MLX end-to-end mock test recovered (branch `feature/mlx`)
+
+**What changed:** `crates/ymir-testkit/tests/mlx.rs` is back: one node serves a GGUF on llama.cpp (with a projector) and an MLX model, both on the mock engine; it checks the engine kinds and launches `NodeConfig` builds, chats with each model through `ymird`, and checks the capabilities each reports (the GGUF takes images and audio, the MLX model text only). It was written during the LF-18 MLX work but never committed (it lived untracked in a scratch clone and a local stash), so DESIGN.md's MLX section pointed at a file that did not exist and the macOS workflow had dropped its MLX mock step. The macOS workflow runs it again after the `ymir-core` unit tests. The rest of that stash (MLX as `EngineKind::Mlx`, the `ymir-engine` shim removal, packaging and docs) had already landed on main through LF-18 and later commits, so nothing else was carried over; main's newer Weirdnet pins stay.
+
+**Checks (Linux x86_64):** `cargo check --workspace --all-targets --locked` clean; `cargo test --workspace --locked`: 178 passed, 0 failed, 6 ignored across 34 test binaries, including `llamacpp_and_mlx_models_on_one_node`; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --check` clean.
+
+**Not tested:** MLX on Apple Silicon (no Mac here); the macOS workflow change needs a push with a token that has the `workflow` scope.
+
 ## 2026-11-22: training plan, white paper reference fixed (branch `feature/training-plan-whitepaper-ref`)
 
 **What changed:** the white paper is not on main yet, so [`docs/design/training.md`](docs/design/training.md) refers to its "Training and fine-tuning (proposal)" section by title instead of linking a file that isn't there (the previous entry's links would not have resolved). Docs only.
