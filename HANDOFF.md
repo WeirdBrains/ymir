@@ -8,7 +8,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **Checks:** none needed (docs only).
 
-**What's next:** review of the order by the project lead, then slice 1 on its own branch.
+**What's next:** the order was confirmed by the project lead (2026-11-22) and the branch merged into main with `--no-ff`; open questions stay open in the doc. Next: slice 1 (P1) on its own branch, after the Weirdnet requests for P1 and P4a are sent.
 
 ## 2026-11-22: LF-38 follow-up, video design corrected (branch `feature/video-design`)
 

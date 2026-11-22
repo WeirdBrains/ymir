@@ -2,8 +2,8 @@
 
 Status: plan, 2026-11-22. Nothing here is built. This document turns the four training proposals in the
 white paper's "Training and fine-tuning (proposal)" section into work items, maps each onto the modules
-that exist today, and suggests an order. The order is a suggestion for review; no training code is written
-until it is agreed.
+that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22; the open
+questions at the end are still open.
 
 Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weirdbrains.com).
 
@@ -172,7 +172,7 @@ command. Answers from different versions must not share answer-cache entries (th
 version). Adapters are tied to the exact base revision and quantisation; loading one on another base must be
 refused, not attempted.
 
-## Suggested order
+## Order (confirmed 2026-11-22)
 
 Smallest useful end-to-end slice first. Slices 1 and 2 together give a complete loop with no new GPU
 scheduling: generate a dataset through the pool, train an adapter by hand on a machine that is not serving,
