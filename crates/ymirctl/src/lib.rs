@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 pub mod bench;
 pub mod mcp;
+pub mod mcp_servers;
 pub mod models;
 pub mod pool;
 
@@ -151,6 +152,9 @@ pub enum Cmd {
     /// Serve this node to MCP clients (Cursor, Claude Desktop, VS Code): pool status, models, chat
     /// (text, images, audio), completions, embeddings and model search as tools. Stdio by default.
     Mcp(mcp::McpArgs),
+    /// The outside MCP servers this node's agent tasks may use: list, add (a local command or an
+    /// HTTP endpoint), remove, enable, disable, test. Secrets are env:/file: references only.
+    McpServers(mcp_servers::McpServersCmd),
     /// The loopback bridge.
     Bridge {
         #[command(subcommand)]
@@ -384,6 +388,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             Ok(())
         }
         Cmd::Mcp(args) => mcp::run(cli_home, paths, args).await,
+        Cmd::McpServers(cmd) => mcp_servers::run(&paths, cmd, out, input).await,
         Cmd::Bench(cmd) => bench_cmd(&paths, cmd, out).await,
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;

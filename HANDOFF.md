@@ -349,3 +349,20 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What's left:** none.
 
 **What's next:** none.
+
+## 2026-11-22: LF-37 outside MCP servers for agent tasks
+
+**What changed**
+
+- A node can use outside MCP servers (stdio or streamable HTTP) in its agent tasks. They are listed as `[[inference.agent.mcp]]` in `node.toml` ([config and validation](crates/ymir-core/src/mcp_servers.rs)); the tools join the task's registry as `<id>.<tool>` in [`tasks::serve`](crates/ymir-core/src/tasks.rs). Every call asks for approval on the asking device; only linked devices can run tasks (unchanged). A server that fails to start or list its tools is left out with a warning.
+- Secrets are references only (`env:NAME` or `file:/path`); a literal secret or a plain-http address (other than loopback) is refused by validation.
+- `ymirctl mcp-servers list | add | remove | enable | disable | test` ([source](crates/ymirctl/src/mcp_servers.rs)). A local command asks before it is added (it runs as the user ymird runs as). The commands edit `node.toml` in place with `toml_edit`, so comments and layout survive; a change applies on the next ymird start.
+- Built on `weirdnet-mcp` 0.6.1 (features `client`, `agent`) and `weirdnet-agent` 0.5.0's `AgentSession`; no client code was written in Ymir. The wish list for the Weirdnet Lead is in Bragi's [mcp-client design](https://github.com/WeirdBrains/bragi/blob/main/docs/design/mcp-client.md).
+
+**Checks run:** see the merge entry.
+
+**Not tested:** a real stdio server with a real model on a node; Windows.
+
+**What's left:** a pool-wide server list (each node lists its own); `ymirctl chat --tools`; resources and prompts (not in the client yet).
+
+**What's next:** Bragi's MCP client settings.
