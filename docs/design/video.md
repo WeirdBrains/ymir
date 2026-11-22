@@ -4,6 +4,14 @@ Status: design, post-v1, 2026-11-22 (LF-38). Nothing here is built, and none of 
 players in all three front ends, ffmpeg packaging) is in [`bragi/docs/design/video.md`](https://github.com/WeirdBrains/bragi/blob/main/docs/design/video.md);
 read it first. This document covers what Ymir does so that video works for Bragi and for every other client of the pool.
 
+## Decisions (2026-11-22, m3talsmith)
+
+- **No default frame count or frame size, in Ymir or in Bragi.** Ymir reports what each model supports; clients plan frames to fit
+  (Bragi doc, "Fitting the clip to the model"). Ymir must therefore never invent a number for a model it knows nothing about: a missing
+  field is reported as missing (absent), not filled with a default, so the client can refuse clearly.
+- The Bragi desktop apps (GPUI on Linux, macOS and Windows) get an inline player with a system-player fallback; Flutter is the phones only.
+  That is client-side and does not change anything here.
+
 ## What exists today
 
 - Message content is text or parts: `text`, `image_url` (data URL only) and `input_audio` (`weirdnet-agent` 0.5, infer/2).
@@ -22,13 +30,22 @@ Bragi expands a clip into timestamped `image_url` parts and an `input_audio` par
 an ordinary multimodal request, so routing, the bridge, caching rules and the backends already do the right thing. What Ymir
 *does* need for phase 1 to be comfortable:
 
-- **Request size.** A 16-frame clip with sound is a few MiB of base64. Check, and document, the largest request the bridge, the
-  coordinator and infer/2 accept, and make the limit a setting (`[bridge] max_request_bytes`) with a clear 413 that names it, so
-  a client learns to send fewer frames. Today's media limits are the clients' (5 MiB per image, 10 MiB per audio).
-- **Images per request.** mistral.rs refuses two images in one message; llama.cpp takes many. Record the per-model image limit in
-  `Capabilities` (`max_images`) so Bragi can lower `max_frames` before sending, and so the coordinator can answer 400 with the number.
-- **Per-image cost.** Expose the tokens one image costs per model (from the projector and the model's settings) in catalog/1, so the
-  client's budget estimate is exact. Unknown means a conservative default on the client.
+- **Limits per model, reported by Ymir.** This is the core of phase 1 on the server side, because the client has no defaults to fall
+  back on. For every model on a node, `Capabilities` and catalog/1 (the union over nodes, using the most restrictive copy that the
+  request could be routed to, or per node when the request names one) report, when known:
+  - the context window the node actually runs the model with (`--ctx-size`, per slot), not the model's trained maximum;
+  - `max_images` per request (llama.cpp takes many, mistral.rs refused two in one message);
+  - the tokens one image costs: a fixed number, or a function of size (from the projector and the model's own settings), and the preferred or
+    maximum image edge;
+  - audio: accepted or not, and the maximum length;
+  - later, native video limits (below).
+  Where the node can measure a limit (a projector's token count for a test image, the real `--ctx-size`), it does so once at model load and
+  records it. Where it cannot, the field is **absent**, never defaulted. `ymirctl models` shows them and says "not reported" for the gaps.
+- **Request size.** Check and document the largest request the bridge, the coordinator and infer/2 accept, and make the limit a setting
+  (`[bridge] max_request_bytes`) with a clear 413 that names it. It is reported in catalog/1 too, so a client sizes frames to fit the
+  bytes as well as the tokens.
+- **Operators can set a limit** a node cannot measure (`[[models]] image_tokens = N`, `max_images = N`) in `node.toml`; that is the
+  operator's number for their hardware, not a default in the code.
 - **Transcription.** A model with a `transcribe` role (Whisper-class, through llama.cpp or a small ASR backend) so the soundtrack can
   become text for models without audio. The catalog lists it and `Catalog::route` picks it for a transcription request. This is the
   one new route in phase 1, and it is optional: without it, the sound is simply left out.
@@ -37,15 +54,15 @@ an ordinary multimodal request, so routing, the bridge, caching rules and the ba
 
 Models that read video exist (Qwen-VL family, and others). They are fed video as sampled frames plus temporal position information,
 or through a backend's own video path. When a backend takes the clip itself, sending it whole is better than the client's frames
-(model-matched sampling, temporal encoding, no double work).
+(model-matched sampling, temporal encoding, no double work). The model's native video limits are what bound the clip, as image limits bound frames.
 
 1. **Shared types** (`weirdnet-agent`, wish list): `ContentPart::video` and `Modalities::VIDEO`. Until it exists, nothing is sent.
 2. **Capability flag.** `Capabilities.video: bool` in the node record and `inputs.video` in catalog/1 (a node that lacks the field
-   counts as no video, as for audio today). Optional detail: `video_max_seconds`, `video_max_bytes`, `video_frame_rate`. `ymirctl models`
+   counts as no video, as for audio today). Optional detail: `video_max_seconds`, `video_max_bytes`, `video_frame_rate`; they follow the same rule, reported or absent. `ymirctl models`
    and `ymirctl nodes` show it.
 3. **Routing.** The coordinator treats a request with a video part like one with images: only to a node whose model reads video; with no
    model named, the main model if it does, else the best chat model in the pool that does; a named model that does not is a 400 that
-   says so *and tells the client the fallback*: send frames. Bragi on that 400 falls back to phase 1 without bothering the user.
+   says so *and tells the client the fallback*: send frames. Bragi on that 400 falls back to phase 1, planning frames from the same reported limits.
 4. **Backends.** `weirdnet-backends` forwards `video_url` to a backend that declares video input (the way it declares images today). For
    llama-server, only once upstream has it (watch the multimodal work; nothing to build until it ships). For mistral.rs or another engine that has
    a video part, a mapping behind a feature flag, checked by the same compatibility matrix in DESIGN.md (one row for video).
@@ -64,7 +81,7 @@ the bridge when the model does not read video natively: the same sampler Bragi u
 - Only `data:` URLs and uploaded bytes. Remote `https://` URLs are not fetched, as for images (no server-side request forgery, nothing
   fetched on a client's behalf).
 - Which node does it: the bridge's own node, in a child process with limits (time, memory, `-protocol_whitelist file,pipe`, no network),
-  never the inference node that holds the model if they differ. Output is bounded by the same frame and audio budget as the client's.
+  never the inference node that holds the model if they differ. Output is bounded by the frame budget computed from the target model's reported limits, exactly as on the client; with no limits reported, expansion refuses with a 400 that says which are missing, and the operator can set them in `node.toml`.
 - The node needs ffmpeg: not bundled with `ymird` by default. A node with expansion on and no ffmpeg refuses video with a 400 that says
   why; `ymirctl doctor`-style status shows it. Linux packages `Recommends` it; Ymir's other platform packages follow the Bragi table, but
   the server is mostly Linux, so no mobile case.
@@ -104,7 +121,7 @@ the bridge when the model does not read video natively: the same sampler Bragi u
 
 ## Milestones
 
-1. Request-size setting, `max_images` and per-image cost in `Capabilities` and catalog/1 (small, useful for images today too).
+1. Per-model limits in `Capabilities` and catalog/1 (context actually in use, `max_images`, per-image token cost and edge, audio length) plus the request-size setting, with the operator overrides. Small, useful for images today too, and **the prerequisite for Bragi's video**.
 2. Transcription role and route.
 3. The `video` modality and capability flag once `weirdnet-agent` has them; routing and the 400 fallback hint.
 4. Backend pass-through when a backend takes video.
@@ -114,12 +131,13 @@ the bridge when the model does not read video natively: the same sampler Bragi u
 
 The same list as in the Bragi doc, with the Ymir-specific items first:
 
-1. **`weirdnet-agent`**: `ContentPart::video`, `Modalities::VIDEO`, `Capabilities.video` (and `max_images`, per-image token cost,
-   `video_max_seconds`, `video_max_bytes`), catalog `inputs.video`; infer/2 carrying a video part, ideally by content-root reference.
+1. **`weirdnet-agent`**: `ContentPart::video`, `Modalities::VIDEO`, `Capabilities.video`, and the limit fields (`context_tokens`, `max_images`,
+   per-image token cost by size, preferred image edge, audio maximum length, `video_max_seconds`, `video_max_bytes`), each optional and
+   absent when unknown, never defaulted; catalog `inputs.video` and the same limits per model; infer/2 carrying a video part, ideally by content-root reference.
 2. **`weirdnet-openai`**: accept and map `video_url`, with a hook for the expansion step; a 413 that names the configured limit.
 3. **`weirdnet-backends`**: forward video to engines that take it, a transcription call, and the compatibility row.
 4. **`weirdnet-media`** (new): probe, `FrameSource` (ffmpeg CLI), frame planning (uniform, scene, hybrid), scaling and encoding, soundtrack
    extraction, hardened ffmpeg invocation, test fake. Mouser's `mouser-media` is the nearest code.
-5. **`weirdnet-model`**: a speech-to-text catalog entry with a `transcribe` role; video support and token-cost metadata per model.
+5. **`weirdnet-model`**: a speech-to-text catalog entry with a `transcribe` role; the per-model limits above (measured at load where possible, so the node can fill them without the operator).
 6. **`weirdnet-mcp`**: image and audio content blocks in tool results.
 7. **An LGPL ffmpeg build recipe** shared by the apps.
