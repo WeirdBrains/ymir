@@ -1,0 +1,6 @@
+// A tiny synthetic fixture for tests only, on the first dataset topic, "Decentralized networks: how they work".
+{"id": "dn-1", "prompt": "In one sentence, what makes a network decentralized?"}
+{"id": "dn-2", "prompt": "How does a peer find another peer without a central server?", "temperature": 0.7, "seed": 11}
+{"id": "dn-3", "messages": [{"role": "system", "content": "You explain networking to beginners."}, {"role": "user", "content": "What does a relay do when two peers cannot connect directly?"}]}
+{"id": "dn-4", "prompt": "Name one trade-off of decentralized networks.", "temperature": 0}
+{"id": "dn-4-again", "prompt": "Name one trade-off of decentralized networks.", "temperature": 0}

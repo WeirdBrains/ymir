@@ -126,7 +126,9 @@ pub enum Cmd {
         cmd: GroupCmd,
     },
     /// Spread a list of prompts (one per line of FILE, or stdin with `-`) over the pool at batch
-    /// priority; prints each answer in order.
+    /// priority; prints each answer in order. With `--jsonl`, FILE holds one JSON row per line
+    /// (`prompt` or `messages`, optional `system`, sampling and `seed`) and the answers of the
+    /// teacher model `--model` are written as JSONL to `--out` with a manifest next to it.
     Batch {
         file: String,
         #[arg(long, short)]
@@ -137,6 +139,8 @@ pub enum Cmd {
         /// Extra tries for a task that fails in a way another try could fix.
         #[arg(long)]
         retries: Option<u32>,
+        #[command(flatten)]
+        jsonl: BatchJsonlArgs,
     },
     /// Benchmark the pool's models on each node (a node×model matrix over Weirdnet, or through the
     /// bridge): time to first token, tokens per second, latency and deterministic quality checks. One
@@ -177,6 +181,49 @@ pub struct ServiceArgs {
     /// directory defaults to /var/lib/ymir, /Library/Application Support/Ymir or %ProgramData%\Ymir.
     #[arg(long)]
     pub system: bool,
+}
+
+/// `ymirctl batch --jsonl`: data generation (see `ymir_core::dataset`).
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BatchJsonlArgs {
+    /// FILE is JSONL rows; write the answers as JSONL to `--out`, with `OUT.manifest.json`.
+    #[arg(long)]
+    pub jsonl: bool,
+    /// The output file (JSONL). It must not exist unless `--resume`.
+    #[arg(long, requires = "jsonl")]
+    pub out: Option<PathBuf>,
+    /// The teacher model's license (an SPDX id such as `apache-2.0`), recorded in the manifest.
+    /// Some licenses forbid training on a model's outputs: check before you generate.
+    #[arg(long, requires = "jsonl")]
+    pub license: Option<String>,
+    /// Accept `--license unknown`.
+    #[arg(long, requires = "jsonl")]
+    pub allow_unknown_license: bool,
+    /// Continue an interrupted run: rows already answered in `--out` are skipped.
+    #[arg(long, requires = "jsonl")]
+    pub resume: bool,
+    /// System prompt for rows that don't set one.
+    #[arg(long, requires = "jsonl")]
+    pub system: Option<String>,
+    #[arg(long, requires = "jsonl")]
+    pub temperature: Option<f32>,
+    #[arg(long, requires = "jsonl")]
+    pub top_p: Option<f32>,
+    #[arg(long, requires = "jsonl")]
+    pub max_tokens: Option<u32>,
+    /// Seed for rows that don't set one.
+    #[arg(long, requires = "jsonl")]
+    pub seed: Option<u64>,
+    /// `bypass` (default) asks for fresh answers; `use` lets the answer cache answer. Either way,
+    /// rows answered from the cache are marked and not usable.
+    #[arg(long, value_enum, requires = "jsonl")]
+    pub cache: Option<CacheArg>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheArg {
+    Use,
+    Bypass,
 }
 
 #[derive(Subcommand, Debug)]
@@ -360,7 +407,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
         }
-        Cmd::Batch { file, model, concurrency, retries } => {
+        Cmd::Batch { file, model, concurrency, retries, jsonl } if jsonl.jsonl => {
+            batch_jsonl(&paths, out, file, model, concurrency, retries, jsonl).await
+        }
+        Cmd::Batch { file, model, concurrency, retries, .. } => {
             let text = if file == "-" {
                 let mut s = String::new();
                 input.read_to_string(&mut s)?;
@@ -1060,5 +1110,59 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             }
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn batch_jsonl(
+    paths: &Paths,
+    out: &mut dyn Write,
+    file: String,
+    model: Option<String>,
+    concurrency: Option<usize>,
+    retries: Option<u32>,
+    a: BatchJsonlArgs,
+) -> Result<()> {
+    use ymir_core::batch::CachePolicy;
+    use ymir_core::dataset::{Generate, RowDefaults};
+    if file == "-" {
+        bail!("--jsonl reads a file, not stdin (its hash goes in the manifest)");
+    }
+    let Some(teacher) = model else { bail!("--jsonl needs --model: the teacher model") };
+    let Some(output) = a.out else { bail!("--jsonl needs --out FILE") };
+    let Some(license) = a.license else {
+        bail!("--jsonl needs --license: the teacher model's license (some forbid training on outputs); `unknown` with --allow-unknown-license")
+    };
+    let g = Generate {
+        input: PathBuf::from(file),
+        output,
+        teacher,
+        license,
+        allow_unknown_license: a.allow_unknown_license,
+        defaults: RowDefaults { system: a.system, temperature: a.temperature, top_p: a.top_p, max_tokens: a.max_tokens, seed: a.seed },
+        resume: a.resume,
+        concurrency,
+        retries,
+        cache: match a.cache.unwrap_or(CacheArg::Bypass) {
+            CacheArg::Use => CachePolicy::Use,
+            CacheArg::Bypass => CachePolicy::Bypass,
+        },
+    };
+    let s = ymir_core::dataset::generate(&paths.socket(), &g, &mut |done, total| {
+        if total > 0 {
+            eprintln!("{done}/{total} rows");
+        }
+    })
+    .await?;
+    let m = &s.manifest;
+    writeln!(
+        out,
+        "{} sent, {} skipped (already answered); {} of {} rows answered, {} usable, {} failed, {} from the cache, {} by a stand-in",
+        s.sent, s.skipped, m.rows_answered, m.rows_in_input, m.rows_usable, m.rows_failed, m.cache_hits, m.standins
+    )?;
+    if !m.cache_policy_supported {
+        writeln!(out, "note: the pool can't skip its answer cache yet; rows it answered from the cache are marked unusable")?;
+    }
+    writeln!(out, "manifest: {}", s.manifest_path.display())?;
     Ok(())
 }
