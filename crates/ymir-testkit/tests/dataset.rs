@@ -94,7 +94,6 @@ async fn jsonl_generation_marks_rows_writes_a_manifest_and_resumes() -> Result<(
     assert_eq!(manifest["input_name"], "prompts.jsonl");
     assert_eq!((manifest["rows_answered"].as_u64(), manifest["answered_by"]["teacher"].as_u64()), (Some(3), Some(3)));
     assert_eq!(manifest["cache"], "bypass");
-    assert_eq!(manifest["cache_mode_supported"], false);
     assert!(manifest.get("sources").is_none());
     let job = manifest["job"].as_str().unwrap().to_string();
 
@@ -103,17 +102,27 @@ async fn jsonl_generation_marks_rows_writes_a_manifest_and_resumes() -> Result<(
     assert!(format!("{e:#}").contains("--resume"), "{e:#}");
 
     // Resume over the whole fixture: only the new rows run. dn-4-again repeats dn-4 at
-    // temperature 0, so the answer cache answers it (no bypass on the wire yet) and it is marked.
+    // temperature 0, but the default `--cache bypass` goes on the wire, so it is a fresh answer.
     std::fs::write(&input, &fixture)?;
     let said = ctl(&home, &[&with_license[..], &["--resume"]].concat()).await?;
-    assert!(said.contains("2 sent, 3 skipped") && said.contains("5 rows answered, 4 usable") && said.contains("1 from the cache"), "{said}");
+    assert!(said.contains("2 sent, 3 skipped") && said.contains("5 rows answered, 5 usable") && said.contains("0 from the cache"), "{said}");
     let r = rows(&out);
     assert_eq!(r.len(), 5, "answered rows are not run again");
     let again = r.iter().find(|x| x["id"] == "dn-4-again").unwrap();
-    assert_eq!((again["ok"].as_bool(), again["cache_hit"].as_bool(), again["usable"].as_bool()), (Some(true), Some(true), Some(false)), "{again}");
+    assert_eq!((again["ok"].as_bool(), again["cache_hit"].as_bool(), again["usable"].as_bool()), (Some(true), Some(false), Some(true)), "{again}");
     let manifest: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("data.jsonl.manifest.json"))?)?;
     assert_eq!(manifest["job"], job.as_str(), "a resumed run keeps its job id");
-    assert_eq!((manifest["rows_in_input"].as_u64(), manifest["rows_usable"].as_u64(), manifest["cache_hits"].as_u64()), (Some(5), Some(4), Some(1)));
+    assert_eq!((manifest["rows_in_input"].as_u64(), manifest["rows_usable"].as_u64(), manifest["cache_hits"].as_u64()), (Some(5), Some(5), Some(0)));
+
+    // With `--cache use` the node's cache may answer: bypass stored nothing above, so dn-4 runs
+    // and is stored, and dn-4-again (same question, temperature 0) is a hit, marked unusable.
+    let used = dir.path().join("used.jsonl").display().to_string();
+    let with_use = with_license.iter().copied().map(|a| if a == o.as_str() { used.as_str() } else { a }).chain(["--cache", "use"]).collect::<Vec<_>>();
+    let said = ctl(&home, &with_use).await?;
+    assert!(said.contains("5 rows answered, 4 usable") && said.contains("1 from the cache"), "{said}");
+    let r = rows(Path::new(&used));
+    let again = r.iter().find(|x| x["id"] == "dn-4-again").unwrap();
+    assert_eq!((again["cache_hit"].as_bool(), again["usable"].as_bool()), (Some(true), Some(false)), "{again}");
 
     // Another teacher can't continue this output.
     let other = [&base[..], &["--license", "apache-2.0", "--resume"]]
@@ -195,10 +204,10 @@ async fn eval_scores_models_with_checks_and_a_judge() -> Result<()> {
         "{ev3}"
     );
 
-    // Run again: every answer is deterministic, so the answer cache replays them (no bypass on the
-    // wire yet), and the report says so.
+    // Run again: every answer is deterministic, but evals bypass the answer cache, so none is
+    // replayed.
     let said = ctl(&home, &args).await?;
-    assert_eq!(line_of(&said, "teacher "), ["teacher", "1/2", "-", "0", "3", "0"], "{said}");
+    assert_eq!(line_of(&said, "teacher "), ["teacher", "1/2", "-", "0", "0", "0"], "{said}");
 
     // No judge: rubric rows are noted and scored by `expect` only.
     let said = ctl(&home, &["eval", EVAL_FIXTURE, "--model", "teacher"]).await?;

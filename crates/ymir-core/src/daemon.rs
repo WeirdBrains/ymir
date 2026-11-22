@@ -122,6 +122,7 @@ impl Daemon {
             let sup = Supervisor::new(engines, launches.clone(), SupervisorOptions { log_dir: Some(paths.logs()), ..Default::default() });
             supervisor = Some(sup.clone());
             let node = Arc::new(LocalModelNode::new(&name, sup, &launches));
+            node.set_revisions(cfg.revisions().into_iter().map(|(id, rev, _)| (id, rev)));
             let workers: Arc<RpcWorkers> = Arc::new(RpcWorkers::new(cfg.worker_config(&paths, key)));
             node.set_group_workers(workers.clone());
             group_workers = Some(workers);
@@ -218,6 +219,9 @@ impl Daemon {
                 }
                 if let Some(n) = &model_node {
                     n.attach_host(service.host().clone());
+                }
+                for (id, rev, quant) in cfg.revisions() {
+                    service.set_model_info(&id, Some(rev), quant);
                 }
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));

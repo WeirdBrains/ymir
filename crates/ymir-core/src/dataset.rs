@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use weirdnet_agent::remote::infer::v2::{Sampling, Usage};
 use weirdnet_agent::{Message, Role};
 
-use crate::batch::{BatchItem, BatchTask, CacheMode, cache_mode_supported};
+use crate::batch::{BatchItem, BatchTask, CacheMode};
 use crate::control::{self, ControlRequest};
 
 /// The manifest's format name.
@@ -343,8 +343,6 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<SourcesRecord>,
     pub cache: CacheMode,
-    /// Whether the pool could honour `cache` (no cache mode is on the wire yet).
-    pub cache_mode_supported: bool,
     pub rows_in_input: usize,
     pub rows_answered: usize,
     pub rows_usable: usize,
@@ -513,7 +511,6 @@ pub async fn generate(socket: &Path, g: &Generate, progress: &mut dyn FnMut(usiz
         defaults: g.defaults.clone(),
         sources: sources.map(|(s, sha256, name)| SourcesRecord { name, sha256, topic: s.topic, sources: s.sources, rows: rows_per_source }),
         cache: g.cache,
-        cache_mode_supported: cache_mode_supported(g.cache),
         rows_in_input: tasks.len(),
         rows_answered: 0,
         rows_usable: 0,

@@ -1,5 +1,6 @@
 //! The model role, and the seam the inference role calls it through.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -44,6 +45,11 @@ pub trait ModelNode: Send + Sync {
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>>;
     /// Embeds `input` with loaded embedding `model`.
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>>;
+    /// The weights revision of `model` here (a Hub commit, a file hash, a fine-tune id), when
+    /// known. The answer cache keys on it, so new weights under the same id don't replay old answers.
+    fn revision(&self, _model: &str) -> Option<String> {
+        None
+    }
     /// Whether the node is draining: it finishes what it has and takes no new requests.
     fn draining(&self) -> bool {
         false
@@ -89,6 +95,8 @@ pub struct LocalModelNode {
     service_host: Mutex<Option<Arc<ModelHost>>>,
     /// Starts this node's part of a group, when it takes group jobs.
     workers: Mutex<Option<Arc<crate::group::RpcWorkers>>>,
+    /// Weights revisions from node.toml (`revision` on `[[model.local]]`).
+    revisions: Mutex<HashMap<String, String>>,
 }
 
 /// How long a drain waits for requests under way.
@@ -103,7 +111,13 @@ impl LocalModelNode {
             draining: AtomicBool::new(false),
             service_host: Mutex::new(None),
             workers: Mutex::new(None),
+            revisions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Sets the weights revision of each model that has one (see [`ModelNode::revision`]).
+    pub fn set_revisions(&self, revisions: impl IntoIterator<Item = (String, String)>) {
+        *self.revisions.lock().unwrap_or_else(|e| e.into_inner()) = revisions.into_iter().collect();
     }
 
     /// Lets this node join split-model groups (M7).
@@ -143,6 +157,10 @@ impl ModelNode for LocalModelNode {
 
     fn status(&self) -> Vec<ModelStatus> {
         self.supervisor.status()
+    }
+
+    fn revision(&self, model: &str) -> Option<String> {
+        self.revisions.lock().unwrap_or_else(|e| e.into_inner()).get(model).cloned()
     }
 
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {

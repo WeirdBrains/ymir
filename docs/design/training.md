@@ -46,8 +46,10 @@ Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weird
 
 **Status (2026-11-22).** First slice built: `ymirctl batch --jsonl` (rows with system prompt, sampling and seed;
 wait-for-model; `usable`, `cache_hit` and `standin` per row; manifest with the operator's license; a sources
-manifest with each source's license; `--resume`) and `ymirctl eval` (bench scorers, optional judge). Left: the cache
-mode on the wire (built in `weirdnet-agent`, not yet published), the teacher license read from the Hub, turning
+manifest with each source's license; `--resume`) and `ymirctl eval` (bench scorers, optional judge). The cache mode is on
+the wire (`weirdnet-agent` 0.5.1: batch generation and evals send `bypass` with `wait_for_model`, and the
+coordinator honours it), and answer-cache entries are keyed on the weights revision where a node reports one.
+Left: the teacher license read from the Hub, turning
 fetched sources into seed prompts, and the synced job record.
 
 **Scope.** A teacher model in the pool answers or labels a file of prompts; the answers become a dataset for a
@@ -72,8 +74,8 @@ student. The same path scores a candidate model on held-out prompts, optionally 
 **Dependencies.** None on other proposals. Code: `ymir-core::batch`, `ymirctl` batch and bench, `weirdnet-agent`
 infer/2 (`Request.seed`, `sampling`, `response_format`, `wait_for_model` exist in 0.5).
 
-**Needed from Weirdnet.** Confirm how a request skips the answer cache over infer/2 (DESIGN.md names a
-per-request `cache: false`; this needs checking against `weirdnet-agent` 0.5). Later: the synced job record
+**Needed from Weirdnet.** Skipping the answer cache over infer/2: done (`Request::cache`, `weirdnet-agent`
+0.5.1; `weirdnet-semcache` 0.2.1 `get_rev`/`put_rev`; `weirdnet-openai` 0.2.1 `cache` / `x-weirdnet-cache`). Later: the synced job record
 for batch hand-off (`weirdnet-agent`, already planned), which replaces `--resume`.
 
 **Data and compute.** Seed prompts from the operator. Compute is the existing pool at `batch` priority; no new
@@ -173,8 +175,8 @@ Weirdnet's).
 **Data and compute.** None beyond serving; an adapter adds little memory over its base.
 
 **Risks.** A canary sends some real requests to a worse model; keep the share small and make rollback one
-command. Answers from different versions must not share answer-cache entries (the cache key must include the
-version). Adapters are tied to the exact base revision and quantisation; loading one on another base must be
+command. Answers from different versions must not share answer-cache entries: done for revisions a node reports
+(`[[model.local]] revision`, keyed with `get_rev`/`put_rev`); P4 must set it for every fine-tune. Adapters are tied to the exact base revision and quantisation; loading one on another base must be
 refused, not attempted.
 
 ## Order (confirmed 2026-11-22)

@@ -277,6 +277,11 @@ pub struct LocalModel {
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quant: Option<String>,
+    /// The weights' revision: a Hub commit, a file hash or a fine-tune id. Optional; when set it
+    /// goes in the capability record and keys the answer cache, so answers from other weights
+    /// under the same `id` are never replayed. Change it when the weights change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_group: Option<String>,
     /// `main`, `standin` or `embedding`; default `chat`.
@@ -641,6 +646,11 @@ impl NodeConfig {
                 l
             })
             .collect()
+    }
+
+    /// `(id, revision, quant)` for each `[[model.local]]` that names a revision.
+    pub fn revisions(&self) -> Vec<(String, String, Option<String>)> {
+        self.model.local.iter().filter_map(|m| Some((m.id.clone(), m.revision.clone()?, m.quant.clone()))).collect()
     }
 
     /// Launch specs for `[[model.local]]`.

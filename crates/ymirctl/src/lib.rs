@@ -1173,9 +1173,6 @@ async fn batch_jsonl(
         "{} sent, {} skipped (already answered); {} of {} rows answered, {} usable, {} failed, {} from the cache, {} by a stand-in",
         s.sent, s.skipped, m.rows_answered, m.rows_in_input, m.rows_usable, m.rows_failed, m.cache_hits, m.standins
     )?;
-    if !m.cache_mode_supported {
-        writeln!(out, "note: the pool can't skip its answer cache yet; rows it answered from the cache are marked unusable")?;
-    }
     writeln!(out, "manifest: {}", s.manifest_path.display())?;
     Ok(())
 }

@@ -986,11 +986,19 @@ Sources: `--sources FILE` takes a sources manifest (`dataset::Sources`: a topic,
 license; Ymir fetches nothing). Every row then names its `source`, unknown ids are refused before anything runs, and
 the dataset's manifest records the sources, their hash and rows per source.
 
-Cache seam: `batch::CacheMode` (`Use`, `Bypass`, `Refresh`) has the names of `weirdnet-agent`'s infer/2 `CacheMode`,
-which is built but not yet published. `Bypass` is the default for both commands, but until Ymir moves to that release
-`batch::with_cache` leaves the request unchanged (`batch::cache_mode_supported` is false for anything but `Use`), so
-the exact cache still replays deterministic requests and those rows are marked from `Meta::cache_hit`. The switch is
-the dependency bump plus `with_cache` calling `Request::with_cache` and the enum becoming a re-export.
+Answer cache: requests carry infer/2 `Request::cache` (`weirdnet-agent` 0.5.1; `batch::CacheMode` re-exports it).
+`batch --jsonl` defaults to `bypass` (`--cache refresh|use` to change it) and `eval` always bypasses; both set
+`wait_for_model`. The coordinator honours the mode itself: `prepare` reads the cache only when `cache.may_read()`, and
+a finished answer is offered only when `cache.may_store()` (`bypass` neither reads nor stores, `refresh` stores
+without reading). The bridge takes the same mode from the body's `cache` or `x-weirdnet-cache` (`weirdnet-openai`
+0.2.1). Rows still record `Meta::cache_hit`, so a `--cache use` run marks replayed rows unusable.
+
+Weights revisions: `[[model.local]] revision` (a Hub commit, file hash or fine-tune id) goes in the node's capability
+record (`ModelEntry::revision`) and `ModelNode::revision`. Answers are stored with `put_rev` under the revision of the
+node that answered and read with `get_rev` under the model's revision when every node with the model reports the same
+one (none reporting one is plain `get`/`put`); when replicas differ the cache is not read, since the answering weights
+aren't known in advance. Answers carry the revision in `Meta::revision`. This is what keeps a fine-tuned model under
+the same id (P4) from replaying answers of its old weights.
 
 ### Shared semantic cache
 
@@ -1261,6 +1269,7 @@ id = "qwen3.6-35b-a3b"
 backend = "llamacpp"
 quant = "Q4_K_M"
 swap_group = "main"
+# revision = "<hub commit or fine-tune id>"  # optional: keys the answer cache on these weights
 
 [[model.local]]
 id = "gemma4-e4b"
@@ -1793,7 +1802,9 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
 - **Streamed answers report the stand-in in the final chunk**; `BridgeClient` reads it there.
 - `Busy` always answers `Retry-After: 1`; Windows kills the engine outright; vLLM is Linux only.
 - **The answer cache is exact-match for temperature 0 only** (no tools, inline messages), per
-  `weirdnet-semcache`; other requests always go to a model.
+  `weirdnet-semcache`; other requests always go to a model. Since `weirdnet-agent` 0.5.1 a request can
+  also skip it (`cache: bypass`) or refresh it (`cache: refresh`), and entries are keyed on the weights
+  revision where a node reports one.
 - No `GroupWorkers` in M3 (group jobs answered Unsupported); M7 adds them for llama.cpp RPC.
 
 **Not done or untested:**

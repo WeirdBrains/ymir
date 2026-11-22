@@ -5133,9 +5133,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95f0920cbb8119f1eba0aea20e23b278f5d97a3469c1d0fce21a095b556c13aa"
+checksum = "47ddd154441f2bea47363e7917670388272c3c515c87f36c3d67c40db6365b1b"
 dependencies = [
  "async-trait",
  "cbor4ii",
@@ -5302,9 +5302,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-openai"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fe8b65a2ba636bc192ccb598c76f79bcc148a5c0ad17716d3165adb0b679f5e"
+checksum = "595d78c80db13b9bbdfd4056a61d3228ac68d0d48eeb34f3c11eb00557eb3b06"
 dependencies = [
  "axum",
  "futures",
@@ -5328,9 +5328,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-semcache"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "228b879681370236b1059f962a08b34078320b37e2562635169d342fc8a9d18b"
+checksum = "931d31e8df68f4dbaf3b0e694a4178784699048bc0f07411f361736a1f22bb75"
 dependencies = [
  "serde",
  "sha2 0.10.9",

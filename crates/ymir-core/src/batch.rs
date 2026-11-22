@@ -46,45 +46,10 @@ impl BatchOptions {
     }
 }
 
-/// Answer-cache policy for a request: the same name and variants as `weirdnet-agent`'s
-/// `remote::infer::v2::CacheMode` (built, not yet published). Until Ymir moves to that release
-/// this is a local copy and nothing of it goes on the wire; then this enum becomes
-/// `pub use weirdnet_agent::remote::infer::v2::CacheMode;` and [`with_cache`] calls
-/// `Request::with_cache`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheMode {
-    /// The inference node may answer from its cache and may store the answer (today's behaviour).
-    #[default]
-    Use,
-    /// Never answer from a cache and never store this answer.
-    Bypass,
-    /// Don't answer from a cache, but the fresh answer may refresh the entry.
-    Refresh,
-}
-
-/// Whether the pool honours `mode` today: only [`CacheMode::Use`] until infer/2 carries a cache
-/// mode. Callers check [`BatchItem::cache_hit`] either way.
-pub fn cache_mode_supported(mode: CacheMode) -> bool {
-    matches!(mode, CacheMode::Use)
-}
-
-/// Sets `mode` on `req`: the one place a request learns its cache mode.
-//
-// TODO(weirdnet-agent 0.5.1, CacheMode): replace the body with `req.with_cache(mode)` and
-// `cache_mode_supported` with `true`. Until then the exact cache is skipped only where it already
-// is (answers that are not deterministic, which it never stores), and a hit is reported through
-// `Meta::cache_hit`.
-pub fn with_cache(req: Request, mode: CacheMode) -> Request {
-    let _ = mode;
-    req
-}
-
-/// Sets wait-for-model on `req` (`Request::with_wait_for_model` in `weirdnet-agent` 0.5.1).
-pub fn with_wait_for_model(mut req: Request, on: bool) -> Request {
-    req.wait_for_model = on;
-    req
-}
+/// Answer-cache mode for a request (`weirdnet-agent` 0.5.1 infer/2): `use` lets the nodes'
+/// answer cache serve and keep the answer, `bypass` neither reads nor stores, `refresh` skips the
+/// read and stores the fresh answer. Hits still show in [`BatchItem::cache_hit`].
+pub use weirdnet_agent::remote::infer::v2::CacheMode;
 
 /// One task of a batch: its own messages, sampling and seed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,14 +134,14 @@ pub fn request_for(task: &BatchTask, o: &BatchOptions, attempt: u32) -> Request 
         .with_job_id(format!("{}-{}", o.job, task.id))
         .with_sampling(task.sampling.clone());
     req.attempt = attempt;
-    let mut req = with_wait_for_model(req, o.wait_for_model);
+    let mut req = req.with_wait_for_model(o.wait_for_model).with_cache(o.cache);
     if let Some(seed) = task.seed {
         req = req.with_seed(seed);
     }
     if let Some(m) = &o.model {
         req = req.with_model(m.clone());
     }
-    with_cache(req, o.cache)
+    req
 }
 
 async fn task(pool: &Pool, index: usize, t: &BatchTask, o: &BatchOptions, cancel: &CancelToken) -> BatchItem {
@@ -264,16 +229,19 @@ mod tests {
     }
 
     #[test]
-    fn bypass_is_not_on_the_wire_yet() {
-        assert!(cache_mode_supported(CacheMode::Use));
-        assert!(!cache_mode_supported(CacheMode::Bypass) && !cache_mode_supported(CacheMode::Refresh));
-        assert_eq!(serde_json::to_string(&CacheMode::Refresh).unwrap(), "\"refresh\"");
+    fn the_cache_mode_and_wait_go_on_the_wire() {
         let t = BatchTask::prompt("1", "x");
         let mut o = BatchOptions::new("b");
         let plain = request_for(&t, &o, 0);
+        assert_eq!(plain.cache, CacheMode::Use);
+        // `use` is left off the wire, so older nodes read the request as before.
+        assert!(serde_json::to_value(&plain).unwrap().get("cache").is_none());
         o.cache = CacheMode::Bypass;
+        o.wait_for_model = true;
         let bypass = request_for(&t, &o, 0);
-        assert_eq!((plain.raw, plain.input), (bypass.raw, bypass.input));
+        assert!(bypass.wait_for_model && bypass.cache == CacheMode::Bypass);
+        assert_eq!(serde_json::to_value(&bypass).unwrap()["cache"], "bypass");
+        assert_eq!(serde_json::to_string(&CacheMode::Refresh).unwrap(), "\"refresh\"");
     }
 
     #[test]
