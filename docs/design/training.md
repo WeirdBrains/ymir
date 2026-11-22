@@ -1,20 +1,19 @@
 # Training and fine-tuning around Ymir: implementation plan
 
 Status: plan, 2026-11-22. Nothing here is built. This document turns the four training proposals in the
-white paper's "Training and fine-tuning (proposal)" section into work items, maps each onto the modules
-that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22; the open
-questions at the end are still open.
+white paper's "Training and fine-tuning (proposal)" section
+([`docs/whitepaper/sections/10-training.tex`](../whitepaper/sections/10-training.tex)) into work items, maps each onto the modules
+that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
+m3talsmith answered the open questions the same day (see "Decisions").
 
 Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weirdbrains.com).
 
 ## Ground rules this plan keeps
 
-- **Training stays out of Ymir.** [DESIGN.md](../DESIGN.md#non-goals) lists training and fine-tuning as a
-  non-goal, "the separate trainer stays separate". Ymir supplies data generation, evals, serving and (later)
-  scheduling a job onto a node; the trainer itself (PEFT/TRL, Unsloth, llama.cpp's finetune or similar) is a
-  separate program that Ymir starts or talks to. If the plan is approved, the non-goal is reworded in the same
-  change as the first code: "Ymir does not train models itself; it feeds, schedules and serves a separate
-  trainer."
+- **Training stays out of Ymir.** [DESIGN.md](../DESIGN.md#non-goals) says Ymir feeds, schedules and serves a
+  separate trainer, and does not train models itself. Ymir supplies data generation, evals, serving and (later)
+  scheduling a job onto a node; the trainer is a separate program that Ymir starts or talks to: llama.cpp's
+  finetune for now.
 - **One GPU per run.** Multi-machine training over Weirdnet spends most of its time waiting on the network
   (white paper, "Why training stays on one machine or a private link"). Every slice below trains on one node.
   Two-node data-parallel LoRA on a private link is listed last, as optional.
@@ -199,13 +198,31 @@ serve it as an adapter, and score it against the base through the pool.
 - No test downloads a model, starts a GPU backend or trains; a real-trainer test is `#[ignore]` and runs only
   on a node the lead has cleared.
 
-## Open questions
+## Decisions (2026-11-22, m3talsmith)
 
-1. Where does the separate trainer live: its own repo, a pinned Python environment that `ymirctl train` calls,
-   or an existing trainer? Which framework (PEFT/TRL, Unsloth, llama.cpp finetune)?
-2. Is rewording the non-goal acceptable ("Ymir feeds, schedules and serves a separate trainer")?
-3. Which first use case should the first dataset target (a small support or coding assistant, a router, a
-   summariser)? It decides the seed prompts and the eval set.
-4. Is the conversation training flag a Bragi feature for the next Bragi milestone, or later?
-5. Should canary weights live in Ymir's `balance` or in the `weirdnet-agent` pool?
-6. The white paper's LaTeX source is not in this repository yet; should it be committed under `docs/`?
+1. **Trainer:** llama.cpp finetune for now. It reads GGUF bases and writes GGUF LoRA adapters, which is what P4a
+   serves on llama.cpp first; a PEFT/TRL trainer for vLLM can come later behind the same interface (P3a).
+2. **Non-goal:** reworded in [DESIGN.md](../DESIGN.md#non-goals) to "Ymir feeds, schedules and serves a
+   separate trainer".
+3. **First dataset and eval topic:** "Decentralized networks: how they work". Datasets stay configurable and none
+   is built in; the tests use a small synthetic fixture on this topic. Sources for the real dataset can be fetched
+   by m3talsmith when needed.
+4. **Conversation training flag (P2):** the Bragi toggle comes after Bragi v1; the Ymir side of P2 can be built
+   before it, but nothing is exported until a conversation can be flagged.
+5. **Version traffic weights (P4b):** in Ymir's `balance` for now (see the proposal below).
+6. **White paper:** committed under [`docs/whitepaper/`](../whitepaper/README.md); the training section is
+   [`sections/10-training.tex`](../whitepaper/sections/10-training.tex).
+
+### Proposal: where version weights could live later
+
+Weights in Ymir's `balance` keep P4b inside this repo: the pool policy names versions and a weight each, and
+`balance` picks a version before it picks a replica. Two alternatives, for later and only with the Weirdnet lead:
+
+- **In the `weirdnet-agent` pool**, as a weighted choice between catalog entries that share a version family.
+  Every Weirdnet app would get canaries, at the cost of a protocol change (catalog entries would need a family
+  and a version).
+- **On the client**, where the app picks a version per conversation (sticky), so one conversation never mixes
+  versions. This is simpler to reason about for evals but needs every client to agree on the rule.
+
+Either way, a conversation should stay on one version once it starts, and answer-cache keys must include the
+version.
