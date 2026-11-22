@@ -80,6 +80,49 @@ fn pairs(items: &[String], what: &str) -> Result<BTreeMap<String, String>> {
     Ok(m)
 }
 
+/// Writes `servers` as `[[inference.agent.mcp]]` into the file at `path`, editing it in place:
+/// every other line, comment and the layout stay as they were, and an entry that did not change
+/// keeps its own comments. The result is checked as a whole before it replaces the file.
+pub fn write_servers(path: &std::path::Path, servers: &[McpServerConfig]) -> Result<()> {
+    use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut doc: DocumentMut = text.parse().with_context(|| format!("parsing {}", path.display()))?;
+    let mut kept: Vec<Table> = Vec::new();
+    if let Some(old) = doc.get("inference").and_then(|i| i.get("agent")).and_then(|a| a.get("mcp")).and_then(Item::as_array_of_tables) {
+        kept = old.iter().cloned().collect();
+    }
+    let mut new = ArrayOfTables::new();
+    for s in servers {
+        let same = kept.iter().find(|t| toml_edit::de::from_str::<McpServerConfig>(&t.to_string()).is_ok_and(|c| &c == s));
+        match same {
+            Some(t) => new.push(t.clone()),
+            None => new.push(toml_edit::ser::to_document(s)?.as_table().clone()),
+        }
+    }
+    if new.is_empty() {
+        if let Some(agent) = doc.get_mut("inference").and_then(|i| i.get_mut("agent")).and_then(Item::as_table_like_mut) {
+            agent.remove("mcp");
+        }
+    } else {
+        let inference = doc.entry("inference").or_insert_with(|| Item::Table(Table::new()));
+        if let Some(t) = inference.as_table_mut() {
+            t.set_implicit(true);
+        }
+        let agent = inference.as_table_mut().context("[inference] is not a table")?.entry("agent").or_insert_with(|| Item::Table(Table::new()));
+        if let Some(t) = agent.as_table_mut() {
+            t.set_implicit(true);
+        }
+        agent.as_table_mut().context("[inference.agent] is not a table")?.insert("mcp", Item::ArrayOfTables(new));
+    }
+    let out = doc.to_string();
+    let cfg: ymir_core::config::NodeConfig = toml::from_str(&out).context("the edited node.toml does not parse")?;
+    cfg.validate()?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 pub async fn run(paths: &Paths, cmd: McpServersCmd, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<()> {
     let path = paths.config();
     let mut cfg = crate::load_cfg(paths)?;
@@ -141,7 +184,7 @@ pub async fn run(paths: &Paths, cmd: McpServersCmd, out: &mut dyn Write, input: 
                 return Ok(());
             }
             list.push(s);
-            cfg.save(&path)?;
+            write_servers(&path, list)?;
             writeln!(out, "Added `{}`. Restart ymird to use it; every tool call will ask for approval on the asking device.", a.id)?;
             Ok(())
         }
@@ -151,7 +194,7 @@ pub async fn run(paths: &Paths, cmd: McpServersCmd, out: &mut dyn Write, input: 
             if list.len() == before {
                 bail!("no MCP server `{id}`");
             }
-            cfg.save(&path)?;
+            write_servers(&path, list)?;
             writeln!(out, "Removed `{id}`.")?;
             Ok(())
         }
@@ -174,7 +217,7 @@ pub async fn run(paths: &Paths, cmd: McpServersCmd, out: &mut dyn Write, input: 
 fn set_enabled(cfg: &mut ymir_core::config::NodeConfig, path: &std::path::Path, id: &str, on: bool, out: &mut dyn Write) -> Result<()> {
     let s = cfg.inference.agent.mcp.iter_mut().find(|s| s.id == id).with_context(|| format!("no MCP server `{id}`"))?;
     s.enabled = on;
-    cfg.save(path)?;
+    write_servers(path, &cfg.inference.agent.mcp)?;
     writeln!(out, "`{id}` is {}. Restart ymird to apply.", if on { "on" } else { "off" })?;
     Ok(())
 }
