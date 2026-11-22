@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ymir_core::Paths;
-use ymir_core::batch::{BatchItem, BatchTask, CachePolicy};
+use ymir_core::batch::{BatchItem, BatchTask, CacheMode};
 use ymir_core::dataset::{self, CHUNK, RowDefaults};
 
 use crate::bench::score::{extract_block, last_number, normalize, strip_think};
@@ -129,7 +129,7 @@ pub fn parse(text: &str, d: &RowDefaults) -> Result<Vec<EvalRow>> {
         rest.push_str(&serde_json::to_string(&v)?);
         rest.push('\n');
     }
-    let tasks = dataset::parse_rows(&rest, d)?;
+    let tasks: Vec<BatchTask> = dataset::parse_rows(&rest, d)?.into_iter().map(|r| r.task).collect();
     Ok(tasks.into_iter().zip(judged).map(|(task, (expect, rubric))| EvalRow { task, expect, rubric }).collect())
 }
 
@@ -237,7 +237,7 @@ fn scored(model: &str, row: &EvalRow, item: BatchItem) -> Scored {
 async fn ask_all(paths: &Paths, tasks: &[BatchTask], model: &str, job: &str, a: &EvalArgs) -> Result<Vec<BatchItem>> {
     let mut out = Vec::with_capacity(tasks.len());
     for chunk in tasks.chunks(CHUNK) {
-        out.extend(dataset::ask(&paths.socket(), chunk, model, job, a.concurrency, a.retries, CachePolicy::Bypass).await?);
+        out.extend(dataset::ask(&paths.socket(), chunk, model, job, a.concurrency, a.retries, CacheMode::Bypass).await?);
     }
     Ok(out)
 }

@@ -203,6 +203,10 @@ pub struct BatchJsonlArgs {
     /// Accept `--license unknown`.
     #[arg(long, requires = "jsonl")]
     pub allow_unknown_license: bool,
+    /// A sources manifest (JSON: a topic and each source's id, title, url and license). Every row
+    /// must then name its `source`; the dataset's manifest records the sources.
+    #[arg(long, requires = "jsonl")]
+    pub sources: Option<PathBuf>,
     /// Continue an interrupted run: rows already answered in `--out` are skipped.
     #[arg(long, requires = "jsonl")]
     pub resume: bool,
@@ -218,8 +222,9 @@ pub struct BatchJsonlArgs {
     /// Seed for rows that don't set one.
     #[arg(long, requires = "jsonl")]
     pub seed: Option<u64>,
-    /// `bypass` (default) asks for fresh answers; `use` lets the answer cache answer. Either way,
-    /// rows answered from the cache are marked and not usable.
+    /// `bypass` (default) asks for fresh answers and stores none; `refresh` asks for fresh answers
+    /// and lets them refresh the cache; `use` lets the cache answer. Either way, rows answered from
+    /// the cache are marked and not usable.
     #[arg(long, value_enum, requires = "jsonl")]
     pub cache: Option<CacheArg>,
 }
@@ -228,6 +233,7 @@ pub struct BatchJsonlArgs {
 pub enum CacheArg {
     Use,
     Bypass,
+    Refresh,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1128,7 +1134,7 @@ async fn batch_jsonl(
     retries: Option<u32>,
     a: BatchJsonlArgs,
 ) -> Result<()> {
-    use ymir_core::batch::CachePolicy;
+    use ymir_core::batch::CacheMode;
     use ymir_core::dataset::{Generate, RowDefaults};
     if file == "-" {
         bail!("--jsonl reads a file, not stdin (its hash goes in the manifest)");
@@ -1145,12 +1151,14 @@ async fn batch_jsonl(
         license,
         allow_unknown_license: a.allow_unknown_license,
         defaults: RowDefaults { system: a.system, temperature: a.temperature, top_p: a.top_p, max_tokens: a.max_tokens, seed: a.seed },
+        sources: a.sources,
         resume: a.resume,
         concurrency,
         retries,
         cache: match a.cache.unwrap_or(CacheArg::Bypass) {
-            CacheArg::Use => CachePolicy::Use,
-            CacheArg::Bypass => CachePolicy::Bypass,
+            CacheArg::Use => CacheMode::Use,
+            CacheArg::Bypass => CacheMode::Bypass,
+            CacheArg::Refresh => CacheMode::Refresh,
         },
     };
     let s = ymir_core::dataset::generate(&paths.socket(), &g, &mut |done, total| {
@@ -1165,7 +1173,7 @@ async fn batch_jsonl(
         "{} sent, {} skipped (already answered); {} of {} rows answered, {} usable, {} failed, {} from the cache, {} by a stand-in",
         s.sent, s.skipped, m.rows_answered, m.rows_in_input, m.rows_usable, m.rows_failed, m.cache_hits, m.standins
     )?;
-    if !m.cache_policy_supported {
+    if !m.cache_mode_supported {
         writeln!(out, "note: the pool can't skip its answer cache yet; rows it answered from the cache are marked unusable")?;
     }
     writeln!(out, "manifest: {}", s.manifest_path.display())?;

@@ -1,0 +1,7 @@
+{
+  "topic": "Decentralized networks: how they work",
+  "sources": [
+    {"id": "dht-notes", "title": "Synthetic notes on distributed hash tables (test fixture)", "url": "https://example.org/dht-notes", "license": "CC0-1.0", "kind": "notes"},
+    {"id": "relay-notes", "title": "Synthetic notes on relays and hole punching (test fixture)", "url": "https://example.org/relay-notes", "license": "CC-BY-4.0", "kind": "notes"}
+  ]
+}

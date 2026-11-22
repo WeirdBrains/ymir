@@ -18,6 +18,10 @@
 //! cache, no stand-in answered, and the model that answered is the teacher. Generation waits for
 //! the teacher to load rather than take a stand-in.
 //!
+//! With `--sources FILE`, a sources manifest ([`Sources`]: the topic and each source's URL and
+//! license) is checked, every row must name its `source`, and the dataset's manifest records the
+//! sources, their licenses and rows per source.
+//!
 //! Runs go to `ymird` in chunks and every chunk is appended to the output as it finishes, so
 //! `--resume` picks up after an interrupted run: rows already answered are skipped (failed rows
 //! are tried again and appended, and the last row for an id wins).
@@ -32,7 +36,7 @@ use sha2::{Digest, Sha256};
 use weirdnet_agent::remote::infer::v2::{Sampling, Usage};
 use weirdnet_agent::{Message, Role};
 
-use crate::batch::{BatchItem, BatchTask, CachePolicy};
+use crate::batch::{BatchItem, BatchTask, CacheMode, cache_mode_supported};
 use crate::control::{self, ControlRequest};
 
 /// The manifest's format name.
@@ -78,11 +82,21 @@ struct InputRow {
     seed: Option<u64>,
     #[serde(default)]
     stop: Option<Vec<String>>,
+    /// The id of the source (in the sources manifest) this row comes from.
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// A parsed input row: the task, and the source it comes from, if it names one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub task: BatchTask,
+    pub source: Option<String>,
 }
 
 /// Parses an input file: one JSON object per line; blank lines and lines starting with `//` are
 /// skipped. A row without an `id` gets its line number. Ids must be unique.
-pub fn parse_rows(text: &str, d: &RowDefaults) -> Result<Vec<BatchTask>> {
+pub fn parse_rows(text: &str, d: &RowDefaults) -> Result<Vec<Row>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for (n, line) in text.lines().enumerate() {
@@ -126,7 +140,10 @@ pub fn parse_rows(text: &str, d: &RowDefaults) -> Result<Vec<BatchTask>> {
         sampling.top_k = row.top_k;
         sampling.max_tokens = row.max_tokens.or(d.max_tokens);
         sampling.stop = row.stop.unwrap_or_default();
-        out.push(BatchTask { id, messages, sampling, seed: row.seed.or(d.seed) });
+        if row.source.as_deref().is_some_and(|x| x.trim().is_empty()) {
+            bail!("line {line_no}: `source` is empty");
+        }
+        out.push(Row { task: BatchTask { id, messages, sampling, seed: row.seed.or(d.seed) }, source: row.source });
     }
     if out.is_empty() {
         bail!("no rows in the input");
@@ -159,6 +176,9 @@ pub struct OutputRow {
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The source the row comes from (an id in the sources manifest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl OutputRow {
@@ -180,6 +200,7 @@ impl OutputRow {
             finish_reason: item.finish_reason,
             usage: item.usage,
             error,
+            source: None,
         }
     }
 }
@@ -214,6 +235,100 @@ pub struct Teacher {
     pub license_source: String,
 }
 
+/// The sources a dataset is drawn from (`--sources FILE`, JSON). The operator writes it; Ymir
+/// fetches nothing. Every source needs a license, so the dataset's manifest can say what each row
+/// may be used for.
+///
+/// ```json
+/// {"topic": "Decentralized networks: how they work",
+///  "sources": [{"id": "kad", "title": "Kademlia", "url": "https://example.org/kademlia.pdf",
+///               "license": "CC-BY-4.0", "kind": "paper"}]}
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sources {
+    pub topic: String,
+    pub sources: Vec<Source>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Source {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    /// An SPDX id or license name; `unknown` only with `--allow-unknown-license`.
+    pub license: String,
+    /// `paper`, `spec`, `docs`, `book`...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+impl Sources {
+    /// Parses and checks a sources manifest: a topic, unique non-empty ids, http(s) URLs and a
+    /// license for every source.
+    pub fn parse(text: &str, allow_unknown_license: bool) -> Result<Self> {
+        let s: Sources = serde_json::from_str(text).context("the sources manifest is not valid")?;
+        if s.topic.trim().is_empty() {
+            bail!("the sources manifest has no topic");
+        }
+        if s.sources.is_empty() {
+            bail!("the sources manifest lists no sources");
+        }
+        let mut seen = HashSet::new();
+        for x in &s.sources {
+            if x.id.trim().is_empty() || !seen.insert(x.id.as_str()) {
+                bail!("source id {:?} is empty or used twice", x.id);
+            }
+            if !(x.url.starts_with("https://") || x.url.starts_with("http://")) {
+                bail!("source {}: the url must be http(s)", x.id);
+            }
+            check_license(&x.license, allow_unknown_license).with_context(|| format!("source {}", x.id))?;
+        }
+        Ok(s)
+    }
+
+    pub fn ids(&self) -> HashSet<&str> {
+        self.sources.iter().map(|x| x.id.as_str()).collect()
+    }
+}
+
+/// Checks that every row's `source` is in `sources`, and, when there are sources, that every row
+/// names one.
+pub fn check_row_sources(rows: &[Row], sources: Option<&Sources>) -> Result<()> {
+    match sources {
+        None => {
+            if let Some(r) = rows.iter().find(|r| r.source.is_some()) {
+                bail!("row {} names a source but no --sources manifest was given", r.task.id);
+            }
+        }
+        Some(s) => {
+            let ids = s.ids();
+            for r in rows {
+                match r.source.as_deref() {
+                    None => bail!("row {} names no source (every row needs one with --sources)", r.task.id),
+                    Some(x) if !ids.contains(x) => bail!("row {}: source {x:?} is not in the sources manifest", r.task.id),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The sources part of a dataset's manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourcesRecord {
+    pub name: String,
+    pub sha256: String,
+    pub topic: String,
+    pub sources: Vec<Source>,
+    /// Rows per source id.
+    pub rows: BTreeMap<String, usize>,
+}
+
 /// Written next to the output as `OUT.manifest.json`, rewritten after every chunk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -225,9 +340,11 @@ pub struct Manifest {
     pub input_sha256: String,
     pub output_name: String,
     pub defaults: RowDefaults,
-    pub cache: CachePolicy,
-    /// Whether the pool could honour `cache` (a bypass is not on the wire yet).
-    pub cache_policy_supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<SourcesRecord>,
+    pub cache: CacheMode,
+    /// Whether the pool could honour `cache` (no cache mode is on the wire yet).
+    pub cache_mode_supported: bool,
     pub rows_in_input: usize,
     pub rows_answered: usize,
     pub rows_usable: usize,
@@ -270,10 +387,12 @@ pub struct Generate {
     pub license: String,
     pub allow_unknown_license: bool,
     pub defaults: RowDefaults,
+    /// A sources manifest ([`Sources`]); every row then names its `source`.
+    pub sources: Option<PathBuf>,
     pub resume: bool,
     pub concurrency: Option<usize>,
     pub retries: Option<u32>,
-    pub cache: CachePolicy,
+    pub cache: CacheMode,
 }
 
 /// What a run did.
@@ -302,7 +421,7 @@ pub async fn ask(
     job: &str,
     concurrency: Option<usize>,
     retries: Option<u32>,
-    cache: CachePolicy,
+    cache: CacheMode,
 ) -> Result<Vec<BatchItem>> {
     let req = ControlRequest::BatchTasks {
         tasks: tasks.to_vec(),
@@ -343,7 +462,22 @@ pub async fn generate(socket: &Path, g: &Generate, progress: &mut dyn FnMut(usiz
     check_license(&g.license, g.allow_unknown_license)?;
     let bytes = std::fs::read(&g.input).with_context(|| format!("reading {}", g.input.display()))?;
     let text = String::from_utf8(bytes.clone()).context("the input is not UTF-8")?;
-    let tasks = parse_rows(&text, &g.defaults)?;
+    let parsed = parse_rows(&text, &g.defaults)?;
+    let sources = match &g.sources {
+        None => None,
+        Some(p) => {
+            let b = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+            let s = Sources::parse(std::str::from_utf8(&b).context("the sources manifest is not UTF-8")?, g.allow_unknown_license)?;
+            Some((s, format!("{:x}", Sha256::digest(&b)), file_name(p)))
+        }
+    };
+    check_row_sources(&parsed, sources.as_ref().map(|(s, _, _)| s))?;
+    let source_of: BTreeMap<String, String> = parsed.iter().filter_map(|r| Some((r.task.id.clone(), r.source.clone()?))).collect();
+    let mut rows_per_source: BTreeMap<String, usize> = BTreeMap::new();
+    for x in source_of.values() {
+        *rows_per_source.entry(x.clone()).or_default() += 1;
+    }
+    let tasks: Vec<BatchTask> = parsed.into_iter().map(|r| r.task).collect();
     let input_sha256 = format!("{:x}", Sha256::digest(&bytes));
     let mpath = manifest_path(&g.output);
 
@@ -377,8 +511,9 @@ pub async fn generate(socket: &Path, g: &Generate, progress: &mut dyn FnMut(usiz
         input_sha256,
         output_name: file_name(&g.output),
         defaults: g.defaults.clone(),
+        sources: sources.map(|(s, sha256, name)| SourcesRecord { name, sha256, topic: s.topic, sources: s.sources, rows: rows_per_source }),
         cache: g.cache,
-        cache_policy_supported: g.cache.supported(),
+        cache_mode_supported: cache_mode_supported(g.cache),
         rows_in_input: tasks.len(),
         rows_answered: 0,
         rows_usable: 0,
@@ -401,7 +536,8 @@ pub async fn generate(socket: &Path, g: &Generate, progress: &mut dyn FnMut(usiz
         let items = ask(socket, chunk, &g.teacher, &job, g.concurrency, g.retries, g.cache).await?;
         let mut buf = Vec::new();
         for (t, item) in chunk.iter().zip(items) {
-            let row = OutputRow::new(t, item, &g.teacher);
+            let mut row = OutputRow::new(t, item, &g.teacher);
+            row.source = source_of.get(&t.id).cloned();
             serde_json::to_writer(&mut buf, &row)?;
             buf.push(b'\n');
             rows.retain(|x| x.id != row.id);
@@ -447,7 +583,7 @@ mod tests {
 {"prompt": "two", "temperature": 0, "seed": 9, "stop": ["\n"], "system": "Own."}
 {"id": 7, "messages": [{"role": "system", "content": "Sys."}, {"role": "user", "content": "three"}]}
 "#;
-        let rows = parse_rows(text, &d).unwrap();
+        let rows: Vec<BatchTask> = parse_rows(text, &d).unwrap().into_iter().map(|r| r.task).collect();
         assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "4", "7"]);
         assert_eq!(rows[0].messages.len(), 2);
         assert_eq!(rows[0].messages[0].role, Role::System);
@@ -510,6 +646,41 @@ mod tests {
         assert_eq!(back.iter().map(|r| (r.id.as_str(), r.ok)).collect::<Vec<_>>(), [("a", true), ("b", true), ("c", false)]);
         let done = done_ids(&back);
         assert!(done.contains("a") && done.contains("b") && !done.contains("c"));
+    }
+
+    #[test]
+    fn sources_are_checked_and_rows_must_name_them() {
+        let good = r#"{"topic": "T", "sources": [{"id": "a", "title": "A", "url": "https://example.org/a", "license": "CC-BY-4.0", "kind": "paper"},
+                                               {"id": "b", "title": "B", "url": "http://example.org/b", "license": "MIT"}]}"#;
+        let s = Sources::parse(good, false).unwrap();
+        assert_eq!(s.ids().len(), 2);
+        for (bad, want) in [
+            (r#"{"topic": "", "sources": [{"id": "a", "title": "A", "url": "https://x", "license": "MIT"}]}"#, "no topic"),
+            (r#"{"topic": "T", "sources": []}"#, "no sources"),
+            (r#"{"topic": "T", "sources": [{"id": "a", "title": "A", "url": "ftp://x", "license": "MIT"}]}"#, "http(s)"),
+            (r#"{"topic": "T", "sources": [{"id": "a", "title": "A", "url": "https://x", "license": "unknown"}]}"#, "source a"),
+            (
+                r#"{"topic": "T", "sources": [{"id": "a", "title": "A", "url": "https://x", "license": "MIT"}, {"id": "a", "title": "B", "url": "https://y", "license": "MIT"}]}"#,
+                "twice",
+            ),
+            (r#"{"topic": "T", "sources": [{"id": "a", "title": "A", "url": "https://x", "license": "MIT", "licence": "x"}]}"#, "not valid"),
+        ] {
+            let e = format!("{:#}", Sources::parse(bad, false).unwrap_err());
+            assert!(e.contains(want), "{bad}: {e}");
+        }
+        assert!(Sources::parse(r#"{"topic": "T", "sources": [{"id": "a", "title": "A", "url": "https://x", "license": "unknown"}]}"#, true).is_ok());
+
+        let d = RowDefaults::default();
+        let rows =
+            parse_rows("{\"id\": \"1\", \"prompt\": \"q\", \"source\": \"a\"}\n{\"id\": \"2\", \"prompt\": \"q\", \"source\": \"b\"}", &d).unwrap();
+        assert_eq!(rows[0].source.as_deref(), Some("a"));
+        assert!(check_row_sources(&rows, Some(&s)).is_ok());
+        assert!(format!("{:#}", check_row_sources(&rows, None).unwrap_err()).contains("no --sources"));
+        let stray = parse_rows("{\"id\": \"1\", \"prompt\": \"q\", \"source\": \"zzz\"}", &d).unwrap();
+        assert!(format!("{:#}", check_row_sources(&stray, Some(&s)).unwrap_err()).contains("not in the sources manifest"));
+        let none = parse_rows("{\"id\": \"1\", \"prompt\": \"q\"}", &d).unwrap();
+        assert!(format!("{:#}", check_row_sources(&none, Some(&s)).unwrap_err()).contains("names no source"));
+        assert!(check_row_sources(&none, None).is_ok());
     }
 
     #[test]

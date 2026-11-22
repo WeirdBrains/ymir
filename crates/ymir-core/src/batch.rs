@@ -37,43 +37,52 @@ pub struct BatchOptions {
     /// Wait for the requested model to load rather than take a stand-in's answer.
     pub wait_for_model: bool,
     /// Whether answers may come from the inference nodes' answer cache.
-    pub cache: CachePolicy,
+    pub cache: CacheMode,
 }
 
 impl BatchOptions {
     pub fn new(job: impl Into<String>) -> Self {
-        Self { model: None, concurrency: 4, retries: 4, job: job.into(), wait_for_model: false, cache: CachePolicy::Use }
+        Self { model: None, concurrency: 4, retries: 4, job: job.into(), wait_for_model: false, cache: CacheMode::Use }
     }
 }
 
-/// Whether a batch's answers may come from the answer cache.
+/// Answer-cache policy for a request: the same name and variants as `weirdnet-agent`'s
+/// `remote::infer::v2::CacheMode` (built, not yet published). Until Ymir moves to that release
+/// this is a local copy and nothing of it goes on the wire; then this enum becomes
+/// `pub use weirdnet_agent::remote::infer::v2::CacheMode;` and [`with_cache`] calls
+/// `Request::with_cache`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CachePolicy {
-    /// The inference node may answer from its cache (today's behaviour for every request).
+pub enum CacheMode {
+    /// The inference node may answer from its cache and may store the answer (today's behaviour).
     #[default]
     Use,
-    /// Ask for a fresh answer. infer/2 has no way to ask for this yet (it is requested from
-    /// `weirdnet-agent` as a per-request cache mode), so for now this is the same as `Use` on the
-    /// wire, and callers must check [`BatchItem::cache_hit`]. See [`apply_cache_policy`].
+    /// Never answer from a cache and never store this answer.
     Bypass,
+    /// Don't answer from a cache, but the fresh answer may refresh the entry.
+    Refresh,
 }
 
-impl CachePolicy {
-    /// Whether the pool honours this policy today.
-    pub fn supported(self) -> bool {
-        matches!(self, CachePolicy::Use)
-    }
+/// Whether the pool honours `mode` today: only [`CacheMode::Use`] until infer/2 carries a cache
+/// mode. Callers check [`BatchItem::cache_hit`] either way.
+pub fn cache_mode_supported(mode: CacheMode) -> bool {
+    matches!(mode, CacheMode::Use)
 }
 
-/// Sets `policy` on `req`. The one place a request learns its cache policy.
+/// Sets `mode` on `req`: the one place a request learns its cache mode.
 //
-// TODO(weirdnet-agent cache mode): when infer/2 carries a per-request cache mode, map
-// `CachePolicy::Bypass` to it here and make `CachePolicy::supported` say so. Until then the
-// cache is skipped only where it already is (answers that are not deterministic, which the
-// exact cache never stores), and a hit is reported through `Meta::cache_hit`.
-pub fn apply_cache_policy(req: Request, policy: CachePolicy) -> Request {
-    let _ = policy;
+// TODO(weirdnet-agent 0.5.1, CacheMode): replace the body with `req.with_cache(mode)` and
+// `cache_mode_supported` with `true`. Until then the exact cache is skipped only where it already
+// is (answers that are not deterministic, which it never stores), and a hit is reported through
+// `Meta::cache_hit`.
+pub fn with_cache(req: Request, mode: CacheMode) -> Request {
+    let _ = mode;
+    req
+}
+
+/// Sets wait-for-model on `req` (`Request::with_wait_for_model` in `weirdnet-agent` 0.5.1).
+pub fn with_wait_for_model(mut req: Request, on: bool) -> Request {
+    req.wait_for_model = on;
     req
 }
 
@@ -160,14 +169,14 @@ pub fn request_for(task: &BatchTask, o: &BatchOptions, attempt: u32) -> Request 
         .with_job_id(format!("{}-{}", o.job, task.id))
         .with_sampling(task.sampling.clone());
     req.attempt = attempt;
-    req.wait_for_model = o.wait_for_model;
+    let mut req = with_wait_for_model(req, o.wait_for_model);
     if let Some(seed) = task.seed {
         req = req.with_seed(seed);
     }
     if let Some(m) = &o.model {
         req = req.with_model(m.clone());
     }
-    apply_cache_policy(req, o.cache)
+    with_cache(req, o.cache)
 }
 
 async fn task(pool: &Pool, index: usize, t: &BatchTask, o: &BatchOptions, cancel: &CancelToken) -> BatchItem {
@@ -256,12 +265,13 @@ mod tests {
 
     #[test]
     fn bypass_is_not_on_the_wire_yet() {
-        assert!(CachePolicy::Use.supported());
-        assert!(!CachePolicy::Bypass.supported());
+        assert!(cache_mode_supported(CacheMode::Use));
+        assert!(!cache_mode_supported(CacheMode::Bypass) && !cache_mode_supported(CacheMode::Refresh));
+        assert_eq!(serde_json::to_string(&CacheMode::Refresh).unwrap(), "\"refresh\"");
         let t = BatchTask::prompt("1", "x");
         let mut o = BatchOptions::new("b");
         let plain = request_for(&t, &o, 0);
-        o.cache = CachePolicy::Bypass;
+        o.cache = CacheMode::Bypass;
         let bypass = request_for(&t, &o, 0);
         assert_eq!((plain.raw, plain.input), (bypass.raw, bypass.input));
     }

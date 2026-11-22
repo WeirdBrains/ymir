@@ -100,7 +100,7 @@ pub enum ControlRequest {
         #[serde(default)]
         wait_for_model: bool,
         #[serde(default)]
-        cache: crate::batch::CachePolicy,
+        cache: crate::batch::CacheMode,
     },
     /// Manage model files on the user's model nodes over Weirdnet (`ymirctl models --node`). The
     /// answer is a stream of [`crate::models::ModelsLine`]s (a pull's progress, then the result), not

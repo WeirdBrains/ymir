@@ -94,7 +94,8 @@ async fn jsonl_generation_marks_rows_writes_a_manifest_and_resumes() -> Result<(
     assert_eq!(manifest["input_name"], "prompts.jsonl");
     assert_eq!((manifest["rows_answered"].as_u64(), manifest["answered_by"]["teacher"].as_u64()), (Some(3), Some(3)));
     assert_eq!(manifest["cache"], "bypass");
-    assert_eq!(manifest["cache_policy_supported"], false);
+    assert_eq!(manifest["cache_mode_supported"], false);
+    assert!(manifest.get("sources").is_none());
     let job = manifest["job"].as_str().unwrap().to_string();
 
     // The output exists: refused without --resume.
@@ -123,6 +124,46 @@ async fn jsonl_generation_marks_rows_writes_a_manifest_and_resumes() -> Result<(
     let e = ctl(&home, &other).await.unwrap_err();
     assert!(format!("{e:#}").contains("teacher"), "{e:#}");
 
+    daemon.shutdown().await;
+    Ok(())
+}
+
+const SOURCES_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks.sources.json");
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jsonl_generation_records_its_sources() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (home, daemon) = node(dir.path()).await?;
+    let input = dir.path().join("rows.jsonl");
+    std::fs::write(
+        &input,
+        "{\"id\": \"s1\", \"prompt\": \"How does a DHT find a key?\", \"source\": \"dht-notes\"}\n\
+         {\"id\": \"s2\", \"prompt\": \"Why do peers use relays?\", \"source\": \"relay-notes\"}\n\
+         {\"id\": \"s3\", \"prompt\": \"What is a k-bucket?\", \"source\": \"dht-notes\"}\n",
+    )?;
+    let out = dir.path().join("data.jsonl");
+    let (i, o) = (input.display().to_string(), out.display().to_string());
+    let args = ["batch", &i, "--jsonl", "--model", "teacher", "--out", &o, "--license", "apache-2.0", "--sources", SOURCES_FIXTURE];
+    let said = ctl(&home, &args).await?;
+    assert!(said.contains("3 usable"), "{said}");
+    let r = rows(&out);
+    assert_eq!(r.iter().map(|x| x["source"].as_str().unwrap()).collect::<Vec<_>>(), ["dht-notes", "relay-notes", "dht-notes"]);
+    let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("data.jsonl.manifest.json"))?)?;
+    let s = &m["sources"];
+    assert_eq!(s["name"], "decentralized-networks.sources.json");
+    assert_eq!(s["topic"], "Decentralized networks: how they work");
+    assert_eq!(s["sources"][1]["license"], "CC-BY-4.0");
+    assert_eq!((s["rows"]["dht-notes"].as_u64(), s["rows"]["relay-notes"].as_u64()), (Some(2), Some(1)));
+    assert_eq!(s["sha256"].as_str().unwrap().len(), 64);
+
+    // A row naming a source that isn't listed is refused before anything runs.
+    std::fs::write(&input, "{\"id\": \"x\", \"prompt\": \"q\", \"source\": \"nowhere\"}\n")?;
+    let o2 = dir.path().join("bad.jsonl").display().to_string();
+    let e = ctl(&home, &["batch", &i, "--jsonl", "--model", "teacher", "--out", &o2, "--license", "apache-2.0", "--sources", SOURCES_FIXTURE])
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("not in the sources manifest"), "{e:#}");
+    assert!(!dir.path().join("bad.jsonl").exists());
     daemon.shutdown().await;
     Ok(())
 }
