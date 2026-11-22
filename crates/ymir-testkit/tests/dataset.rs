@@ -117,7 +117,8 @@ async fn jsonl_generation_marks_rows_writes_a_manifest_and_resumes() -> Result<(
     // With `--cache use` the node's cache may answer: bypass stored nothing above, so dn-4 runs
     // and is stored, and dn-4-again (same question, temperature 0) is a hit, marked unusable.
     let used = dir.path().join("used.jsonl").display().to_string();
-    let with_use = with_license.iter().copied().map(|a| if a == o.as_str() { used.as_str() } else { a }).chain(["--cache", "use"]).collect::<Vec<_>>();
+    let with_use =
+        with_license.iter().copied().map(|a| if a == o.as_str() { used.as_str() } else { a }).chain(["--cache", "use"]).collect::<Vec<_>>();
     let said = ctl(&home, &with_use).await?;
     assert!(said.contains("5 rows answered, 4 usable") && said.contains("1 from the cache"), "{said}");
     let r = rows(Path::new(&used));

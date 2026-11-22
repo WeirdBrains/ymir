@@ -3,6 +3,18 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-22: training plan P1, `ymirctl batch --jsonl` and `ymirctl eval` (branch `feature/batch-jsonl`)
+
+**What changed**
+- `ymirctl batch FILE --jsonl` ([`ymir-core::dataset`](crates/ymir-core/src/dataset.rs), [`batch::run_tasks`](crates/ymir-core/src/batch.rs), control request `BatchTasks`): rows with their own messages or prompt, system prompt, sampling and seed; the teacher waits for its model (no stand-in); output rows marked `usable`, `cache_hit` and `standin` from the answer's `Meta`; a `*.manifest.json` with the teacher model and the operator's `--license` (required), input hash, counts and the cache mode; `--resume`; `--sources` for a sources manifest (topic, URL and license per source; nothing is fetched).
+- `ymirctl eval FILE --model M [--model M2] [--judge J]` ([`ymirctl/src/eval.rs`](crates/ymirctl/src/eval.rs)): bench scorers for `expect`, an optional judge for `rubric`, temperature 0 and a fixed seed, per-model totals.
+- `weirdnet-agent` 0.5.1, `weirdnet-semcache` 0.2.1 and `weirdnet-openai` 0.2.1: `batch::CacheMode` is now the infer/2 `CacheMode`; batch generation (default `--cache bypass`) and evals send it with `wait_for_model`. The coordinator checks `Request::cache` itself (`may_read` in `prepare`, `may_store` before `put`). Weights revisions: `[[model.local]] revision` goes in the capability record and `ModelNode::revision`; the cache uses `get_rev`/`put_rev` (no read when replicas report different revisions), and `Meta::revision` says which weights answered.
+- Docs: DESIGN (data generation and evals, answer cache, `revision` in the example `node.toml`), training plan status, CHANGELOG, site `ymirctl` page.
+
+**Checks:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` (see the merge entry for results). New tests: coordinator cache modes and revisions (`ymir-core/tests/nodes.rs`), JSONL generation, sources and eval against a mock pool (`ymir-testkit/tests/dataset.rs`), request shape (`batch` unit tests). Synthetic fixtures only; no live inference nodes, no real model.
+
+**Not done:** the teacher license read from the Hub, turning fetched sources into seed prompts, the synced job record (`--resume` is the stopgap), a real dataset.
+
 ## 2026-11-22: training plan, decisions (branch `feature/training-plan-answers`)
 
 **What changed:** [`docs/design/training.md`](docs/design/training.md) records m3talsmith's answers to the open questions (llama.cpp finetune as the trainer; first topic "Decentralized networks: how they work"; Bragi's training toggle after v1; version weights in Ymir's `balance`, with alternatives proposed) and links the white paper's training section. [DESIGN.md](docs/DESIGN.md#non-goals): the non-goal now reads "Ymir feeds, schedules and serves a separate trainer". Docs only.
