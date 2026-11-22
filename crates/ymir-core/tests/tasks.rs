@@ -245,7 +245,12 @@ impl weirdnet_mcp::Tools for Demo {
     fn specs(&self) -> &[weirdnet_mcp::ToolSpec] {
         DEMO_TOOLS
     }
-    fn call(&self, _tool: &weirdnet_mcp::ToolSpec, a: &serde_json::Value, _token: Option<&str>) -> Result<serde_json::Value, weirdnet_mcp::ToolError> {
+    fn call(
+        &self,
+        _tool: &weirdnet_mcp::ToolSpec,
+        a: &serde_json::Value,
+        _token: Option<&str>,
+    ) -> Result<serde_json::Value, weirdnet_mcp::ToolError> {
         Ok(json!({ "echo": a["text"] }))
     }
 }

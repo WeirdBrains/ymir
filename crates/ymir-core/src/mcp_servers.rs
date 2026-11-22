@@ -73,7 +73,8 @@ fn is_secret_ref(s: &str) -> bool {
 fn loopback(url: &str) -> bool {
     let host = url.strip_prefix("http://").unwrap_or_default();
     let host = host.split(['/', '?']).next().unwrap_or_default();
-    let name = if let Some(rest) = host.strip_prefix('[') { rest.split(']').next().unwrap_or_default() } else { host.split(':').next().unwrap_or_default() };
+    let name =
+        if let Some(rest) = host.strip_prefix('[') { rest.split(']').next().unwrap_or_default() } else { host.split(':').next().unwrap_or_default() };
     name == "localhost" || name == "::1" || name.parse::<std::net::Ipv4Addr>().is_ok_and(|a| a.is_loopback())
 }
 
