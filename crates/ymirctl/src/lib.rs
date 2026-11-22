@@ -5,6 +5,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 pub mod bench;
+pub mod eval;
 pub mod mcp;
 pub mod mcp_servers;
 pub mod models;
@@ -127,7 +128,9 @@ pub enum Cmd {
         cmd: GroupCmd,
     },
     /// Spread a list of prompts (one per line of FILE, or stdin with `-`) over the pool at batch
-    /// priority; prints each answer in order.
+    /// priority; prints each answer in order. With `--jsonl`, FILE holds one JSON row per line
+    /// (`prompt` or `messages`, optional `system`, sampling and `seed`) and the answers of the
+    /// teacher model `--model` are written as JSONL to `--out` with a manifest next to it.
     Batch {
         file: String,
         #[arg(long, short)]
@@ -138,12 +141,17 @@ pub enum Cmd {
         /// Extra tries for a task that fails in a way another try could fix.
         #[arg(long)]
         retries: Option<u32>,
+        #[command(flatten)]
+        jsonl: BatchJsonlArgs,
     },
     /// Benchmark the pool's models on each node (a node×model matrix over Weirdnet, or through the
     /// bridge): time to first token, tokens per second, latency and deterministic quality checks. One
     /// request at a time; saves timestamped JSON, Markdown and CSV. `bench list` shows what can run,
     /// `bench compare A.json B.json` compares two results.
     Bench(bench::BenchCmd),
+    /// Score models of the pool on a held-out JSONL file: deterministic checks (`expect`, with the
+    /// bench scorers) and, with `--judge`, rubric grading by another model.
+    Eval(eval::EvalArgs),
     /// This node's place in your Weirdnet: link it, link other devices, revoke.
     Pool {
         #[command(subcommand)]
@@ -181,6 +189,55 @@ pub struct ServiceArgs {
     /// directory defaults to /var/lib/ymir, /Library/Application Support/Ymir or %ProgramData%\Ymir.
     #[arg(long)]
     pub system: bool,
+}
+
+/// `ymirctl batch --jsonl`: data generation (see `ymir_core::dataset`).
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BatchJsonlArgs {
+    /// FILE is JSONL rows; write the answers as JSONL to `--out`, with `OUT.manifest.json`.
+    #[arg(long)]
+    pub jsonl: bool,
+    /// The output file (JSONL). It must not exist unless `--resume`.
+    #[arg(long, requires = "jsonl")]
+    pub out: Option<PathBuf>,
+    /// The teacher model's license (an SPDX id such as `apache-2.0`), recorded in the manifest.
+    /// Some licenses forbid training on a model's outputs: check before you generate.
+    #[arg(long, requires = "jsonl")]
+    pub license: Option<String>,
+    /// Accept `--license unknown`.
+    #[arg(long, requires = "jsonl")]
+    pub allow_unknown_license: bool,
+    /// A sources manifest (JSON: a topic and each source's id, title, url and license). Every row
+    /// must then name its `source`; the dataset's manifest records the sources.
+    #[arg(long, requires = "jsonl")]
+    pub sources: Option<PathBuf>,
+    /// Continue an interrupted run: rows already answered in `--out` are skipped.
+    #[arg(long, requires = "jsonl")]
+    pub resume: bool,
+    /// System prompt for rows that don't set one.
+    #[arg(long, requires = "jsonl")]
+    pub system: Option<String>,
+    #[arg(long, requires = "jsonl")]
+    pub temperature: Option<f32>,
+    #[arg(long, requires = "jsonl")]
+    pub top_p: Option<f32>,
+    #[arg(long, requires = "jsonl")]
+    pub max_tokens: Option<u32>,
+    /// Seed for rows that don't set one.
+    #[arg(long, requires = "jsonl")]
+    pub seed: Option<u64>,
+    /// `bypass` (default) asks for fresh answers and stores none; `refresh` asks for fresh answers
+    /// and lets them refresh the cache; `use` lets the cache answer. Either way, rows answered from
+    /// the cache are marked and not usable.
+    #[arg(long, value_enum, requires = "jsonl")]
+    pub cache: Option<CacheArg>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheArg {
+    Use,
+    Bypass,
+    Refresh,
 }
 
 #[derive(Subcommand, Debug)]
@@ -364,7 +421,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
         }
-        Cmd::Batch { file, model, concurrency, retries } => {
+        Cmd::Batch { file, model, concurrency, retries, jsonl } if jsonl.jsonl => {
+            batch_jsonl(&paths, out, file, model, concurrency, retries, jsonl).await
+        }
+        Cmd::Batch { file, model, concurrency, retries, .. } => {
             let text = if file == "-" {
                 let mut s = String::new();
                 input.read_to_string(&mut s)?;
@@ -390,6 +450,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Mcp(args) => mcp::run(cli_home, paths, args).await,
         Cmd::McpServers(cmd) => mcp_servers::run(&paths, cmd, out, input).await,
         Cmd::Bench(cmd) => bench_cmd(&paths, cmd, out).await,
+        Cmd::Eval(a) => eval::run(&paths, a, out).await,
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;
             pool::run(&paths, &cfg, cmd, out, input).await
@@ -1065,5 +1126,58 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             }
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn batch_jsonl(
+    paths: &Paths,
+    out: &mut dyn Write,
+    file: String,
+    model: Option<String>,
+    concurrency: Option<usize>,
+    retries: Option<u32>,
+    a: BatchJsonlArgs,
+) -> Result<()> {
+    use ymir_core::batch::CacheMode;
+    use ymir_core::dataset::{Generate, RowDefaults};
+    if file == "-" {
+        bail!("--jsonl reads a file, not stdin (its hash goes in the manifest)");
+    }
+    let Some(teacher) = model else { bail!("--jsonl needs --model: the teacher model") };
+    let Some(output) = a.out else { bail!("--jsonl needs --out FILE") };
+    let Some(license) = a.license else {
+        bail!("--jsonl needs --license: the teacher model's license (some forbid training on outputs); `unknown` with --allow-unknown-license")
+    };
+    let g = Generate {
+        input: PathBuf::from(file),
+        output,
+        teacher,
+        license,
+        allow_unknown_license: a.allow_unknown_license,
+        defaults: RowDefaults { system: a.system, temperature: a.temperature, top_p: a.top_p, max_tokens: a.max_tokens, seed: a.seed },
+        sources: a.sources,
+        resume: a.resume,
+        concurrency,
+        retries,
+        cache: match a.cache.unwrap_or(CacheArg::Bypass) {
+            CacheArg::Use => CacheMode::Use,
+            CacheArg::Bypass => CacheMode::Bypass,
+            CacheArg::Refresh => CacheMode::Refresh,
+        },
+    };
+    let s = ymir_core::dataset::generate(&paths.socket(), &g, &mut |done, total| {
+        if total > 0 {
+            eprintln!("{done}/{total} rows");
+        }
+    })
+    .await?;
+    let m = &s.manifest;
+    writeln!(
+        out,
+        "{} sent, {} skipped (already answered); {} of {} rows answered, {} usable, {} failed, {} from the cache, {} by a stand-in",
+        s.sent, s.skipped, m.rows_answered, m.rows_in_input, m.rows_usable, m.rows_failed, m.cache_hits, m.standins
+    )?;
+    writeln!(out, "manifest: {}", s.manifest_path.display())?;
     Ok(())
 }

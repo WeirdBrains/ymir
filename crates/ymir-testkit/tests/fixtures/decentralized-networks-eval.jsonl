@@ -1,0 +1,4 @@
+// A tiny synthetic eval fixture for tests only, on "Decentralized networks: how they work".
+{"id": "ev-1", "prompt": "Explain what a decentralized network is.", "expect": {"contains": "decentralized"}}
+{"id": "ev-2", "prompt": "Which component forwards traffic when peers cannot connect directly?", "expect": {"exact": ["a relay", "relay"]}}
+{"id": "ev-3", "prompt": "What does a relay do?", "rubric": "Says that a relay forwards traffic between peers."}

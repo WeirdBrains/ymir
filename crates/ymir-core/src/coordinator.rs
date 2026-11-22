@@ -504,15 +504,29 @@ impl Coordinator {
         // own model (a stand-in would continue another model's text).
         let continuing = req.assistant_prefix.is_some();
         // Answers to images and audio are not cached: the key does not cover the media.
+        // The request's own cache mode (`bypass`, `refresh`) skips the read; answers are looked up
+        // under the weights' revision when the nodes report one.
         if !req.raw
             && !continuing
             && needed.is_text()
-            && let Some(hit) = self.cache.get(&model, req)
+            && req.cache.may_read()
+            && let Some(rev) = self.cache_revision(&model)
+            && let Some(hit) = self.cache.get_rev(&model, rev.as_deref(), req)
         {
             return Ok(Prepared { model, standin: None, raw: false, route: Route::Cached(hit) });
         }
         let (t, cold) = self.choose(&model, req.wait_for_model || req.raw || continuing, needed)?;
         Ok(Prepared { model: t.model, standin: t.standin, raw: req.raw, route: Route::Node { node: t.node, cold } })
+    }
+
+    /// The weights revision cached answers for `model` are keyed on: `Some(None)` when no node
+    /// reports one, `Some(Some(rev))` when every node with the model reports the same one, and
+    /// `None` when they differ (or only some report one), so the answering weights aren't known in
+    /// advance and the cache is not read.
+    fn cache_revision(&self, model: &str) -> Option<Option<String>> {
+        let mut revs = self.nodes().into_iter().filter(|n| n.status().iter().any(|s| s.id == model)).map(|n| n.revision(model));
+        let first = revs.next().flatten();
+        revs.all(|r| r == first).then_some(first)
     }
 
     /// The stand-in, when policy allows it for this cold `model` on `node`.
@@ -694,10 +708,12 @@ impl Coordinator {
                     }
                     f.meta.served_by = Some(node.name().to_string());
                     f.meta.standin = standin.map(str::to_string);
+                    let revision = node.revision(model);
+                    f.meta.revision = revision.clone();
                     answer.finish_reason = Some(reason);
                     answer.usage = usage;
-                    if !raw && answer.complete() && req.assistant_prefix.is_none() && *shown == answer.text {
-                        self.cache.put(model, req, &answer);
+                    if !raw && req.cache.may_store() && answer.complete() && req.assistant_prefix.is_none() && *shown == answer.text {
+                        self.cache.put_rev(model, revision.as_deref(), req, &answer);
                     }
                     return Ok(f);
                 }

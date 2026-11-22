@@ -194,6 +194,35 @@ summary at the end.</p>
 <tr><td><code>--retries N</code></td><td>Extra tries for a task that fails in a way another try could fix.</td></tr>
 </tbody></table>
 <pre><code>ymirctl batch prompts.txt --concurrency 4 --retries 2 &gt; answers.tsv</code></pre>
+<h3 id="batch-jsonl"><code>ymirctl batch FILE --jsonl</code>: generate a dataset</h3>
+<p>With <code>--jsonl</code>, FILE holds one JSON row per line: <code>prompt</code> or <code>messages</code>, and optionally
+<code>id</code>, <code>system</code>, <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>max_tokens</code>,
+<code>seed</code> and <code>stop</code>. The teacher model (<code>--model</code>, required) answers every row, waiting for
+the model to load rather than taking a stand-in. Each answer is written to <code>--out</code> as a JSON row with the
+messages sent, the completion, the model and node that answered, and <code>usable</code>: false when the row failed,
+came from the answer cache, came from a stand-in or was answered by another model. A manifest,
+<code>OUT.manifest.json</code>, records the teacher, the license you gave for it, the input's hash and the counts.
+No dataset is built in.</p>
+<table>
+<thead><tr><th>Flag</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>--out FILE</code></td><td>The output (JSONL). It must not exist unless <code>--resume</code>.</td></tr>
+<tr><td><code>--license ID</code></td><td>The teacher's license, such as <code>apache-2.0</code>. Required: some licenses forbid training on a model's outputs. <code>unknown</code> needs <code>--allow-unknown-license</code>.</td></tr>
+<tr><td><code>--resume</code></td><td>Continue an interrupted run: rows already answered are skipped, failed rows are tried again.</td></tr>
+<tr><td><code>--system TEXT</code></td><td>System prompt for rows without one.</td></tr>
+<tr><td><code>--temperature</code>, <code>--top-p</code>, <code>--max-tokens</code>, <code>--seed</code></td><td>Defaults for rows that don't set their own.</td></tr>
+<tr><td><code>--sources FILE</code></td><td>A sources manifest (JSON: a <code>topic</code>, and each source's <code>id</code>, <code>title</code>, <code>url</code> and <code>license</code>). Every row then names its <code>source</code>, and the dataset's manifest records the sources and rows per source.</td></tr>
+<tr><td><code>--cache bypass|refresh|use</code></td><td><code>bypass</code> (default) asks for fresh answers; <code>refresh</code> also lets them refresh the cache; <code>use</code> lets the cache answer, and rows it answers are marked unusable.</td></tr>
+</tbody></table>
+<pre><code>ymirctl batch prompts.jsonl --jsonl --model teacher-model --license apache-2.0 --out data.jsonl --temperature 0.7</code></pre>
+<h3 id="eval"><code>ymirctl eval FILE</code>: score models</h3>
+<p>Scores one or more models (<code>--model</code>, repeatable) on a held-out JSONL file. Rows are like
+<code>batch --jsonl</code> rows plus <code>expect</code>, checked with the same scorers as <code>ymirctl bench</code>
+(<code>exact</code>, <code>contains</code>, <code>contains_all</code>, <code>number</code>, <code>json</code> or
+<code>lines</code>), and/or <code>rubric</code>, graded PASS or FAIL by <code>--judge MODEL</code>. Answers are at
+temperature 0 with <code>--seed</code> (default 0) unless a row says otherwise. Prints checks and judge scores
+separately per model, with errors, cached and stand-in answers; <code>--out FILE</code> writes every answer and verdict.</p>
+<pre><code>ymirctl eval held-out.jsonl --model base-model --model fine-tuned --judge judge-model --out eval.jsonl</code></pre>
 
 <h2 id="pool">Pool and devices</h2>
 <p>These commands manage this node's place in your Weirdnet: the identity shared by your linked devices. They need
@@ -406,6 +435,8 @@ ymirctl update status</code></pre>
 <tr><td>get or change the API key</td><td><code>ymirctl bridge token</code>, <code>--rotate</code>, then restart <code>ymird</code></td></tr>
 <tr><td>use the pool from Cursor, Claude or VS Code</td><td><a href="#mcp"><code>ymirctl mcp</code></a></td></tr>
 <tr><td>run many prompts</td><td><code>ymirctl batch prompts.txt</code></td></tr>
+<tr><td>generate a dataset</td><td><code>ymirctl batch rows.jsonl --jsonl --model M --license ID --out data.jsonl</code></td></tr>
+<tr><td>score models</td><td><code>ymirctl eval held-out.jsonl --model M</code></td></tr>
 </tbody></table>
 
 <h2 id="next">Where next</h2>

@@ -3,6 +3,34 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-22: training plan P1, `ymirctl batch --jsonl` and `ymirctl eval` (branch `feature/batch-jsonl`)
+
+**What changed**
+- `ymirctl batch FILE --jsonl` ([`ymir-core::dataset`](crates/ymir-core/src/dataset.rs), [`batch::run_tasks`](crates/ymir-core/src/batch.rs), control request `BatchTasks`): rows with their own messages or prompt, system prompt, sampling and seed; the teacher waits for its model (no stand-in); output rows marked `usable`, `cache_hit` and `standin` from the answer's `Meta`; a `*.manifest.json` with the teacher model and the operator's `--license` (required), input hash, counts and the cache mode; `--resume`; `--sources` for a sources manifest (topic, URL and license per source; nothing is fetched).
+- `ymirctl eval FILE --model M [--model M2] [--judge J]` ([`ymirctl/src/eval.rs`](crates/ymirctl/src/eval.rs)): bench scorers for `expect`, an optional judge for `rubric`, temperature 0 and a fixed seed, per-model totals.
+- `weirdnet-agent` 0.5.1, `weirdnet-semcache` 0.2.1 and `weirdnet-openai` 0.2.1: `batch::CacheMode` is now the infer/2 `CacheMode`; batch generation (default `--cache bypass`) and evals send it with `wait_for_model`. The coordinator checks `Request::cache` itself (`may_read` in `prepare`, `may_store` before `put`). Weights revisions: `[[model.local]] revision` goes in the capability record and `ModelNode::revision`; the cache uses `get_rev`/`put_rev` (no read when replicas report different revisions), and `Meta::revision` says which weights answered.
+- Docs: DESIGN (data generation and evals, answer cache, `revision` in the example `node.toml`), training plan status, CHANGELOG, site `ymirctl` page.
+
+**Checks:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` (see the merge entry for results). New tests: coordinator cache modes and revisions (`ymir-core/tests/nodes.rs`), JSONL generation, sources and eval against a mock pool (`ymir-testkit/tests/dataset.rs`), request shape (`batch` unit tests). Synthetic fixtures only; no live inference nodes, no real model.
+
+**Not done:** the teacher license read from the Hub, turning fetched sources into seed prompts, the synced job record (`--resume` is the stopgap), a real dataset.
+
+## 2026-11-22: LF-37 outside MCP servers for agent tasks
+
+**What changed**
+
+- A node can use outside MCP servers (stdio or streamable HTTP) in its agent tasks. They are listed as `[[inference.agent.mcp]]` in `node.toml` ([config and validation](crates/ymir-core/src/mcp_servers.rs)); the tools join the task's registry as `<id>.<tool>` in [`tasks::serve`](crates/ymir-core/src/tasks.rs). Every call asks for approval on the asking device; only linked devices can run tasks (unchanged). A server that fails to start or list its tools is left out with a warning.
+- Secrets are references only (`env:NAME` or `file:/path`); a literal secret or a plain-http address (other than loopback) is refused by validation.
+- `ymirctl mcp-servers list | add | remove | enable | disable | test` ([source](crates/ymirctl/src/mcp_servers.rs)). A local command asks before it is added (it runs as the user ymird runs as). The commands edit `node.toml` in place with `toml_edit`, so comments and layout survive; a change applies on the next ymird start.
+- Built on `weirdnet-mcp` 0.6.1 (features `client`, `agent`) and `weirdnet-agent` 0.5.0's `AgentSession`; no client code was written in Ymir. The wish list for the Weirdnet Lead is in Bragi's [mcp-client design](https://github.com/WeirdBrains/bragi/blob/main/docs/design/mcp-client.md).
+
+**Checks run:** see the merge entry.
+
+**Not tested:** a real stdio server with a real model on a node; Windows.
+
+**What's left:** a pool-wide server list (each node lists its own); `ymirctl chat --tools`; resources and prompts (not in the client yet).
+
+**What's next:** Bragi's MCP client settings.
 
 ## 2026-11-22: training plan, white paper reference fixed (branch `feature/training-plan-whitepaper-ref`)
 
@@ -11,6 +39,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **Checks:** none needed (docs only).
 
 **What's next:** link the section's source once the white paper is on main.
+
 
 ## 2026-11-22: training plan, decisions (branch `feature/training-plan-answers`)
 
@@ -350,19 +379,3 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **What's next:** none.
 
-## 2026-11-22: LF-37 outside MCP servers for agent tasks
-
-**What changed**
-
-- A node can use outside MCP servers (stdio or streamable HTTP) in its agent tasks. They are listed as `[[inference.agent.mcp]]` in `node.toml` ([config and validation](crates/ymir-core/src/mcp_servers.rs)); the tools join the task's registry as `<id>.<tool>` in [`tasks::serve`](crates/ymir-core/src/tasks.rs). Every call asks for approval on the asking device; only linked devices can run tasks (unchanged). A server that fails to start or list its tools is left out with a warning.
-- Secrets are references only (`env:NAME` or `file:/path`); a literal secret or a plain-http address (other than loopback) is refused by validation.
-- `ymirctl mcp-servers list | add | remove | enable | disable | test` ([source](crates/ymirctl/src/mcp_servers.rs)). A local command asks before it is added (it runs as the user ymird runs as). The commands edit `node.toml` in place with `toml_edit`, so comments and layout survive; a change applies on the next ymird start.
-- Built on `weirdnet-mcp` 0.6.1 (features `client`, `agent`) and `weirdnet-agent` 0.5.0's `AgentSession`; no client code was written in Ymir. The wish list for the Weirdnet Lead is in Bragi's [mcp-client design](https://github.com/WeirdBrains/bragi/blob/main/docs/design/mcp-client.md).
-
-**Checks run:** see the merge entry.
-
-**Not tested:** a real stdio server with a real model on a node; Windows.
-
-**What's left:** a pool-wide server list (each node lists its own); `ymirctl chat --tools`; resources and prompts (not in the client yet).
-
-**What's next:** Bragi's MCP client settings.

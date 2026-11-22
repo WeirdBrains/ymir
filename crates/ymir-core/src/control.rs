@@ -83,6 +83,25 @@ pub enum ControlRequest {
         #[serde(default)]
         retries: Option<u32>,
     },
+    /// Fan `tasks` (each with its own messages, sampling and seed) out over the pool at batch
+    /// priority and wait for all the answers (`ymirctl batch --jsonl`, in chunks).
+    BatchTasks {
+        tasks: Vec<crate::batch::BatchTask>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        concurrency: Option<usize>,
+        #[serde(default)]
+        retries: Option<u32>,
+        /// Job id prefix, stable across chunks and resumed runs (default: a fresh one).
+        #[serde(default)]
+        job: Option<String>,
+        /// Wait for the model to load rather than take a stand-in.
+        #[serde(default)]
+        wait_for_model: bool,
+        #[serde(default)]
+        cache: crate::batch::CacheMode,
+    },
     /// Manage model files on the user's model nodes over Weirdnet (`ymirctl models --node`). The
     /// answer is a stream of [`crate::models::ModelsLine`]s (a pull's progress, then the result), not
     /// one [`ControlResponse`].
@@ -534,6 +553,23 @@ impl ControlHandler {
                 o.concurrency = concurrency.unwrap_or(o.concurrency);
                 o.retries = retries.unwrap_or(o.retries);
                 let items = crate::batch::run(pool.clone(), prompts, o, weirdnet_agent::CancelToken::new()).await;
+                let failed = items.iter().filter(|i| !i.ok).count();
+                let mut r = ControlResponse::ok(format!("{} task(s), {failed} failed", items.len()));
+                r.batch = items;
+                r
+            }
+            ControlRequest::BatchTasks { tasks, model, concurrency, retries, job, wait_for_model, cache } => {
+                let Some(pool) = &self.pool else { return ControlResponse::err("batch needs the app role") };
+                let job = job.unwrap_or_else(|| {
+                    format!("batch-{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()))
+                });
+                let mut o = crate::batch::BatchOptions::new(job);
+                o.model = model;
+                o.concurrency = concurrency.unwrap_or(o.concurrency);
+                o.retries = retries.unwrap_or(o.retries);
+                o.wait_for_model = wait_for_model;
+                o.cache = cache;
+                let items = crate::batch::run_tasks(pool.clone(), tasks, o, weirdnet_agent::CancelToken::new()).await;
                 let failed = items.iter().filter(|i| !i.ok).count();
                 let mut r = ControlResponse::ok(format!("{} task(s), {failed} failed", items.len()));
                 r.batch = items;

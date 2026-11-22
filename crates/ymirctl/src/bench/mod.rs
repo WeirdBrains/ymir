@@ -15,7 +15,7 @@
 mod compare;
 pub mod hints;
 mod report;
-mod score;
+pub(crate) mod score;
 mod suites;
 
 use std::io::{IsTerminal, Write};

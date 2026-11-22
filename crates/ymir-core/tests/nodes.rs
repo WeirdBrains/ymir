@@ -10,7 +10,7 @@ use futures::stream;
 use serde_json::json;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::catalog::ModelState as AgentState;
-use weirdnet_agent::remote::infer::v2::{Prefix, Request, Usage};
+use weirdnet_agent::remote::infer::v2::{CacheMode, Prefix, Request, Usage};
 use weirdnet_agent::{CancelToken, ContentPart, Message, Modalities, ToolCall};
 use weirdnet_backends::{Chunk, ChunkStream, ModelState, ModelStatus};
 use weirdnet_semcache::NoCache;
@@ -51,6 +51,8 @@ struct Scripted {
     delay_ms: AtomicUsize,
     /// Whether its models take images and audio.
     media: AtomicBool,
+    /// The weights revision it reports for every model.
+    revision: Mutex<Option<String>>,
 }
 
 impl Scripted {
@@ -66,10 +68,14 @@ impl Scripted {
             load_fails: AtomicBool::new(false),
             delay_ms: AtomicUsize::new(0),
             media: AtomicBool::new(false),
+            revision: Mutex::new(None),
         })
     }
     fn set(&self, m: Mode) {
         *self.mode.lock().unwrap() = m;
+    }
+    fn set_revision(&self, rev: Option<&str>) {
+        *self.revision.lock().unwrap() = rev.map(str::to_string);
     }
 }
 
@@ -151,6 +157,9 @@ impl ModelNode for Scripted {
     }
     fn draining(&self) -> bool {
         self.draining.load(Ordering::SeqCst)
+    }
+    fn revision(&self, _model: &str) -> Option<String> {
+        self.revision.lock().unwrap().clone()
     }
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
@@ -478,4 +487,58 @@ async fn images_and_audio_go_only_to_nodes_that_take_them() {
     assert!(matches!(&e, RemoteError::BadRequest { message } if message.contains("does not take images")), "{e:?}");
     let e = c.prepare(&with_image()).err().expect("no model reads it");
     assert!(matches!(e, RemoteError::BadRequest { .. }), "{e:?}");
+}
+
+#[tokio::test]
+async fn the_request_cache_mode_skips_or_refreshes_the_answer_cache() {
+    let a = Scripted::new("a", &[("alpha", false, READY)]);
+    let c = cached(&[&a]);
+    let chats = || a.chats.load(Ordering::SeqCst);
+    // `bypass` neither reads nor stores: two engine calls, and still nothing cached after.
+    let bypass = plain().with_model("alpha").with_cache(CacheMode::Bypass);
+    say(&c, bypass.clone()).await.0.unwrap();
+    say(&c, bypass).await.0.unwrap();
+    assert_eq!(chats(), 2);
+    assert!(!c.prepare(&plain().with_model("alpha")).unwrap().cache_hit(), "bypass stored nothing");
+    // `refresh` skips the read but stores the fresh answer, which `use` then reads.
+    let refresh = plain().with_model("alpha").with_cache(CacheMode::Refresh);
+    assert!(!c.prepare(&refresh).unwrap().cache_hit());
+    say(&c, refresh).await.0.unwrap();
+    assert_eq!(chats(), 3);
+    assert!(c.prepare(&plain().with_model("alpha")).unwrap().cache_hit());
+    // A cached answer is there, but `bypass` and `refresh` still go to the engine.
+    assert!(!c.prepare(&plain().with_model("alpha").with_cache(CacheMode::Bypass)).unwrap().cache_hit());
+    assert!(!c.prepare(&plain().with_model("alpha").with_cache(CacheMode::Refresh)).unwrap().cache_hit());
+}
+
+#[tokio::test]
+async fn cached_answers_are_keyed_on_the_weights_revision() {
+    let a = Scripted::new("a", &[("alpha", false, READY)]);
+    a.set_revision(Some("r1"));
+    let c = cached(&[&a]);
+    let req = || plain().with_model("alpha");
+    let prepared = c.prepare(&req()).unwrap();
+    let out = Collect::default();
+    let f = c.run(prepared, &req(), &out, &CancelToken::new()).await.unwrap();
+    assert_eq!(f.meta.revision.as_deref(), Some("r1"), "the answer says which weights gave it");
+    assert!(c.prepare(&req()).unwrap().cache_hit(), "stored under r1");
+    // New weights under the same id: the old answer is not replayed.
+    a.set_revision(Some("r2"));
+    assert!(!c.prepare(&req()).unwrap().cache_hit());
+    say(&c, req()).await.0.unwrap();
+    assert!(c.prepare(&req()).unwrap().cache_hit(), "stored under r2");
+    // A node with no revision: the answers keyed on r1 and r2 aren't its own.
+    a.set_revision(None);
+    assert!(!c.prepare(&req()).unwrap().cache_hit());
+    // Replicas on different weights: which one answers isn't known in advance, so no read.
+    let b = Scripted::new("b", &[("alpha", false, READY)]);
+    a.set_revision(Some("r2"));
+    b.set_revision(Some("r3"));
+    let c2 = cached(&[&a, &b]);
+    say(&c2, req()).await.0.unwrap();
+    assert!(!c2.prepare(&req()).unwrap().cache_hit());
+    // Both on r2 again: the cache reads under r2.
+    b.set_revision(Some("r2"));
+    say(&c2, req()).await.0.unwrap();
+    assert!(c2.prepare(&req()).unwrap().cache_hit());
 }

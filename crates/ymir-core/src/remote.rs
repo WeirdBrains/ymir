@@ -344,6 +344,10 @@ impl ModelNode for RemoteModelNode {
         self.record().map(|c| c.models.into_iter().map(|m| m.status).collect()).unwrap_or_default()
     }
 
+    fn revision(&self, model: &str) -> Option<String> {
+        self.record()?.models.into_iter().find(|m| m.status.id == model)?.revision
+    }
+
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
             self.permitted()?;
