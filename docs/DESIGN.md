@@ -71,7 +71,7 @@ Weirdnet main until it ships (AGENTS.md); we don't build it inside the app.
 
 ## Non-goals
 
-- Training or fine-tuning (the separate trainer stays separate).
+- Training or fine-tuning inside Ymir: Ymir feeds, schedules and serves a separate trainer (decided by m3talsmith 2026-11-22; see [docs/design/training.md](design/training.md)).
 - Other users: no CI tenants, teammates or shared pools; no invites, membership roles or quotas.
 - Any HTTPS or API-key endpoint, LAN or public. No [WeirdBrains](https://weirdbrains.com)-run gateway (forbidden by AGENTS.md).
 - Writing our own inference engine: we drive llama.cpp and vLLM, and in-process llama.cpp through
