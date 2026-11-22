@@ -1,0 +1,77 @@
+\section{How data centers run LLM clouds}\label{sec:datacenter}
+
+Hyperscalers and GPU-cloud operators serve models on large, uniform fleets run by a cluster
+scheduler (Google's Borg and its open descendant Kubernetes), with inference layers such as Ray,
+the vLLM production stack, llm-d and NVIDIA Dynamo on top. Ymir solves a much smaller version of
+the same problem, a handful of mismatched machines owned by one person, so it borrows the ideas
+that still pay off at that size and leaves out the ones that only make sense for a fleet.
+
+{\small
+\begin{xltabular}{\linewidth}{@{}L{2.7cm}YY@{}}
+\toprule
+Concern & Typical data center & Ymir \\
+\midrule
+\endhead
+Scheduling & Cluster scheduler (Borg, Kubernetes) places containers; Ray or an operator manages model replicas & No cluster scheduler; one inference node will hold a lease and write the placement plan (designed, M6) \\
+Load balancing & KV-cache and load-aware routers (llm-d, Dynamo, Gateway API Inference Extension) & Power-of-two-choices on predicted completion, from signed capability records \\
+Prefill and decode & Often disaggregated onto separate GPU pools (DistServe, Dynamo, llm-d) & Not disaggregated; each engine does both \\
+Autoscaling and placement & Replicas scale with traffic and SLOs; new capacity is provisioned & Fixed hardware; designed replication and cross-node swap within what you own \\
+Failure handling & Retry on another replica; Dynamo can migrate a request with its tokens & Resume from the receiver's buffer with offsets, at model and coordinator level \\
+Tensor parallel networking & InfiniBand or NVLink fabrics, RDMA & Opt-in split groups on a declared private link (cable or isolated VLAN), never over Weirdnet \\
+Tenancy & Many tenants, quotas, rate limits, billing & One owner; fairness only between devices and priority classes \\
+Edge auth & Public HTTPS gateway with API keys or OAuth & No public endpoint; Noise-authenticated peers plus the identity roster \\
+Observability & Prometheus, tracing, SLO dashboards across the fleet & \code{ymirctl status}, optional Prometheus text on loopback, alerts by email and webhook \\
+Hardware & Homogeneous accelerators per pool & Heterogeneous personal hardware; capabilities advertised per node \\
+\bottomrule
+\end{xltabular}
+}
+
+\noindent Ideas Ymir borrows, each from its design doc:
+\begin{enumerate}
+  \item Power of two choices: score two random candidates and take the better, so stale load data does not cause herding (Mitzenmacher).
+  \item Priority classes: interactive, batch and background, with batch yielding between requests.
+  \item Admission control at the server: model nodes answer Busy when slots and queue are full, so several coordinators never overcommit a node.
+  \item Leases for a single writer: placement is decided by one inference node holding a renewable lease, while every node keeps routing (designed).
+  \item Signed, expiring capability records, much like heartbeat and node-status reporting in cluster managers.
+  \item Prefix-aware routing as a cost reduction, not a requirement (designed, from synced prefix hints).
+  \item Draining before maintenance, and per-device fair sharing in the spirit of deficit round robin.
+\end{enumerate}
+
+\noindent What Ymir deliberately does not do:
+\begin{enumerate}
+  \item Run a general cluster scheduler, containers or Kubernetes.
+  \item Disaggregate prefill and decode, or move KV caches between nodes; KV stays local and is rebuilt or warmed.
+  \item Autoscale by buying or provisioning capacity; the pool is the hardware you own.
+  \item Carry tensor-parallel traffic over its network; that stays on a fast private link.
+  \item Serve other tenants, issue API keys, enforce quotas or expose a public gateway.
+\end{enumerate}
+
+The result is a design that looks like a miniature inference cloud from the inside (routing,
+admission, priorities, failover, synced state) but is shaped for trust and heterogeneity rather
+than for scale.
+
+\subsection{At a glance: Ymir against the usual home stack}\label{sec:comparison-summary}
+
+{\small
+\begin{xltabular}{\linewidth}{@{}L{2.4cm}YYYY@{}}
+\toprule
+ & Ymir & llama-swap & Hosted APIs & Single-node servers \\
+\midrule
+\endhead
+Scope & Pool of your own machines & One machine & Provider's cloud & One machine \\
+Remote access & Weirdnet only, roster-checked & HTTP; add proxy or VPN & Public HTTPS & HTTP port; add proxy or VPN \\
+Credentials & Device identity; no API keys & Optional keys & API keys & Usually none or proxy keys \\
+Model swapping & Per node now; pool-wide designed & Per machine & Provider-managed & Per machine \\
+Mid-answer failover & Yes, both levels & No & Provider-dependent & No \\
+Where data goes & Only your linked devices & Your machine & Provider & Your machine \\
+\bottomrule
+\end{xltabular}
+}
+
+llama-swap is a per-machine proxy that starts and stops model servers on demand; Ymir absorbs that
+job into each model node's supervisor and adds routing across machines, so it replaces llama-swap
+rather than wrapping it. Hosted APIs offer scale and frontier models Ymir does not aim to match,
+at the cost of sending data off your hardware and managing keys. Single-node servers in the
+Ollama style are the simplest way to run a model on one box; Ymir's one-box mode covers the same
+ground, and stays OpenAI-compatible on loopback for local tools, but its point is what happens
+when you add the second machine.

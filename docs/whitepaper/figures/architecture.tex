@@ -1,0 +1,12 @@
+% Ymir roles and the protocols between them.
+\begin{tikzpicture}[node distance=9mm and 6mm]
+  \node[fbox=9cm] (apps) {\textbf{App nodes}\\Bragi desktop and phone, ymirctl, MCP server, loopback OpenAI bridge};
+  \node[fbox=9cm, below=of apps] (inf) {\textbf{Inference nodes (one or more)}\\catalog, routing, fairness, failover, context sync, alerts};
+  \node[fbox=4.6cm, below left=11mm and -4.3cm of inf] (m1) {\textbf{Model node}\\llama.cpp, vLLM or MLX-LM under a supervisor};
+  \node[fbox=4.6cm, below right=11mm and -4.3cm of inf] (m2) {\textbf{Model node}\\same wrapper, any hardware};
+  \node[fbox=4.6cm, below=of m2] (grp) {\textbf{Split group}\\llama.cpp RPC workers on a private link};
+  \draw[arr] (apps) -- node[elabel, right=2pt] {\code{infer/2}, \code{catalog/1}} (inf);
+  \draw[arr] (inf) -- node[elabel] {raw infer, \code{node/1}} (m1);
+  \draw[arr] (inf) -- node[elabel] {raw infer, \code{node/1}} (m2);
+  \draw[darr] (m2) -- node[elabel, right=2pt] {private link only} (grp);
+\end{tikzpicture}

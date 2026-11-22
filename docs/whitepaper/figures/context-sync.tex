@@ -1,0 +1,10 @@
+% How a conversation reaches the user's other devices.
+\begin{tikzpicture}[node distance=5mm]
+  \node[fterm] (w) {\textbf{A message is written}\\user turn on the app, or a finished answer under its job id};
+  \node[fbox, below=of w] (r) {\textbf{Sync record}\\conversation meta as a last-writer-wins register; one append-only record per message};
+  \node[fbox, below=of r] (s) {\textbf{Sealed}\\XChaCha20-Poly1305 under the roster's sync key; key rotates when a device is unlinked};
+  \node[fbox, below=of s] (l) {\textbf{Op log}\\ordered by hybrid logical clock; saved and reloaded across restarts};
+  \node[fbox, below=of l] (p) {\textbf{Pulled by peers}\\\code{/weirdnet/sync/2} on every sync pass, default every 30\,s};
+  \node[fterm, below=of p] (e) {\textbf{Inference nodes and Bragi devices}\\model nodes never hold conversations};
+  \foreach \a/\b in {w/r, r/s, s/l, l/p, p/e} \draw[arr] (\a) -- (\b);
+\end{tikzpicture}

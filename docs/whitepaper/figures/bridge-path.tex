@@ -1,0 +1,9 @@
+% Local tools reach the whole pool through the loopback bridge.
+\begin{tikzpicture}[node distance=9mm]
+  \node[fbox=3.2cm] (t) {\textbf{Jan, editor, script or MCP client}};
+  \node[fbox=3.2cm, right=of t] (b) {\textbf{Bridge on 127.0.0.1:8484}\\token, Host check, no CORS};
+  \node[fbox=3.2cm, right=of b] (p) {\textbf{Pool call} (\code{infer/2})\\to inference nodes};
+  \node[fbox=2.6cm, below=8mm of p] (c) {\textbf{Whole pool catalog}};
+  \draw[arr] (t) -- node[elabel, above=3pt, text width=2cm] {\code{/v1/...}} (b);
+  \draw[arr] (b) -- (p); \draw[arr] (p) -- (c);
+\end{tikzpicture}

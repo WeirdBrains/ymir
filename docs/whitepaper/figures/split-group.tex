@@ -1,0 +1,10 @@
+% A split group for one model.
+\begin{tikzpicture}[node distance=10mm and 6mm]
+  \node[fbox=7cm] (inf) {\textbf{Inference node}\\routes to the group like any model node};
+  \node[fbox=7cm, below=of inf] (lead) {\textbf{Leader model node}\\\code{llama-server --rpc} on loopback; advertises the model};
+  \node[fbox=5cm, below left=12mm and -3cm of lead] (w1) {\textbf{Worker model node}\\\code{rpc-server} bound to its private-link address};
+  \node[fbox=5cm, below right=12mm and -3cm of lead] (w2) {\textbf{Worker model node}\\\code{rpc-server} bound to its private-link address};
+  \draw[arr] (inf) -- node[elabel, right=2pt] {Weirdnet} (lead);
+  \draw[darr] (lead) -- node[elabel] {private link, $\geq$10\,Gb/s} (w1);
+  \draw[darr] (lead) -- node[elabel] {private link} (w2);
+\end{tikzpicture}

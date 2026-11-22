@@ -1,0 +1,13 @@
+% Milestone status counts, from ROADMAP.md in each repo.
+\begin{tikzpicture}
+\begin{axis}[wpbars, xbar stacked, height=4cm, bar width=12pt, xmax=12.5,
+    xlabel={Milestones}, ytick={0,1}, y dir=reverse,
+    yticklabels={{Ymir (M0--M10)},{Bragi (B1--B6)}}]
+  \addplot[fill=series1, draw=none] coordinates {(7,0) (2,1)};
+  \addplot[fill=series2, draw=none] coordinates {(3,0) (4,1)};
+  \addplot[fill=series3, draw=none] coordinates {(1,0) (0,1)};
+  \legend{Done, In progress, Planned}
+  \node[font=\footnotesize, anchor=west] at (axis cs:11,0) {11};
+  \node[font=\footnotesize, anchor=west] at (axis cs:6,1) {6};
+\end{axis}
+\end{tikzpicture}

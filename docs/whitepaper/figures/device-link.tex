@@ -1,0 +1,9 @@
+% Linking and unlinking a device.
+\begin{tikzpicture}[node distance=5mm]
+  \node[fterm] (n) {\textbf{New machine runs \code{ymirctl pool link}}\\prints a link offer (QR)};
+  \node[fbox, below=of n] (s) {\textbf{Owner admits it from an existing device}\\both screens show the same short code (SAS)};
+  \node[fbox, below=of s] (r) {\textbf{Roster updated and synced}\\until then every node answers NotAdmitted};
+  \node[fbox, below=of r] (o) {\textbf{Owner turns on its roles}\\model, inference, app};
+  \node[fterm, below=of o] (u) {\textbf{Unlink later}\\cut off everywhere; sync key rotates};
+  \draw[arr] (n) -- (s); \draw[arr] (s) -- (r); \draw[arr] (r) -- (o); \draw[darr] (o) -- (u);
+\end{tikzpicture}

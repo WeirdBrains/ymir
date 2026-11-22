@@ -1,0 +1,11 @@
+% Mid-answer failover at the inference-node level.
+\begin{tikzpicture}[y=-1cm]
+  \foreach \x/\t in {0/{\textbf{App pool}\\keeps what it has shown}, 6/{\textbf{Inference node 1}}, 12/{\textbf{Inference node 2}}}
+    { \node[seqactor] at (\x,0) {\t}; \draw[lifeline] (\x,0.5) -- (\x,7.6); }
+  \seqmsg[5cm]{0}{6}{1.3}{infer with \code{context_ref}}
+  \seqreply[5cm]{6}{0}{2.3}{Delta frames, offsets 0 to N}
+  \node[seqnote] at (6,3.2) {Inference node 1 dies; the app's stream resets or stalls};
+  \seqmsg[10cm]{0}{12}{4.4}{same \code{context_ref}, \code{assistant_prefix} = text shown, length N}
+  \node[seqnote=4.2cm] at (12,5.5) {Node 2 already has the conversation through sync, routes to a model node as usual};
+  \seqreply[10cm]{12}{0}{6.9}{Delta frames from offset N}
+\end{tikzpicture}

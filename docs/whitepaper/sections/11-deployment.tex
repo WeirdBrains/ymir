@@ -1,0 +1,30 @@
+\section{Deployment model}\label{sec:deployment}
+
+Ymir is designed to install as a user-level service with no root, though a system service is
+supported for headless servers. Release files are meant to carry a pinned llama.cpp build next to
+the binaries, in two variants: \code{ymir} (CPU and Vulkan) and \code{ymir-cuda} (CUDA 13 runtime,
+needs only the driver). Packaging scripts produce tar.gz, zip, deb, rpm, Arch and Nix artifacts and
+a Windows installer that registers a Windows service. There is no tagged release yet, so today's
+path is to build from source.
+
+\begin{lstlisting}[language=bash]
+cargo build --release -p ymird -p ymirctl
+python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --out target/release/llama.cpp
+ymirctl hw                      # hardware and model budget
+ymirctl setup --download        # picks models that fit, asks before downloading
+ymird &                         # model, inference and app roles in one process
+ymirctl chat "Hello"            # streams through the loopback bridge
+ymirctl pool link               # on a new machine: print a link offer to admit it
+\end{lstlisting}
+
+\begin{enumerate}
+  \item \textbf{One box, all roles.} A single machine runs \code{ymird} with every role; local tools use the loopback bridge and Bragi on a phone reaches it over Weirdnet.
+  \item \textbf{Server plus apps.} A GPU machine runs model and inference roles; laptops and phones are app nodes. Only Weirdnet crosses the network.
+  \item \textbf{Several model nodes.} Link another GPU machine with the model role on; it advertises what it can run and joins the catalog.
+  \item \textbf{Redundant coordinators.} Two or more inference nodes run active-active with synced state; apps fail over between them.
+\end{enumerate}
+
+Operators manage the pool with \code{ymirctl}: status, load and unload, drain, group up and down,
+model search and pull on any node over Weirdnet, and self-update with signed bundles and automatic
+rollback. \code{ymirctl mcp} exposes the node to MCP clients over stdio or loopback HTTP, with
+mutating tools gated behind explicit confirmation.

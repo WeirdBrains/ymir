@@ -1,0 +1,12 @@
+% Mid-answer failover at the model-node level.
+\begin{tikzpicture}[y=-1cm]
+  \foreach \x/\t in {0/{\textbf{App pool}\\Bragi or bridge}, 4.6/{\textbf{Inference node}}, 9.2/{\textbf{Model node A}}, 13.8/{\textbf{Model node B}}}
+    { \node[seqactor] at (\x,0) {\t}; \draw[lifeline] (\x,0.5) -- (\x,8.4); }
+  \seqmsg{0}{4.6}{1.3}{infer (job id, attempt 1)}
+  \seqmsg{4.6}{9.2}{2.3}{raw infer}
+  \seqreply{9.2}{4.6}{3.3}{Delta frames with offsets}
+  \node[seqnote] at (4.6,4.2) {Node A dies or stalls; inference node keeps its buffer};
+  \seqmsg[8cm]{4.6}{13.8}{5.4}{same messages, attempt 2, \code{assistant_prefix}}
+  \seqreply{13.8}{4.6}{6.5}{Delta from offset = prefix length}
+  \seqreply{4.6}{0}{7.6}{one unbroken stream, resumed flag}
+\end{tikzpicture}

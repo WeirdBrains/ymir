@@ -1,0 +1,103 @@
+% Ymir: a private cloud of LLM models -- white paper
+% Copyright 2026 Weird Brains LLC (https://weirdbrains.com). BSD-3-Clause.
+% Build: latexmk -pdf ymir-whitepaper.tex   (or: make)
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xltabular}
+\usepackage{enumitem}
+\usepackage[table]{xcolor}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,calc}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{hyperref}
+\usepackage{xurl}
+\usepackage{adjustbox}
+\setlength{\emergencystretch}{3em}
+
+\hypersetup{
+  pdftitle={Ymir: a private cloud of LLM models},
+  pdfauthor={Michael Christenson II},
+  pdfsubject={White paper},
+  colorlinks=true, linkcolor=black, urlcolor=blue!50!black, citecolor=black
+}
+
+\input{figures/styles}
+
+% --- Helpers --------------------------------------------------------------
+% Inline code; underscores and slashes need no escaping.
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+% Figure from figures/, shrunk only if wider than the text.
+\newcommand{\fig}[1]{\begin{adjustbox}{max width=\linewidth}\input{figures/#1}\end{adjustbox}}
+% Weird Brains, linked.
+\newcommand{\WB}{\href{https://weirdbrains.com}{Weird Brains LLC}}
+% Status labels kept from the original Page.
+\newcommand{\status}[1]{\quad{\mdseries\small\textsc{[#1]}}}
+\newcommand{\planned}{{\small\textsc{[planned]}}}
+% Callout box.
+\newtcolorbox{callout}[1][]{colback=black!3, colframe=black!35, boxrule=0.5pt,
+  arc=2pt, left=6pt, right=6pt, top=4pt, bottom=4pt, fontupper=\small, #1}
+% Item lists with a bold title and a status label.
+\newlist{rowlist}{description}{1}
+\setlist[rowlist]{font=\normalfont\bfseries, style=nextline, leftmargin=1.2em, itemsep=4pt}
+\setlist{itemsep=2pt, topsep=4pt}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true,
+  breaklines=true, frame=single, rulecolor=\color{black!30}, xleftmargin=4pt, xrightmargin=4pt}
+
+\renewcommand{\arraystretch}{1.15}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{Ymir: a private cloud of LLM models\\[4pt]\large A white paper}
+\author{Michael Christenson II\\\small Published by \WB}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+\begin{minipage}{0.88\linewidth}
+\small\itshape
+A white paper on Ymir, a self-hosted model cloud that pools your own machines over
+Weirdnet into one endpoint, with no HTTPS port, no API keys and automatic mid-answer failover.
+\end{minipage}
+\end{center}
+
+\tableofcontents
+\newpage
+
+\input{sections/01-abstract}
+\input{sections/02-problem}
+\input{sections/03-goals}
+\input{sections/04-architecture}
+\input{sections/05-compat}
+\input{sections/06-bragi}
+\input{sections/07-comparison}
+\input{sections/08-datacenter}
+\input{sections/09-fit}
+\input{sections/10-training}
+\input{sections/11-deployment}
+\input{sections/12-roadmap}
+\input{sections/13-conclusion}
+
+\nocite{*}
+\bibliographystyle{unsrt}
+\renewcommand{\refname}{Sources}
+\bibliography{references}
+
+\vfill
+\noindent\small Copyright \copyright{} 2026 \WB. Licensed under BSD-3-Clause.
+
+\end{document}

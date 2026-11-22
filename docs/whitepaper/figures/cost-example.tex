@@ -1,0 +1,14 @@
+% ILLUSTRATIVE example, not a measurement: balancer cost for two candidates, in seconds.
+\begin{tikzpicture}
+\begin{axis}[wpbars, xbar stacked, height=4.2cm, bar width=12pt,
+    xlabel={Predicted completion (seconds)}, xmax=9.5,
+    yticklabels={{Node A},{Node B (picked)}}, ytick={0,1}, y dir=reverse]
+  \addplot[fill=series1, draw=none] coordinates {(2,0) (4,1)};
+  \addplot[fill=series2, draw=none] coordinates {(2,0) (2.5,1)};
+  \addplot[fill=series3, draw=none] coordinates {(0,0) (0,1)};
+  \addplot[fill=seriesother, draw=none] coordinates {(4,0) (0,1)};
+  \legend{wait, service, load, penalty}
+  \node[font=\footnotesize, anchor=west] at (axis cs:8.0,0) {8.0\,s};
+  \node[font=\footnotesize, anchor=west] at (axis cs:6.5,1) {6.5\,s};
+\end{axis}
+\end{tikzpicture}

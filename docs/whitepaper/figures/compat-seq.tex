@@ -1,0 +1,9 @@
+% Version negotiation on the inference protocol.
+\begin{tikzpicture}[y=-1cm]
+  \foreach \x/\t in {0/{\textbf{Client or app pool}}, 9/{\textbf{Serving node}}}
+    { \node[seqactor] at (\x,0) {\t}; \draw[lifeline] (\x,0.5) -- (\x,5.6); }
+  \seqmsg[8cm]{0}{9}{1.3}{open \code{/weirdnet-agent/infer/2} (CBOR)}
+  \seqreply[8cm]{9}{0}{2.4}{Accepted \{ model, resume: true or false \}}
+  \node[seqnote=5cm] at (0.6,3.4) {Resume and \code{assistant_prefix} are used only if the server said resume: true};
+  \seqmsg[8cm]{0}{9}{4.9}{older clients: \code{/weirdnet-agent/infer/1} (JSON), still served}
+\end{tikzpicture}

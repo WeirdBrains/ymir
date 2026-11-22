@@ -1,0 +1,41 @@
+% Shared TikZ and pgfplots styles for the white paper figures.
+\definecolor{series1}{HTML}{3B82F6} % blue
+\definecolor{series2}{HTML}{EAB308} % yellow
+\definecolor{series3}{HTML}{06B6D4} % cyan
+\definecolor{seriesother}{HTML}{9CA3AF} % gray
+
+\tikzset{
+  fbox/.style={draw=black!60, rounded corners=2pt, align=center, text width=#1,
+    font=\footnotesize, inner sep=4pt, fill=white},
+  fbox/.default=8cm,
+  fterm/.style={fbox=#1, rounded corners=7pt, fill=black!6},
+  fterm/.default=8cm,
+  fdec/.style={fbox=#1, fill=blue!6, draw=blue!50!black},
+  fdec/.default=8cm,
+  arr/.style={-{Stealth[length=2.2mm]}, thick, black!70},
+  darr/.style={arr, dashed},
+  elabel/.style={font=\scriptsize, fill=white, inner sep=1pt, align=center},
+  % sequence diagrams
+  seqactor/.style={draw=black!60, fill=black!6, rounded corners=2pt, align=center,
+    font=\footnotesize, text width=2.6cm, inner sep=3pt},
+  lifeline/.style={black!35, dashed},
+  seqlabel/.style={font=\scriptsize, align=center, text width=#1, above},
+  seqlabel/.default=4cm,
+  seqnote/.style={draw=black!40, fill=yellow!12, font=\scriptsize, align=center,
+    text width=#1, inner sep=3pt},
+  seqnote/.default=4.5cm,
+}
+% \seqmsg{from x}{to x}{y}{label}   solid request arrow
+\newcommand{\seqmsg}[5][4cm]{\draw[arr] (#2,#4) -- node[seqlabel=#1] {#5} (#3,#4);}
+% \seqreply{from x}{to x}{y}{label} dashed reply arrow
+\newcommand{\seqreply}[5][4cm]{\draw[darr] (#2,#4) -- node[seqlabel=#1] {#5} (#3,#4);}
+
+\pgfplotsset{
+  wpbars/.style={
+    width=0.62\linewidth, scale only axis, xmin=0, axis lines*=left, ytick=data,
+    tick label style={font=\footnotesize}, label style={font=\footnotesize},
+    legend style={font=\footnotesize, draw=none, legend columns=-1,
+      at={(0,1.02)}, anchor=south west, /tikz/every even column/.append style={column sep=6pt}},
+    major grid style={black!12}, xmajorgrids, enlarge y limits=0.45,
+  },
+}

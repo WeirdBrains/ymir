@@ -1,0 +1,51 @@
+\section{Roadmap}\label{sec:roadmap}
+
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io,
+and then the Ymir side. This section follows the published roadmap files: Ymir's ROADMAP.md
+and Bragi's ROADMAP.md, both generated from each repo's
+roadmap.toml. Of Ymir's eleven milestones, seven are done, three are in progress and one is
+planned.
+
+\begin{figure}[htbp]
+\centering
+\fig{roadmap-status}
+\caption{Milestone status by repository.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\fig{roadmap-flow}
+\caption{Ymir milestone order. Solid border: done; dashed: in progress; dotted: planned.}
+\end{figure}
+
+\subsection{Ymir milestones M0 to M10}\label{sec:roadmap-ymir}
+
+\begin{rowlist}
+  \item[M0 Design \status{Done}] The repo, the names, the three roles and the decisions, written down in the design doc and reviewed by the Weirdnet lead. Crates: none new.
+  \item[M1 One box, three roles in one daemon \status{Done}] One machine runs the model, inference and app roles in a single \code{ymird}: hardware detection, models picked to fit, llama.cpp, an OpenAI-compatible endpoint on loopback for Jan and scripts, and \code{ymirctl setup} to write the config. Crates: \code{weirdnet-model}, \code{weirdnet-backends}, \code{weirdnet-openai}, \code{weirdnet-semcache}.
+  \item[M2 Model-node parity with existing llama-swap servers \status{Done}] vLLM as a second engine (managed or wrapping a running server), idle unload, restart with backoff after a crash, a stand-in model while a big one loads, alerts, a user service and Linux packages. Crates: \code{weirdnet-backends}, \code{weirdnet-alerts}, \code{weirdnet-model}.
+  \item[M3 Roles over Weirdnet \status{Done}] The same three roles across devices: app nodes reach inference nodes, inference nodes drive model nodes, and only devices in your own roster are let in. \code{ymirctl} and Jan work on another machine through its own loopback endpoint. Crates: \code{weirdnet-agent}, \code{weirdnet-net}, \code{weirdnet-sync}, \code{weirdnet-device-link}, \code{weirdnet-backends}, \code{weirdnet-model}.
+  \item[M4 Several model nodes \status{Done}] Linking devices, each node advertising what it can run, one combined model list, failover before the first token, and draining a node before maintenance. Crates: \code{weirdnet-device-link}, \code{weirdnet-relay}, \code{weirdnet-net}, \code{weirdnet-agent}, \code{weirdnet-backends}.
+  \item[M5 Context sync and failover \status{Done}] Conversations kept in sync across inference nodes, so a reply resumes mid-answer after a model node or an inference node dies, with the full context and no repeated text. Crates: \code{weirdnet-agent}, \code{weirdnet-sync}.
+  \item[M6 Workload spreading \status{In progress}] Built: load balancing across replicas, fair sharing between devices, priority classes and batch jobs that fan out across nodes. Next: moving models between nodes, placement, and a shared answer cache. Crates: \code{weirdnet-agent}, \code{weirdnet-backends}, \code{weirdnet-semcache}.
+  \item[M7 Split models \status{In progress}] A model too big for one machine split across several with llama.cpp RPC: an opt-in pool policy, private-link-only planning, group up and down, and teardown when a member is lost. Next: vLLM with Ray groups. Crates: \code{weirdnet-backends}.
+  \item[M8 Move existing servers onto Ymir \status{Done}] The servers that served models before now run on Ymir, moved one step at a time with the owner approving each step. Crates: none new.
+  \item[M9 Breadth and hardening \status{In progress}] Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks for Bragi's agent mode, the Windows service, a security review with checks that run, and a guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher. Crates: \code{weirdnet-update}, \code{weirdnet-push}, \code{weirdnet-agent}.
+  \item[M10 Cert-only server link \status{Planned}] Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. The design is approved and the Weirdnet crates are published; Ymir wires it up next, and a majority-vote lease follows as \code{weirdnet-sync} 0.8.0. Crates: \code{weirdnet-sync}, \code{weirdnet-device-link}.
+\end{rowlist}
+
+Beyond the milestones, the changelog's unreleased section records work that has landed alongside
+them: Windows MSI and setup installers, rpm packages and a release workflow for Linux, macOS and
+Windows, bundled llama.cpp in every release file, \code{ymirctl models search}, \code{pull},
+\code{list} and \code{remove} on any node over Weirdnet, and the \code{ymirctl mcp} server.
+
+\subsection{Bragi milestones B1 to B6}\label{sec:roadmap-bragi}
+
+\begin{rowlist}
+  \item[B1 Core and both shells \status{Done}] Pair with your own devices, list the cloud's models, stream a chat, stop and continue it, and keep local history, in the Linux desktop app (GPUI) and the Android app (Flutter) on one shared Rust core.
+  \item[B2 Pool client \status{Done}] Several inference nodes at once: one combined model list, retries and automatic mid-answer failover, with stand-in and cache flags shown in both shells.
+  \item[B3 Platforms \status{In progress}] Released in v0.1.0: Linux packages and tarballs, a macOS dmg, Windows installers, Android apks and an unsigned iOS ipa. Next: store listings (Play, F-Droid, TestFlight) and signing with a release key.
+  \item[B4 Sync and optional extras \status{In progress}] Chat history on the shared context store, so a conversation follows you between devices, is built on both shells. Next: push wake-ups and an optional on-device model.
+  \item[B5 Breadth \status{In progress}] Text, image and audio attachments and agent mode (tool calls with approval cards) are built on both shells. Next: BSD support, once the desktop toolkit builds there.
+  \item[B6 Your own endpoints \status{In progress}] Any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback; keys sealed on the device and never synced; per-chat targets and folders. Built in the core and the Flutter app; the GPUI desktop shell is next.
+\end{rowlist}

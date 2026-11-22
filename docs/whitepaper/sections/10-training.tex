@@ -1,0 +1,88 @@
+\section{Training and fine-tuning (proposal)}\label{sec:training}
+
+\begin{callout}
+\textbf{Nothing in this section is built.} Ymir's design doc lists training and fine-tuning as a
+non-goal, with the note that a separate trainer stays separate. A search of the Ymir code and docs
+finds no LoRA, adapter, dataset or eval support, and Bragi's README and roadmap mention none. What
+follows is a proposal for how a separate trainer could use Ymir, built on parts that do exist
+today.
+\end{callout}
+
+\begin{figure}[htbp]
+\centering
+\fig{training-loop}
+\caption{\textsc{Proposal}: a training loop that uses Ymir for data, evals and serving. Each step
+says whether it is built or proposed.}
+\end{figure}
+
+\begin{rowlist}
+  \item[1. Data generation and distillation through the bridge and batch \status{Path built, use proposed}]
+  A larger teacher model in the pool answers or labels thousands of prompts, and those answers become training data for a smaller student model. Any script using the OpenAI API can do this against the loopback bridge today, and \code{ymirctl batch} already fans a file of prompts across every node at batch priority with retries, so the work spreads over all your GPUs without starving interactive chat. The same path runs evals: score a candidate model on held-out prompts, with a second model as judge if wanted. Check each model's license before training on its outputs.
+
+  \item[2. Conversations from synced context, with consent \status{Proposal}]
+  Your chats already sync, encrypted, among your linked devices. A trainer running as a linked device could read only conversations you mark for training (for example a per-conversation opt-in flag), strip what you choose, and export them as a dataset. Model nodes never hold conversations, and nothing would leave your devices. Neither the flag nor the export exists today.
+
+  \item[3. Fine-tuning as a pool job \status{Proposal}]
+  A LoRA or QLoRA run trains small adapter weights on top of a frozen base model, which fits on one capable GPU (QLoRA keeps the base model 4-bit). The trainer would run it as a background-priority job on a node with spare GPU memory, unloading or pausing serving there, with its job record and checkpoints synced so another capable node can resume from the last checkpoint if the first one goes down. That builds on the synced job record already planned for batch hand-off.
+
+  \item[4. Distribution, hot swap and versioned rollout \status{Partly built}]
+  Built today: \code{ymirctl models pull} downloads a model from Hugging Face (including private repos with a token) onto any node over Weirdnet and serves it without a restart, so a fine-tune merged into a GGUF can already be rolled out by hand. Proposed: serve LoRA adapters on top of a loaded base (llama.cpp and vLLM both support adapters, but Ymir does not wire this up), name versions in the catalog, send a small share of traffic to a new version first, and roll back by moving traffic to the previous version, which stays loaded until the new one proves itself.
+\end{rowlist}
+
+\begin{lstlisting}[language=Python, caption={Sketch only: distil through the loopback bridge with any OpenAI client.}]
+from openai import OpenAI
+pool = OpenAI(base_url="http://127.0.0.1:8484/v1", api_key=BRIDGE_TOKEN)
+for prompt in prompts:
+    answer = pool.chat.completions.create(
+        model="teacher-model", messages=[{"role": "user", "content": prompt}])
+    dataset.write({"prompt": prompt, "completion": answer.choices[0].message.content})
+\end{lstlisting}
+
+\subsection{Why training stays on one machine or a private link}\label{sec:training-bandwidth}
+
+Training a model across several machines (data parallel) means every machine trains on its own
+share of the data and then all of them exchange gradients after every step. That exchange is the
+same problem that makes split models slow, only bigger, and it is why the design keeps tensor
+traffic off Weirdnet.
+\[
+  \text{time per step} \approx \frac{\text{gradient size}}{\text{link bandwidth}}
+\]
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}llY@{}}
+\toprule
+Link & Bandwidth & Full 8B fine-tune, 16\,GB of gradients \\
+\midrule
+Home internet upload & 100\,Mb/s & About 21 minutes per step \\
+Home LAN & 1\,Gb/s & About 2 minutes per step \\
+Private link (Ymir's split minimum) & 10\,Gb/s & About 13 seconds per step \\
+NVLink inside a data-center server & About 900\,GB/s & Well under a tenth of a second \\
+\bottomrule
+\end{tabularx}
+\caption*{\footnotesize Estimates, not measurements.}
+\end{table}
+
+Estimates, not measurements: 8 billion parameters at 2 bytes each, with two machines exchanging
+their full gradients once per step and no overlap with compute. LoRA is far lighter, since only
+the adapter's gradients move and an adapter is usually well under 1 percent of the model, so
+two-machine data parallel LoRA can be practical on a 10\,Gb/s private link. Over Weirdnet's
+relayed or internet paths, any multi-machine training would spend most of its time waiting on the
+network, so the proposal trains on one GPU node and uses the pool only for data, evals and
+serving.
+
+{\small
+\begin{xltabular}{\linewidth}{@{}L{2.9cm}YY@{}}
+\toprule
+ & Data-center training & Ymir proposal \\
+\midrule
+\endhead
+Hardware & Thousands of identical GPUs & One capable GPU in your pool \\
+Network & NVLink in a server, InfiniBand or RoCE between servers & None during training; private link only for two-node LoRA \\
+Parallelism & Data, tensor and pipeline parallel, sharded optimizer state & None, or two-node data parallel on a private link \\
+Scale of job & Pretraining and full fine-tunes & LoRA or QLoRA adapters on open-weight models \\
+Scheduling and recovery & Cluster scheduler, checkpoints to shared storage & Background-priority pool job, synced checkpoints (proposal) \\
+Data & Curated corpora on shared storage & Pool-generated data and consented chats on your devices \\
+\bottomrule
+\end{xltabular}
+}

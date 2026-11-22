@@ -1,0 +1,15 @@
+% How one call is distributed.
+\begin{tikzpicture}[node distance=5mm]
+  \node[fterm] (app) {\textbf{App sends a prompt}\\Bragi, the bridge or ymirctl; local inference node first};
+  \node[fbox, below=7mm of app] (admit) {\textbf{Inference node admission}\\priority queue: interactive, then batch, then background; per-device batch cap};
+  \node[fbox, below=of admit] (cands) {\textbf{Candidates}\\model nodes whose capability record says the model is ready and takes the request's inputs};
+  \node[fbox, below=of cands] (p2c) {\textbf{Pick two at random, score both}\\cost = wait + service + load + penalty};
+  \node[fbox, below=of p2c] (send) {\textbf{Send raw infer to the cheaper node}};
+  \node[fdec, below=of send] (busy) {\textbf{Node answers Busy?}};
+  \node[fterm, below=7mm of busy] (stream) {\textbf{Tokens stream back to the app}};
+  \draw[arr] (app) -- node[elabel, right=2pt] {\code{infer/2}} (admit);
+  \draw[arr] (admit) -- (cands); \draw[arr] (cands) -- (p2c); \draw[arr] (p2c) -- (send);
+  \draw[arr] (send) -- (busy);
+  \draw[arr] (busy) -- node[elabel, right=2pt] {no} (stream);
+  \draw[darr] (busy.east) -- ++(1.2,0) |- node[elabel, pos=0.25, right=2pt, text width=2.6cm] {yes: 4\,s penalty, try the next} (p2c.east);
+\end{tikzpicture}

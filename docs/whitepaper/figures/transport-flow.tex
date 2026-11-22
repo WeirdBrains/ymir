@@ -1,0 +1,14 @@
+% How a node finds peers and who it serves.
+\begin{tikzpicture}[node distance=5mm]
+  \node[fterm] (start) {\textbf{Node starts}};
+  \node[fbox, below=of start] (find) {\textbf{Find peers}\\public Weirdnet relay (or your own), mDNS on the LAN, LAN and fixed-address hints, peers' announced apps};
+  \node[fbox, below=of find] (path) {\textbf{Connect}\\direct path where possible, relayed otherwise; streams survive a relay-to-direct move};
+  \node[fbox, below=of path] (noise) {\textbf{Noise handshake}\\both ends prove a certificate chained to the owner's identity};
+  \node[fdec, below=of noise] (roster) {\textbf{Linked device in the roster?}};
+  \node[fterm, below=8mm of roster] (serve) {\textbf{Protocols served}\\infer/2, catalog/1, node/1, sync/2 and the rest};
+  \node[fterm=3.6cm, right=12mm of roster] (refuse) {\textbf{Refused} before any handler runs};
+  \draw[arr] (start) -- (find); \draw[arr] (find) -- (path); \draw[arr] (path) -- (noise);
+  \draw[arr] (noise) -- (roster);
+  \draw[arr] (roster) -- node[elabel, right=2pt] {yes} (serve);
+  \draw[arr] (roster) -- node[elabel, above=2pt] {no} (refuse);
+\end{tikzpicture}

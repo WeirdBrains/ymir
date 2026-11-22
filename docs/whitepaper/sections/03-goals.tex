@@ -1,0 +1,29 @@
+\section{Design goals and non-goals}\label{sec:goals}
+
+\begin{xltabular}{\linewidth}{@{}L{4.2cm}Y@{}}
+\toprule
+Goal & What it means \\
+\midrule
+\endhead
+One machine first & One command runs every role on one box, with a backend and models picked for its hardware. \\
+Grow over Weirdnet & Add machines by linking them; the pool acts as one endpoint with load balancing and model spreading. \\
+Weirdnet is the only remote path & Inference, control and health ride Weirdnet streams authorized by the device roster. No Caddy, no HTTPS, no API keys. \\
+Seamless failover & If a node dies mid-answer, the reply continues on another node with no duplicate text. \\
+Local OpenAI clients work & Jan, editors and scripts use a bridge bound to 127.0.0.1 on the same machine. \\
+Everything else optional & Redis, Tailscale and a second node are never required. \\
+Any Weirdnet app can use the cloud & Pool discovery and remote inference live in \code{weirdnet-agent}, not in Ymir or Bragi. \\
+Thin apps & Generic parts go in published \code{weirdnet-*} crates (BSD-3-Clause). \\
+\bottomrule
+\end{xltabular}
+
+\noindent Explicit non-goals, as written in the design doc:
+\begin{enumerate}
+  \item Training or fine-tuning.
+  \item Other users: no tenants, teammates, shared pools, invites, membership roles or quotas.
+  \item Any HTTPS or API-key endpoint, on a LAN or in public, and no vendor-run gateway.
+  \item A new inference engine: Ymir drives llama.cpp, vLLM and MLX-LM.
+  \item llama-swap: replaced by Ymir's own process manager.
+  \item Carrying tensor-parallel traffic (NCCL, Ray, llama.cpp RPC) over Weirdnet; it stays on a fast private link.
+  \item Syncing KV caches between nodes; they stay local and are rebuilt or warmed.
+  \item Replacing Tailscale for SSH and general admin.
+\end{enumerate}

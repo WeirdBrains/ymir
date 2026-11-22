@@ -1,0 +1,31 @@
+\section{Bragi, the client}\label{sec:bragi}
+
+Bragi is the chat app for your own cloud. It is an app node: it links to the owner's identity with a QR and
+short-authentication-string check, finds inference nodes through the \code{weirdnet-agent} pool,
+and never talks to model nodes or needs the bridge \footnoteref{footnote:bridge}.
+
+It can, however, use the bridge to reach the pool from other devices and use OpenAI compatible endpoints;
+making Bragi good for other APIs like Claude, Gemini, and others.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Layer & What \\
+\midrule
+\code{bragi-core} & All behaviour: pairing, pool client, catalog, routing, streaming, cancel, history on the shared context store \\
+\code{bragi-desktop} & GPUI shell on Linux, macOS and Windows; calls the core in-process \\
+\code{bragi-bridge} + Flutter app & Android and iOS shell over \code{flutter_rust_bridge}; same actions and events \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The desktop and phone apps are deliberately identical in behaviour: one model picker with live
+status, streaming tokens with a stop button, automatic mid-answer failover with a small note
+saying which node continued, and history that syncs between devices. Tokens cross to Dart as a
+stream of chat events that mirror the \code{infer/2} frames, coalesced so the UI is not flooded.
+An optional on-device model, off by default, can answer when no node is reachable.
+
+\footnote{\label{footnote:bridge}The bridge is a simple HTTP server that translates the standard OpenAI API endpoints into pool calls,
+and marks stand-in and resumed answers with \code{x-weirdnet-*} headers.
+It also provides a simple API for other APIs like Claude, Gemini, and others to use.}

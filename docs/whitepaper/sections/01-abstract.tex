@@ -1,0 +1,27 @@
+\section{Abstract}\label{sec:abstract}
+
+People who run open-weight models at home or in a small lab usually end up with a patchwork of servers, proxies, VPNs, and alerts.
+Each machine is its own island. Clients must know which box holds which model, a crash in the middle of a long answer
+loses the answer, and every open port is attack surface.
+
+Ymir solves this by turning the machines you already own (a GPU workstation, a gaming PC, a Mac, a DGX
+Spark-class box, or a CPU-only server) into one private model cloud with a simple single-software \footnoteref{footnote:setup} setup. It starts on a single
+machine with one command and grows by linking more of your own devices over Weirdnet, a private,
+peer-to-peer network keyed to your identity. The pool behaves as one endpoint: requests go to a
+node that has the model ready, models are spread across the pool, and only devices linked to the owner's identity can use or command the pool.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Repository & \url{https://github.com/WeirdBrains/ymir} \\
+License & BSD-3-Clause, copyright \WB \\
+Language & Rust (edition 2024, Rust 1.99) \\
+Binaries & \code{ymird} (daemon), \code{ymirctl} (CLI) \\
+Client & Bragi (separate repo, v0.1.0 released) \\
+Release state & No tagged Ymir release yet; build from source \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\footnote{\label{footnote:setup}You can add additional engines (e.g. vLLM, llama-cpp, etc.) and Ymir will automatically use them.}

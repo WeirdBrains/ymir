@@ -1,0 +1,331 @@
+\section{Architecture}\label{sec:architecture}
+
+\begin{figure}[htbp]
+\centering
+\fig{architecture}
+\caption{The three roles and the protocols between them.}
+\end{figure}
+
+Ymir has three roles, each an independent toggle in a node's config. One \code{ymird} process
+can run all three, or they can be spread over any number of devices in any combination. Roles
+always talk through the same protocols; when two share a device they use an in-process fast
+path, so behaviour, auth and failure handling do not change with placement.
+
+\begin{xltabular}{\linewidth}{@{}L{2.4cm}YY@{}}
+\toprule
+Role & Does & Never does \\
+\midrule
+\endhead
+Model node & Runs engines, advertises hardware and models in a signed capability record, obeys Load and Unload, serves raw inference. & Routing, placement, conversation state, talking to apps. \\
+Inference node & Builds the pool catalog, picks a model node per request, resumes failed answers, owns context sync, aggregates health and alerts. & Running models (unless the same device is also a model node). \\
+App node & Finds inference nodes, reads the catalog, sends prompts. & Discovering or calling model nodes directly. \\
+\bottomrule
+\end{xltabular}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Between & Protocol \\
+\midrule
+App to inference & \code{/weirdnet-agent/infer/2} and \code{/weirdnet-agent/catalog/1} \\
+Inference to model & \code{/weirdnet-agent/infer/2} (raw mode) and \code{/weirdnet-backends/node/1} \\
+Inference to inference & \code{/weirdnet/sync/2} for context and policy; \code{/ymir/coord/1} for coordination \\
+Any to any (admin) & \code{/ymir/control/1} for \code{ymirctl} commands \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ---------------------------------------------------------------------------
+\subsection{Weirdnet transport and discovery}\label{sec:transport}
+
+\begin{figure}[htbp]
+\centering
+\fig{transport-flow}
+\caption{Finding a peer and being allowed to talk to it are separate steps.}
+\end{figure}
+
+In short: finding a peer and being allowed to talk to it are separate steps. The relay and mDNS
+only help nodes locate each other; what admits a caller is the roster check that every serving
+node runs on every call.
+
+Every node and client is a Weirdnet node with a certificate chained to the owner's identity, and
+Noise authenticates every stream end to end, relays included. Nodes find each other by key, by
+the user record and by the apps each peer announces, with LAN hints and mDNS for same-network
+peers. Presence never grants anything; the roster does. By default nodes bootstrap from the
+public Weirdnet relay, and the operator can override that.
+
+The \code{infer/2} protocol is CBOR throughout and streams tokens as frames with backpressure.
+It adds priority classes (interactive, batch, background), a stable job id with an attempt
+number, a conversation reference, an optional assistant prefix for resume, Queued frames from a
+real priority queue, offset-carrying Delta and Reasoning frames, whole-only ToolCall frames,
+embeddings, and response metadata (which node served it, cache hit, stand-in flag, resume
+offsets). Dropping a call resets its stream and aborts the engine request, freeing the slot.
+Large payloads travel as content-addressed roots rather than inline frames.
+
+Discovery and remote inference are deliberately generic: they live in the published
+\code{weirdnet-agent} crate, so any Weirdnet app can be an app node, and Bragi works with any
+inference node that serves the catalog and infer protocols.
+
+% ---------------------------------------------------------------------------
+\subsection{Scheduling and placement}\label{sec:scheduling}
+
+\begin{figure}[htbp]
+\centering
+\fig{request-path}
+\caption{How one call is distributed.}
+\end{figure}
+
+Inference nodes route each request from the capability records model nodes push to them every
+15 seconds and on change. Among nodes with the model ready, the built balancer scores each by
+predicted completion and takes the cheaper of two random candidates (power of two choices), so
+stale records do not make every coordinator pile onto one node.
+\begin{align*}
+  \text{cost} &= \text{wait} + \text{service} + \text{load} + \text{penalty}\\
+  \text{wait} &= \frac{\text{queue\_depth}}{\text{slots}} \times \text{mean\_service}
+\end{align*}
+
+\begin{figure}[htbp]
+\centering
+\fig{cost-example}
+\caption{\textsc{Illustrative} example, not a measurement. Node A: 2 queued, 2 slots, answered
+Busy 3\,s ago. Node B: 2 queued, 1 slot, slower service.}
+\end{figure}
+
+Illustrative example, not a measurement: the two candidates the balancer drew, scored in seconds
+with the formula in the code (\code{ymir-core::balance}). Node A has the shorter queue per slot
+but is still carrying the Busy penalty, so the request goes to node B. Mean service starts at 2
+seconds until a node has finished a request for that model; a cold node would add its load-time
+estimate.
+
+\code{queue_depth} is the larger of the node's reported in-flight count and what this
+coordinator has itself sent and not seen finish; \code{mean_service} is measured per node and
+model; a Busy answer adds a flat 4-second penalty to that node for the next 5 seconds; and a
+node on the same device wins when two costs are within 5 percent. Model nodes keep the last word
+through admission, answering Busy when slots and queue are full, so several coordinators can run
+active-active without overcommitting a node.
+
+Fairness is between devices and priority classes, since the pool has one owner. Interactive
+requests are served first, and each device has a cap on batch and background work so one
+laptop's batch job cannot starve a phone's chat. \code{ymirctl batch} fans a file of prompts out
+across the pool at batch priority with per-task retries and results in order.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}llY@{}}
+\toprule
+Class & Who uses it & How it is treated \\
+\midrule
+interactive & Bragi chat, the bridge & Served first; never held back by the device cap \\
+batch & \code{ymirctl batch} & Yields between requests; counted against the device cap \\
+background & Prefix warming, re-placement (designed) & Lowest; counted against the device cap \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The design also specifies cloud-wide swap and placement: a scheduler lease held by one inference
+node, a signed and synced placement plan, replication of popular models when queue wait exceeds
+a target, prefix warming, and a pool-wide semantic cache.
+
+% ---------------------------------------------------------------------------
+\subsection{Failover and continuation}\label{sec:failover}
+
+\begin{figure}[htbp]
+\centering
+\fig{failover-model}
+\caption{Failover at the model-node level.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\fig{failover-inference}
+\caption{Failover at the inference-node level.}
+\end{figure}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}YL{6.2cm}@{}}
+\toprule
+Rule & Value in the code \\
+\midrule
+Resumes allowed per answer, per level & 2 (\code{MAX_RESUMES}) \\
+Frame accepted only if its offset equals the buffer length & Yes; lower offsets dropped, a gap counts as a failure \\
+Resume only on servers that say so & \code{Accepted} must carry \code{resume: true} \\
+Keep-alive while a model cold-loads & Empty Meta frame every 5\,s \\
+A quiet model node is given up on after & 5 to 12\,s, before the app's own 15\,s stall timer \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Whoever receives a stream keeps a buffer of exactly what it has passed on: the inference node for
+model-node streams, and the app's \code{weirdnet-agent} pool for inference-node streams. On a
+reset, a dropped connection or a stall, the receiver reruns routing with the failed node
+excluded and sends the same assembled messages, sampling parameters and job id with the next
+attempt number, plus its buffer as an assistant prefix. The new engine continues the open
+assistant message (vLLM \code{continue_final_message}, llama.cpp assistant prefill) and generates
+only what comes after it.
+
+Duplicates are prevented by offsets: every Delta carries its position in the answer, the receiver
+appends a frame only if its offset matches the buffer length, and frames from an old attempt are
+dropped. Up to two resumes per answer per level are allowed, the final metadata records each
+resume, and a client resumes only on a server that says it honours prefixes. Sampling after a
+resume is a fresh draw, so the continuation is valid but not bit-identical. If no node can take
+over, the app receives the partial answer with a clear error.
+
+Both levels are built. The exit tests kill a model node and then an
+inference node mid-answer on separate daemons over loopback with a mock engine, and check that
+each reply ends with the exact text.
+
+% ---------------------------------------------------------------------------
+\subsection{Context sync}\label{sec:context}
+
+\begin{figure}[htbp]
+\centering
+\fig{context-sync}
+\caption{How a conversation reaches the user's other devices.}
+\end{figure}
+
+A request that names a conversation does not wait for the next pass: the inference node first
+pulls any missing records from the caller, which always has them, and then assembles the prompt.
+Because an answer is stored under its job id, a retry or resume rewrites the same record instead
+of adding a second answer.
+
+Conversations are replicated with \code{weirdnet-sync} among inference nodes and app nodes, so any
+inference node can continue any conversation and routing never depends on a sticky node. Model
+nodes are not in the sync set; they receive fully assembled messages per request and keep nothing
+afterwards beyond their local KV cache.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Item & Synced? \\
+\midrule
+Messages & Yes, as text; an assistant message is written once, when it completes \\
+System prompt, model, settings, title & Yes, last-writer-wins registers \\
+Attachments & Reference synced; bytes fetched on demand (design) \\
+KV cache & No; stays on the node that computed it \\
+Semantic cache entries & No; pooled separately by \code{weirdnet-semcache} (design) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Records are sealed under the roster's sync key (XChaCha20-Poly1305), which rotates when a device
+is unlinked, so a revoked device cannot read new context even through a relay. Deleting a
+conversation writes a tombstone that every device honours. Ymir records use their own
+\code{ymir.} namespace inside a sync group shared with Morph, another Weirdnet app, but each
+device opts into only the record types it needs, so a GPU server never holds browsing data.
+Bragi's chat history is this same store; there is no separate Bragi history database.
+
+% ---------------------------------------------------------------------------
+\subsection{Security and trust model}\label{sec:security}
+
+\begin{figure}[htbp]
+\centering
+\fig{device-link}
+\caption{Linking and unlinking a device.}
+\end{figure}
+
+\begin{xltabular}{\linewidth}{@{}L{4.2cm}L{3.6cm}Y@{}}
+\toprule
+Socket & Bound to & Who can use it \\
+\midrule
+\endhead
+Weirdnet listener & The network & Noise-authenticated peers that pass the roster check \\
+OpenAI bridge & 127.0.0.1:8484 only & Local tools with the bridge token and a local Host header \\
+MCP over HTTP (optional) & Loopback only & Local MCP clients with the bridge token \\
+Engine ports (llama.cpp, vLLM, MLX-LM) & 127.0.0.1 & Ymir, using a random key per launch \\
+llama.cpp RPC workers (split groups) & A declared private-link address & The group leader; public and CGNAT addresses refused \\
+\bottomrule
+\end{xltabular}
+
+\begin{rowlist}
+  \item[One authorization check] Every serving node runs the roster check per call: the caller must be a linked device of the owner. No roles, memberships, invites or API keys.
+  \item[No network listeners besides Weirdnet] The OpenAI bridge, MCP HTTP mode and engine ports bind to loopback only, and engines get a random per-launch key. The Weirdnet listener accepts only Noise-authenticated peers, then the roster check.
+  \item[Revocation] Unlinking a device cuts it off everywhere as peers see the roster update and rotates the sync key. Ymir also refuses a revoked model node on connect, on every request and on every capability update.
+  \item[Least data per role] Model nodes see only the prompt in hand; context lives on inference and app nodes; capability records and context go only to linked devices, never the DHT.
+  \item[Private-link split workers] llama.cpp RPC workers have no auth of their own, so Ymir binds them only to private addresses (loopback, RFC 1918, link-local, ULA) and refuses public and CGNAT ranges.
+  \item[Local secrets] Secrets are never inline in config; the bridge token and identity seed are 0600 files and the state directory is 0700.
+\end{rowlist}
+
+The trust boundary is the owner's identity. Today, model and inference nodes receive the owner's
+root identity seed when they are linked, which means a copied seed is the owner on Weirdnet.
+Milestone M10, a cert-only server link, is designed and approved \planned: service nodes would get
+a node certificate and the sync keys they need without the seed, so one node can be revoked
+without rotating the identity. The Weirdnet crates for it are published, and Ymir's wiring is
+next. The current security review was done by the author and is not an independent audit.
+
+% ---------------------------------------------------------------------------
+\subsection{Engines and split models}\label{sec:engines}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lYl@{}}
+\toprule
+Platform & Chat models & Optional \\
+\midrule
+Linux, Windows & llama.cpp, bundled (CPU and Vulkan, or CUDA 13 build) & vLLM on Linux with NVIDIA \\
+macOS, Apple Silicon & MLX-LM with MLX weights & llama.cpp via a flag \\
+macOS, Intel & llama.cpp, bundled & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Engines run as child processes under a supervisor rather than in-process, so an engine crash
+restarts the engine and triggers failover instead of taking down the daemon. The supervisor does
+what llama-swap did per machine: swap groups decide which models may be resident together, idle
+models unload after a TTL, crashed engines restart with backoff, a model with requests in flight
+is drained before it is stopped, and a small stand-in model can answer, flagged, while a large one
+cold-starts. A node can also wrap a stock \code{vllm serve} or \code{llama-server} already running
+on loopback. Images and audio route only to nodes whose copy of a model takes them.
+
+A model too big for any one machine can be split across a group of model nodes with llama.cpp RPC
+(milestone M7, in progress). It is opt-in per model through pool policy, requires a declared
+private link of at least 10\,Gb/s by default, and tears the group down if any member is lost. The
+design is explicit that splitting is for models that do not fit, not for speed: in the repo's one
+recorded test, an 8B model split between a GPU and a CPU worker ran at 8.3 tokens/s against 63.1
+tokens/s unsplit on the GPU. The next step is to use vLLM with Ray groups \planned.
+
+\begin{figure}[htbp]
+\centering
+\fig{split-throughput}
+\caption{Qwen3-8B Q4\_K\_M, measured once in the repo's real-engine split test
+(\code{real_split.rs}), with a 3:1 tensor split over loopback; about a quarter of the layers ran
+on the CPU and every token crossed the RPC link.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\fig{split-group}
+\caption{A split group for one model.}
+\end{figure}
+
+\code{ymirctl group up} checks the policy and links, starts the workers first, then the leader,
+and rolls back if a step fails. A watcher checks every 5 seconds and takes the whole group down if
+any member leaves, drains or crashes, after which the model returns to normal routing. Starting
+groups automatically on demand is coming soon \planned.
+
+% ---------------------------------------------------------------------------
+\subsection{Batch fan-out, bridge and MCP}\label{sec:batch}
+
+\begin{figure}[htbp]
+\centering
+\fig{batch-flow}
+\caption{\code{ymirctl batch} fan-out.}
+\end{figure}
+
+Because the per-device cap answers Busy, a big batch slows itself to what the pool will take
+instead of crowding out interactive chat. Today the submitting machine must stay up while the job
+runs; handing a job to another node from a synced job record is coming soon \planned.
+
+\begin{figure}[htbp]
+\centering
+\fig{bridge-path}
+\caption{Local tools reach the whole pool through the loopback bridge.}
+\end{figure}
+
+The bridge translates \code{/v1/models}, \code{/v1/chat/completions}, \code{/v1/completions} and
+\code{/v1/embeddings} into pool calls, maps Busy to 503 with Retry-After, and marks stand-in and
+resumed answers with \code{x-weirdnet-*} headers. \code{ymirctl mcp} offers the same pool to MCP
+clients over stdio or loopback HTTP; tools that change the pool refuse to run without
+\code{confirm: true}.

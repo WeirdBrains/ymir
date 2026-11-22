@@ -1,0 +1,11 @@
+% ymirctl batch fan-out.
+\begin{tikzpicture}[node distance=5mm]
+  \node[fterm] (f) {\textbf{\code{ymirctl batch FILE}}\\one prompt per line, one job id};
+  \node[fbox, below=of f] (w) {\textbf{Up to 4 tasks in flight (default)}\\each a separate batch-priority request};
+  \node[fbox, below=of w] (p) {\textbf{Pool spreads them}\\over inference nodes, which spread them over replicas};
+  \node[fdec, below=of p] (r) {\textbf{Busy, unreachable or timed out?}};
+  \node[fterm, below=7mm of r] (o) {\textbf{Results returned in prompt order}};
+  \draw[arr] (f) -- (w); \draw[arr] (w) -- (p); \draw[arr] (p) -- (r);
+  \draw[arr] (r) -- node[elabel, right=2pt] {done} (o);
+  \draw[darr] (r.east) -- ++(1.2,0) |- node[elabel, pos=0.25, right=2pt, text width=2.6cm] {retry, up to 4, growing pause} (w.east);
+\end{tikzpicture}

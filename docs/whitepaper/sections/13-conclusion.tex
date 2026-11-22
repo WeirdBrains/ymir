@@ -1,0 +1,24 @@
+\section{Conclusion}\label{sec:conclusion}
+
+\begin{callout}
+\textbf{One endpoint, your machines only.} Ymir treats a handful of personal machines as a single
+private model cloud: one command to start, a link to grow, no ports or keys to expose, and answers
+that survive a node dying halfway through.
+\end{callout}
+
+Its core bet is that identity-keyed peer-to-peer transport can replace the proxy, TLS, API-key and
+VPN layers that self-hosters normally bolt on, and that the generic pieces (discovery, inference
+protocol, sync, engines) belong in shared Weirdnet crates so any app can use the cloud. The
+single-box path, multi-node routing, context sync and two-level failover are built; pool-wide
+placement, Ray-based splitting and cert-only service nodes are the documented road ahead.
+
+Ymir is developed by Michael Christenson II and published by \WB{} under the BSD-3-Clause license.
+Copyright 2026 \WB.
+
+\begin{itemize}
+  \item Weird Brains: \url{https://weirdbrains.com}
+  \item Ymir on GitHub: \url{https://github.com/WeirdBrains/ymir}
+  \item Ymir design doc: \url{https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md}
+  \item Bragi on GitHub: \url{https://github.com/WeirdBrains/bragi}
+  \item Weirdnet: \url{https://net.weirdbrains.com}
+\end{itemize}

@@ -1,0 +1,125 @@
+\section{Comparison with alternatives}\label{sec:comparison}
+
+\footnote{Research as of 2026-11-21}
+Running models across more than one place is now a crowded field, but
+the efforts split into three camps: vendor hybrids that pair one personal device with the vendor's
+cloud (Microsoft, Apple, Google), data-center stacks for operators of GPU fleets (NVIDIA Dynamo,
+llm-d, GPUStack), and community tools that pool or serve models on hardware you own (exo, LocalAI,
+LM Studio LM Link, Ollama, llama-swap, Petals). Ymir sits in the third camp but borrows the second
+camp's scheduling ideas. Every claim below comes from the cited vendor or project page; Meta's
+Llama Stack is left out because its current status could not be verified from a primary source.
+
+{\small
+\begin{xltabular}{\linewidth}{@{}L{3.3cm}L{3.2cm}YY@{}}
+\caption{Who owns the hardware, pooling and exposure.}\\
+\toprule
+Product & Who owns the hardware & Pools several machines & Network exposure and auth \\
+\midrule
+\endfirsthead
+\toprule
+Product & Who owns the hardware & Pools several machines & Network exposure and auth \\
+\midrule
+\endhead
+Ymir & You & Yes, any mix of your devices & No public endpoint; Weirdnet only, identity roster \\
+Microsoft Hybrid Intelligence & You (one PC) plus Microsoft cloud & No; one PC and the cloud & Microsoft account, tenant identity \\
+Microsoft Autopilot & Microsoft cloud & Not applicable (agent service) & Entra Agent ID inside the tenant \\
+Apple Private Cloud Compute & You (device) plus Apple servers & No; device and Apple's servers & Apple-operated, attested nodes \\
+Google Gemini Nano hybrid & You (phone) plus Google cloud & No; device and cloud fallback & Firebase project and Google cloud \\
+NVIDIA Dynamo & Data-center operator & Yes, GPU fleets on Kubernetes & Operator's API gateway and auth \\
+llm-d & Data-center operator & Yes, Kubernetes clusters & Kubernetes Gateway API \\
+GPUStack & Operator (on-prem or cloud) & Yes, multi-cluster & REST API with auth, RBAC, tenants \\
+exo & You & Yes, devices on one network & Same-network discovery by cluster name; local HTTP API \\
+LocalAI federation & You or an operator & Yes, remotes over P2P invites & Invite links; admin key on the HTTP API \\
+LM Studio LM Link & You & Remote access to your devices & Tailscale mesh, no public ports \\
+Ollama & You & No; one machine & Local API with no inbound auth \\
+llama-swap & You & No; one machine & Local OpenAI and Anthropic API \\
+Petals & Volunteers or a private swarm & Yes, BitTorrent-style & Public swarm by default \\
+\bottomrule
+\end{xltabular}
+
+\begin{xltabular}{\linewidth}{@{}L{3.1cm}L{2.9cm}L{2.7cm}L{2.6cm}Y@{}}
+\caption{Failover, data locality, license and maturity, as of 2026-11-21.}\\
+\toprule
+Product & Mid-answer failover & Data locality & License & Maturity \\
+\midrule
+\endfirsthead
+\toprule
+Product & Mid-answer failover & Data locality & License & Maturity \\
+\midrule
+\endhead
+Ymir & Yes, model and coordinator level & Only your linked devices & BSD-3-Clause & Pre-release; no tagged version \\
+Microsoft Hybrid Intelligence & Not described & Local or Microsoft cloud, per task & Proprietary & Coming soon (Copilot); preview (Copilot Fusion) \\
+Microsoft Autopilot & Not described & Microsoft cloud, in tenant & Proprietary & Rolling out to Frontier customers \\
+Apple Private Cloud Compute & Not described & Device or Apple servers & Proprietary; code published for research & Shipping \\
+Google Gemini Nano hybrid & Falls back to cloud & Device or Google cloud & Proprietary & Experimental (Firebase hybrid) \\
+NVIDIA Dynamo & Yes, request migration & Operator's data center & Open source on GitHub & 1.0 since March 2026 \\
+llm-d & Not described & Operator's cluster & Apache-2.0 & v1.0; CNCF Sandbox \\
+GPUStack & Not described & Operator's clusters & Apache-2.0 & v2.3.1 (2026-11-11) \\
+exo & Not described & Your devices & Apache-2.0 & v1.0.x releases \\
+LocalAI federation & Failed requests move to the next member & Your instances & MIT & Active \\
+LM Studio LM Link & Not described & Your devices & Not checked & Preview \\
+Ollama & No & Your machine (cloud models optional) & MIT & Mature \\
+llama-swap & No & Your machine & MIT & Mature \\
+Petals & Not described & Shared swarm & MIT & Last commits in 2024 \\
+\bottomrule
+\end{xltabular}
+}
+
+\subsection{Microsoft Hybrid Intelligence and Autopilot}\label{sec:cmp-microsoft}
+
+The closest large-company effort is Microsoft's Hybrid Intelligence for Windows, restated at
+Ignite on 2026-11-17
+(\url{https://blogs.windows.com/windowsexperience/2026/11/17/microsoft-ignite-2026-building-windows-for-the-next-era-of-work/}).
+Copilot on Copilot+ PCs is to gain local context, local actions and local models, using models on
+the PC and reaching to the cloud when a task needs it; Microsoft lists these as coming soon with
+no date. GitHub Copilot Fusion already routes coding work between on-device models such as MAI
+Code 1.1 Flash and cloud models, in experimental preview, and GitHub notes that routing decisions
+are still made in the cloud
+(\url{https://github.blog/changelog/2026-10-28-github-copilot-fusion-now-supports-selection-of-local-models/}).
+Foundry Local and the Windows AI APIs supply the local models, including Phi Silica on Copilot+
+PC NPUs.
+
+Autopilot, shown in the Microsoft Mechanics video ``Introducing Autopilot, your personal and
+proactive agent'' (2026-11-18), is a persistent agent that runs on dedicated Microsoft cloud
+compute inside a company's tenant, with its own Entra Agent ID, and can run sessions on managed
+devices; it began rolling out to Frontier customers on 2026-11-17. It is an agent product rather
+than model infrastructure.
+
+The difference with Ymir is where the cloud lives. Microsoft pairs one device with Microsoft's
+data centers and decides per task which side runs it; nothing in these announcements pools
+several of a user's own PCs into one shared model service. Ymir has no vendor side at all: the
+cloud is the set of machines you own, linked to your identity, and failover goes to another of
+your machines rather than to a provider. Microsoft's approach is stronger where the task needs
+frontier-scale models, enterprise governance or zero setup; Ymir's is stronger where data must
+never leave your hardware and you want several machines to act as one.
+
+\subsection{Product notes}\label{sec:cmp-notes}
+
+\begin{rowlist}
+  \item[Apple Private Cloud Compute] Extends on-device Apple Intelligence to Apple-operated servers designed to be stateless and publicly verifiable, with binaries and a transparency log open to security researchers. Private, but on Apple's hardware, not yours.
+  \item[Google Gemini Nano with Firebase AI Logic] Runs Gemini Nano on Android through AICore and falls back to a cloud Gemini model automatically. Experimental; on-device requests are single-turn, foreground only and limited to 4,000 tokens.
+  \item[NVIDIA Dynamo] Data-center inference framework over vLLM, SGLang and TensorRT-LLM with disaggregated prefill and decode, KV-aware routing and autoscaling. Its request migration keeps tokens already generated and continues on a healthy worker, the closest analogue to Ymir's mid-answer resume.
+  \item[llm-d] Kubernetes-native stack on vLLM and the Gateway API Inference Extension: prefix-cache-aware routing, prefill/decode disaggregation, KV offloading and autoscaling. CNCF Sandbox since March 2026.
+  \item[GPUStack] Cluster manager that deploys vLLM, SGLang and TensorRT-LLM across on-prem, Kubernetes and cloud GPUs, with an OpenAI-compatible API, multi-tenancy, RBAC, monitoring and failure recovery.
+  \item[exo] Connects your devices into one cluster with automatic discovery on the same network, then shards a model across them with tensor or pipeline parallelism, including RDMA over Thunderbolt 5 on Macs. It focuses on running models too big for one device; Ymir treats splitting as opt-in and routes whole models by default.
+  \item[LocalAI federation] Serves one model name from several LocalAI instances joined by P2P invite links, routing least-busy or round-robin and moving a request to the next member when one fails. Also offers model-split workers over P2P.
+  \item[LM Studio LM Link] Lets LM Studio on your devices use each other's models over a Tailscale mesh with no public ports. In preview. It is remote access to a chosen device rather than a pool with load balancing.
+  \item[Ollama] The common single-machine server. Its local API has no inbound authentication, so exposing it means adding a proxy; optional Ollama cloud models need sign-in.
+  \item[llama-swap] One Go binary that hot-swaps local model servers behind OpenAI and Anthropic APIs on one machine. Ymir's per-node supervisor does the same job and adds cross-machine routing.
+  \item[Petals] Splits large models across a volunteer swarm. The project appears dormant, with its last repository activity in 2024.
+\end{rowlist}
+
+\subsection{Where Ymir differs, where others are stronger}\label{sec:cmp-verdict}
+
+\begin{xltabular}{\linewidth}{@{}YY@{}}
+\toprule
+Ymir is different in & Others are stronger in \\
+\midrule
+\endhead
+No public endpoint, proxy or API key; admission is your device roster & Maturity: Ollama, llama-swap, LocalAI and GPUStack ship tagged releases with large user bases \\
+Mid-answer resume at two levels, for personal hardware & Raw scale and throughput: Dynamo and llm-d target GPU fleets with disaggregation and autoscaling \\
+Any mix of your devices: NVIDIA, AMD, Apple, CPU-only, laptops and phones & Splitting one huge model: exo's topology-aware sharding over RDMA is further along than Ymir's opt-in llama.cpp RPC groups \\
+Conversation context synced and encrypted across your own nodes & Frontier models and zero setup: Microsoft, Apple and Google hybrids \\
+One shared client core for desktop and phone (Bragi) & Multi-tenant governance, RBAC and audit, which Ymir excludes by design \\
+\bottomrule
+\end{xltabular}

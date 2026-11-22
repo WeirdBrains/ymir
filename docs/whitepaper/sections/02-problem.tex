@@ -1,0 +1,19 @@
+\section{Problem and motivation}\label{sec:problem}
+
+People who run open-weight models at home or in a small lab usually end up with a patchwork:
+one llama.cpp or vLLM server per machine, a process swapper such as llama-swap to juggle models
+on each box, a reverse proxy with TLS and per-client API keys in front, a VPN to reach it
+remotely, and a separate monitor that emails when something breaks. Each machine is its own
+island. Clients must know which box holds which model, a crash in the middle of a long answer
+loses the answer, and every open port is attack surface.
+
+Ymir began as the replacement for exactly such a setup: two model servers that ran llama-swap,
+a vLLM frontend, a Ray-based ``big mode'' for models too large for one machine, a Redis semantic
+cache, Caddy with per-tenant keys, and timer-based alerts. The design doc maps every one of
+those pieces to a Ymir component, and the roadmap records how the servers that served models
+before now run on Ymir.
+
+The motivation is simple: treat all of your own hardware as one cloud, keep prompts and answers
+on your own machines, remove the complexity of running a separate model server on each machine, 
+and remove the network endpoints and credentials that a hosted-style API would require
+(and that you would need to manage and secure).

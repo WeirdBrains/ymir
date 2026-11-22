@@ -1,0 +1,21 @@
+% Milestone dependencies. Solid = done, dashed border = in progress, dotted = planned.
+\begin{tikzpicture}[node distance=5mm and 6mm,
+    done/.style={fbox=2.5cm, fill=black!6},
+    prog/.style={fbox=2.5cm, dashed},
+    plan/.style={fterm=2.5cm, densely dotted, fill=white}]
+  \node[done] (m0) {\textbf{M0} Design\\Done};
+  \node[done, right=of m0] (m1) {\textbf{M1} One box\\Done};
+  \node[done, right=of m1] (m2) {\textbf{M2} llama-swap parity\\Done};
+  \node[done, right=of m2] (m3) {\textbf{M3} Roles over Weirdnet\\Done};
+  \node[done, below=of m3] (m4) {\textbf{M4} Several model nodes\\Done};
+  \node[done, left=of m4] (m5) {\textbf{M5} Context sync, failover\\Done};
+  \node[done, left=of m5] (m8) {\textbf{M8} Servers on Ymir\\Done};
+  \node[prog, left=of m8] (m9) {\textbf{M9} Breadth, hardening\\In progress};
+  \node[prog, below=of m5] (m6) {\textbf{M6} Workload spreading\\In progress};
+  \node[prog, right=of m6] (m7) {\textbf{M7} Split models\\In progress};
+  \node[plan, below=of m9] (m10) {\textbf{M10} Cert-only link\\Planned};
+  \draw[arr] (m0) -- (m1); \draw[arr] (m1) -- (m2); \draw[arr] (m2) -- (m3);
+  \draw[arr] (m3) -- (m4); \draw[arr] (m4) -- (m5); \draw[arr] (m5) -- (m8);
+  \draw[arr] (m5) -- (m6); \draw[arr] (m5) -- (m7); \draw[arr] (m8) -- (m9);
+  \draw[darr] (m9) -- (m10);
+\end{tikzpicture}

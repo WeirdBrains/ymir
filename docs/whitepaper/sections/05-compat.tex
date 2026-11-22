@@ -1,0 +1,31 @@
+\section{Backwards compatibility}\label{sec:compat}
+
+Ymir is built to let old and new pieces run side by side, so a pool can be upgraded one machine
+at a time and existing tools keep working. The rule is that every protocol carries its version in
+its name, and a new version is served next to the old one rather than replacing it.
+
+\begin{figure}[htbp]
+\centering
+\fig{compat-seq}
+\caption{Version negotiation on the inference protocol.}
+\end{figure}
+
+\begin{xltabular}{\linewidth}{@{}L{4.6cm}Y@{}}
+\toprule
+Interface & How old and new coexist \\
+\midrule
+\endhead
+\code{infer/1} and \code{infer/2} & Both served side by side; \code{/2} added Queued frames, offsets and resume, so it is a new version rather than a change to \code{/1} \\
+Resume & Opt-in per server: a client resumes only where \code{Accepted} says \code{resume: true}, so an older server never repeats text \\
+Capability records (\code{node/1}) & Nodes on older \code{weirdnet-backends} that report no capabilities are treated as text-only, with the older embedding flag used to spot embedding models \\
+Model management (\code{models/1}) & An older \code{ymird} that lacks it answers with a clear ``does not take model management'' naming that node \\
+\code{catalog/1}, \code{sync/2}, \code{task/1}, \code{coord/1}, \code{control/1} & Versioned names; a future version is meant to be served alongside, as with infer \\
+Weirdnet profile & Ymir and Bragi copy the standard Weirdnet profile and change only their link scheme, so certificates verify and all apps share one network \\
+Shared sync group & Needs Morph v0.3 or later on every device; the Morph 0.2 line cannot join, so devices move together \\
+OpenAI bridge & Existing tools use standard \code{/v1} endpoints unchanged; Ymir-specific signals ride in extra headers they can ignore \\
+MCP & Speaks MCP 2026-07-28 and still answers older initialize requests \\
+Stock engines & A node can wrap an already running \code{vllm serve} or \code{llama-server} instead of replacing it \\
+Updates & Self-update refuses downgrades and rolls back to the last good release after two failed starts \\
+Cert-only service nodes (M10) & \planned{} Existing nodes re-link without the root seed, then their seed copies are wiped \\
+\bottomrule
+\end{xltabular}
