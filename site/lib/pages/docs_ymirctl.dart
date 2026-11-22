@@ -77,7 +77,8 @@ ymirctl status --json | jq .models</code></pre>
 only on disk. Use these ids with every other command and in apps like Jan.</p>
 <pre><code>ymirctl models</code></pre>
 <h3 id="models-search"><code>ymirctl models search QUERY...</code></h3>
-<p>Searches the Hugging Face Hub for GGUF models (and MLX models on Apple Silicon, or with <code>--format all</code>), most
+<p>Searches the Hugging Face Hub for GGUF models, plus MLX models on Apple Silicon and safetensors/vLLM
+repos on Linux NVIDIA nodes (or with <code>--format mlx</code>, <code>--format vllm</code> or <code>--format all</code>), most
 downloaded first. For each repo it shows the best quant for <em>this</em> node and whether it fits: the file size plus the KV
 cache at the context length (default 32768, or less if the model was trained for less; change it with <code>--context</code>)
 plus about 0.5 GiB of overhead, against this node's GPU or unified memory. A verdict is <em>fits</em>, <em>partial</em> (only
@@ -86,10 +87,18 @@ by spilling layers to RAM, which is slower) or <em>too big</em>. <code>--limit N
 ymirctl models search --format all --limit 3 gemma</code></pre>
 <h3 id="models-pull"><code>ymirctl models pull REPO</code></h3>
 <p>Downloads a model into this node's model directory (<code>models_dir</code> in <code>node.toml</code>, else the shared
-Weirdnet models folder; <code>--dir</code> overrides it). It takes the best quant that fits, or the one you name with
-<code>--quant Q4_K_M</code> or <code>--file NAME.gguf</code>. Split GGUFs download every shard. Downloads resume if
+Weirdnet models folder; <code>--dir</code> overrides it). For a GGUF repo it takes the best quant that fits, or the one you name with
+<code>--quant Q4_K_M</code> or <code>--file NAME.gguf</code>. Split GGUFs download every shard. A <code>mmproj-*.gguf</code>
+in the same repo is also fetched (preferring Q8_0) and set as <code>mmproj</code> so image input works. Downloads resume if
 interrupted (run the same command again) and are checked against the Hub's SHA-256 before they are renamed into place.
 <code>--dry-run</code> shows the plan and downloads nothing; <code>--force</code> takes the smallest quant even if none fits.</p>
+<p>A safetensors / transformers repo (for example <code>thinkingmachines/Inkling-2-Mini</code>) is registered for
+<code>backend = "vllm"</code> as a Hub id: the weights are not copied into <code>models_dir</code>; vLLM fetches them into
+the Hugging Face cache on first load. Inkling 2 Mini also gets the <code>inkling</code> reasoning and tool-call parsers,
+DSpark, the <code>vllm/vllm-openai:inkling-2-mini</code> image, and <code>--max-model-len 262144</code> on a DGX Spark.
+That needs vLLM 0.35.0 or newer, or that image (support is not in 0.34.0). You can also start the image yourself and set
+<code>wrap = "http://127.0.0.1:8000/v1"</code>, or set <code>[model] vllm = "image:vllm/vllm-openai:inkling-2-mini"</code>.
+MLX repos for Inkling are refused until mlx-lm#2086 is released.</p>
 <p>When it finishes it prints a ready <code>[[model.local]]</code> entry. <code>node.toml</code> is <strong>not</strong>
 changed unless you add <code>--register</code>, which appends the entry (keeping a copy as <code>node.toml.bak</code>). Restart
 <code>ymird</code> afterwards to load it. <code>--id</code>, <code>--role</code> and <code>--context</code> shape the entry; the
@@ -98,7 +107,9 @@ role defaults to <code>main</code> only when the node has no main model yet.</p>
 file named by <code>YMIR_HF_TOKEN_FILE</code>, <code>state/hf-token</code> in the Ymir home, or Hugging Face's own
 <code>~/.cache/huggingface/token</code>. It is only sent to the Hub, and never printed or logged.</p>
 <pre><code>ymirctl models pull Qwen/Qwen3-8B-GGUF
-ymirctl models pull bartowski/Qwen3-8B-GGUF --quant Q5_K_M --register</code></pre>
+ymirctl models pull bartowski/Qwen3-8B-GGUF --quant Q5_K_M --register
+ymirctl models pull thinkingmachines/Inkling-2-Mini --register
+ymirctl models pull ggml-org/Inkling-2-Mini-GGUF --quant IQ4_NL --register</code></pre>
 <h3 id="models-list"><code>ymirctl models list</code></h3>
 <p>Lists the model files on this node (GGUF, split GGUF as one entry, MLX folders and unfinished downloads) and whether a
 <code>[[model.local]]</code> in <code>node.toml</code> uses each.</p>

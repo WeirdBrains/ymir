@@ -31,7 +31,7 @@ use plan::{Capacity, KvSource, Verdict};
 
 #[derive(Subcommand, Debug)]
 pub enum ModelsCmd {
-    /// Search the Hugging Face Hub for GGUF and MLX models, with a fit verdict for this node.
+    /// Search the Hugging Face Hub for GGUF, MLX and (where vLLM can run) safetensors models, with a fit verdict for this node.
     Search(SearchArgs),
     /// Download a model into this node's model directory and print its `[[model.local]]` entry.
     Pull(PullArgs),
@@ -62,6 +62,8 @@ pub struct ListArgs {
 pub enum Format {
     Gguf,
     Mlx,
+    /// Safetensors / transformers repos, served with vLLM.
+    Vllm,
     All,
 }
 
@@ -70,7 +72,7 @@ pub struct SearchArgs {
     /// Words to search for, such as `qwen3 8b`.
     #[arg(required = true)]
     pub query: Vec<String>,
-    /// Which kind of repo to show (default: GGUF, plus MLX on Apple Silicon).
+    /// Which kind of repo to show (default: GGUF, plus MLX on Apple Silicon and vLLM/safetensors on Linux NVIDIA).
     #[arg(long, value_enum)]
     pub format: Option<Format>,
     /// How many repos to show per format.
@@ -233,6 +235,27 @@ fn is_mac_arm(hw: &Hardware) -> bool {
     hw.os == "macos" && matches!(hw.arch.as_str(), "aarch64" | "arm64")
 }
 
+/// Which Hub libraries to search: GGUF always by default, MLX on Apple Silicon, safetensors on
+/// vLLM-capable nodes. `--format` overrides that.
+fn search_libs(format: Option<Format>, hw: &Hardware) -> Vec<(&'static str, &'static str)> {
+    match format {
+        Some(Format::Gguf) => vec![("gguf", "GGUF")],
+        Some(Format::Mlx) => vec![("mlx", "MLX")],
+        Some(Format::Vllm) => vec![("safetensors", "vLLM")],
+        Some(Format::All) => vec![("gguf", "GGUF"), ("mlx", "MLX"), ("safetensors", "vLLM")],
+        None => {
+            let mut v = vec![("gguf", "GGUF")];
+            if is_mac_arm(hw) {
+                v.push(("mlx", "MLX"));
+            }
+            if hw.vllm_supported() {
+                v.push(("safetensors", "vLLM"));
+            }
+            v
+        }
+    }
+}
+
 /// What this node can say about one repo: the quant it would take and whether it fits.
 struct Assessment {
     /// Complete models of the repo, smallest first.
@@ -262,7 +285,7 @@ fn assess(ctx: &Ctx, repo: &str, requested_context: Option<u64>) -> Result<Optio
 
 fn search(ctx: &Ctx, out: &mut dyn Write, a: &SearchArgs) -> Result<()> {
     let query = a.query.join(" ");
-    let format = a.format.unwrap_or(if is_mac_arm(&ctx.hw) { Format::All } else { Format::Gguf });
+    let libs = search_libs(a.format, &ctx.hw);
     let cap = plan::capacity(&ctx.hw);
     writeln!(
         out,
@@ -271,10 +294,7 @@ fn search(ctx: &Ctx, out: &mut dyn Write, a: &SearchArgs) -> Result<()> {
         if cap.accelerated { "accelerated" } else { "CPU" }
     )?;
     let mut shown = 0;
-    for (lib, label) in [("gguf", "GGUF"), ("mlx", "MLX")] {
-        if !(format == Format::All || (format == Format::Gguf) == (lib == "gguf")) {
-            continue;
-        }
+    for (lib, label) in libs {
         let limit = a.limit.clamp(1, 25);
         let hits: Vec<Hit> = if lib == "gguf" {
             ctx.hub().search(&Search::new(&query).with_limit(limit))?.into_iter().map(Hit::from).collect()
@@ -288,11 +308,13 @@ fn search(ctx: &Ctx, out: &mut dyn Write, a: &SearchArgs) -> Result<()> {
                 if let Err(e) = print_gguf(ctx, out, &h.id, a.context) {
                     writeln!(out, "    (could not read the files: {e})")?;
                 }
-            } else {
+            } else if lib == "mlx" {
                 match ctx.mlx.repo(&h.id) {
                     Err(e) => writeln!(out, "    (could not read the files: {e})")?,
                     Ok(info) => print_mlx(ctx, out, &info.files, &cap)?,
                 }
+            } else if let Err(e) = print_vllm(ctx, out, &h.id, &cap) {
+                writeln!(out, "    (could not read the files: {e})")?;
             }
         }
     }
@@ -348,6 +370,40 @@ fn print_mlx(ctx: &Ctx, out: &mut dyn Write, files: &[RepoFile], cap: &Capacity)
     }
     let need = plan::footprint_of(size, None, plan::DEFAULT_CONTEXT);
     writeln!(out, "    {} on disk, needs about {} (KV cache estimated): {}", gib(size), gib(need), plan::verdict(need, cap).label())?;
+    Ok(())
+}
+
+fn print_vllm(ctx: &Ctx, out: &mut dyn Write, repo: &str, cap: &Capacity) -> Result<()> {
+    let info = ctx.mlx.repo(repo)?;
+    let size: u64 = info.files.iter().filter(|f| f.name.ends_with(".safetensors") || f.name.ends_with(".json")).map(|f| f.size).sum();
+    let ctxlen = if ymir_core::vllm::is_inkling(repo) && ymir_core::vllm::is_spark_class(&ctx.hw) {
+        u64::from(ymir_core::vllm::SPARK_MAX_MODEL_LEN)
+    } else {
+        plan::DEFAULT_CONTEXT
+    };
+    let need = plan::footprint_of(size, None, ctxlen);
+    if !ctx.hw.vllm_supported() {
+        writeln!(out, "    {} of weights; vLLM is not detected on this node. Pull still records the Hub id.", gib(size))?;
+    } else {
+        writeln!(
+            out,
+            "    {} of weights, needs about {} at {} context (vLLM fetches on first load): {}",
+            gib(size),
+            gib(need),
+            ctxlen,
+            plan::verdict(need, cap).label()
+        )?;
+    }
+    if ymir_core::vllm::is_inkling(repo) {
+        writeln!(
+            out,
+            "    Inkling 2 Mini: needs vLLM {}.{}.{}+ or the {} image (not a released vLLM yet).",
+            ymir_core::vllm::INKLING_MIN_VERSION.0,
+            ymir_core::vllm::INKLING_MIN_VERSION.1,
+            ymir_core::vllm::INKLING_MIN_VERSION.2,
+            ymir_core::vllm::INKLING_IMAGE
+        )?;
+    }
     Ok(())
 }
 
@@ -442,83 +498,116 @@ fn download(ctx: &Ctx, out: &mut dyn Write, store: &ModelStore, name: &str, spec
     Ok(())
 }
 
+struct PullPlan {
+    specs: Vec<ModelSpec>,
+    store: ModelStore,
+    main: PathBuf,
+    backend: &'static str,
+    id_default: String,
+    context: u64,
+    need: u64,
+    label: String,
+    mmproj: Option<String>,
+}
+
 fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs) -> Result<()> {
     let ggufs = ctx.hub().models(&a.repo)?;
-    let mlx = if ggufs.is_empty() {
-        let info = ctx.mlx.repo(&a.repo)?;
-        if !info.tags.iter().any(|t| t == "mlx") {
-            bail!("{} has no GGUF files and is not an MLX repo; `ymirctl models search` shows repos that work", a.repo);
-        }
-        Some(info)
-    } else {
-        None
-    };
-    let cap = plan::capacity(&ctx.hw);
-    // (files to download, store to download into, backend, default id, context, memory needed, what to call it)
-    let (specs, store, main, backend, id_default, context, need, label): (Vec<ModelSpec>, ModelStore, PathBuf, &str, String, u64, u64, String) =
-        if let Some(info) = &mlx {
-            if !is_mac_arm(&ctx.hw) {
-                writeln!(out, "Note: MLX runs on Apple Silicon only; this node can store the files but not serve them.")?;
+    let info = if ggufs.is_empty() { Some(ctx.mlx.repo(&a.repo)?) } else { ctx.mlx.repo(&a.repo).ok() };
+    if ggufs.is_empty() {
+        let info = info.as_ref().expect("repo metadata");
+        if info.tags.iter().any(|t| t == "mlx") {
+            if ymir_core::vllm::is_inkling(&a.repo) {
+                bail!("{}", ymir_core::vllm::mlx_not_supported_message());
             }
-            let name = a.repo.rsplit('/').next().unwrap_or(&a.repo);
-            let files: Vec<&RepoFile> = info.files.iter().filter(|f| !f.name.starts_with('.')).collect();
-            let size: u64 = files.iter().map(|f| f.size).sum();
-            let ctxlen = plan::context_for(a.context, None);
-            let need = plan::footprint_of(size, None, ctxlen);
-            let dest = ctx.dir().join("mlx").join(name);
-            let store = ymir_core::models::store(&dest, &ctx.state);
-            // Follow this node's Hub (the one the repo was read from), not only the environment's.
-            let store = if store.hub() == ctx.store.hub() { store } else { ModelStore::new(&dest).with_hub(ctx.store.hub()) };
-            let specs = files
-                .iter()
-                .map(|f| ModelSpec {
-                    id: name.to_string(),
-                    label: name.to_string(),
-                    repo: a.repo.clone(),
-                    file: f.name.clone(),
-                    size: f.size,
-                    sha256: f.sha256.clone(),
-                })
-                .collect();
-            (specs, store, dest.clone(), "mlx", name.to_ascii_lowercase(), ctxlen, need, "MLX weights".to_string())
+        } else if plan::is_safetensors_repo(&info.files, &info.tags) {
+            return pull_vllm(ctx, out, a, info);
         } else {
-            let asm = assess(ctx, &a.repo, a.context)?.context("no usable GGUF files in this repo")?;
-            let model = choose(ctx, a, &a.repo, &asm)?;
-            let need = plan::measure(model, asm.kv, asm.context).footprint;
-            let specs = model.specs(&a.repo)?;
-            (
-                specs,
-                ctx.store.clone(),
-                ctx.dir().join(&model.first().name),
-                "llamacpp",
-                plan::id_for_repo(&a.repo),
-                asm.context,
-                need,
-                plan::label(model),
-            )
-        };
-    let total: u64 = specs.iter().map(|s| s.size).sum();
+            bail!("{} has no GGUF files and is not an MLX or safetensors (vLLM) repo; `ymirctl models search` shows repos that work", a.repo);
+        }
+    }
+    let cap = plan::capacity(&ctx.hw);
+    let plan = if ggufs.is_empty() {
+        let info = info.as_ref().expect("MLX repo");
+        if !is_mac_arm(&ctx.hw) {
+            writeln!(out, "Note: MLX runs on Apple Silicon only; this node can store the files but not serve them.")?;
+        }
+        let name = a.repo.rsplit('/').next().unwrap_or(&a.repo);
+        let files: Vec<&RepoFile> = info.files.iter().filter(|f| !f.name.starts_with('.')).collect();
+        let size: u64 = files.iter().map(|f| f.size).sum();
+        let ctxlen = plan::context_for(a.context, None);
+        let need = plan::footprint_of(size, None, ctxlen);
+        let dest = ctx.dir().join("mlx").join(name);
+        let store = ymir_core::models::store(&dest, &ctx.state);
+        // Follow this node's Hub (the one the repo was read from), not only the environment's.
+        let store = if store.hub() == ctx.store.hub() { store } else { ModelStore::new(&dest).with_hub(ctx.store.hub()) };
+        let specs = files
+            .iter()
+            .map(|f| ModelSpec {
+                id: name.to_string(),
+                label: name.to_string(),
+                repo: a.repo.clone(),
+                file: f.name.clone(),
+                size: f.size,
+                sha256: f.sha256.clone(),
+            })
+            .collect();
+        PullPlan {
+            specs,
+            store,
+            main: dest.clone(),
+            backend: "mlx",
+            id_default: name.to_ascii_lowercase(),
+            context: ctxlen,
+            need,
+            label: "MLX weights".to_string(),
+            mmproj: None,
+        }
+    } else {
+        let asm = assess(ctx, &a.repo, a.context)?.context("no usable GGUF files in this repo")?;
+        let model = choose(ctx, a, &a.repo, &asm)?;
+        let need = plan::measure(model, asm.kv, asm.context).footprint;
+        let mut specs = model.specs(&a.repo)?;
+        let mmproj = info.as_ref().and_then(|i| plan::pick_mmproj(&i.files)).cloned();
+        if let Some(p) = &mmproj {
+            // Same id as the weights so download_parts accepts one Consent (it rejects mixed ids).
+            let id = specs.first().map(|s| s.id.clone()).unwrap_or_else(|| plan::id_for_repo(&a.repo));
+            specs.push(ModelSpec { id, label: p.name.clone(), repo: a.repo.clone(), file: p.name.clone(), size: p.size, sha256: p.sha256.clone() });
+        }
+        PullPlan {
+            specs,
+            store: ctx.store.clone(),
+            main: ctx.dir().join(&model.first().name),
+            backend: "llamacpp",
+            id_default: plan::id_for_repo(&a.repo),
+            context: asm.context,
+            need,
+            label: plan::label(model),
+            mmproj: mmproj.map(|p| p.name.rsplit('/').next().unwrap_or(&p.name).to_string()),
+        }
+    };
+    let total: u64 = plan.specs.iter().map(|s| s.size).sum();
     writeln!(
         out,
-        "{}: {label}, {} file(s), {} to download, needs {} at {} context: {}",
+        "{}: {}, {} file(s), {} to download, needs {} at {} context: {}",
         a.repo,
-        specs.len(),
+        plan.label,
+        plan.specs.len(),
         gib(total),
-        gib(need),
-        context,
-        plan::verdict(need, &cap).label()
+        gib(plan.need),
+        plan.context,
+        plan::verdict(plan.need, &cap).label()
     )?;
-    if plan::verdict(need, &cap) != Verdict::Fits {
+    if plan::verdict(plan.need, &cap) != Verdict::Fits {
         writeln!(out, "Warning: this will not fit entirely in this node's {} of model memory.", gib(cap.fast))?;
     }
     if a.dry_run {
-        for s in &specs {
+        for s in &plan.specs {
             writeln!(out, "  {}  {}", gib(s.size), s.file)?;
         }
         return Ok(writeln!(out, "Dry run: nothing was downloaded.")?);
     }
-    let name = specs[0].id.clone();
-    download(ctx, out, &store, &name, &specs)?;
+    let name = plan.specs[0].id.clone();
+    download(ctx, out, &plan.store, &name, &plan.specs)?;
     let role = a.role.clone().unwrap_or_else(|| {
         if a.repo.to_ascii_lowercase().contains("embed") {
             "embedding".into()
@@ -528,9 +617,77 @@ fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs) -> Result<()> {
             "main".into()
         }
     });
-    let id = a.id.clone().unwrap_or(id_default);
-    let entry = plan::local_model(&id, backend, &role, &main.to_string_lossy(), context, cap.accelerated);
+    let id = a.id.clone().unwrap_or(plan.id_default);
+    let mut entry = plan::local_model(&id, plan.backend, &role, &plan.main.to_string_lossy(), plan.context, cap.accelerated);
+    if let Some(proj) = plan.mmproj {
+        entry.mmproj = Some(proj);
+    }
     let stanza = plan::stanza(&entry);
+    writeln!(out, "\nnode.toml entry:\n{stanza}")?;
+    if a.register {
+        local::register(&ctx.config, &id, &stanza)?;
+        writeln!(out, "Added `{id}` to {} (the old file is {}.bak). Restart ymird to load it.", ctx.config.display(), ctx.config.display())?;
+    } else {
+        writeln!(out, "node.toml was not changed. Add the entry above and restart ymird, or pull again with --register.")?;
+    }
+    Ok(())
+}
+
+fn pull_vllm(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, info: &hub::RepoInfo) -> Result<()> {
+    if a.quant.is_some() || a.file.is_some() {
+        bail!(
+            "{} is a safetensors repo for vLLM; --quant and --file apply to GGUF repos. Pull it without those flags to register the Hub id",
+            a.repo
+        );
+    }
+    let cap = plan::capacity(&ctx.hw);
+    let size: u64 = info.files.iter().filter(|f| f.name.ends_with(".safetensors")).map(|f| f.size).sum();
+    let inkling = ymir_core::vllm::is_inkling(&a.repo);
+    let spark = ymir_core::vllm::is_spark_class(&ctx.hw);
+    let context =
+        if inkling && spark && a.context.is_none() { u64::from(ymir_core::vllm::SPARK_MAX_MODEL_LEN) } else { plan::context_for(a.context, None) };
+    let need = plan::footprint_of(size, None, context);
+    writeln!(
+        out,
+        "{}: vLLM Hub id, {} of weights (fetched into the Hugging Face cache on first load), needs about {} at {} context: {}",
+        a.repo,
+        gib(size),
+        gib(need),
+        context,
+        plan::verdict(need, &cap).label()
+    )?;
+    if !ctx.hw.vllm_supported() {
+        writeln!(
+            out,
+            "Note: vLLM is not detected on this hardware; the entry is still written. Serve it on a Linux NVIDIA node, or wrap a container."
+        )?;
+    }
+    if plan::verdict(need, &cap) != Verdict::Fits {
+        writeln!(out, "Warning: this will not fit entirely in this node's {} of model memory.", gib(cap.fast))?;
+    }
+    if inkling {
+        writeln!(
+            out,
+            "Inkling 2 Mini: needs vLLM {}.{}.{}+ or image `{}`. A wrap path is in the docs if you start the image yourself.",
+            ymir_core::vllm::INKLING_MIN_VERSION.0,
+            ymir_core::vllm::INKLING_MIN_VERSION.1,
+            ymir_core::vllm::INKLING_MIN_VERSION.2,
+            ymir_core::vllm::INKLING_IMAGE
+        )?;
+    }
+    let role =
+        a.role.clone().unwrap_or_else(|| if ctx.cfg.as_ref().is_some_and(|c| c.main_model().is_some()) { "chat".into() } else { "main".into() });
+    let id = a.id.clone().unwrap_or_else(|| plan::id_for_repo(&a.repo));
+    let mut entry = plan::local_model(&id, "vllm", &role, &a.repo, context, cap.accelerated);
+    if inkling {
+        entry.args = ymir_core::vllm::inkling_args(spark);
+        entry.image = Some(ymir_core::vllm::INKLING_IMAGE.into());
+    }
+    let stanza = plan::stanza(&entry);
+    if a.dry_run {
+        writeln!(out, "\nnode.toml entry:\n{stanza}")?;
+        return Ok(writeln!(out, "Dry run: nothing was downloaded.")?);
+    }
     writeln!(out, "\nnode.toml entry:\n{stanza}")?;
     if a.register {
         local::register(&ctx.config, &id, &stanza)?;

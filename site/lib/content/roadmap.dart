@@ -7,7 +7,7 @@ class Milestone {
 }
 
 const roadmapIntro = 'Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc.';
-const roadmapUpdated = '2026-11-20';
+const roadmapUpdated = '2026-11-22';
 const roadmapDesignUrl = 'https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md';
 const unpublishedCrates = <String>['weirdnet-push'];
 
@@ -21,6 +21,6 @@ const milestones = <Milestone>[
   Milestone('M6', 'Workload spreading', 'in-progress', 'Load balancing across replicas, fair sharing between devices, priority classes and batch jobs that fan out across nodes are built. Next: moving models between nodes, placement, and a shared answer cache.', ['weirdnet-agent', 'weirdnet-backends', 'weirdnet-semcache']),
   Milestone('M7', 'Split models', 'in-progress', 'A model too big for one machine is split across several with llama.cpp RPC: an opt-in pool policy, private-link-only planning, group up and down, and teardown when a member is lost. Next: vLLM with Ray groups.', ['weirdnet-backends']),
   Milestone('M8', 'Move existing servers onto Ymir', 'done', 'The servers that served models before now run on Ymir. The move was made one step at a time, with the owner approving each step.', []),
-  Milestone('M9', 'Breadth and hardening', 'in-progress', 'Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi\'s agent mode, the Windows service, a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher.', ['weirdnet-update', 'weirdnet-push', 'weirdnet-agent']),
+  Milestone('M9', 'Breadth and hardening', 'in-progress', 'Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi\'s agent mode, the Windows service, a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher; MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).', ['weirdnet-update', 'weirdnet-push', 'weirdnet-agent']),
   Milestone('M10', 'Cert-only server link', 'planned', 'Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. The design is approved and the Weirdnet crates are published; Ymir wires it up next. A majority-vote lease follows as weirdnet-sync 0.8.0.', ['weirdnet-sync', 'weirdnet-device-link']),
 ];

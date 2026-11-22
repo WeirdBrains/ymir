@@ -8,6 +8,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- First-class Inkling 2 Mini support: `ymirctl models pull thinkingmachines/Inkling-2-Mini` registers a vLLM Hub id (with Inkling reasoning/tool parsers, DSpark, the `vllm/vllm-openai:inkling-2-mini` image, and a 262144 context cap on DGX Spark / GB10); `pull ggml-org/Inkling-2-Mini-GGUF` also fetches `mmproj-Inkling-2-Mini-Q8_0.gguf` (any `mmproj-*.gguf` in the same repo is pulled this way). `ymirctl models search` lists safetensors/vLLM repos on vLLM-capable nodes (`--format vllm` or `--format all`). ymird refuses to launch Inkling on a vLLM older than 0.35.0 unless the node uses that image or a wrapped server. MLX is not supported until mlx-lm#2086 lands in a release; pull says so.
+- `[model] vllm = "image:registry/name:tag"` and `[[model.local]] image` run vLLM through docker or podman (host networking, `--entrypoint vllm` so the supervisor's `vllm serve` still works).
+- Bundled llama.cpp is pinned at b12628 (Inkling 2 Mini GGUF support, including the NVFP4 loop-scale fix from ggml-org/llama.cpp#32704).
+
 - One `ymird` for the model, inference and app roles, with `ymirctl` setup, status, load, unload and chat.
 - Loopback OpenAI bridge: `/v1/models`, `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`.
 - llama.cpp and vLLM engines, swap groups, idle unload, and crash restarts with backoff.

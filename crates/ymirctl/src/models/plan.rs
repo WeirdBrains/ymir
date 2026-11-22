@@ -204,6 +204,39 @@ pub fn local_model(id: &str, backend: &str, role: &str, file: &str, context: u64
     }
 }
 
+/// A projector GGUF (`mmproj-*.gguf`), which is not a chat quant.
+pub fn is_mmproj_name(file: &str) -> bool {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file).to_ascii_lowercase();
+    name.starts_with("mmproj-") && name.ends_with(".gguf")
+}
+
+/// The projector to pull with a GGUF: prefer `Q8_0` (as the catalog Gemma projectors do), then
+/// any non-F16/BF16 file, then whatever is there.
+pub fn pick_mmproj(files: &[weirdnet_model::hf::RepoFile]) -> Option<&weirdnet_model::hf::RepoFile> {
+    let mut found: Vec<&weirdnet_model::hf::RepoFile> = files.iter().filter(|f| is_mmproj_name(&f.name)).collect();
+    if found.is_empty() {
+        return None;
+    }
+    found.sort_by_key(|f| {
+        let n = f.name.to_ascii_uppercase();
+        if n.contains("Q8_0") {
+            0u8
+        } else if n.contains("BF16") || n.contains("-F16") || n.ends_with("F16.GGUF") {
+            2
+        } else {
+            1
+        }
+    });
+    Some(found[0])
+}
+
+/// A Hugging Face repo vLLM can load: `config.json` plus safetensors, or the Hub's tags.
+pub fn is_safetensors_repo(files: &[weirdnet_model::hf::RepoFile], tags: &[String]) -> bool {
+    let has_st = files.iter().any(|f| f.name.ends_with(".safetensors"));
+    let has_cfg = files.iter().any(|f| f.name.rsplit('/').next() == Some("config.json"));
+    (has_st && has_cfg) || tags.iter().any(|t| t == "safetensors" || t == "transformers")
+}
+
 #[cfg(test)]
 mod tests {
     use weirdnet_model::hf::{RepoFile, group_files};
@@ -283,5 +316,22 @@ mod tests {
         assert_eq!(id_for_repo("bartowski/Qwen3-8B-GGUF"), "qwen3-8b");
         assert_eq!(id_for_file("big-Q8_0-00001-of-00004.gguf"), "big-q8_0");
         assert_eq!(id_for_file("Tiny-Q4_K_M.gguf"), "tiny-q4_k_m");
+    }
+
+    #[test]
+    fn picks_the_q8_0_mmproj_and_detects_safetensors_repos() {
+        use weirdnet_model::hf::RepoFile;
+        let files = [
+            RepoFile { name: "mmproj-Inkling-2-Mini-BF16.gguf".into(), size: 642, sha256: None },
+            RepoFile { name: "mmproj-Inkling-2-Mini-Q8_0.gguf".into(), size: 346, sha256: None },
+            RepoFile { name: "Inkling-2-Mini-IQ4_NL.gguf".into(), size: 17_600, sha256: None },
+        ];
+        assert_eq!(pick_mmproj(&files).unwrap().name, "mmproj-Inkling-2-Mini-Q8_0.gguf");
+        assert!(!is_mmproj_name("Inkling-2-Mini-IQ4_NL.gguf"));
+        let st =
+            [RepoFile { name: "config.json".into(), size: 10, sha256: None }, RepoFile { name: "model.safetensors".into(), size: 100, sha256: None }];
+        assert!(is_safetensors_repo(&st, &[]));
+        assert!(is_safetensors_repo(&[], &["transformers".into()]));
+        assert!(!is_safetensors_repo(&[RepoFile { name: "README.md".into(), size: 1, sha256: None }], &[]));
     }
 }

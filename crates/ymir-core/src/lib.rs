@@ -33,6 +33,7 @@ pub mod tasks;
 pub mod token;
 pub mod update;
 pub mod vision;
+pub mod vllm;
 
 pub use config::NodeConfig;
 pub use coordinator::Coordinator;

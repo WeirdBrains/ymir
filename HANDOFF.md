@@ -3,6 +3,22 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-22: Inkling 2 Mini, first-class support (branch `feature/inkling`)
+
+**What changed**
+- Bundled llama.cpp pin moved from b12590 to **b12628** (`packaging/engines/llama.cpp.toml`, `scripts/engine.py pin b12628`). b12600 added `inkling2_loop` (ggml-org/llama.cpp#32694); b12628 includes the NVFP4 loop-scale fix (#32704). `engine.py fetch --target x86_64-unknown-linux-gnu --variant default --check` reports `build 12628`.
+- GGUF pull auto-fetches a `mmproj-*.gguf` in the same repo (prefers Q8_0) and sets `mmproj` on the `[[model.local]]` stanza, so `ggml-org/Inkling-2-Mini-GGUF` gets `mmproj-Inkling-2-Mini-Q8_0.gguf` the way catalog Gemma projectors work.
+- `ymirctl models pull` of a safetensors/transformers repo (e.g. `thinkingmachines/Inkling-2-Mini`) records the Hub id for `backend = "vllm"` (vLLM fetches into the HF cache on first load), honors `--register`, and for Inkling adds the reasoning/tool parsers, DSpark, `image = "vllm/vllm-openai:inkling-2-mini"`, and `--max-model-len 262144` on GB10 / Spark. Search lists safetensors repos on vLLM-capable nodes (`--format vllm` or `--format all`).
+- `[model] vllm = "image:..."` and `[[model.local]] image` write a docker/podman shim. ymird preflights Inkling launches: a vLLM older than 0.35.0 without the image or a wrap is left unloaded with a clear error (0.34.0 cannot load `inkling2_loop`; support is not in a vLLM release yet).
+- MLX Inkling is refused with a pointer at mlx-lm#2086 (still an open draft). Roadmap/DESIGN record that follow-up.
+
+**Checks:** On this box (`grok-bot-vm-541285893`, rustc 1.100.0), with `CARGO_BUILD_JOBS=4` and `--locked --offline`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` (clean aside from pre-existing unused workspace-dependency warnings: chrono, lettre, thiserror, weirdnet-rules, ymird), `cargo test --workspace --locked --offline`: **213 passed, 0 failed, 6 ignored**. New unit tests: version/Spark/args/wrapper (`ymir-core` `vllm`), config validation, GGUF+mmproj pick and pull, safetensors→vLLM stanza (including Spark context cap), MLX refusal, vLLM search.
+
+**Not tested end to end:** no real Inkling weights, no real vLLM, no DGX Spark, no docker image run, no llama.cpp load of an `inkling2_loop` GGUF (this box has no GPU and must not download the model). The b12628 default linux engine archive was fetched and `llama-server --version` checked. CUDA variant fetch was not run here (large). `--node` remote pull of safetensors is still the GGUF-only models/1 path.
+
+**What's next:** Infra cuts the release and rolls it out. On a Spark node: pull, register, load, and a test chat (commands in the merge notes). MLX once mlx-lm#2086 is released.
+
+
 ## 2026-11-22: MLX end-to-end mock test recovered (branch `feature/mlx`)
 
 **What changed:** `crates/ymir-testkit/tests/mlx.rs` is back: one node serves a GGUF on llama.cpp (with a projector) and an MLX model, both on the mock engine; it checks the engine kinds and launches `NodeConfig` builds, chats with each model through `ymird`, and checks the capabilities each reports (the GGUF takes images and audio, the MLX model text only). It was written during the LF-18 MLX work but never committed (it lived untracked in a scratch clone and a local stash), so DESIGN.md's MLX section pointed at a file that did not exist and the macOS workflow had dropped its MLX mock step. The macOS workflow runs it again after the `ymir-core` unit tests. The rest of that stash (MLX as `EngineKind::Mlx`, the `ymir-engine` shim removal, packaging and docs) had already landed on main through LF-18 and later commits, so nothing else was carried over; main's newer Weirdnet pins stay.

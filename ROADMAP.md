@@ -4,7 +4,7 @@
 
 Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc.
 
-Updated 2026-11-20. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
+Updated 2026-11-22. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
 ## M0 Design (Done)
 
@@ -62,7 +62,7 @@ Weirdnet crates: none new.
 
 ## M9 Breadth and hardening (In progress)
 
-Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher.
+Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher; MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 

@@ -314,6 +314,12 @@ pub struct LocalModel {
     /// Where the wrapped server's API key comes from: `env:NAME` or `file:/path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap_api_key: Option<String>,
+    /// A container image that provides `vllm` (for example `vllm/vllm-openai:inkling-2-mini`).
+    /// When `[model] vllm` is `auto` and no `wrap` is set, ymird runs this image through docker
+    /// or podman (see [`crate::vllm::write_image_wrapper`]). Every unwrapped vLLM model on the
+    /// node must name the same image, because the supervisor has one vLLM program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 impl LocalModel {
@@ -517,6 +523,24 @@ impl NodeConfig {
             {
                 bail!("model `{}`: wrap_api_key must be env:NAME or file:/path, not the key itself", m.id);
             }
+            if let Some(img) = &m.image {
+                if m.backend.as_deref() != Some("vllm") {
+                    bail!("model `{}`: image is only valid with backend = \"vllm\"", m.id);
+                }
+                if !crate::vllm::valid_image(img) {
+                    bail!("model `{}`: image `{img}` is not a container image name (registry/name:tag)", m.id);
+                }
+            }
+            if m.backend.as_deref() == Some("mlx") && crate::vllm::is_inkling(m.file.as_deref().unwrap_or(&m.id)) {
+                bail!("model `{}`: {}", m.id, crate::vllm::mlx_not_supported_message());
+            }
+        }
+        let vllm_images: Vec<&str> =
+            self.model.local.iter().filter(|m| m.backend.as_deref() == Some("vllm") && m.wrap.is_none()).filter_map(|m| m.image.as_deref()).collect();
+        if vllm_images.windows(2).any(|w| w[0] != w[1]) {
+            bail!(
+                "[[model.local]] image: every unwrapped vLLM model on this node must use the same image (the supervisor has one vLLM program); wrap a server you started if you need more than one"
+            );
         }
         crate::mcp_servers::validate(&self.inference.agent.mcp)?;
         self.validate_splits()?;
@@ -612,7 +636,7 @@ impl NodeConfig {
                 None => tracing::warn!("models use mlx but MLX-LM is not installed (run `ymirctl setup --download`); they will fail to load"),
             }
         }
-        if let Some(p) = resolve_engine(&self.model.vllm, "vllm", &paths.engines().join("vllm").join("bin").join("vllm")) {
+        if let Some(p) = resolve_vllm(&self.model, paths) {
             out.push(EngineConfig::vllm(p));
         }
         out
@@ -753,9 +777,56 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     Ok(std::time::Duration::from_secs_f64(n * mult))
 }
 
+/// `auto` or `managed` uses a container image when `[model] vllm = "image:..."` or a local
+/// vLLM model sets `image` and is not wrapped.
+fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+    let setting = model.vllm.trim();
+    if setting == "off" {
+        return None;
+    }
+    if let Some(img) = setting.strip_prefix("image:") {
+        return match crate::vllm::write_image_wrapper(&paths.engines(), img.trim()) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!("vLLM image: {e}");
+                None
+            }
+        };
+    }
+    if matches!(setting, "auto" | "managed")
+        && let Some(img) = vllm_image_from_models(model)
+    {
+        return match crate::vllm::write_image_wrapper(&paths.engines(), &img) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!("vLLM image: {e}");
+                None
+            }
+        };
+    }
+    resolve_engine(setting, "vllm", &paths.engines().join("vllm").join("bin").join("vllm"))
+}
+
+/// The image unwrapped vLLM models agree on, if any.
+pub fn vllm_image_from_models(model: &ModelSection) -> Option<String> {
+    let mut imgs: Vec<&str> =
+        model.local.iter().filter(|m| m.backend.as_deref() == Some("vllm") && m.wrap.is_none()).filter_map(|m| m.image.as_deref()).collect();
+    imgs.sort_unstable();
+    imgs.dedup();
+    match imgs.as_slice() {
+        [one] => Some((*one).to_string()),
+        _ => None,
+    }
+}
+
+/// Whether this node's vLLM program is (or will be) a container-image wrapper.
+pub fn vllm_via_image(model: &ModelSection) -> bool {
+    model.vllm.trim().starts_with("image:") || vllm_image_from_models(model).is_some()
+}
+
 /// `managed` looks in Ymir's engines dir, then at the engine shipped with this install (see
 /// [`crate::engine`]), then on `PATH`; `system:/path` uses that; `auto` (vLLM) looks on `PATH`;
-/// `off` disables.
+/// `off` disables. `image:name` is handled by [`resolve_vllm`].
 fn resolve_engine(setting: &str, binary: &str, managed_path: &Path) -> Option<PathBuf> {
     resolve_engine_with(setting, binary, managed_path, crate::engine::bundled().as_ref())
 }
@@ -922,5 +993,60 @@ mod tests {
         assert_eq!(resolve_engine_with("managed", "llama-server", &managed, Some(&b)), Some(managed.clone()));
         assert_eq!(resolve_engine_with("system:/opt/ls", "llama-server", &managed, Some(&b)), Some(PathBuf::from("/opt/ls")));
         assert_eq!(resolve_engine_with("off", "llama-server", &managed, Some(&b)), None);
+    }
+
+    #[test]
+    fn vllm_image_and_inkling_mlx_are_validated() {
+        let ok: NodeConfig = toml::from_str(
+            r#"
+            [node]
+            name = "spark"
+            [[model.local]]
+            id = "inkling-2-mini"
+            backend = "vllm"
+            file = "thinkingmachines/Inkling-2-Mini"
+            image = "vllm/vllm-openai:inkling-2-mini"
+            args = ["--reasoning-parser", "inkling"]
+            "#,
+        )
+        .unwrap();
+        ok.validate().unwrap();
+        assert_eq!(ok.model.local[0].image.as_deref(), Some(crate::vllm::INKLING_IMAGE));
+        assert!(vllm_via_image(&ok.model));
+        assert_eq!(vllm_image_from_models(&ok.model).as_deref(), Some(crate::vllm::INKLING_IMAGE));
+
+        let mlx: NodeConfig = toml::from_str(
+            r#"
+            [node]
+            name = "mac"
+            [[model.local]]
+            id = "inkling"
+            backend = "mlx"
+            file = "mlx-community/Inkling-2-Mini-4bit"
+            "#,
+        )
+        .unwrap();
+        let err = mlx.validate().unwrap_err().to_string();
+        assert!(err.contains("mlx-lm") && err.contains("2086"), "{err}");
+
+        let mixed: NodeConfig = toml::from_str(
+            r#"
+            [node]
+            name = "n"
+            [[model.local]]
+            id = "a"
+            backend = "vllm"
+            file = "a"
+            image = "vllm/one:tag"
+            [[model.local]]
+            id = "b"
+            backend = "vllm"
+            file = "b"
+            image = "vllm/two:tag"
+            "#,
+        )
+        .unwrap();
+        let err = mixed.validate().unwrap_err().to_string();
+        assert!(err.contains("same image"), "{err}");
     }
 }

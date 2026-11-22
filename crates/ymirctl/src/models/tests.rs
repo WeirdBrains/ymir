@@ -3,6 +3,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use weirdnet_model::hw::Hardware;
+use ymir_core::NodeConfig;
 
 use super::hub::mock::{MockHub, sample_header};
 use super::*;
@@ -38,12 +39,14 @@ impl Fixture {
         ];
         let siblings: Vec<_> = files.iter().map(|(n, b)| json!({"rfilename": n, "size": b.len(), "lfs": {"sha256": sha(b)}})).collect();
         let mut siblings = siblings;
-        siblings.push(json!({"rfilename": "mmproj-tiny-f16.gguf", "size": 5}));
+        let mmproj = b"MMPROJ".to_vec();
+        siblings.push(json!({"rfilename": "mmproj-tiny-f16.gguf", "size": mmproj.len(), "lfs": {"sha256": sha(&mmproj)}}));
         siblings.push(json!({"rfilename": "README.md", "size": 5}));
         hub.route("/api/models/acme/Tiny-GGUF?blobs=true", 200, json!({"gated": false, "tags": ["gguf"], "siblings": siblings}).to_string());
         for (n, b) in &files {
             hub.route(&format!("/acme/Tiny-GGUF/resolve/main/{n}"), 200, b.clone());
         }
+        hub.route("/acme/Tiny-GGUF/resolve/main/mmproj-tiny-f16.gguf", 200, mmproj);
         Self { hub, dir: tempfile::tempdir().unwrap() }
     }
 
@@ -93,11 +96,13 @@ fn pull_picks_the_best_quant_that_fits_and_prints_a_stanza_without_touching_node
     let mut out = Vec::new();
     pull(&ctx, &mut out, &pull_args("acme/Tiny-GGUF")).unwrap();
     let s = text(out);
-    assert!(s.contains("acme/Tiny-GGUF: Q8_0, 1 file(s)"), "{s}");
+    assert!(s.contains("acme/Tiny-GGUF: Q8_0, 2 file(s)"), "{s}");
     assert!(s.contains("downloaded, checksum verified"), "{s}");
     assert!(s.contains("[[model.local]]\nid = \"tiny\"") && s.contains("role = \"main\"") && s.contains("tiny-Q8_0.gguf"), "{s}");
+    assert!(s.contains("mmproj = ") && s.contains("mmproj-tiny-f16.gguf"), "{s}");
     assert!(s.contains("node.toml was not changed"));
     assert_eq!(std::fs::read(ctx.dir().join("tiny-Q8_0.gguf")).unwrap(), gguf_bytes(400_000, 1));
+    assert_eq!(std::fs::read(ctx.dir().join("mmproj-tiny-f16.gguf")).unwrap(), b"MMPROJ");
     assert_eq!(std::fs::read_to_string(&ctx.config).unwrap(), "[node]\nname = \"n\"\n");
     assert!(!ctx.dir().join("tiny-Q4_K_M.gguf").exists());
     // The next run is a no-op download.
@@ -113,7 +118,7 @@ fn pull_a_split_quant_downloads_every_shard_and_points_at_the_first() {
     let mut out = Vec::new();
     pull(&ctx, &mut out, &PullArgs { quant: Some("q6_k".into()), ..pull_args("acme/Tiny-GGUF") }).unwrap();
     let s = text(out);
-    assert!(s.contains("Q6_K, 2 file(s)"), "{s}");
+    assert!(s.contains("Q6_K, 3 file(s)"), "{s}"); // two shards + mmproj
     assert!(ctx.dir().join("tiny-Q6_K-00002-of-00002.gguf").exists());
     // The path is a TOML string: basic (`"`) on Unix, literal (`'`) when it holds Windows backslashes.
     assert!(s.contains("tiny-Q6_K-00001-of-00002.gguf\"") || s.contains("tiny-Q6_K-00001-of-00002.gguf'"), "{s}");
@@ -150,7 +155,8 @@ fn unknown_quant_and_non_model_repos_say_what_is_available() {
     let err = pull(&ctx, &mut Vec::new(), &PullArgs { quant: Some("Q2_K".into()), ..pull_args("acme/Tiny-GGUF") }).unwrap_err().to_string();
     assert!(err.contains("no `Q2_K` quant") && err.contains("Q4_K_M"), "{err}");
     fx.hub.route("/api/models/acme/Plain?blobs=true", 200, json!({"siblings": [{"rfilename": "model.bin", "size": 1}]}).to_string());
-    assert!(pull(&ctx, &mut Vec::new(), &pull_args("acme/Plain")).unwrap_err().to_string().contains("no GGUF files"));
+    let err = pull(&ctx, &mut Vec::new(), &pull_args("acme/Plain")).unwrap_err().to_string();
+    assert!(err.contains("no GGUF files") && err.contains("safetensors"), "{err}");
 }
 
 #[test]
@@ -263,4 +269,95 @@ fn ids_come_from_the_file_name_for_unix_and_windows_paths() {
     assert_eq!(plan::id_for_file("/srv/m/Tiny-Q8_0.gguf"), "tiny-q8_0");
     assert_eq!(plan::id_for_file(r"C:\models\Tiny-Q8_0.gguf"), "tiny-q8_0");
     assert_eq!(plan::id_for_file(r"C:\models\big-Q4_K_M-00001-of-00002.gguf"), "big-q4_k_m");
+}
+
+fn inkling_repo() -> serde_json::Value {
+    json!({
+        "tags": ["transformers", "safetensors"],
+        "siblings": [
+            {"rfilename": "config.json", "size": 2048},
+            {"rfilename": "model.safetensors", "size": 20_000_000u64, "lfs": {"sha256": "ab"}}
+        ]
+    })
+}
+
+#[test]
+fn pull_of_a_safetensors_repo_prints_a_vllm_stanza_and_downloads_nothing() {
+    let fx = Fixture::new();
+    fx.hub.route("/api/models/thinkingmachines/Inkling-2-Mini?blobs=true", 200, inkling_repo().to_string());
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { register: true, ..pull_args("thinkingmachines/Inkling-2-Mini") }).unwrap();
+    let s = text(out);
+    assert!(s.contains("vLLM Hub id"), "{s}");
+    assert!(s.contains("backend = \"vllm\""), "{s}");
+    assert!(s.contains("file = \"thinkingmachines/Inkling-2-Mini\""), "{s}");
+    assert!(s.contains("reasoning-parser") && s.contains("inkling"), "{s}");
+    assert!(s.contains("tool-call-parser") && s.contains("enable-auto-tool-choice"), "{s}");
+    assert!(s.contains("dspark"), "{s}");
+    assert!(s.contains("image = \"vllm/vllm-openai:inkling-2-mini\""), "{s}");
+    assert!(s.contains("Added `inkling-2-mini`"), "{s}");
+    // Not Spark-class in this fixture: no 262144 cap.
+    assert!(!s.contains("max-model-len"), "{s}");
+    assert!(!ctx.dir().join("model.safetensors").exists());
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    assert_eq!(cfg.model.local[0].backend.as_deref(), Some("vllm"));
+    assert_eq!(cfg.model.local[0].image.as_deref(), Some(ymir_core::vllm::INKLING_IMAGE));
+}
+
+#[test]
+fn pull_of_inkling_on_spark_caps_context_and_mlx_is_refused() {
+    use weirdnet_model::hw::{Accel, Gpu};
+    let fx = Fixture::new();
+    fx.hub.route("/api/models/thinkingmachines/Inkling-2-Mini?blobs=true", 200, inkling_repo().to_string());
+    let mut ctx = fx.ctx(128, None);
+    ctx.hw = Hardware {
+        os: "linux".into(),
+        arch: "aarch64".into(),
+        cpu_threads: 20,
+        ram_bytes: 128 << 30,
+        gpus: vec![Gpu {
+            accel: Accel::Nvidia,
+            name: "NVIDIA GB10".into(),
+            memory_bytes: 128 << 30,
+            unified: true,
+            compute_capability: Some((12, 1)),
+            driver: None,
+        }],
+    };
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &pull_args("thinkingmachines/Inkling-2-Mini")).unwrap();
+    let s = text(out);
+    assert!(s.contains("max-model-len") && s.contains("262144"), "{s}");
+    assert!(s.contains("context = 262144") || s.contains("at 262144 context"), "{s}");
+
+    fx.hub.route(
+        "/api/models/mlx-community/Inkling-2-Mini-4bit?blobs=true",
+        200,
+        json!({"tags": ["mlx"], "siblings": [{"rfilename": "config.json", "size": 2}, {"rfilename": "model.safetensors", "size": 8}]}).to_string(),
+    );
+    let err = pull(&ctx, &mut Vec::new(), &pull_args("mlx-community/Inkling-2-Mini-4bit")).unwrap_err().to_string();
+    assert!(err.contains("mlx-lm") && err.contains("2086"), "{err}");
+}
+
+#[test]
+fn search_lists_vllm_safetensors_repos() {
+    let fx = Fixture::new();
+    fx.hub.route(
+        "/api/models",
+        200,
+        json!([{"id": "thinkingmachines/Inkling-2-Mini", "downloads": 5000, "likes": 80, "gated": false, "safetensors": {"total": 20_000_000_000u64}}]).to_string(),
+    );
+    fx.hub.route("/api/models/thinkingmachines/Inkling-2-Mini?blobs=true", 200, inkling_repo().to_string());
+    let ctx = fx.ctx(32, None);
+    let mut out = Vec::new();
+    search(
+        &ctx,
+        &mut out,
+        &SearchArgs { query: vec!["inkling".into()], format: Some(Format::Vllm), limit: 5, context: None, node: NodeArgs::default() },
+    )
+    .unwrap();
+    let s = text(out);
+    assert!(s.contains("thinkingmachines/Inkling-2-Mini") && s.contains("vLLM"), "{s}");
+    assert!(s.contains("Inkling 2 Mini") && s.contains("0.35.0"), "{s}");
 }

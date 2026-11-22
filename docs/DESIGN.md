@@ -453,7 +453,7 @@ embeddings in `weirdnet-model` (`llama`), and Bragi's offline model.
 
 How it works:
 
-- `packaging/engines/llama.cpp.toml` pins one upstream build (`b12590` at first) and, per target and
+- `packaging/engines/llama.cpp.toml` pins one upstream build (`b12628`, first Inkling-capable pin; was `b12590`) and, per target and
   variant, the upstream release archives with their SHA-256. `scripts/engine.py fetch` downloads and
   checks them and keeps only `llama-server`, `rpc-server`, their libraries and GPU backends, the
   licenses and an `engine.toml` (build, variant, backends). `scripts/engine.py build` compiles the
@@ -472,7 +472,7 @@ How it works:
   upgrades the engine, and `--llama-server PATH` (`system:PATH`) still picks an external build.
 - `ymirctl setup` names the engine it found and warns when the machine has an NVIDIA GPU but the
   installed build has no CUDA.
-- vLLM stays an external engine (`vllm = "auto"` or `system:PATH`, or a wrapped `vllm serve`).
+- vLLM stays an external engine (`vllm = "auto"` or `system:PATH`, `image:registry/name:tag`, or a wrapped `vllm serve`).
 - Tests: `ymir-testkit/tests/bundled_engine.rs` (setup and `ymird` pick the bundled engine, with the
   mock engine laid out as a package installs it) and `real_bundle.rs` (an unpacked release archive,
   its own `ymirctl` and `ymird` processes, a real tiny GGUF streamed through the bridge, and a killed
@@ -484,6 +484,56 @@ Generic part, proposed to the Weirdnet lead for `weirdnet-backends` (the design 
 `engine.toml`, the pin manifest format and fetch with `weirdnet-model`'s download and consent, and the
 engine build script, so Morph, Bragi and other apps reuse them. Until then the code is in
 `ymir_core::engine` and `scripts/engine.py`, marked to be extracted.
+
+
+### Inkling 2 Mini (2026-11-22)
+
+Thinking Machines' Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`, Apache 2.0) is a looped
+multimodal MoE (`model_type: inkling2_loop`, 26.4B / 3.4B active, NVFP4+MXFP8, 1M context, text and
+image). It is small enough for a DGX Spark. Ymir serves it through vLLM or llama.cpp; MLX is not
+ready yet.
+
+- **vLLM (preferred on Linux NVIDIA, including Spark).** `ymirctl models pull thinkingmachines/Inkling-2-Mini`
+  records the Hub id (vLLM fetches weights into the Hugging Face cache on first load) and writes a
+  `[[model.local]]` with `backend = "vllm"`, the Inkling reasoning and tool-call parsers, DSpark
+  speculative decoding, and `image = "vllm/vllm-openai:inkling-2-mini"`. On GB10 / DGX Spark it also
+  sets `--max-model-len 262144` (the vLLM recipe's cap so the KV cache fits). Support needs vLLM
+  0.35.0 or a newer nightly, or that image; it is not in 0.34.0 and is not in a vLLM release yet
+  ([recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini),
+  [vllm#69028](https://github.com/vllm-project/vllm/pull/69028)). If the node's `vllm` is too old,
+  ymird leaves the model unloaded and logs how to point `[model] vllm` at `image:vllm/vllm-openai:inkling-2-mini`
+  or wrap a container the operator started:
+
+      docker run --gpus all --ipc=host -p 8000:8000 \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        vllm/vllm-openai:inkling-2-mini thinkingmachines/Inkling-2-Mini \
+        --reasoning-parser inkling --tool-call-parser inkling --enable-auto-tool-choice \
+        --max-model-len 262144
+
+      # node.toml
+      wrap = "http://127.0.0.1:8000/v1"
+
+  `image:` writes a `vllm-image` shim under the engines dir (`docker` or `podman`, host network,
+  `--entrypoint vllm`) so the supervisor can still run `vllm serve MODEL --host 127.0.0.1 --port N`.
+  `ymirctl models search` lists safetensors repos on vLLM-capable nodes (`--format vllm` or
+  `--format all`). A safetensors pull from another machine over `--node` is not in the models/1
+  protocol (that path is GGUF); run `ymirctl models pull` on the node itself.
+
+- **llama.cpp.** The bundled engine is llama.cpp **b12628** (GGUF architecture `inkling2_loop` from
+  [llama.cpp#32694](https://github.com/ggml-org/llama.cpp/pull/32694) in b12600, plus the NVFP4
+  loop-scale fix in [llama.cpp#32704](https://github.com/ggml-org/llama.cpp/pull/32704)).
+  `ymirctl models pull ggml-org/Inkling-2-Mini-GGUF` picks a fitting quant and also downloads a
+  `mmproj-*.gguf` from the same repo (preferring Q8_0, e.g. `mmproj-Inkling-2-Mini-Q8_0.gguf`) and
+  sets `mmproj` on the stanza so images work. That auto-fetch is generic: any GGUF repo with an
+  `mmproj-*.gguf` gets the same treatment. Use ggml-org or bartowski GGUFs on this pin; Unsloth
+  `Mainline_Support` files need the #32704 fix (included in b12628), and Unsloth's root files need
+  Unsloth's own llama.cpp, which Ymir does not ship.
+
+- **MLX (not yet).** mlx-lm support is still an open draft
+  ([mlx-lm#2086](https://github.com/ml-explore/mlx-lm/pull/2086)). `ymirctl models pull` of an
+  Inkling MLX repo fails with that pointer. Use vLLM or a GGUF until the PR is in a released
+  mlx-lm; even then Ymir's MLX engine is text-only today (see above), so images would still need
+  more work (`mlx-vlm` is not adopted).
 
 ### Engines per platform: MLX on Macs, llama.cpp everywhere else (2026-11-20)
 

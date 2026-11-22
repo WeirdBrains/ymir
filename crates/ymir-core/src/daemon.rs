@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use weirdnet_backends::{Supervisor, SupervisorOptions};
+use weirdnet_backends::{EngineKind, Supervisor, SupervisorOptions};
 use weirdnet_semcache::{AnswerCache, ExactCache, NoCache};
 
 use crate::control::{self, ControlHandler};
@@ -116,6 +116,13 @@ impl Daemon {
                 tracing::info!(engine = e.kind.name(), program = %e.program.display(), "model role: engine");
             }
             let mut launches = cfg.launches();
+            launches.retain(|l| match preflight_vllm(&cfg, &engines, l) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(model = %l.id, "{e}");
+                    false
+                }
+            });
             // Split models (M7): the leader's llama-server is wrapped, and appears when a group is up.
             let key = group::load_or_create_key(&paths.state().join("split.key")).with_context(|| "creating the split-model key")?;
             launches.extend(cfg.split_launches(&key));
@@ -370,4 +377,23 @@ impl Daemon {
         }
         tracing::info!("ymird stopped");
     }
+}
+
+/// Drops an Inkling vLLM launch that this node's vLLM cannot load, with a clear error. Wrapped
+/// servers and container images are left alone (the operator picked them).
+fn preflight_vllm(cfg: &NodeConfig, engines: &[weirdnet_backends::EngineConfig], l: &weirdnet_backends::ModelLaunch) -> Result<()> {
+    if l.engine != EngineKind::Vllm || l.wrap.is_some() {
+        return Ok(());
+    }
+    let inkling = crate::vllm::is_inkling(&l.source) || l.extra_args.iter().any(|a| a == "inkling");
+    if !inkling {
+        return Ok(());
+    }
+    if crate::config::vllm_via_image(&cfg.model) {
+        return Ok(());
+    }
+    let Some(eng) = engines.iter().find(|e| e.kind == EngineKind::Vllm) else {
+        anyhow::bail!("{}", crate::vllm::inkling_unsupported_message(None));
+    };
+    crate::vllm::ensure_inkling(&eng.program, false)
 }
