@@ -2,9 +2,9 @@
 # Prebuilt binaries from the GitHub release. scripts/package.py --recipe (and the release workflow)
 # fill in pkgver and the sha256sums; scripts/weirdnet_release.py taur publishes this recipe to TAUR.
 pkgname=ymir-bin
-_ver=0.1.0
-pkgver=0.1.0
-pkgrel=2
+_ver=0.2.0
+pkgver=0.2.0
+pkgrel=1
 pkgdesc="Private cloud of LLM models on your own machines (node daemon and CLI), llama.cpp included (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/WeirdBrains/ymir"
@@ -17,8 +17,8 @@ conflicts=('ymir' 'ymir-git' 'ymir-cuda' 'ymir-cuda-bin')
 options=('!strip' '!debug')
 source_x86_64=("ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('6631586e3e1e872cebb170f3d02e47d831ea7d144b2417176b5d3ca1fdc40b3b')
-sha256sums_aarch64=('200c2d367c80379dfc994b5f87f74663b48fc2c4de388c0e3a45dd9301ea87a1')
+sha256sums_x86_64=('b53ad486ca0d74a713a5d5eac0f1d37ff2c696028cafbded8a180ab1dd173a04')
+sha256sums_aarch64=('452d525bd232cfd3980e1c40a26feca1c4aeb69f11d2e04a41783bb23afb29c8')
 
 package() {
   cd "ymir-${_ver}-${CARCH}-unknown-linux-gnu"
