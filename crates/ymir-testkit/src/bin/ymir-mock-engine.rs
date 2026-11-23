@@ -8,6 +8,10 @@
 //! Images: with `--mmproj FILE` (a file that exists), image parts in a chat message are counted and
 //! the answer ends with ` [N image(s)]`; without one, a request with an image fails like
 //! `llama-server`'s ("image input is not supported").
+//!
+//! LoRA: `--lora FILE` (repeatable) as llama-server takes it; a chat body's `"lora": [{"id": i,
+//! "scale": s}]` applies file `i`, and the answer reads "Hello from `<alias>` with `<file stem>` at
+//! `<s>`!". An id past the list is refused like llama-server's "invalid adapter id".
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,6 +29,8 @@ struct Mock {
     key: Option<String>,
     vision: bool,
     ready_at: Instant,
+    /// `--lora` files, in order (llama-server's adapter ids are their positions).
+    loras: Vec<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -37,7 +43,9 @@ async fn main() {
     let load_ms = std::env::var("YMIR_MOCK_LOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     assert_eq!(host, "127.0.0.1", "engines must bind loopback only");
     let vision = flag("--mmproj").is_some_and(|p| std::path::Path::new(&p).is_file());
-    let st = Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), vision, ready_at: Instant::now() + Duration::from_millis(load_ms) });
+    let loras: Vec<String> = args.windows(2).filter(|w| w[0] == "--lora").map(|w| w[1].clone()).collect();
+    let st =
+        Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), vision, ready_at: Instant::now() + Duration::from_millis(load_ms), loras });
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(models))
@@ -149,7 +157,20 @@ async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body):
         None => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
     };
     let seen = if images > 0 { format!(" [{images} image(s)]") } else { String::new() };
-    let answer = format!("Hello from {}! You said: {said}{seen}", st.alias);
+    // Per-request adapters as llama-server takes them: `"lora": [{"id": index, "scale": s}]`.
+    let mut applied = Vec::new();
+    for l in body["lora"].as_array().into_iter().flatten() {
+        let Some(file) = l["id"].as_u64().and_then(|i| st.loras.get(i as usize)) else {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("invalid adapter id {}", l["id"])}}))).into_response();
+        };
+        let scale = l["scale"].as_f64().unwrap_or(1.0);
+        if scale != 0.0 {
+            let name = std::path::Path::new(file).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            applied.push(format!("{name} at {scale}"));
+        }
+    }
+    let with = if applied.is_empty() { String::new() } else { format!(" with {}", applied.join(", ")) };
+    let answer = format!("Hello from {}{with}! You said: {said}{seen}", st.alias);
     // A trailing assistant message is a prefix to continue (llama.cpp prefill), as a resume
     // sends: only what comes after it streams.
     let prefix = body["messages"].as_array().and_then(|m| m.last()).filter(|m| m["role"] == "assistant").and_then(|m| m["content"].as_str());

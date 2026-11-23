@@ -25,6 +25,9 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
         ModelsCmd::Context(_) => {
             bail!("`ymirctl models context` edits this machine's node.toml; run it on the node itself (without --node)")
         }
+        ModelsCmd::Adapter { .. } => {
+            bail!("`ymirctl models adapter` edits this machine's node.toml; run it on the node itself (without --node)")
+        }
     }
 }
 
@@ -181,14 +184,18 @@ async fn list(paths: &Paths, out: &mut dyn Write, node: &str) -> Result<()> {
                     writeln!(out, "  none downloaded")?;
                 }
                 for e in entries {
-                    let state = match (&e.served_as, e.state.clone()) {
-                        (Some(id), Some(st)) => format!("serving as `{id}` ({st:?})"),
-                        (Some(id), None) => format!("serving as `{id}`"),
-                        _ if !e.model.complete => "incomplete (parts missing)".to_string(),
+                    let complete = e.model.as_ref().is_none_or(|m| m.complete);
+                    let state = match (&e.served_as, e.state.clone(), &e.base) {
+                        (Some(id), _, Some(base)) => format!("adapter `{id}` on `{base}`"),
+                        (Some(id), Some(st), None) => format!("serving as `{id}` ({st:?})"),
+                        (Some(id), None, None) => format!("serving as `{id}`"),
+                        _ if !complete => "incomplete (parts missing)".to_string(),
+                        _ if e.adapter.is_some() => "adapter, not served".to_string(),
                         _ => "not served".to_string(),
                     };
-                    let shards = if e.model.files.len() > 1 { format!(" ({} files)", e.model.files.len()) } else { String::new() };
-                    writeln!(out, "  {:<40} {:>10}{shards}  {state}", e.model.id, gib(e.model.size))?;
+                    let files = e.model.as_ref().map_or(1, |m| m.files.len());
+                    let shards = if files > 1 { format!(" ({files} files)") } else { String::new() };
+                    writeln!(out, "  {:<40} {:>10}{shards}  {state}", e.id(), gib(e.size()))?;
                 }
             }
             Outcome::Failed { message } => {
@@ -241,6 +248,30 @@ fn explain_pick(out: &mut dyn Write, c: &Chosen) -> Result<()> {
     Ok(writeln!(out, "Picked {}: it can hold {} ({}) in its {} of model memory.", c.node.label, c.model, gib(c.size), gib(c.usable_bytes))?)
 }
 
+/// What to tell the operator about an adapter pulled for `base`.
+fn adapter_pulled(out: &mut dyn Write, label: &str, base: &str, p: &weirdnet_backends::models::Pulled) -> Result<()> {
+    use weirdnet_backends::AdapterChange;
+    match (p.served, p.change) {
+        (true, Some(AdapterChange::NextLoad)) => writeln!(
+            out,
+            "{label}: `{}` is added to `{base}`, which is running without it: the first request for `{}` restarts `{base}` with it",
+            p.id, p.id
+        )?,
+        (true, _) => writeln!(out, "{label}: serving `{}` now, on `{base}`", p.id)?,
+        _ => writeln!(out, "{label}: not serving yet; pull again with --serve (no restart needed), or add it to node.toml there")?,
+    }
+    writeln!(
+        out,
+        "\nTo keep it after a restart, run on {label}:\n  ymirctl models adapter add {base} {} --id {}",
+        p.files.first().map(String::as_str).unwrap_or_default(),
+        p.id
+    )?;
+    if p.served {
+        writeln!(out, "{label}: serving without a restart is in memory only; node.toml was not changed.")?;
+    }
+    Ok(())
+}
+
 async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> Result<()> {
     if a.register {
         bail!(
@@ -251,6 +282,14 @@ async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> R
         bail!(
             "--id and --role shape a node.toml entry on this machine; with --node the model keeps its file name as its id (the printed entry shows where to change it)"
         );
+    }
+    if a.adapter_for.is_some() {
+        if node == "auto" || node == "all" {
+            bail!("--adapter-for needs the node that serves the base: name it with --node");
+        }
+        if a.quant.is_some() || a.dry_run || a.context.is_some() {
+            bail!("--quant, --context and --dry-run are for models; pick an adapter file with --file");
+        }
     }
     let lookup = if node == "auto" { "all" } else { node };
     let context = a.context.map(|c| c.min(u64::from(u32::MAX)) as u32);
@@ -293,6 +332,7 @@ async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> R
     pull.context = context;
     pull.serve = a.serve || a.load;
     pull.load = a.load;
+    pull.adapter_for.clone_from(&a.adapter_for);
     let done = ask(paths, out, node, ModelsOp::Pull(pull)).await?;
     if let Some(c) = &done.chosen {
         explain_pick(out, c)?;
@@ -303,6 +343,10 @@ async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> R
             Outcome::Ok { reply } => {
                 let ModelsReply::Pulled(p) = &**reply else { continue };
                 writeln!(out, "{}: pulled {} ({}, {} file(s), checksum verified)", r.node.label, p.id, gib(p.size), p.files.len())?;
+                if let Some(base) = &p.adapter_for {
+                    adapter_pulled(out, &r.node.label, base, p)?;
+                    continue;
+                }
                 match (p.served, p.loaded) {
                     (_, true) => writeln!(out, "{}: serving `{}` now, loaded", r.node.label, p.id)?,
                     (true, false) => writeln!(out, "{}: serving `{}` now (loads on first use)", r.node.label, p.id)?,

@@ -856,6 +856,9 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
             other => format!("{other:?}").to_lowercase(),
         };
         let mut extra = String::new();
+        if let Some(b) = &m.base {
+            extra.push_str(&format!(", LoRA adapter on {b}"));
+        }
         if m.wrapped {
             extra.push_str(", wrapped");
         }

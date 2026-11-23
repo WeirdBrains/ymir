@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use weirdnet_backends::{EngineConfig, EngineKind, ModelLaunch, find_in_path};
+use weirdnet_backends::{EngineConfig, EngineKind, LoraAdapter, ModelLaunch, find_in_path};
 
 use crate::Paths;
 
@@ -320,11 +320,51 @@ pub struct LocalModel {
     /// node must name the same image, because the supervisor has one vLLM program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// LoRA adapters served on this model (`[[model.local.lora]]`), each under its own pool id
+    /// and sharing this model's engine: llama.cpp and vLLM only, not wrapped, not embedding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lora: Vec<LocalAdapter>,
+}
+
+/// A LoRA adapter on a `[[model.local]]` base, served as its own model id (for example
+/// `qwen3-8b+support-v2`). Requests for that id run on the base's engine with the adapter
+/// applied; the base keeps answering under its own id.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LocalAdapter {
+    /// The pool id it serves as. Unique among this node's models and adapters.
+    pub id: String,
+    /// For llama.cpp a LoRA GGUF (absolute, or relative to `models_dir`) made for this exact base
+    /// (its architecture is checked); for vLLM a PEFT adapter directory (likewise) or a Hub id.
+    pub file: String,
+    /// How strongly it applies, per request on llama.cpp (default 1.0). vLLM ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    /// The adapter's revision (a training run id or file hash): keys the answer cache like a
+    /// model's `revision`, so answers from an older adapter under the same id are never replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 impl LocalModel {
     pub fn is_embedding(&self) -> bool {
         self.role.as_deref() == Some("embedding")
+    }
+}
+
+impl LocalAdapter {
+    /// The adapter path the engine takes: a path under `models_dir` when relative and present
+    /// there (or not a Hub id), else as written.
+    pub fn path(&self, models_dir: &Path) -> String {
+        let p = Path::new(&self.file);
+        if p.is_absolute() {
+            return self.file.clone();
+        }
+        let under = models_dir.join(p);
+        if under.exists() || self.file.matches('/').count() != 1 || self.file.ends_with(".gguf") {
+            under.to_string_lossy().into_owned()
+        } else {
+            self.file.clone()
+        }
     }
 }
 
@@ -534,6 +574,33 @@ impl NodeConfig {
             if m.backend.as_deref() == Some("mlx") && crate::vllm::is_inkling(m.file.as_deref().unwrap_or(&m.id)) {
                 bail!("model `{}`: {}", m.id, crate::vllm::mlx_not_supported_message());
             }
+            if !m.lora.is_empty() {
+                if m.backend.as_deref() == Some("mlx") {
+                    bail!("model `{}`: LoRA adapters need backend llamacpp or vllm, not mlx", m.id);
+                }
+                if m.wrap.is_some() {
+                    bail!("model `{}`: a wrapped server can't take LoRA adapters from ymird", m.id);
+                }
+                if m.is_embedding() {
+                    bail!("model `{}`: embedding models take no LoRA adapters", m.id);
+                }
+            }
+        }
+        for m in &self.model.local {
+            for a in &m.lora {
+                if a.id.is_empty() || a.id.contains(char::is_whitespace) {
+                    bail!("model `{}`: adapter id `{}` must be non-empty and have no spaces", m.id, a.id);
+                }
+                if !seen.insert(&a.id) {
+                    bail!("adapter `{}` on `{}`: that id is already a model or adapter on this node", a.id, m.id);
+                }
+                if a.file.trim().is_empty() {
+                    bail!("adapter `{}` on `{}`: file is required", a.id, m.id);
+                }
+                if a.scale.is_some_and(|s| !s.is_finite()) {
+                    bail!("adapter `{}` on `{}`: scale must be a finite number", a.id, m.id);
+                }
+            }
         }
         let vllm_images: Vec<&str> =
             self.model.local.iter().filter(|m| m.backend.as_deref() == Some("vllm") && m.wrap.is_none()).filter_map(|m| m.image.as_deref()).collect();
@@ -677,9 +744,12 @@ impl NodeConfig {
             .collect()
     }
 
-    /// `(id, revision, quant)` for each `[[model.local]]` that names a revision.
+    /// `(id, revision, quant)` for each `[[model.local]]` that names a revision, and for each of
+    /// their `lora` adapters that does (with the base's quant: an adapter runs on it).
     pub fn revisions(&self) -> Vec<(String, String, Option<String>)> {
-        self.model.local.iter().filter_map(|m| Some((m.id.clone(), m.revision.clone()?, m.quant.clone()))).collect()
+        let models = self.model.local.iter().filter_map(|m| Some((m.id.clone(), m.revision.clone()?, m.quant.clone())));
+        let adapters = self.model.local.iter().flat_map(|m| m.lora.iter().filter_map(|a| Some((a.id.clone(), a.revision.clone()?, m.quant.clone()))));
+        models.chain(adapters).collect()
     }
 
     /// Launch specs for `[[model.local]]`.
@@ -742,7 +812,18 @@ impl NodeConfig {
                         }
                     }),
                 });
-                l
+                l.with_adapters(
+                    m.lora
+                        .iter()
+                        .map(|a| {
+                            let la = LoraAdapter::new(&a.id, a.path(&dir));
+                            match a.scale {
+                                Some(s) => la.with_scale(s),
+                                None => la,
+                            }
+                        })
+                        .collect(),
+                )
             })
             .collect()
     }
@@ -962,6 +1043,65 @@ mod tests {
         let mut cfg = NodeConfig::default();
         cfg.model.local = vec![LocalModel { id: "a".into(), ..Default::default() }, LocalModel { id: "a".into(), ..Default::default() }];
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn lora_adapters_on_a_local_model() {
+        let cfg: NodeConfig = toml::from_str(
+            r#"
+            [model]
+            models_dir = "/models"
+            [[model.local]]
+            id = "qwen3-8b"
+            file = "qwen.gguf"
+            revision = "base-r1"
+            quant = "Q4_K_M"
+            [[model.local.lora]]
+            id = "qwen3-8b+support-v2"
+            file = "adapters/support-v2.gguf"
+            scale = 0.8
+            revision = "run-42"
+            [[model.local.lora]]
+            id = "qwen3-8b+abs"
+            file = "/srv/abs.gguf"
+            [[model.local]]
+            id = "big"
+            backend = "vllm"
+            file = "org/big"
+            [[model.local.lora]]
+            id = "big+tune"
+            file = "org/big-tune"
+            "#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let l = cfg.launches();
+        let ids: Vec<&str> = l[0].adapters.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["qwen3-8b+support-v2", "qwen3-8b+abs"]);
+        assert_eq!(Path::new(&l[0].adapters[0].path), Path::new("/models/adapters/support-v2.gguf"));
+        assert_eq!(l[0].adapters[0].scale, Some(0.8));
+        assert_eq!(l[0].adapters[1].path, "/srv/abs.gguf");
+        assert_eq!(l[0].served_ids(), ["qwen3-8b", "qwen3-8b+support-v2", "qwen3-8b+abs"]);
+        // A Hub id stays a Hub id for vLLM.
+        assert_eq!(l[1].adapters[0].path, "org/big-tune");
+        // Adapters key the answer cache with their own revision, on the base's quant.
+        assert!(cfg.revisions().contains(&("qwen3-8b+support-v2".into(), "run-42".into(), Some("Q4_K_M".into()))));
+        assert!(!cfg.revisions().iter().any(|(id, ..)| id == "qwen3-8b+abs"));
+        let back: NodeConfig = toml::from_str(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back, cfg);
+
+        let bad = |f: &dyn Fn(&mut NodeConfig)| {
+            let mut c = cfg.clone();
+            f(&mut c);
+            c.validate().unwrap_err().to_string()
+        };
+        assert!(bad(&|c| c.model.local[0].lora[1].id = "big".into()).contains("already a model or adapter"));
+        assert!(bad(&|c| c.model.local[1].lora[0].id = "qwen3-8b+abs".into()).contains("already a model or adapter"));
+        assert!(bad(&|c| c.model.local[0].lora[0].scale = Some(f32::INFINITY)).contains("finite"));
+        assert!(bad(&|c| c.model.local[0].backend = Some("mlx".into())).contains("llamacpp or vllm"));
+        assert!(bad(&|c| c.model.local[0].role = Some("embedding".into())).contains("embedding"));
+        assert!(bad(&|c| c.model.local[0].wrap = Some("http://127.0.0.1:9000".into())).contains("wrapped"));
+        assert!(bad(&|c| c.model.local[0].lora[0].file = String::new()).contains("file is required"));
     }
 
     #[test]

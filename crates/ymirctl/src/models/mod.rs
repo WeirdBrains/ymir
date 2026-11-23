@@ -10,6 +10,7 @@
 //! `weirdnet-model`'s; this directory keeps MLX (`hub.rs`, which that crate does not read), the
 //! quality-first quant choice (`plan.rs`), `node.toml` handling (`local.rs`) and the output.
 
+mod adapters;
 mod ctxcmd;
 mod hub;
 mod local;
@@ -43,6 +44,11 @@ pub enum ModelsCmd {
     /// Show the context each model runs with on this node and why, or put models back on the
     /// automatic context (their full trained length, cut only where the KV cache would not fit).
     Context(ContextArgs),
+    /// LoRA adapters on a model in node.toml: each serves as its own model id on the base's engine.
+    Adapter {
+        #[command(subcommand)]
+        cmd: adapters::AdapterCmd,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -143,6 +149,10 @@ pub struct PullArgs {
     /// With --node: serve it and load it now.
     #[arg(long)]
     pub load: bool,
+    /// With --node: pull a LoRA adapter from the repo (by --file, or its only one) for this model
+    /// the node serves, instead of a model. With --serve it serves as its own model id right away.
+    #[arg(long, value_name = "BASE")]
+    pub adapter_for: Option<String>,
     #[command(flatten)]
     pub dir: DirArgs,
     #[command(flatten)]
@@ -198,10 +208,17 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::Pull(a) => a.node.node.clone(),
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
-        ModelsCmd::Context(_) => None,
+        ModelsCmd::Context(_) | ModelsCmd::Adapter { .. } => None,
     };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;
+    }
+    if let ModelsCmd::Pull(a) = &cmd
+        && a.adapter_for.is_some()
+    {
+        bail!(
+            "--adapter-for needs --node (name this machine, or another one): the node checks the adapter against the base it serves. Or download the adapter by hand and add it with `ymirctl models adapter add BASE FILE`"
+        );
     }
     if let ModelsCmd::Pull(a) = &cmd
         && (a.serve || a.load)
@@ -220,7 +237,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::List(a) => a.dir.dir.clone(),
         ModelsCmd::Remove(a) => a.dir.dir.clone(),
         ModelsCmd::Context(a) => a.dir.dir.clone(),
-        ModelsCmd::Search(_) => None,
+        ModelsCmd::Search(_) | ModelsCmd::Adapter { .. } => None,
     };
     let env_store = ModelStore::from_env();
     let dir = dir_arg.or_else(|| cfg.as_ref().map(NodeConfig::models_dir)).unwrap_or_else(|| env_store.dir().to_path_buf());
@@ -241,6 +258,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::List(_) => list(&ctx, out),
         ModelsCmd::Remove(a) => remove(&ctx, out, input, &a),
         ModelsCmd::Context(a) => ctxcmd::run(&ctx, out, &a),
+        ModelsCmd::Adapter { cmd } => adapters::run(&ctx, out, cmd),
     }
 }
 

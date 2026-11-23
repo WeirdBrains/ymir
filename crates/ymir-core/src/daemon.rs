@@ -125,6 +125,7 @@ impl Daemon {
                     false
                 }
             });
+            crate::adapters::keep_servable(&mut launches);
             // Contexts: each model's full trained length, cut only where its KV cache would not fit.
             let hw = weirdnet_model::hw::detect();
             let budget = weirdnet_model::hw::budget(
@@ -301,7 +302,7 @@ impl Daemon {
                         }
                     }
                     let every = std::time::Duration::from_secs(cfg.inference.alerts.probe_secs.max(5));
-                    tasks.push(tokio::spawn(weirdnet_alerts::engine::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
+                    tasks.push(tokio::spawn(crate::engine_alerts::monitor(a, supervisor.clone(), disks, every, stop_rx.clone())));
                 }
                 Err(e) => tracing::error!("alerts are off: {e}"),
             }

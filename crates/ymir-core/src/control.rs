@@ -158,6 +158,9 @@ pub struct NodeModel {
     /// What the model takes (chat, embeddings, images, audio), when the node reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<weirdnet_backends::Capabilities>,
+    /// For a LoRA adapter: the base model it runs on (it shares the base's engine and state).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -363,6 +366,7 @@ impl ControlHandler {
                             wrapped: s.wrapped,
                             crashes: s.crashes,
                             capabilities: s.capabilities,
+                            base: s.base,
                         })
                     })
                     .collect();
