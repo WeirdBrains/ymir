@@ -4,7 +4,7 @@
 pkgname=ymir-bin
 _ver=0.1.0
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Private cloud of LLM models on your own machines (node daemon and CLI), llama.cpp included (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/WeirdBrains/ymir"
@@ -17,8 +17,8 @@ conflicts=('ymir' 'ymir-git' 'ymir-cuda' 'ymir-cuda-bin')
 options=('!strip' '!debug')
 source_x86_64=("ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${_ver}/ymir-${_ver}-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('e57beb6d93b01ced5b3c182b7b41da6f5af25c35e2d759d127366432731822fa')
-sha256sums_aarch64=('e9ea6c8f3faec03f6b8f0eca8f9b1e62699297a463d8a5578b2f9dd736fe16a4')
+sha256sums_x86_64=('6631586e3e1e872cebb170f3d02e47d831ea7d144b2417176b5d3ca1fdc40b3b')
+sha256sums_aarch64=('200c2d367c80379dfc994b5f87f74663b48fc2c4de388c0e3a45dd9301ea87a1')
 
 package() {
   cd "ymir-${_ver}-${CARCH}-unknown-linux-gnu"
