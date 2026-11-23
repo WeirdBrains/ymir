@@ -100,7 +100,10 @@ jobs:
           merge-multiple: true
       - name: makepkg (as a normal user)
         run: |
-          pacman -Sy --noconfirm --needed python
+          # archlinux:base-devel already has python. `pacman -Sy --needed python`
+          # would upgrade it and pull openssl-3, which currently conflicts with
+          # the image's openssl (`/usr/lib/libcrypto.so.3` already owned).
+          command -v python3 >/dev/null || pacman -Sy --noconfirm --needed python
           useradd -m builder
           chown -R builder .
           su builder -c "python3 scripts/package.py --out dist-arch --pacman-from linux/ymir-*-unknown-linux-gnu.tar.gz"
