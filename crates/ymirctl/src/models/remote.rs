@@ -22,6 +22,9 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
         ModelsCmd::Pull(a) => pull(paths, out, node, &a).await,
         ModelsCmd::List(_) => list(paths, out, node).await,
         ModelsCmd::Remove(a) => remove(paths, out, input, node, &a).await,
+        ModelsCmd::Context(_) => {
+            bail!("`ymirctl models context` edits this machine's node.toml; run it on the node itself (without --node)")
+        }
     }
 }
 
@@ -305,7 +308,7 @@ async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> R
                     (true, false) => writeln!(out, "{}: serving `{}` now (loads on first use)", r.node.label, p.id)?,
                     _ => writeln!(out, "{}: not serving yet; pull again with --serve (no restart needed), or add the entry below", r.node.label)?,
                 }
-                let entry = plan::local_model(&p.id, "llamacpp", "chat", &p.files[0], u64::from(context.unwrap_or(32_768)), false);
+                let entry = plan::local_model(&p.id, "llamacpp", "chat", &p.files[0], context.map(u64::from), false);
                 writeln!(
                     out,
                     "\nnode.toml entry for {} (to keep it after a restart; its file path is under that node's models directory):\n{}",

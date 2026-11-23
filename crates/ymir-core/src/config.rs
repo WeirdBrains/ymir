@@ -714,6 +714,13 @@ impl NodeConfig {
                 l.swap_group.clone_from(&m.swap_group);
                 l.embedding = m.is_embedding();
                 l.extra_args.clone_from(&m.args);
+                // A context flag in `args` is what the engine would run with (it comes last), so it
+                // is the context: one flag on the command line, and the same number advertised.
+                let flags = crate::kvfit::context_flags(engine);
+                if let Some(c) = crate::kvfit::arg_value(&m.args, flags).and_then(|v| v.parse::<u32>().ok()) {
+                    l.context = Some(c);
+                    l.extra_args = crate::kvfit::strip_arg(&m.args, flags);
+                }
                 let has_own = m.args.iter().any(|a| a == "--mmproj" || a == "-mm" || a == "--no-mmproj");
                 if engine == EngineKind::Llamacpp
                     && backend == "llamacpp"

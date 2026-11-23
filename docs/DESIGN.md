@@ -496,8 +496,10 @@ ready yet.
 - **vLLM (preferred on Linux NVIDIA, including Spark).** `ymirctl models pull thinkingmachines/Inkling-2-Mini`
   records the Hub id (vLLM fetches weights into the Hugging Face cache on first load) and writes a
   `[[model.local]]` with `backend = "vllm"`, the Inkling reasoning and tool-call parsers, DSpark
-  speculative decoding, and `image = "vllm/vllm-openai:inkling-2-mini"`. On GB10 / DGX Spark it also
-  sets `--max-model-len 262144` (the vLLM recipe's cap so the KV cache fits). Support needs vLLM
+  speculative decoding, and `image = "vllm/vllm-openai:inkling-2-mini"`, and saves the repo's
+  `config.json` so ymird can size `--max-model-len` (see "Context length" below; the vLLM recipe's
+  262144 cap for a Spark is no longer written: only 8 of its 48 unrolled attention layers are global,
+  so the full 1M fits on 128 GB). Support needs vLLM
   0.35.0 or a newer nightly, or that image; it is not in 0.34.0 and is not in a vLLM release yet
   ([recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini),
   [vllm#69028](https://github.com/vllm-project/vllm/pull/69028)). If the node's `vllm` is too old,
@@ -512,6 +514,7 @@ ready yet.
 
       # node.toml
       wrap = "http://127.0.0.1:8000/v1"
+      context = 262144   # a wrapped server's context is whatever it was started with
 
   `image:` writes a `vllm-image` shim under the engines dir (`docker` or `podman`, host network,
   `--entrypoint vllm`) so the supervisor can still run `vllm serve MODEL --host 127.0.0.1 --port N`.
@@ -651,6 +654,44 @@ the node's own environment or files. It prints the `[[model.local]]` entry; `--r
 to `node.toml`, otherwise the file is never touched. `list` shows what is on disk and whether it is
 registered; `remove` deletes files only. Without `--node` these run on the machine itself and need no
 daemon.
+
+#### Context length (2026-11-22)
+
+A model runs with as much context as it can take. `pull` (and `setup`, for llama.cpp) writes no
+`context`; at start ymird plans one per model (`ymir_core::kvfit::plan_launches`) and passes it to the
+engine (`--ctx-size` for llama.cpp, `--max-model-len` for vLLM), so the catalog advertises exactly what
+the server runs with:
+
+- **Length.** The trained context: `<arch>.context_length` from the GGUF header, or `config.json`
+  (the text config's `max_position_embeddings` or other length key, times the RoPE scaling factor
+  the way vLLM derives it; yarn from `original_max_position_embeddings`). Unknown: 32768.
+- **KV cache.** Per token: K and V heads times head size, summed over attention layers. Loop passes
+  count once each (Inkling's `loop.*` / `loop_config`), sliding-window layers hold only their window
+  (plus llama.cpp's 512-token micro-batch; pattern from `sliding_window_pattern`, `layer_types` or
+  `local_layer_ids`, and a window without a pattern counts every layer as global), linear or
+  recurrent layers hold none, and a vLLM MTP head adds its layers. Element size from `-ctk`/`-ctv`
+  or `--kv-cache-dtype`, else 16-bit.
+- **Fit.** Weights + KV + 10% (as `weirdnet_model::fit`) against the node's model budget (`[model]
+  memory_budget` / `reserve`). Models that can be resident together share it: each other swap group
+  counts with its largest member's weights (and KV for a fixed context), and what is left is split
+  evenly among the automatic models. vLLM is also held to `--gpu-memory-utilization` (default 0.9)
+  of the pool. When the full length does not fit, the context is cut to what does, in 1024-token
+  steps (never below 4096), and ymird logs the KV size, the free memory and the budget. MLX-LM
+  grows its cache as it goes and wrapped servers set their own, so neither is planned.
+- **Overrides.** `context = N`, or `--ctx-size` / `-c` / `--max-model-len` in `args` (moved into the
+  launch's context so the flag appears once), is kept as set; ymird warns if its KV cache may not fit.
+- **Where the shape comes from.** The GGUF file itself (the reader in `kvfit` also reads the
+  sliding-window and loop keys that `weirdnet_model::gguf::GgufInfo` lacks; it is free of Ymir types
+  and meant to move there). For a vLLM Hub id: `models_dir/vllm/<owner>--<name>/config.json` and
+  `weights`, saved by `pull`, else the Hugging Face cache's snapshot.
+- **Older entries.** Pulls before this wrote `context = 32768` (and `--max-model-len 262144` for
+  Inkling on a Spark). That cannot be told apart from a chosen value, so ymird keeps it and logs a
+  hint when the model could take more. `ymirctl models context` lists every model's planned context
+  and why; `--old-defaults` (or `--auto ID...`) removes those values from `node.toml` (keeping
+  `node.toml.bak`, fetching a vLLM model's `config.json` if it is missing); restart ymird to apply.
+- **Not covered.** A model served in memory by a `--node` pull (`weirdnet-backends` models/1) gets
+  the pull's context or the engine default until it is in `node.toml`; `[[model.split]]` keeps its
+  set context.
 
 Hub search, repo files, GGUF headers, the downloader, the model store and the fit are
 `weirdnet-model`'s (`hf::Hub`, `fit`, `download_parts`, `ModelStore`); `crates/ymirctl/src/models/`

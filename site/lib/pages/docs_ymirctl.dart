@@ -80,7 +80,7 @@ only on disk. Use these ids with every other command and in apps like Jan.</p>
 <p>Searches the Hugging Face Hub for GGUF models, plus MLX models on Apple Silicon and safetensors/vLLM
 repos on Linux NVIDIA nodes (or with <code>--format mlx</code>, <code>--format vllm</code> or <code>--format all</code>), most
 downloaded first. For each repo it shows the best quant for <em>this</em> node and whether it fits: the file size plus the KV
-cache at the context length (default 32768, or less if the model was trained for less; change it with <code>--context</code>)
+cache at the context length a quant is picked at (default 32768, or less if the model was trained for less; change it with <code>--context</code>)
 plus about 0.5 GiB of overhead, against this node's GPU or unified memory. A verdict is <em>fits</em>, <em>partial</em> (only
 by spilling layers to RAM, which is slower) or <em>too big</em>. <code>--limit N</code> sets how many repos to show.</p>
 <pre><code>ymirctl models search qwen3 8b
@@ -95,7 +95,8 @@ interrupted (run the same command again) and are checked against the Hub's SHA-2
 <p>A safetensors / transformers repo (for example <code>thinkingmachines/Inkling-2-Mini</code>) is registered for
 <code>backend = "vllm"</code> as a Hub id: the weights are not copied into <code>models_dir</code>; vLLM fetches them into
 the Hugging Face cache on first load. Inkling 2 Mini also gets the <code>inkling</code> reasoning and tool-call parsers,
-DSpark, the <code>vllm/vllm-openai:inkling-2-mini</code> image, and <code>--max-model-len 262144</code> on a DGX Spark.
+DSpark and the <code>vllm/vllm-openai:inkling-2-mini</code> image; its <code>config.json</code> is saved so
+<code>ymird</code> can size the context.
 That needs vLLM 0.35.0 or newer, or that image (support is not in 0.34.0). You can also start the image yourself and set
 <code>wrap = "http://127.0.0.1:8000/v1"</code>, or set <code>[model] vllm = "image:vllm/vllm-openai:inkling-2-mini"</code>.
 MLX repos for Inkling are refused until mlx-lm#2086 is released.</p>
@@ -110,6 +111,18 @@ file named by <code>YMIR_HF_TOKEN_FILE</code>, <code>state/hf-token</code> in th
 ymirctl models pull bartowski/Qwen3-8B-GGUF --quant Q5_K_M --register
 ymirctl models pull thinkingmachines/Inkling-2-Mini --register
 ymirctl models pull ggml-org/Inkling-2-Mini-GGUF --quant IQ4_NL --register</code></pre>
+<p>The entry gets no fixed <code>context</code> unless you pass <code>--context N</code>. <code>ymird</code> then runs each
+model with its full trained context (from the GGUF header, or <code>config.json</code> for vLLM), and cuts it only where the
+KV cache would not fit beside the weights and the node's other models; the log says which and why. Pull prints the context
+the model will get on this node.</p>
+<h3 id="models-context"><code>ymirctl models context [ID...]</code></h3>
+<p>Shows the context <code>ymird</code> runs each model with on this node and why: <code>auto</code> entries get their full
+trained length or what fits, and a <code>context</code> you set is kept. <code>--auto ID...</code> removes
+<code>context</code> (and any <code>--ctx-size</code> or <code>--max-model-len</code> in <code>args</code>) from those
+entries; <code>--old-defaults</code> does that for every entry that still has the 32768 an older pull wrote (or 262144 for
+Inkling 2 Mini on vLLM). Both keep a copy as <code>node.toml.bak</code>; restart <code>ymird</code> to apply.</p>
+<pre><code>ymirctl models context
+ymirctl models context --old-defaults</code></pre>
 <h3 id="models-list"><code>ymirctl models list</code></h3>
 <p>Lists the model files on this node (GGUF, split GGUF as one entry, MLX folders and unfinished downloads) and whether a
 <code>[[model.local]]</code> in <code>node.toml</code> uses each.</p>

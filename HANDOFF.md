@@ -3,6 +3,23 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-22: models run with as much context as they can take (branch `feat/full-context`)
+
+**What changed**
+- ymird plans each model's context at start ([`ymir_core::kvfit`](crates/ymir-core/src/kvfit.rs)): the full trained length (GGUF `<arch>.context_length`, or `config.json` with RoPE scaling for vLLM), cut in 1024-token steps only where the KV cache would not fit beside the weights and the node's other co-resident models; the log says why. KV sizing counts loop passes, sliding-window layers (window only), linear/recurrent layers (none), a vLLM MTP head, and `-ctk`/`-ctv` / `--kv-cache-dtype`. vLLM is also held to `--gpu-memory-utilization`. MLX and wrapped servers are not planned.
+- The launch carries the planned context, so `--ctx-size` / `--max-model-len` and the catalog's advertised context are the same number. A context flag in `args` becomes the launch's context and appears once.
+- `ymirctl models pull` writes no `context` unless `--context` is given, prints the context the model will get on this node, drops Inkling's `--max-model-len 262144`, and saves a vLLM repo's `config.json` and weight size under `models_dir/vllm/`. `setup` leaves llama.cpp contexts to ymird.
+- `ymirctl models context` lists each model's planned context and why; `--auto ID...` / `--old-defaults` remove a fixed context (and its flags) from `node.toml`, keeping `node.toml.bak`. ymird logs a hint for entries still at an old pull default (32768, or 262144 for Inkling on vLLM).
+- Docs: DESIGN ("Context length"), site `ymirctl` page, CHANGELOG.
+
+**Checks:** `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` (clean); `cargo test --workspace --locked --offline`: **223 passed, 0 failed, 6 ignored**. New tests: Inkling GGUF header and config.json shapes (8 of 48 unrolled layers global, 32 GiB of f16 KV at 1M), RoPE/yarn and `layer_types`, cache types and flag handling, fit and cut, shared memory across swap groups, explicit contexts kept, vLLM sizing from the saved config, `pull` output, and `models context --old-defaults`.
+
+**Not tested:** a real llama.cpp or vLLM launch at the planned context (no GPU here); real Hub fetch of `config.json`. Estimates are Ymir's, not the engine's: llama.cpp compute buffers and vLLM's CUDA graphs are covered only by the 10% margin.
+
+**What's left:** move the GGUF sliding-window/loop reader into `weirdnet-model` (`GgufInfo` lacks those fields); `--node` pulls served in memory (`weirdnet-backends` models/1) still use the pull's context.
+
+**What's next:** release, then on each node: `ymirctl models context --old-defaults` and restart ymird.
+
 ## 2026-11-22: Inkling 2 Mini, first-class support (branch `feature/inkling`)
 
 **What changed**
