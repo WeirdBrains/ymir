@@ -8,8 +8,12 @@
 //!
 //! The KV cache is sized from the model's shape ([`KvShape`]): attention layers (loop passes
 //! unrolled), KV heads, head size, the cache type in `args` (`-ctk`/`-ctv`, `--kv-cache-dtype`),
-//! and sliding-window layers, which hold only their window. Weights plus KV get 10% on top for
-//! compute buffers, as `weirdnet_model::fit` counts them.
+//! and sliding-window layers, which hold one window per server slot (llama-server runs 4 slots
+//! with a unified cache unless told otherwise). Attention that cannot use flash attention (a
+//! per-head score bias, as Inkling's relative positions, or `-fa off`) materializes its f32 score
+//! matrix, context x micro-batch x heads, in the compute buffer (48 GiB for Inkling at 1M
+//! tokens). Everything gets 10% on top, as `weirdnet_model::fit` counts a footprint, and
+//! [`HEADROOM_PCT`] of the memory left is kept free.
 //!
 //! `weirdnet_model::gguf::GgufInfo` has no sliding-window or loop fields yet, so the GGUF reader
 //! here reads those keys too. It is meant to move into `weirdnet-model` (a wish for the Weirdnet
@@ -37,6 +41,17 @@ pub const OLD_PULL_DEFAULT: u32 = 32_768;
 pub const OLD_INKLING_SPARK_DEFAULT: u32 = 262_144;
 /// llama.cpp's default micro-batch, which a sliding-window cache keeps beyond its window.
 const UBATCH: u64 = 512;
+/// The slots llama-server runs when `--parallel` is not given (its "auto": 4, unified KV).
+pub const SERVER_AUTO_SLOTS: u32 = 4;
+/// The share of the memory free for a model that is kept free anyway: estimates are estimates, and
+/// a unified-memory node also runs its OS out of it.
+pub const HEADROOM_PCT: u64 = 20;
+/// How many context x micro-batch x heads f32 score matrices the compute buffer holds on the
+/// non-flash-attention path (llama.cpp b12628 `build_attn_mha`; ggml's allocator reuses the
+/// bias's buffer for the scores). Inkling 2 Mini IQ4_NL at 1M tokens with 4 slots used 104.6 GiB
+/// on a 128 GB Spark: 16.7 GiB of weights, 32.7 GiB of KV, and one 48 GiB matrix plus ~7 GiB of
+/// other buffers; with the 10% this estimates 107 GiB.
+const SCORE_COPIES: u64 = 1;
 /// The share of GPU memory vLLM takes unless `--gpu-memory-utilization` says otherwise.
 const VLLM_UTILIZATION: f64 = 0.9;
 /// How many header bytes [`gguf_shape`] reads at most (tokenizer vocabularies are the bulk).
@@ -56,6 +71,11 @@ pub struct KvShape {
     pub swa_layers: u64,
     /// The context the model was trained for (or can take, with its RoPE scaling).
     pub trained: Option<u64>,
+    /// Query heads (the most of any layer).
+    pub heads: u64,
+    /// Attention takes a per-head score bias, so llama.cpp cannot use flash attention for it and
+    /// keeps full score matrices (Inkling's relative-position bias, T5's).
+    pub dense_scores: bool,
 }
 
 impl KvShape {
@@ -64,6 +84,50 @@ impl KvShape {
     pub fn kv_bytes(&self, context: u64, slots: u64, cache: CacheType) -> u64 {
         let swa_tokens = context.min(self.window.saturating_mul(slots.max(1)).saturating_add(UBATCH));
         cache.bytes(self.full_elems.saturating_mul(context).saturating_add(self.swa_elems.saturating_mul(swa_tokens)))
+    }
+
+    /// The compute buffer that grows with the context: the f32 attention scores when they are not
+    /// flash-attended (else nothing; the fixed-size rest is in [`footprint`]'s 10%).
+    pub fn score_bytes(&self, context: u64, run: Run) -> u64 {
+        if !(self.dense_scores || run.flash_off) || self.full_layers == 0 {
+            return 0;
+        }
+        SCORE_COPIES.saturating_mul(context).saturating_mul(run.ubatch).saturating_mul(self.heads.max(1)).saturating_mul(4)
+    }
+
+    /// Everything that grows with the context: the KV cache and the score buffers.
+    pub fn context_bytes(&self, context: u64, run: Run) -> u64 {
+        self.kv_bytes(context, run.slots, run.cache).saturating_add(self.score_bytes(context, run))
+    }
+}
+
+/// How a launch runs, as far as its memory goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    /// Sequences sharing the cache (llama-server `--parallel`; vLLM: 1, its pool is per token).
+    pub slots: u64,
+    pub cache: CacheType,
+    /// llama.cpp's micro-batch (`-ub`), the score matrices' other side.
+    pub ubatch: u64,
+    /// `-fa off`: every layer keeps full score matrices.
+    pub flash_off: bool,
+}
+
+impl Run {
+    pub fn of(l: &ModelLaunch) -> Self {
+        let llama = l.engine == EngineKind::Llamacpp;
+        let n = |names: &[&str]| arg_value(&l.extra_args, names).and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0);
+        Self {
+            slots: if llama { l.slots.map(u64::from).or_else(|| n(&["-np", "--parallel"])).unwrap_or(u64::from(SERVER_AUTO_SLOTS)) } else { 1 },
+            cache: cache_type(l.engine, &l.extra_args),
+            ubatch: if llama { n(&["-ub", "--ubatch-size"]).unwrap_or(UBATCH) } else { UBATCH },
+            flash_off: llama && arg_value(&l.extra_args, &["-fa", "--flash-attn"]).is_some_and(|v| matches!(v, "off" | "0" | "false")),
+        }
+    }
+
+    /// One slot, a 16-bit cache, the default micro-batch.
+    pub fn single() -> Self {
+        Self { slots: 1, cache: CacheType::F16, ubatch: UBATCH, flash_off: false }
     }
 }
 
@@ -291,6 +355,9 @@ impl<R: Read> Reader<R> {
     }
 }
 
+/// Architectures whose attention takes a score bias in llama.cpp, which turns flash attention off.
+const DENSE_SCORE_ARCHS: &[&str] = &["inkling2", "inkling2_loop", "t5", "t5encoder"];
+
 /// The KV shape in a GGUF file's header (versions 2 and 3). Reads only the metadata.
 pub fn gguf_shape(r: impl Read) -> Result<KvShape> {
     let mut r = Reader { inner: r, read: 0 };
@@ -348,8 +415,16 @@ pub fn gguf_shape(r: impl Read) -> Result<KvShape> {
         _ => vec![false; n],
     };
     let loops = (int("loop.start"), int("loop.end"), int("loop.count"));
-    let mut shape = KvShape { window, trained: int("context_length").filter(|c| *c > 0), ..Default::default() };
-    for il in 0..n {
+    let mut shape = KvShape {
+        window,
+        trained: int("context_length").filter(|c| *c > 0),
+        heads: max_heads,
+        dense_scores: DENSE_SCORE_ARCHS.contains(&arch.as_str()),
+        ..Default::default()
+    };
+    // Gemma 3n/4: the last `shared_kv_layers` layers reuse earlier layers' KV and cache none.
+    let own_kv = n.saturating_sub(usize::try_from(int("attention.shared_kv_layers").unwrap_or(0)).unwrap_or(0));
+    for il in 0..own_kv {
         let passes = match loops {
             (Some(s), Some(e), Some(c)) if (s..e).contains(&(il as u64)) => c.max(1),
             _ => 1,
@@ -429,7 +504,7 @@ fn layer_shape(t: &Value, loops: bool) -> Result<KvShape> {
     };
     let lc = t.get("loop_config").filter(|_| loops);
     let range = lc.and_then(|c| Some((num(c, &["core_start"])?, num(c, &["core_end"])?, num(c, &["num_passes"]).unwrap_or(1))));
-    let mut shape = KvShape { window, ..Default::default() };
+    let mut shape = KvShape { window, heads, ..Default::default() };
     for (i, kind) in kinds.iter().enumerate() {
         let passes = match range {
             Some((s, e, p)) if (s..e).contains(&(i as u64)) => p.max(1),
@@ -580,20 +655,47 @@ pub fn footprint(weights: u64, kv: u64) -> u64 {
     t.saturating_add(t / 10)
 }
 
-/// The largest context up to the trained length whose KV cache fits in `kv_budget` bytes, and
-/// whether it had to be cut.
-pub fn fit_context(shape: &KvShape, kv_budget: u64, slots: u64, cache: CacheType) -> (u32, bool) {
+/// What of `free` bytes the context may grow into: [`HEADROOM_PCT`] stays free, and the rest
+/// leaves room for [`footprint`]'s 10%.
+pub fn context_budget(free: u64) -> u64 {
+    free / 100 * (100 - HEADROOM_PCT) / 11 * 10
+}
+
+/// The largest context up to the trained length whose KV cache and score buffers
+/// ([`KvShape::context_bytes`]) fit in `budget` bytes, and whether it had to be cut.
+pub fn fit_context(shape: &KvShape, budget: u64, run: Run) -> (u32, bool) {
     let max = shape.trained.unwrap_or(u64::from(FALLBACK_CONTEXT)).min(u64::from(u32::MAX));
-    if shape.kv_bytes(max, slots, cache) <= kv_budget {
+    if shape.context_bytes(max, run) <= budget {
         return (max as u32, false);
     }
     let (mut lo, mut hi) = (0u64, max);
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
-        if shape.kv_bytes(mid, slots, cache) <= kv_budget { lo = mid } else { hi = mid - 1 }
+        if shape.context_bytes(mid, run) <= budget { lo = mid } else { hi = mid - 1 }
     }
     let floor = u64::from(MIN_CONTEXT).min(max);
     ((lo / STEP * STEP).max(floor) as u32, true)
+}
+
+/// What `l` takes in memory at the context it launches with (weights alone when it has none).
+pub fn cost(r: &Resolved, l: &ModelLaunch) -> u64 {
+    footprint(r.weights, l.context.map_or(0, |c| r.shape.context_bytes(u64::from(c), Run::of(l))))
+}
+
+/// The bytes `l`'s context may grow into when `free` bytes are free for it (its weights still to
+/// load): its weights and their 10% come off, [`context_budget`] keeps the headroom, and vLLM is
+/// also held to its own pool (`--gpu-memory-utilization`, default 0.9, of the memory pool).
+pub fn room_for_context(r: &Resolved, l: &ModelLaunch, budget: &Budget, free: u64) -> u64 {
+    let mut free = free.saturating_sub(footprint(r.weights, 0));
+    if l.engine == EngineKind::Vllm {
+        let util = arg_value(&l.extra_args, &["--gpu-memory-utilization", "--gpu_memory_utilization"])
+            .and_then(|u| u.parse::<f64>().ok())
+            .filter(|u| *u > 0.0 && *u <= 1.0)
+            .unwrap_or(VLLM_UTILIZATION);
+        let pool = (budget.pool_bytes as f64 * util) as u64;
+        free = free.min(pool.saturating_sub(footprint(r.weights, 0)));
+    }
+    context_budget(free)
 }
 
 /// What [`plan_launches`] decided for one model.
@@ -659,11 +761,7 @@ pub fn plan_launches(launches: &mut [ModelLaunch], budget: &Budget, models_dir: 
         let Some(r) = &items[i].resolved else {
             return if items[i].planned { std::fs::metadata(&l.source).map_or(0, |m| m.len()) } else { 0 };
         };
-        let kv = match (items[i].auto, l.context) {
-            (false, Some(c)) => r.shape.kv_bytes(u64::from(c), u64::from(l.slots.unwrap_or(1)), cache_type(l.engine, &l.extra_args)),
-            _ => 0,
-        };
-        footprint(r.weights, kv)
+        if items[i].auto { footprint(r.weights, 0) } else { cost(r, l) }
     };
     let costs: Vec<u64> = (0..launches.len()).map(cost).collect();
     let mut plans = Vec::new();
@@ -686,8 +784,8 @@ pub fn plan_launches(launches: &mut [ModelLaunch], budget: &Budget, models_dir: 
         let sharers = 1 + others.values().filter(|(_, a)| *a).count() as u64;
         let l = &launches[i];
         let id = l.id.clone();
-        let slots = if l.engine == EngineKind::Vllm { 1 } else { u64::from(l.slots.unwrap_or(1)) };
-        let cache = cache_type(l.engine, &l.extra_args);
+        let run = Run::of(l);
+        let cache = run.cache;
         let Some(r) = items[i].resolved.clone() else {
             let why = items[i].error.clone().unwrap_or_default();
             if items[i].auto {
@@ -716,25 +814,16 @@ pub fn plan_launches(launches: &mut [ModelLaunch], budget: &Budget, models_dir: 
             }
             continue;
         };
-        let mut free = budget.usable_bytes.saturating_sub(fixed).saturating_sub(footprint(r.weights, 0));
-        if l.engine == EngineKind::Vllm {
-            let util = arg_value(&l.extra_args, &["--gpu-memory-utilization", "--gpu_memory_utilization"])
-                .and_then(|u| u.parse::<f64>().ok())
-                .filter(|u| *u > 0.0 && *u <= 1.0)
-                .unwrap_or(VLLM_UTILIZATION);
-            let pool = (budget.pool_bytes as f64 * util) as u64;
-            free = free.min(pool.saturating_sub(footprint(r.weights, 0)));
-        }
-        let kv_budget = free / sharers / 11 * 10;
-        let (fit, clamped) = fit_context(&r.shape, kv_budget, slots, cache);
+        let kv_budget = room_for_context(&r, l, budget, budget.usable_bytes.saturating_sub(fixed)) / sharers;
+        let (fit, clamped) = fit_context(&r.shape, kv_budget, run);
         let trained = r.shape.trained;
         let full = trained.map_or(String::from("its trained length is unknown, so the fallback"), |t| format!("the trained length is {t}"));
         if let (false, Some(c)) = (items[i].auto, l.context) {
-            let kv = r.shape.kv_bytes(u64::from(c), slots, cache);
+            let kv = r.shape.context_bytes(u64::from(c), run);
             let warn = kv > kv_budget;
             let note = if warn {
                 format!(
-                    "context {c} (set in node.toml): its {} {} KV cache may not fit beside the weights ({} free for it here)",
+                    "context {c} (set in node.toml): its {} {} KV cache and score buffers may not fit beside the weights ({} free for them here)",
                     gib(kv),
                     cache.name,
                     gib(kv_budget)
@@ -746,11 +835,11 @@ pub fn plan_launches(launches: &mut [ModelLaunch], budget: &Budget, models_dir: 
             continue;
         }
         launches[i].context = Some(fit);
-        let kv = r.shape.kv_bytes(u64::from(fit), slots, cache);
+        let kv = r.shape.context_bytes(u64::from(fit), run);
         let note = if clamped {
-            let want = r.shape.kv_bytes(trained.unwrap_or(u64::from(FALLBACK_CONTEXT)), slots, cache);
+            let want = r.shape.context_bytes(trained.unwrap_or(u64::from(FALLBACK_CONTEXT)), run);
             format!(
-                "context {fit}, cut from {}: the full-length {} KV cache needs {}, and {} is free for it beside {} of weights{} (budget {}). Set `context` to override",
+                "context {fit}, cut from {}: the full-length {} KV cache and buffers need {}, and {} is free for them beside {} of weights{} (budget {}, {HEADROOM_PCT}% kept free). Set `context` to override",
                 trained.unwrap_or(u64::from(FALLBACK_CONTEXT)),
                 cache.name,
                 gib(want),
@@ -760,7 +849,7 @@ pub fn plan_launches(launches: &mut [ModelLaunch], budget: &Budget, models_dir: 
                 gib(budget.usable_bytes)
             )
         } else {
-            format!("context {fit} ({full}; {} {} KV cache, {} with the weights)", gib(kv), cache.name, gib(footprint(r.weights, kv)))
+            format!("context {fit} ({full}; {} {} KV cache and buffers, {} with the weights)", gib(kv), cache.name, gib(footprint(r.weights, kv)))
         };
         plans.push(Plan {
             id,
@@ -796,4 +885,4 @@ pub fn log_plans(plans: &[Plan]) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -105,6 +105,7 @@ impl Daemon {
         let mut supervisor = None;
         let mut group_workers: Option<Arc<RpcWorkers>> = None;
         let mut model_hw = None;
+        let mut planner_task = None;
         if roles.model {
             let engines = cfg.engines(&paths);
             if engines.is_empty() {
@@ -131,14 +132,21 @@ impl Daemon {
                 weirdnet_model::hw::parse_size(&cfg.model.memory_budget),
                 cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
             );
-            crate::kvfit::log_plans(&crate::kvfit::plan_launches(&mut launches, &budget, &cfg.models_dir()));
-            model_hw = Some((hw, budget));
+            let plans = crate::kvfit::plan_launches(&mut launches, &budget, &cfg.models_dir());
+            crate::kvfit::log_plans(&plans);
+            let explicit: std::collections::HashSet<String> = plans.iter().filter(|p| p.explicit).map(|p| p.id.clone()).collect();
+            model_hw = Some((hw.clone(), budget));
             // Split models (M7): the leader's llama-server is wrapped, and appears when a group is up.
             let key = group::load_or_create_key(&paths.state().join("split.key")).with_context(|| "creating the split-model key")?;
             launches.extend(cfg.split_launches(&key));
             let sup = Supervisor::new(engines, launches.clone(), SupervisorOptions { log_dir: Some(paths.logs()), ..Default::default() });
             supervisor = Some(sup.clone());
+            // At load time, contexts follow what runs beside them (`ctxplan`).
+            let probe = Arc::new(crate::ctxplan::SystemProbe::new(&hw, &budget));
+            let planner = Arc::new(crate::ctxplan::Planner::new(sup.clone(), budget, probe, cfg.models_dir(), &explicit));
+            planner_task = Some(planner.spawn_keeper());
             let node = Arc::new(LocalModelNode::new(&name, sup, &launches));
+            node.set_planner(planner);
             node.set_revisions(cfg.revisions().into_iter().map(|(id, rev, _)| (id, rev)));
             let workers: Arc<RpcWorkers> = Arc::new(RpcWorkers::new(cfg.worker_config(&paths, key)));
             node.set_group_workers(workers.clone());
@@ -164,6 +172,7 @@ impl Daemon {
 
         let (stop, stop_rx) = watch::channel(false);
         let mut tasks = Vec::new();
+        tasks.extend(planner_task.take());
         if let (Some(c), false) = (&coordinator, cfg.inference.split.is_empty()) {
             tasks.push(c.spawn_group_watch(std::time::Duration::from_secs(5)));
         }

@@ -13,6 +13,7 @@ pub mod config;
 pub mod context;
 pub mod control;
 pub mod coordinator;
+pub mod ctxplan;
 pub mod daemon;
 pub mod dataset;
 pub mod direct;

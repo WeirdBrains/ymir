@@ -666,13 +666,23 @@ the server runs with:
   (the text config's `max_position_embeddings` or other length key, times the RoPE scaling factor
   the way vLLM derives it; yarn from `original_max_position_embeddings`). Unknown: 32768.
 - **KV cache.** Per token: K and V heads times head size, summed over attention layers. Loop passes
-  count once each (Inkling's `loop.*` / `loop_config`), sliding-window layers hold only their window
-  (plus llama.cpp's 512-token micro-batch; pattern from `sliding_window_pattern`, `layer_types` or
-  `local_layer_ids`, and a window without a pattern counts every layer as global), linear or
-  recurrent layers hold none, and a vLLM MTP head adds its layers. Element size from `-ctk`/`-ctv`
-  or `--kv-cache-dtype`, else 16-bit.
-- **Fit.** Weights + KV + 10% (as `weirdnet_model::fit`) against the node's model budget (`[model]
-  memory_budget` / `reserve`). Models that can be resident together share it: each other swap group
+  count once each (Inkling's `loop.*` / `loop_config`), sliding-window layers hold one window per
+  server slot plus llama.cpp's 512-token micro-batch (llama-server runs 4 slots with a unified cache
+  unless `slots` / `--parallel` says otherwise; pattern from `sliding_window_pattern`, `layer_types`
+  or `local_layer_ids`, and a window without a pattern counts every layer as global), Gemma's
+  `shared_kv_layers` hold none, linear or recurrent layers hold none, and a vLLM MTP head adds its
+  layers. Element size from `-ctk`/`-ctv` or `--kv-cache-dtype`, else 16-bit.
+- **Score buffers.** Attention with a per-head score bias (Inkling's relative positions, T5) cannot
+  use flash attention in llama.cpp (`build_attn_mha`, b12628), so the compute buffer holds an f32
+  score matrix of context x micro-batch (`-ub`, 512) x heads: 48 GiB for Inkling at 1M tokens. The
+  same holds for every model under `-fa off`. v0.2.0 left this out and planned Inkling at 1M on a
+  128 GB Spark from a 53.9 GiB estimate; llama-server took 104.6 GiB (16.7 GiB IQ4_NL weights and
+  mmproj, 32.7 GiB KV, the 48 GiB matrix and ~7 GiB of other buffers). That run now estimates at
+  107 GiB, and the plan gives Inkling 721,920 tokens alone on a Spark (655,360 beside a busy
+  gemma4-e4b at its full 131,072).
+- **Fit.** Weights + KV + score buffers + 10% (as `weirdnet_model::fit`) against the node's model
+  budget (`[model] memory_budget` / `reserve`), with 20% of the memory free for the model kept free.
+  Models that can be resident together share it: each other swap group
   counts with its largest member's weights (and KV for a fixed context), and what is left is split
   evenly among the automatic models. vLLM is also held to `--gpu-memory-utilization` (default 0.9)
   of the pool. When the full length does not fit, the context is cut to what does, in 1024-token
@@ -689,9 +699,24 @@ the server runs with:
   hint when the model could take more. `ymirctl models context` lists every model's planned context
   and why; `--old-defaults` (or `--auto ID...`) removes those values from `node.toml` (keeping
   `node.toml.bak`, fetching a vLLM model's `config.json` if it is missing); restart ymird to apply.
-- **Not covered.** A model served in memory by a `--node` pull (`weirdnet-backends` models/1) gets
-  the pull's context or the engine default until it is in `node.toml`; `[[model.split]]` keeps its
-  set context.
+- **At load time** (`ymir_core::ctxplan`). The start-up plan is what a model gets while it could
+  share the node with every other model. When one is asked for, ymird sizes it beside what actually
+  runs: free memory is the smaller of the budget less the running models' estimates and the measured
+  free memory (`MemAvailable` less the OS reserve on unified memory and CPU nodes, `nvidia-smi` free
+  memory on a discrete NVIDIA GPU). If its full trained length (or explicit context) does not fit,
+  running models with no request in flight and none for the last 30 s are unloaded first, longest
+  idle first, until it does; a model with a request in flight or loading is never unloaded, and a
+  model that fits whole unloads nothing, so two models don't evict each other on every turn. It then
+  gets the largest context that fits, with 20% kept free, and ymird logs what it unloaded, the
+  context and why. The context is set on the supervisor's launch (removed and re-added while not
+  loaded; the supervisor has no setter), so the capability record and every catalog built from it,
+  Bragi's budget included, report the value the engine runs with. This runs for loads through the
+  node's own inference role (`LocalModelNode::load`). A keeper task re-sizes every automatic model
+  that is not loaded whenever what runs changes (and every 30 s), sharing the room among those that
+  could load together, so a `Load` from another device's inference node (node/1 goes straight to
+  the supervisor), a crash restart, or a model added by a `--node` pull starts with a context that
+  fits beside what runs; those loads do not unload idle models (node/1 has no hook before a load;
+  that needs `weirdnet-backends`). `[[model.split]]` keeps its set context.
 
 Hub search, repo files, GGUF headers, the downloader, the model store and the fit are
 `weirdnet-model`'s (`hf::Hub`, `fit`, `download_parts`, `ModelStore`); `crates/ymirctl/src/models/`

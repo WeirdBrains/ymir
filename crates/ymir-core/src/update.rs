@@ -33,6 +33,26 @@ pub const CHANNEL: &str = "stable";
 /// The program the daemon runs from a release.
 pub const DAEMON_FILE: &str = "ymird";
 
+/// The programs a package carries besides the daemon: `ymirctl` and the bundled llama.cpp
+/// servers ymird launches.
+#[cfg_attr(not(unix), allow(dead_code))]
+const PROGRAMS: &[&str] = &[DAEMON_FILE, "ymirctl", "llama-server", "rpc-server"];
+
+/// Whether an installed package file gets the executable bit: a known program, a file that was
+/// executable in the bundle, or a native binary or script (ELF, Mach-O, `#!`), wherever it sits
+/// in the package. Everything else is installed read-only data.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn executable(path: &str, data: &[u8], bundle_mode: u32) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let magic = data.get(..4).unwrap_or(data);
+    PROGRAMS.contains(&name)
+        || bundle_mode & 0o111 != 0
+        || magic == b"\x7fELF"
+        || magic == [0xcf, 0xfa, 0xed, 0xfe]
+        || magic == [0xca, 0xfe, 0xba, 0xbe]
+        || data.starts_with(b"#!")
+}
+
 /// Where the updater keeps its files.
 pub fn dir(paths: &Paths) -> PathBuf {
     paths.home.join("updates")
@@ -274,7 +294,7 @@ impl Updater {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = if f.path == DAEMON_FILE || f.path == "ymirctl" { 0o755 } else { 0o644 };
+                let mode = if executable(&f.path, &data, meta.permissions().mode()) { 0o755 } else { 0o644 };
                 std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))?;
             }
         }
@@ -391,8 +411,22 @@ mod tests {
 
     /// Writes a bundle for `version` into `dir`: a `ymird` with `body`, signed by `signer`.
     fn bundle(dir: &Path, signer: &SigningKey, id: &str, seq: u64, version: &str, body: &[u8], platform: Platform) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join("ymird"), body).unwrap();
+        bundle_with(dir, signer, id, seq, version, &[("ymird", body)], platform);
+    }
+
+    /// [`bundle`] with these files (each written read-only, as a tarball unpacked by a tool that
+    /// drops modes would leave them).
+    fn bundle_with(dir: &Path, signer: &SigningKey, id: &str, seq: u64, version: &str, files: &[(&str, &[u8])], platform: Platform) {
+        for (name, body) in files {
+            let p = dir.join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+        }
         let (_, arch) = this_target().unwrap();
         let m = UpdateManifest {
             app: APP.into(),
@@ -402,7 +436,7 @@ mod tests {
             kind: UpdateKind::Full(FullPackage { platform, arch, format: PackageFormat::TarGz, signing_identity: "unsigned".into() }),
             version: v(version),
             base_releases: vec![],
-            files: vec![FileEntry::describe("ymird", body)],
+            files: files.iter().map(|(name, body)| FileEntry::describe(name, body)).collect(),
             min_client: None,
             max_client: None,
             capabilities: vec![],
@@ -427,6 +461,37 @@ mod tests {
 
     fn here() -> Platform {
         this_target().unwrap().0
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_programs_are_installed_executable_and_data_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let o = org();
+        let mut u = open(tmp.path(), &o);
+        let elf: &[u8] = b"\x7fELF\x02\x01\x01 a server";
+        let files: &[(&str, &[u8])] = &[
+            ("ymird", b"daemon"),
+            ("ymirctl", b"ctl"),
+            ("llama/llama-server", b"server"),
+            ("llama/rpc-server", b"rpc"),
+            ("llama/llama-quantize", elf),
+            ("llama/libggml.so", elf),
+            ("scripts/engine.py", b"#!/usr/bin/env python3\n"),
+            ("share/README.md", b"docs"),
+        ];
+        bundle_with(&tmp.path().join("b1"), &o.release, "u1", 1, "0.2.0", files, here());
+        u.stage(&tmp.path().join("b1"), &v("0.1.0"), NOW).unwrap();
+        let release = dir(&Paths::new(tmp.path().join("home"))).join("releases/u1");
+        let mode = |p: &str| std::fs::metadata(release.join(p)).unwrap().permissions().mode() & 0o777;
+        for p in ["ymird", "ymirctl", "llama/llama-server", "llama/rpc-server", "llama/llama-quantize", "llama/libggml.so", "scripts/engine.py"] {
+            assert_eq!(mode(p), 0o755, "{p}");
+        }
+        assert_eq!(mode("share/README.md"), 0o644);
+        // A file that was executable in the bundle stays so, whatever its name.
+        assert!(executable("tools/thing", b"data", 0o755));
+        assert!(!executable("tools/thing", b"data", 0o644));
     }
 
     #[test]
