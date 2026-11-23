@@ -21,6 +21,13 @@ primary = true
 kind = "cargo-lock"
 path = "Cargo.lock"
 
+[[files]]                       # workspace dependencies on ymir-core, ymird, ymirctl (path + version; crates are publish = false)
+kind = "regex"
+path = "Cargo.toml"
+pattern = '^((?:ymir-core|ymird|ymirctl) = \{ path = "crates/[a-z-]+", version = ")\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?"'
+replace = '\g<1>{version}"'
+count = 3
+
 [[files]]                       # the Homebrew template's version (sha256s come from the release workflow)
 kind = "regex"
 path = "packaging/homebrew/ymir.rb"
