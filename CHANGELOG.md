@@ -10,6 +10,12 @@ All notable changes to Ymir are listed here. The format follows
 
 - LoRA adapters on a loaded base (training plan P4a): `[[model.local.lora]]` (`id`, `file`, `scale`, `revision`) serves each adapter as its own model id on its base's engine (llama.cpp `--lora` with the adapter and scale per request; vLLM `--enable-lora`). The catalog and `ymirctl status` list adapters with their base, requests are routed by the adapter's id like any model, and the context planner counts adapter weights in the base's memory. `ymirctl models adapter add | remove | list` edits `node.toml`; `ymirctl models pull REPO --node NAME --adapter-for BASE --serve` pulls an adapter onto a node and serves it without a restart. Adapters that don't match their base are dropped at start with an error, and the base still serves.
 
+### Fixed
+
+- `ymirctl models context` agrees with the load-time planner: with ymird running it sizes each model as ymird would if it were asked for now, beside what runs and on measured free memory, with a loaded model's own memory counted back. On a 128 GB Spark it had shown Inkling at 321,536 tokens with 41.2 GiB free and warned that the 382,976 it ran with might not fit: it showed the start-up plan, which keeps room for every model in `node.toml` that could run beside it (there qwen3.8-27b-nvfp4 at 131,072 and the embedding model, about 33 GiB). Without ymird it still shows the start-up plan, and says so.
+- A long prompt is no longer taken for a stalled node. The inference node keeps its asker alive (a `Meta` frame every 5 s) until the first token, within an allowance that grows with the prompt, and waits as long for a remote model node's first frame. `ymirctl chat` on a 128 GB Spark had failed with "stalled: no frame for 25000 ms" during Inkling's 62 s on a 17.9k-token prompt.
+- The load-time plan's log line gives the whole estimate (KV and buffers, weights and the 10% for the engine's other buffers): 85.5 GiB for Inkling at 479,232 tokens on a 128 GB Spark, which measured 79.4 GiB loaded and 81.0 GiB after a 17.9k-token prompt.
+
 ### Changed
 
 - `weirdnet-backends` 0.4 (LoRA adapters). Engine alerts are forwarded by ymird until `weirdnet-alerts` accepts 0.4.

@@ -3,6 +3,25 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-23: three fixes after the 0.3.1 rollout (branch `fix/post-031`)
+
+**What changed**
+- `ymirctl models context` agrees with the load-time planner. It used to print the start-up plan (`kvfit::plan_launches`), which keeps room for every model in `node.toml` that could run beside each one (on a 128 GB Spark: about 33 GiB for a vLLM 27B at 131,072 plus the embedding model, so Inkling showed 321,536 tokens / 41.2 GiB free and a "may not fit" for the 382,976 it ran with). With ymird answering on the control socket it now sizes each model with `ctxplan::preview`: beside what runs (`ymirctl status` rows now carry `context` and `slots`), on measured free memory (`SystemProbe`), with a loaded model's own estimate counted back (`ctxplan::free_beside`; not for one still loading), naming the idle models it would unload. Without ymird it prints the start-up plan and says so.
+- Long prompts are not stalls. `Coordinator::attempt` sends the cold-load keepalive (empty `Meta` every 5 s) from routing until the first text or reasoning goes out, within `coordinator::prefill_allowance` (60 s + request bytes / 3 tokens at 50 tok/s, at most 2 h); the pool to a remote model node waits as long for the first frame (`remote::model_node_stall`), 5-12 s between frames as before. `ymirctl chat` had failed with `stalled: no frame for 25000 ms` during a 62 s prefill (17.9k tokens, Inkling at 479k context).
+- The load-time plan note gives the whole estimate: "61.0 GiB for KV and buffers; 85.5 GiB in all with 16.7 GiB of weights and 10% for the engine's other buffers".
+- Docs: [CHANGELOG.md](CHANGELOG.md), [DESIGN.md](docs/DESIGN.md) (load-time `models context`, long prompts). Host names in older test comments and docs replaced with `node-a` / `node-b`.
+
+**Why 479,232 and not 437,248:** 437,248 is the test fixture's budget alone ((128 - 16 GiB) x 85% = 95.2 GiB). The real node had `budget 108.0 GiB` and 102.3 GiB measured free with nothing else running; that gives 479,232 (pinned in `ctxplan` tests).
+
+**The 4% "over plan":** not over the estimate. 77.7 GiB was weights + KV and buffers; the plan's whole estimate adds 10% for the engine's fixed-size buffers: 85.5 GiB. Measured VmHWM 79.4 GiB loaded and 81.0 GiB after a 17.9k-token prompt, 4.5 GiB under it, with the 20% headroom untouched. `llama-fit-params -fitp on` (b12628, CPU build, Inkling-2-Mini IQ4_NL header) at 479,232: 15,219 MiB context + 46,519 MiB compute = 60.3 GiB, so Ymir's 61.0 GiB is 0.7 GiB above llama.cpp; with 16.7 GiB of weights llama.cpp's own total is 77.0 GiB. The other ~2.4 GiB at load is what `llama-fit-params` does not count (mmproj/CLIP compute, host staging and output buffers, process heap; not separated here: no Vulkan device or mmproj file on the build box). The +1.6 GiB after the prompt fits llama-server's context checkpoints for a sliding-window model (each holds one sequence's SWA cache, ~240 MiB for Inkling; up to 32 per slot, 8192 tokens apart) and its host prompt cache (`--cache-ram`, 8 GiB by default). Both live outside the planner's numbers and grow with use; the 10% covers what was measured. Estimate not changed.
+
+**Checks:** `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings` (old unused workspace-dependency warnings only); `cargo test --workspace --locked`. New tests: `ctxplan` (the 479,232 from measured free; a loaded model counted back, not one loading; preview wording; llama-fit-params points at 382,976 and 479,232), `ymirctl` `models context` with and without ymird, `nodes` (12 keepalives over a 62 s prefill, none past the allowance, the allowance's growth, and a 62 s prefill through `local_pool` with weirdnet-agent's default stall: it failed with `Stalled { ms: 25000 }` before the fix).
+
+**Not tested:** on a Spark (Infra verifies after the next release); a remote model node's long prefill end to end over Weirdnet (unit-tested stall only).
+
+**What's left:** keepalives that prove progress need llama.cpp `return_progress` in the request body and a progress chunk in `weirdnet-backends` (a wish for the Weirdnet lead); measuring the fixed buffers on a Spark (`-lv 4`); counting llama-server's checkpoints and prompt cache if they ever outgrow the 10%.
+
+
 ## 2026-11-23: LoRA adapters on a loaded base, training plan P4a first slice (branch `feat/p4a-lora-adapters`)
 
 **What changed**

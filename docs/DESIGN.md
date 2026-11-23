@@ -681,10 +681,10 @@ the server runs with:
   Inkling-2-Mini IQ4_NL header: 68,002 MiB of compute at 701,440 tokens, 101,563 MiB at 1M; Qwen3
   0.6B under `-fa off` at 32,768: 1,110 MiB against a 1,024 MiB matrix). v0.2.0 left the scores
   out; v0.3.0 counted one matrix, calibrated on an RSS read after load that did not hold the whole
-  compute buffer, and planned Inkling at 701,440 tokens (70.9 GiB) beside a busy gemma4-e4b on m1,
+  compute buffer, and planned Inkling at 701,440 tokens (70.9 GiB) beside a busy gemma4-e4b on node-a,
   where llama-server mapped 108 GiB setting up its context and the node ran out of memory. The plan
   now gives Inkling 437,248 tokens alone on a Spark (397,312 beside a busy gemma4-e4b at its full
-  131,072, or with 93 GiB measured free as on m1).
+  131,072, or with 93 GiB measured free as on node-a).
 - **Fit.** Weights + KV + score buffers + 10% (as `weirdnet_model::fit`) against the node's model
   budget (`[model] memory_budget` / `reserve`), with 20% of the memory free for the model kept free.
   Models that can be resident together share it: each other swap group
@@ -702,7 +702,9 @@ the server runs with:
 - **Older entries.** Pulls before this wrote `context = 32768` (and `--max-model-len 262144` for
   Inkling on a Spark). That cannot be told apart from a chosen value, so ymird keeps it and logs a
   hint when the model could take more. `ymirctl models context` lists every model's planned context
-  and why; `--old-defaults` (or `--auto ID...`) removes those values from `node.toml` (keeping
+  and why: with ymird running, as the load-time planner below would size each one if it were asked
+  for now (beside what runs, on measured free memory, a loaded model's own estimate counted back, and
+  the idle models it would unload named); without ymird, the start-up plan; `--old-defaults` (or `--auto ID...`) removes those values from `node.toml` (keeping
   `node.toml.bak`, fetching a vLLM model's `config.json` if it is missing); restart ymird to apply.
 - **At load time** (`ymir_core::ctxplan`). The start-up plan is what a model gets while it could
   share the node with every other model. When one is asked for, ymird sizes it beside what actually
@@ -721,7 +723,11 @@ the server runs with:
   could load together, so a `Load` from another device's inference node (node/1 goes straight to
   the supervisor), a crash restart, or a model added by a `--node` pull starts with a context that
   fits beside what runs; those loads do not unload idle models (node/1 has no hook before a load;
-  that needs `weirdnet-backends`). `[[model.split]]` keeps its set context.
+  that needs `weirdnet-backends`). `[[model.split]]` keeps its set context. A model that is
+  itself loaded (asked about by `ymirctl models context`) is sized with its own estimate added back
+  to the measured free memory, so it is never sized against itself; one still loading is not. The
+  plan's log line gives the whole estimate (KV and buffers, weights, and the 10% that holds the
+  engine's fixed-size buffers), which is what a measurement such as `VmHWM` is held to.
 
 Hub search, repo files, GGUF headers, the downloader, the model store and the fit are
 `weirdnet-model`'s (`hf::Hub`, `fit`, `download_parts`, `ModelStore`); `crates/ymirctl/src/models/`
@@ -2080,6 +2086,17 @@ nodes and sync among them. On published crates only: `weirdnet-agent` 0.4.2, `we
   (`x-wait`, or no stand-in) gets an empty `Meta` frame every 5 s while the load runs, so the asker's
   stall timer (15 to 25 s) doesn't give up on a vLLM load that takes a minute or more. Before this, such
   a request ended with a stall error after 25 s while the model went on loading.
+- **Long prompts are not stalls.** A model node sends nothing while its engine processes the prompt
+  (`weirdnet-backends` streams only tokens), so the inference node sends the same `Meta` keepalive
+  every 5 s from the moment it routes a request until its first text or reasoning goes out (a tool
+  call still being collected counts as quiet too), within an allowance that grows with the prompt
+  (`coordinator::prefill_allowance`: 60 s plus the request at 3 bytes a token and 50 tokens/s, at
+  most 2 h). Past it the keepalive stops and the asker's own stall timer applies again. The pool to
+  a remote model node waits as long for its first frame (`remote::model_node_stall`), and 5 to 12 s
+  between frames as before; a node or engine that dies still ends the stream at once. Before this,
+  Inkling's 62 s on a 17.9k-token prompt on a 128 GB Spark ended with "stalled: no frame for 25000 ms", and the
+  node cancelled the answer once the prompt was done. llama.cpp's `return_progress` would make the
+  keepalive evidence of progress, but the request body is built in `weirdnet-backends`.
 - **Resume at the inference level.** The inference host now says `resume: true`, so an app's pool whose
   inference node dies mid-answer continues on the other one, from the text it already shows. It is
   also what `continue_final_message` needs: the bridge continues the last assistant message through
