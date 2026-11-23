@@ -4,7 +4,7 @@ use weirdnet_model::hw::Budget;
 
 use super::*;
 
-const GIB: u64 = 1 << 30;
+pub(crate) const GIB: u64 = 1 << 30;
 
 enum V<'a> {
     U32(u32),
@@ -64,8 +64,12 @@ fn header(kv: &[(&str, V)]) -> Vec<u8> {
 }
 
 /// Inkling 2 Mini's header keys, as in ggml-org/Inkling-2-Mini-GGUF.
-fn inkling_header() -> Vec<u8> {
-    let a = "inkling2_loop";
+pub(crate) fn inkling_header() -> Vec<u8> {
+    looped_header("inkling2_loop")
+}
+
+/// Inkling's shape under another architecture name: a model llama.cpp flash-attends.
+pub(crate) fn looped_header(a: &str) -> Vec<u8> {
     let k = |s: &str| format!("{a}.{s}");
     let pattern: Vec<bool> = (0..24).map(|i| i % 6 != 5).collect();
     let keys = [
@@ -106,6 +110,43 @@ fn inkling_header() -> Vec<u8> {
     ])
 }
 
+/// Gemma 4 E4B's header keys, as in its Q4_0 GGUF (4.3 GiB).
+pub(crate) fn gemma4_e4b_header() -> Vec<u8> {
+    let a = "gemma4";
+    let k = |s: &str| format!("{a}.{s}");
+    let pattern: Vec<bool> = (0..42).map(|i| i % 6 != 5).collect();
+    let keys = [
+        "block_count",
+        "context_length",
+        "embedding_length",
+        "attention.head_count",
+        "attention.head_count_kv",
+        "attention.key_length",
+        "attention.value_length",
+        "attention.key_length_swa",
+        "attention.value_length_swa",
+        "attention.sliding_window",
+        "attention.sliding_window_pattern",
+        "attention.shared_kv_layers",
+    ]
+    .map(k);
+    header(&[
+        ("general.architecture", V::Str(a)),
+        (&keys[0], V::U32(42)),
+        (&keys[1], V::U32(131_072)),
+        (&keys[2], V::U32(2560)),
+        (&keys[3], V::U32(8)),
+        (&keys[4], V::U32(2)),
+        (&keys[5], V::U32(512)),
+        (&keys[6], V::U32(512)),
+        (&keys[7], V::U32(256)),
+        (&keys[8], V::U32(256)),
+        (&keys[9], V::U32(512)),
+        (&keys[10], V::Bools(pattern)),
+        (&keys[11], V::U32(18)),
+    ])
+}
+
 /// Inkling 2 Mini's `config.json`, trimmed to what sizing reads.
 fn inkling_config() -> serde_json::Value {
     json!({
@@ -124,7 +165,7 @@ fn inkling_config() -> serde_json::Value {
     })
 }
 
-fn spark_budget() -> Budget {
+pub(crate) fn spark_budget() -> Budget {
     use weirdnet_model::hw::{Accel, Gpu, Hardware};
     let hw = Hardware {
         os: "linux".into(),
@@ -154,6 +195,44 @@ fn the_inkling_header_counts_loop_passes_and_sliding_layers() {
     // f16: 32 KiB per token in the global layers, so 32 GiB at the full 1M; the sliding layers
     // hold only their window.
     assert_eq!(s.kv_bytes(1_048_576, 1, CacheType::F16), 32 * GIB + 40 * 8 * 256 * 2 * (1024 + 512));
+}
+
+#[test]
+fn inkling_keeps_full_score_matrices_and_server_slots_widen_the_sliding_cache() {
+    let s = gguf_shape(&inkling_header()[..]).unwrap();
+    assert!(s.dense_scores && s.heads == 24);
+    // llama-server's default: 4 slots sharing one cache, 512-token micro-batches.
+    let run = Run::of(&ModelLaunch::new("ink", EngineKind::Llamacpp, "/m/ink.gguf"));
+    assert_eq!((run.slots, run.ubatch, run.flash_off), (4, 512, false));
+    // At 1M: the f32 scores are 1M x 512 x 24 heads (48 GiB), beside 32 GiB of global KV and a
+    // sliding window per slot. This is what v0.2.0 missed.
+    assert_eq!(s.score_bytes(1_048_576, run), 48 * GIB);
+    assert_eq!(s.kv_bytes(1_048_576, 4, CacheType::F16), 32 * GIB + 40 * 8 * 256 * 2 * (4 * 1024 + 512));
+    // A flash-attended model has no score buffers unless `-fa off`; `-ub` and `--parallel` count.
+    let g = gguf_shape(&gemma4_e4b_header()[..]).unwrap();
+    assert_eq!(g.score_bytes(131_072, run), 0);
+    let mut l = ModelLaunch::new("g", EngineKind::Llamacpp, "/m/g.gguf");
+    l.extra_args = ["-fa", "off", "-ub", "256", "--parallel", "2"].map(String::from).to_vec();
+    let off = Run::of(&l);
+    assert_eq!((off.slots, off.ubatch, off.flash_off), (2, 256, true));
+    assert_eq!(g.score_bytes(131_072, off), 131_072 * 256 * 8 * 4);
+    // `slots` in node.toml is what ymird passes as `--parallel`.
+    l.slots = Some(1);
+    assert_eq!(Run::of(&l).slots, 1);
+    // vLLM sizes its own pool: one sequence's worth, no llama.cpp buffers.
+    let v = Run::of(&ModelLaunch::new("v", EngineKind::Vllm, "org/m"));
+    assert_eq!((v.slots, v.flash_off), (1, false));
+}
+
+#[test]
+fn gemma4_caches_only_the_layers_that_do_not_share_kv() {
+    let g = gguf_shape(&gemma4_e4b_header()[..]).unwrap();
+    // 42 layers, the last 18 reuse earlier KV: of the 24 left, 4 are global (512-wide heads).
+    assert_eq!((g.full_layers, g.swa_layers), (4, 20));
+    assert_eq!(g.full_elems, 4 * 2 * 1024);
+    assert_eq!(g.trained, Some(131_072));
+    // Its full 128k context is 2 GiB of f16 global KV.
+    assert_eq!(g.kv_bytes(131_072, 1, CacheType::F16) - CacheType::F16.bytes(g.swa_elems * (512 + 512)), 2 * GIB);
 }
 
 #[test]
@@ -225,28 +304,26 @@ fn cache_types_and_flags_come_from_args() {
 }
 
 #[test]
-fn inkling_gets_its_full_context_on_a_128_gib_spark_and_is_cut_on_a_small_gpu() {
+fn a_cut_context_falls_on_a_step_with_a_floor_and_a_fallback() {
     let s = gguf_shape(&inkling_header()[..]).unwrap();
-    let b = spark_budget();
-    let weights = 27 * GIB;
-    let kv_budget = (b.usable_bytes - footprint(weights, 0)) / 11 * 10;
-    assert_eq!(fit_context(&s, kv_budget, 1, CacheType::F16), (1_048_576, false));
-    // 8 GiB for the cache: cut, on a 1024 step, to the most that fits.
-    let (c, cut) = fit_context(&s, 8 * GIB, 1, CacheType::F16);
+    // Without the score buffers (flash attention), 8 GiB holds a quarter-million-token cache:
+    // cut, on a 1024 step, to the most that fits.
+    let fa = KvShape { dense_scores: false, ..s.clone() };
+    let (c, cut) = fit_context(&fa, 8 * GIB, Run::single());
     assert!(cut);
     assert_eq!(u64::from(c) % STEP, 0);
-    assert!(s.kv_bytes(u64::from(c), 1, CacheType::F16) <= 8 * GIB);
-    assert!(s.kv_bytes(u64::from(c) + STEP, 1, CacheType::F16) > 8 * GIB);
+    assert!(fa.kv_bytes(u64::from(c), 1, CacheType::F16) <= 8 * GIB);
+    assert!(fa.kv_bytes(u64::from(c) + STEP, 1, CacheType::F16) > 8 * GIB);
     assert_eq!(c, 253_952);
     // Nothing fits: the floor.
-    assert_eq!(fit_context(&s, 0, 1, CacheType::F16), (MIN_CONTEXT, true));
+    assert_eq!(fit_context(&s, 0, Run::single()), (MIN_CONTEXT, true));
     // Unknown trained length: the fallback.
     let unknown = KvShape { full_elems: 1, ..Default::default() };
-    assert_eq!(fit_context(&unknown, u64::MAX, 1, CacheType::F16), (FALLBACK_CONTEXT, false));
+    assert_eq!(fit_context(&unknown, u64::MAX, Run::single()), (FALLBACK_CONTEXT, false));
 }
 
 /// A sparse GGUF of `size` bytes with `header` at the front.
-fn sparse(dir: &Path, name: &str, header: &[u8], size: u64) -> String {
+pub(crate) fn sparse(dir: &Path, name: &str, header: &[u8], size: u64) -> String {
     let p = dir.join(name);
     std::fs::write(&p, header).unwrap();
     std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_len(size).unwrap();
@@ -256,7 +333,8 @@ fn sparse(dir: &Path, name: &str, header: &[u8], size: u64) -> String {
 #[test]
 fn plans_share_memory_keep_explicit_contexts_and_skip_wraps_and_mlx() {
     let dir = tempfile::tempdir().unwrap();
-    let ink = sparse(dir.path(), "ink-Q8_0.gguf", &inkling_header(), 27 * GIB);
+    // Inkling's shape, flash-attended (no score buffers), so the KV cache is what is shared.
+    let ink = sparse(dir.path(), "ink-Q8_0.gguf", &looped_header("looped"), 27 * GIB);
     let budget = Budget { pool_bytes: 128 * GIB, reserve_bytes: 16 * GIB, usable_bytes: 95 * GIB };
 
     // Alone: the full trained length.
@@ -266,13 +344,13 @@ fn plans_share_memory_keep_explicit_contexts_and_skip_wraps_and_mlx() {
     assert!(!p[0].clamped && !p[0].explicit && p[0].note.contains("trained length is 1048576"), "{p:?}");
 
     // Beside a 40 GiB model in another group, both automatic: they split what is left.
-    let big = sparse(dir.path(), "big.gguf", &inkling_header(), 40 * GIB);
+    let big = sparse(dir.path(), "big.gguf", &looped_header("looped"), 40 * GIB);
     let mut two = vec![ModelLaunch::new("ink", EngineKind::Llamacpp, &ink), ModelLaunch::new("big", EngineKind::Llamacpp, &big)];
     let p = plan_launches(&mut two, &budget, dir.path());
     assert!(p[0].clamped && p[1].clamped, "{p:?}");
     assert!(p[0].note.contains("cut from 1048576") && p[0].note.contains("shared with 1 other"), "{}", p[0].note);
-    let used: u64 =
-        two.iter().map(|l| footprint(0, gguf_shape(&inkling_header()[..]).unwrap().kv_bytes(u64::from(l.context.unwrap()), 1, CacheType::F16))).sum();
+    let shape = gguf_shape(&looped_header("looped")[..]).unwrap();
+    let used: u64 = two.iter().map(|l| footprint(0, shape.context_bytes(u64::from(l.context.unwrap()), Run::of(l)))).sum();
     assert!(footprint(27 * GIB, 0) + footprint(40 * GIB, 0) + used <= budget.usable_bytes);
 
     // The same two in one swap group are never resident together: each gets its own fit.

@@ -97,6 +97,8 @@ pub struct LocalModelNode {
     workers: Mutex<Option<Arc<crate::group::RpcWorkers>>>,
     /// Weights revisions from node.toml (`revision` on `[[model.local]]`).
     revisions: Mutex<HashMap<String, String>>,
+    /// Sizes a model's context beside what runs before it loads.
+    planner: Mutex<Option<Arc<crate::ctxplan::Planner>>>,
 }
 
 /// How long a drain waits for requests under way.
@@ -112,7 +114,17 @@ impl LocalModelNode {
             service_host: Mutex::new(None),
             workers: Mutex::new(None),
             revisions: Mutex::new(HashMap::new()),
+            planner: Mutex::new(None),
         }
+    }
+
+    /// Has loads made room for the model and size its context first ([`crate::ctxplan`]).
+    pub fn set_planner(&self, planner: Arc<crate::ctxplan::Planner>) {
+        *self.planner.lock().unwrap_or_else(|e| e.into_inner()) = Some(planner);
+    }
+
+    fn planner(&self) -> Option<Arc<crate::ctxplan::Planner>> {
+        self.planner.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Sets the weights revision of each model that has one (see [`ModelNode::revision`]).
@@ -166,7 +178,10 @@ impl ModelNode for LocalModelNode {
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
             self.check_file(model)?;
-            self.supervisor.load_with(model, force).await
+            match self.planner() {
+                Some(p) => p.load(model, force).await,
+                None => self.supervisor.load_with(model, force).await,
+            }
         })
     }
 
@@ -176,6 +191,9 @@ impl ModelNode for LocalModelNode {
 
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
         Box::pin(async move {
+            if let Some(p) = self.planner() {
+                p.touch(model);
+            }
             // A raw prompt (`/v1/completions`) goes to the engine's completions route, with the
             // assistant prefix (a resume) appended to the prompt.
             if let Input::Prompt(prompt) = &req.input {
@@ -190,6 +208,9 @@ impl ModelNode for LocalModelNode {
     }
 
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {
+        if let Some(p) = self.planner() {
+            p.touch(model);
+        }
         Box::pin(self.supervisor.embed(model, input))
     }
 

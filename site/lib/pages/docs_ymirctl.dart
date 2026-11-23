@@ -113,10 +113,12 @@ ymirctl models pull thinkingmachines/Inkling-2-Mini --register
 ymirctl models pull ggml-org/Inkling-2-Mini-GGUF --quant IQ4_NL --register</code></pre>
 <p>The entry gets no fixed <code>context</code> unless you pass <code>--context N</code>. <code>ymird</code> then runs each
 model with its full trained context (from the GGUF header, or <code>config.json</code> for vLLM), and cuts it only where the
-KV cache would not fit beside the weights and the node's other models; the log says which and why. Pull prints the context
-the model will get on this node.</p>
+KV cache and attention buffers would not fit beside the weights and the models running next to it, keeping 20% of the
+free memory free. When a model is asked for, idle models (no request for 30 seconds) are unloaded first if it would
+otherwise be cut; busy ones never are. The log says which and why, and the catalog shows the context it runs with. Pull
+prints the context the model will get on this node.</p>
 <h3 id="models-context"><code>ymirctl models context [ID...]</code></h3>
-<p>Shows the context <code>ymird</code> runs each model with on this node and why: <code>auto</code> entries get their full
+<p>Shows the context <code>ymird</code> starts each model with on this node, before it looks at what else runs, and why: <code>auto</code> entries get their full
 trained length or what fits, and a <code>context</code> you set is kept. <code>--auto ID...</code> removes
 <code>context</code> (and any <code>--ctx-size</code> or <code>--max-model-len</code> in <code>args</code>) from those
 entries; <code>--old-defaults</code> does that for every entry that still has the 32768 an older pull wrote (or 262144 for

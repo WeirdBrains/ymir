@@ -6,6 +6,15 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The context plan no longer under-counts models that llama.cpp can't flash-attend: Inkling 2 Mini (and T5, or any model under `-fa off`) keeps a context x micro-batch x heads f32 score buffer, 48 GiB for Inkling at 1M tokens, which v0.2.0 left out (it planned 1M on a 128 GB Spark from a 53.9 GiB estimate; llama-server used 104.6 GiB). Server slots (4 by default) now widen sliding-window caches, Gemma's shared-KV layers are not counted, and 20% of the free memory is kept free. Inkling 2 Mini now gets 721,920 tokens alone on a Spark.
+- The updater installs bundled programs executable: `llama-server`, `rpc-server` and any other native binary or script in a package (ELF, Mach-O, `#!`, or executable in the bundle) get mode 755, not just `ymird` and `ymirctl`.
+
+### Changed
+
+- Contexts follow the models that run beside them: when a model is asked for, ymird sizes its context against the memory actually free (measured, and estimated from the running models), unloading idle models first (no request in flight, none for 30 s) when the requested model would otherwise be cut; a busy model is never unloaded. ymird logs what it unloaded and the context it chose, and the catalog reports that context. Models not loaded are re-sized as what runs changes.
+
 ## [0.2.0] - 2026-11-23
 
 ### Changed
