@@ -1,6 +1,8 @@
 # Training and fine-tuning around Ymir: implementation plan
 
-Status: plan, 2026-11-22. Nothing here is built. This document turns the four training proposals in the
+Status: plan, updated 2026-11-23. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`); the Hub
+license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
+base) is starting. P2 and P3 have not started. This document turns the four training proposals in the
 white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
 repository yet) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
@@ -150,6 +152,10 @@ Resume is only correct if the data order and seeds are recorded, so P3b must che
 
 ### P4. Distribution, hot swap and versioned rollout (partly built)
 
+**Status (2026-11-23).** P4a (LoRA adapters on a loaded base, llama.cpp first) is starting. P4b
+(versioned rollout and canaries) has not started. Pulling a merged GGUF onto any node and serving it
+without a restart is already built.
+
 **Scope.** Built: pull a merged GGUF onto any node and serve it without a restart. Proposed: serve LoRA adapters
 on a loaded base, name versions in the catalog, send a small share of traffic to a new version, and roll back by
 moving traffic to the previous version, which stays loaded until the new one proves itself.
@@ -199,7 +205,7 @@ serve it as an adapter, and score it against the base through the pool.
 
 1. **P1: JSONL batch, teacher integrity, manifest, resume, and `ymirctl eval`.** Ymir only, no Weirdnet change
    needed to start, usable on day one.
-2. **P4a: LoRA adapters on a loaded base (llama.cpp first).** Small Ymir change; asks the lead for the
+2. **P4a: LoRA adapters on a loaded base (llama.cpp first).** Starting. Small Ymir change; asks the lead for the
    `weirdnet-backends` adapter arguments. Closes the loop.
 3. **P2: consented conversation export.** Needs the flag record agreed with the lead and Bragi.
 4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Needs the reservation in
