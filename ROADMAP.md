@@ -2,9 +2,9 @@
 
 <!-- Generated from roadmap.toml by site/tool/gen_roadmap.py. Edit roadmap.toml, not this file. -->
 
-Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc.
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1 is built, P4a is starting, and P2 and P3 have not started.
 
-Updated 2026-11-22. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
+Updated 2026-11-23. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
 ## M0 Design (Done)
 
@@ -44,7 +44,7 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## M6 Workload spreading (In progress)
 
-Load balancing across replicas, fair sharing between devices, priority classes and batch jobs that fan out across nodes are built. Next: moving models between nodes, placement, and a shared answer cache.
+Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, and the pool benchmark are built. Next: moving models between nodes, placement and replication, and a semantic cache.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
 
@@ -62,7 +62,7 @@ Weirdnet crates: none new.
 
 ## M9 Breadth and hardening (In progress)
 
-Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, and a `[model] callers` guard so a model node can refuse app devices. Next: push wake-ups, BSD packages and a bundle fetcher; MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
+Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, and outside MCP servers for tasks. Next: push wake-ups, BSD packages, a bundle fetcher, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 
@@ -71,3 +71,27 @@ Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. The design is approved and the Weirdnet crates are published; Ymir wires it up next. A majority-vote lease follows as weirdnet-sync 0.8.0.
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
+
+## P1 Data generation and evals (Done)
+
+Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests, resume, bench scorers and an optional judge). Left: the teacher license read from the Hugging Face Hub, turning sources into seed prompts, and a job record that stays in sync across nodes.
+
+Weirdnet crates: `weirdnet-agent`.
+
+## P4a LoRA adapters on a loaded base (In progress)
+
+Serve LoRA adapters on an already-loaded base model (llama.cpp first): a first-class adapter list in the catalog, each advertised as its own model. Work is starting. Versioned rollout and canaries (P4b) wait on this. P2 and P3 have not started.
+
+Weirdnet crates: `weirdnet-backends`, `weirdnet-model`.
+
+## P2 Training data from conversations (Planned)
+
+Export only the conversations the user has marked for training, with chosen parts stripped, as a dataset that never leaves their devices. Not started.
+
+Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
+
+## P3 Fine-tuning as a pool job (Planned)
+
+A LoRA or QLoRA run on one capable GPU node at background priority, with serving paused or moved off that node. Not started. A synced job record and resume on another node come later (P3b).
+
+Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`.

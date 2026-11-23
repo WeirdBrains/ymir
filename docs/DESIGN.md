@@ -1683,7 +1683,10 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
 - **B3 Platforms** (in progress 2026-11-19; see [B3 status](#b3-status-in-progress-2026-11-19)): iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
 - **B4 Sync and optional extras:** history on the shared context store (after M5); the optional on-device model
   and push wake-ups, on both shells.
-- **B5 Breadth:** BSDs where GPUI allows, agent mode and attachments, on both shells.
+- **B5 Breadth** (in progress; see [B5 status](#b5-status-in-progress-2026-11-20)): attachments (text, image and audio) and agent mode are built on both shells. The BSD desktop window does not build yet, so on BSD it is the terminal app only.
+- **B6 Your own endpoints** (built 2026-11-21; see [B6 status](#b6-status-built-2026-11-21)): any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback. Built in the core, the Flutter app and the GPUI desktop shell.
+- **B7 Models on your pool** (in progress; see [B7 status](#b7-status-in-progress)): a Models screen to search, pull and remove models on your Ymir nodes. Built in both shells and tried against demo nodes and a mock Hub. Next: a check against a real Ymir node.
+- **v0.2 Chat, code and the desktop link** (shipped in Bragi v0.2.1): chat and code as modes of one conversation, a desktop linker with QR pairing over Weirdnet so the phone's code mode works against a paired desktop, project scaffolding, a shell-out command, prompt history, a notification log, mouse support in the terminal app, and thinking blocks that stay collapsed and can be expanded.
 
 ## Milestones (Ymir)
 
@@ -1722,18 +1725,15 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   retention and tombstones; bridge ephemeral contexts. Mid-answer resume at both levels. Exit test:
   kill a model node mid-answer, then an inference node mid-answer; each reply continues with the full
   context and no duplicate text.
-- **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Load-balanced routing across replicas, scheduler lease,
-  cloud-wide swap, placement and replication, prefix warming, device fairness and priority classes,
-  batch and agent job fan-out, pool-mode semantic cache; several inference nodes active-active. Exit
+- **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
+  device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
+  nodes active-active. Still to do: moving models between nodes, placement and replication, scheduler
+  lease, cloud-wide swap, prefix warming, and a pool-mode semantic cache. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
-- **M7 Split models.** Group jobs: vLLM + Ray over RoCE, llama.cpp RPC over Ethernet; big mode on
-  server-a/server-b reproduced as a group job.
+- **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
 - **M8 server-a/server-b migration** (done 2026-11-20; each step approved by m3talsmith).
-- **M9 Breadth and hardening.** Self-update via `weirdnet-update` with rollback; push via the
-  embedded `weirdnet-push` senders (once its Weirdnet front end exists); Windows service (done
-  2026-11-20, see [Running as a service](#running-as-a-service)), BSD packages, a security review of the roster check,
-  role boundaries and backend ports, 1.0 criteria.
+- **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; and outside MCP servers for tasks. Still to do: push wake-ups (once the `weirdnet-push` front end exists), BSD packages, a bundle fetcher, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
 - **M10 Cert-only server link** (Weirdnet lead). `weirdnet-sync`/`weirdnet-device-link` give service
   nodes a node certificate and sync keys without the root seed; Ymir nodes re-link and wipe their seed
   copies; a node can then be revoked without rotating the root identity.
@@ -2368,8 +2368,9 @@ Bragi now uses every inference node among the user's devices at once. All behavi
 
 ## B3 status (in progress 2026-11-19)
 
-What a Linux box with no Mac and no Windows can build and check. Nothing is released, signed with a
-real key, or uploaded anywhere.
+Packages for Linux, macOS, Windows, Android and unsigned iOS shipped in v0.1.0 (and later in v0.2.1).
+Store listings, signing with a release key and a finished F-Droid recipe are still left. The notes
+below are from the first packaging pass on a Linux box.
 
 **Built and run:**
 
@@ -2483,19 +2484,48 @@ Attachments and agent mode are built on both shells. BSD support is written but 
 
 **Not built or not verified, and why:**
 
-- **BSDs: the desktop app does not build on FreeBSD (found 2026-11-20).** The manual `freebsd` CI job in `platforms.yml` (a FreeBSD 14.2 VM,
+- **BSDs: the desktop window does not build on FreeBSD (found 2026-11-20), so on BSD it is the terminal app only.** The manual `freebsd` CI job in `platforms.yml` (a FreeBSD 14.2 VM,
   rustup stable, git CLI, CA bundle, a stub `bzip2.pc`) got through every dependency and then failed in `gpui_linux`: GPUI gates
   `layer_shell`, `PriorityQueueReceiver` and `PriorityQueueSender` to linux, windows and wasm, while `gpui_linux` uses them on FreeBSD.
   It fails the same way at the pinned rev and on Zed's main, so it is a Zed bug, not Bragi's; fixing it means patching or forking GPUI.
-  The job now requires `bragi-core` to pass its tests there and only warns for the desktop build. OpenBSD and DragonFly are not GPUI targets.
+  The job requires `bragi-core` to pass its tests there, builds `bragi-desktop` without the window (the terminal app), and only warns for the desktop window. OpenBSD and DragonFly are not GPUI targets.
 - **Real nodes served no `task/1` in B5**, so agent mode ran only against the demo node. Ymir M9 adds it (see the M9 status);
   Bragi's own agent mode has still not been run against a real `ymird`, only the two sides separately.
 - Attachments are text only (no images, PDFs or binary), and the Flutter file picker was only exercised in its scripted demo path.
 
+## B6 status (built 2026-11-21)
+
+Any OpenAI-compatible server, with an optional API key, can sit next to the Weirdnet pool or act as a
+fallback when it is down. Settings add, edit, delete, test and reorder both Weirdnet links and
+endpoints; keys are sealed on the device and never synced. Each chat is bound to one target and keeps
+its own history, and chats nest in folders. This is built in `bragi-core` (`endpoints`), the Flutter
+app (desktop and phone) and the GPUI desktop shell (`view/endpoints.rs`). The older "GPUI shell is
+next" note is stale.
+
+## B7 status (in progress)
+
+A Models screen on both shells searches the Hugging Face Hub with a fit badge for each of the user's
+Ymir nodes, pulls a model to one node, the best-fitting one or all of them with progress and cancel,
+lists what each node has, and removes with a confirm. It runs over Weirdnet with this device's own
+identity; nodes accept it only from devices linked to their owner. Built in the core, the Flutter app
+and the GPUI desktop shell, and tried against demo nodes and a mock Hub (`models_scenario.rs`). Next:
+a check against a real Ymir node.
+
+## v0.2 status (shipped in Bragi v0.2.1)
+
+Chat and code are modes of one conversation (Tab, Shift-Tab, `/chat`, `/code`, `/mode`). A desktop
+linker (`bragi linker pair`) shows a QR code and a typed code so a phone can pair over the LAN or
+through the Weirdnet relay and use code mode against shared folders on the desktop. Also in v0.2.1:
+project scaffolding (`/root`), a shell-out command (`!cmd` or `/shell`), prompt history, a
+notification log, mouse support in the terminal app, and thinking blocks that stay collapsed and can
+be expanded.
+
 ## M9 status (in progress 2026-11-20)
 
 The parts of "breadth and hardening" that can be built and tested on one machine are built: self-update with rollback,
-agent tasks for Bragi, and a security review with checks that run. Push, the Windows service and BSD packages are not.
+agent tasks for Bragi, the Windows service, a security review with checks that run, Inkling 2 Mini, automatic context
+sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, and outside MCP servers for tasks. Push wake-ups,
+BSD packages and a bundle fetcher are not; MLX-LM for Inkling waits on mlx-lm#2086.
 
 **Built and run:**
 
@@ -2563,8 +2593,7 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 
 - **Push wake-ups:** `weirdnet-push` 0.1.0 has sealed payloads and APNs/FCM senders, but its Weirdnet front end (so the inference node
   can embed it with no listener) does not exist; tracked below. It also needs Apple and Google credentials from m3talsmith.
-- **Windows service and named-pipe control; BSD packages:** not built or tried. Nothing here runs on Windows or a BSD, and the
-  user service covers systemd and launchd only. (Bragi's FreeBSD CI job is a separate item, see the Bragi B5 status.)
+- **BSD packages:** not built or tried. The user and system services cover systemd, launchd and Windows (see [Running as a service](#running-as-a-service)), but nothing here was packaged for a BSD. (Bragi's FreeBSD CI job is a separate item, see the Bragi B5 status.)
 - **A bundle fetcher.** `update stage` takes a directory. Announcements over `weirdnet-relay` (`/weirdnet/updates/1`, feature
   `wire`) and downloads are the next piece; nothing is signed with a real org key (m3talsmith holds those) and no release was cut.
 - **Updating `ymirctl` and the engines with `ymird`:** the release directory may hold `ymirctl`, but only `ymird` is started from
@@ -2589,7 +2618,7 @@ agent tasks for Bragi, and a security review with checks that run. Push, the Win
 
 | Criterion | State |
 | --- | --- |
-| M1 to M7 built, M8 done with m3talsmith's approval at each step | M1 to M6 done, M7 llama.cpp only; **M8 not started** |
+| M1 to M7 built, M8 done with m3talsmith's approval at each step | M1 to M6 and M8 done, M7 llama.cpp only |
 | Full workspace tests pass on a clean checkout, and the real-engine tests have run on the target hardware | passes here; real engines run on one NVIDIA box only |
 | A run across at least two real machines: link, serve, fail over mid-answer, update | not done (all tests are one box, memory or loopback transport) |
 | The four upstream issues are closed or knowingly accepted | all open |
