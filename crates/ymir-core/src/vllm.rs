@@ -3,7 +3,7 @@
 //! vLLM stays an external engine (`auto`, `system:PATH`, a wrapped `vllm serve`, or
 //! `image:registry/name:tag`). Inkling 2 Mini (`inkling2_loop`) needs vLLM 0.35.0 or a newer
 //! nightly, or the `vllm/vllm-openai:inkling-2-mini` image, until that support is in a release
-//! (https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini). A too-old binary gets a clear error
+//! (<https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini>). A too-old binary gets a clear error
 //! rather than a load failure from inside vLLM.
 
 use std::io::Write;

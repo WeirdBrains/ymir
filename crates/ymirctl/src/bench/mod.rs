@@ -5,7 +5,7 @@
 //! different nodes. `--via bridge` goes through the loopback bridge instead, where the pool picks the
 //! node (and the node that answered is recorded). For each target it measures time to first token,
 //! decode and prompt-processing speed and total latency (one warm-up, then N repeats, median and p90),
-//! then scores deterministic quality checks at temperature 0 (see [`suites`]).
+//! then scores deterministic quality checks at temperature 0 (see the `suites` module).
 //!
 //! Safety: one request at a time, strictly in sequence, so no node runs two benchmark jobs. A model that
 //! is busy or loading is re-checked and then skipped, and a model that is not loaded is skipped unless
