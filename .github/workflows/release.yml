@@ -61,7 +61,8 @@ jobs:
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             # Official llama.cpp CUDA 13.5 ubuntu binaries need glibc 2.38.
             python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda
-            docker run --rm -v /tmp/engine-cuda:/engine:ro -w /engine ubuntu:24.04 ./llama-server --version
+            docker run --rm -v /tmp/engine-cuda:/engine:ro -w /engine ubuntu:24.04 \
+              bash -lc 'apt-get update && apt-get install -y --no-install-recommends libgomp1 && ./llama-server --version'
           else
             python3 scripts/engine.py fetch --target aarch64-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
           fi
