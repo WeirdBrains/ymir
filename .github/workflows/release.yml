@@ -34,10 +34,12 @@ jobs:
       matrix:
         include:
           # Ubuntu 22.04 keeps ymird's glibc requirement low (2.35).
+          # Official llama.cpp aarch64 ubuntu binaries need glibc 2.38, so that
+          # job runs on 24.04; x86_64 default still checks on 22.04.
           - arch: x86_64
             runner: ubuntu-22.04
           - arch: aarch64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
       YMIR_ENGINE_CACHE: ${{ github.workspace }}/.engine-cache
@@ -56,7 +58,13 @@ jobs:
       - name: Engines run on this runner
         run: |
           python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --out /tmp/engine-default --check
-          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            # Official llama.cpp CUDA 13.5 ubuntu binaries need glibc 2.38.
+            python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda
+            docker run --rm -v /tmp/engine-cuda:/engine:ro -w /engine ubuntu:24.04 ./llama-server --version
+          else
+            python3 scripts/engine.py fetch --target aarch64-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
+          fi
       - name: Package (default and CUDA)
         run: |
           python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --engine /tmp/engine-default
