@@ -12,6 +12,7 @@
 
 mod adapters;
 mod ctxcmd;
+pub use ctxcmd::Live;
 mod hub;
 mod local;
 mod plan;
@@ -189,6 +190,8 @@ pub struct Ctx {
     pub config: PathBuf,
     pub cfg: Option<NodeConfig>,
     pub tty: bool,
+    /// What the ymird running here has loaded (for `models context`), when it answers.
+    pub live: Option<ctxcmd::Live>,
 }
 
 impl Ctx {
@@ -227,10 +230,11 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
             "--serve and --load need --node (name this machine, or another one): serving a pulled model without a restart is done by ymird. Without --node, add the printed entry to node.toml, or use --register, and restart ymird"
         );
     }
-    run_local(paths, out, input, cmd)
+    let live = if matches!(cmd, ModelsCmd::Context(_)) { ctxcmd::live(paths).await } else { None };
+    run_local(paths, out, input, cmd, live)
 }
 
-fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: ModelsCmd) -> Result<()> {
+fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: ModelsCmd, live: Option<ctxcmd::Live>) -> Result<()> {
     let cfg = NodeConfig::load(&paths.config()).ok();
     let dir_arg = match &cmd {
         ModelsCmd::Pull(a) => a.dir.dir.clone(),
@@ -251,6 +255,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         config: paths.config(),
         cfg,
         tty: std::io::stdout().is_terminal(),
+        live,
     };
     match cmd {
         ModelsCmd::Search(a) => search(&ctx, out, &a),

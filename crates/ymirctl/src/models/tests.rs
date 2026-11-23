@@ -63,6 +63,7 @@ impl Fixture {
             cfg: NodeConfig::load(&config).ok(),
             config,
             tty: false,
+            live: None,
         }
     }
 }
@@ -408,4 +409,64 @@ fn context_lists_each_model_and_lifts_old_pull_defaults() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("no [[model.local]] with id `nope`"), "{err}");
+}
+
+/// A status row for `models context`'s view of what runs.
+fn running(id: &str, state: ymir_core::control::ModelState, context: Option<u32>) -> ymir_core::control::NodeModel {
+    serde_json::from_value(json!({
+        "node": "n", "id": id, "engine": "llamacpp", "state": state, "in_flight": 0, "swap_group": null,
+        "purpose": "chat", "pid": 1, "context": context
+    }))
+    .unwrap()
+}
+
+#[test]
+fn context_with_ymird_running_sizes_a_loaded_model_with_its_own_memory_counted_back() {
+    use ymir_core::control::ModelState;
+    let fx = Fixture::new();
+    let models = fx.dir.path().join("models");
+    std::fs::create_dir_all(&models).unwrap();
+    // `tiny`: 128 KiB of f16 KV per token, so 8 GiB at its 65,536. `big`: 14 GiB of weights,
+    // in node.toml but not loaded (a sparse file: only the size counts).
+    std::fs::write(models.join("tiny.gguf"), gguf_bytes(400_000, 1)).unwrap();
+    let big = std::fs::File::create(models.join("big.gguf")).unwrap();
+    {
+        use std::io::Write as _;
+        (&big).write_all(&gguf_bytes(4096, 2)).unwrap();
+    }
+    big.set_len(14 << 30).unwrap();
+    let toml = format!(
+        "[node]\nname = \"n\"\n\n[model]\nmodels_dir = {:?}\n\n[[model.local]]\nid = \"tiny\"\nfile = \"tiny.gguf\"\ncontext = 65536\n\n[[model.local]]\nid = \"big\"\nfile = \"big.gguf\"\ncontext = 8192\n",
+        models.display().to_string()
+    );
+    // 32 GiB of RAM: (32 - 4) x 85% = 23.8 GiB for models.
+    let ctx = fx.ctx(32, Some(&toml));
+    let args = ContextArgs { ids: vec![], auto: false, old_defaults: false, dir: DirArgs { dir: None } };
+
+    // ymird not running: the start-up plan keeps room for `big` beside `tiny`, so 65,536 looks short.
+    let mut out = Vec::new();
+    ctxcmd::run(&ctx, &mut out, &args).unwrap();
+    let s = text(out);
+    assert!(s.contains("ymird is not running here"), "{s}");
+    assert!(s.contains("context 65536 (set in node.toml): its 8.0 GiB f16 KV cache and score buffers may not fit"), "{s}");
+
+    // ymird running with `tiny` loaded, 8 GiB measured free (tiny's own 8.8 GiB already taken):
+    // what the load-time planner would give it, with its own memory counted back. It fits.
+    let live = Live {
+        models: vec![running("tiny", ModelState::Ready, Some(65_536)), running("big", ModelState::Unloaded, Some(8192))],
+        measured: Some(8 << 30),
+    };
+    let ctx = Ctx { live: Some(live), ..ctx };
+    let mut out = Vec::new();
+    ctxcmd::run(&ctx, &mut out, &args).unwrap();
+    let s = text(out);
+    assert!(s.contains("8.0 GiB measured free") && s.contains("if it were asked for now"), "{s}");
+    let tiny = s.lines().find(|l| l.trim_start().starts_with("tiny")).unwrap();
+    assert!(tiny.contains("context 65536 (set in node.toml)") && tiny.contains("with nothing else running"), "{tiny}");
+    assert!(tiny.contains("its own 8.8 GiB is counted back") && tiny.contains("runs at 65536 now"), "{tiny}");
+    assert!(!tiny.contains("may not fit"), "{tiny}");
+    // `big` does not fit beside `tiny` as it runs (8 GiB free), so the planner would unload the
+    // idle `tiny` for it, as it would at load.
+    let big = s.lines().find(|l| l.trim_start().starts_with("big")).unwrap();
+    assert!(big.contains("it would unload idle tiny") && !big.contains("may not fit"), "{big}");
 }

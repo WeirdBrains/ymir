@@ -1,18 +1,45 @@
-//! `ymirctl models context`: the context each `[[model.local]]` runs with on this node and why
-//! (the same plan ymird makes at start, `ymir_core::kvfit`), and `--auto` / `--old-defaults` to
-//! put entries back on the automatic context.
+//! `ymirctl models context`: the context each `[[model.local]]` runs with on this node and why,
+//! and `--auto` / `--old-defaults` to put entries back on the automatic context.
+//!
+//! With ymird running here, each model is sized as ymird's load-time planner
+//! (`ymir_core::ctxplan`) would size it if it were asked for now: beside the models that run, on
+//! measured free memory, with a loaded model's own memory counted back. Without ymird, it is the
+//! plan ymird makes at start (`ymir_core::kvfit`), which leaves room for every model in node.toml
+//! that could run beside it.
 
+use std::collections::HashMap;
 use std::io::Write;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use toml_edit::{Array, DocumentMut, Item, Value};
 use weirdnet_backends::EngineKind;
 use weirdnet_model::hw::Budget;
 use ymir_core::NodeConfig;
+use ymir_core::Paths;
 use ymir_core::config::LocalModel;
+use ymir_core::control::{self, ControlRequest, ModelState, NodeModel};
+use ymir_core::ctxplan::{self, Ask, Decision, MemProbe, Resident};
 use ymir_core::kvfit::{self, OLD_INKLING_SPARK_DEFAULT, OLD_PULL_DEFAULT, Plan};
 
 use super::{ContextArgs, Ctx};
+
+/// What runs on this node now, from the local ymird.
+#[derive(Debug, Clone, Default)]
+pub struct Live {
+    /// This node's models, as ymird reports them.
+    pub models: Vec<NodeModel>,
+    /// The free memory measured now; `None`: measure it here as ymird does.
+    pub measured: Option<u64>,
+}
+
+/// This node's models from the ymird running here, when one answers.
+pub async fn live(paths: &Paths) -> Option<Live> {
+    let r = tokio::time::timeout(Duration::from_secs(3), control::request(&paths.socket(), &ControlRequest::Status)).await.ok()?.ok()?;
+    let st = r.status?;
+    let me = st.nodes.iter().find(|n| n.local).map(|n| n.name.clone())?;
+    Some(Live { models: st.models.into_iter().filter(|m| m.node == me).collect(), measured: None })
+}
 
 /// This node's model memory, as ymird computes it.
 fn budget(ctx: &Ctx, cfg: &NodeConfig) -> Budget {
@@ -154,20 +181,97 @@ pub fn run(ctx: &Ctx, out: &mut dyn Write, a: &ContextArgs) -> Result<()> {
     list(ctx, out, &cfg)
 }
 
+/// What ymird's load-time planner would give each automatic or explicit model in `cfg` were it
+/// asked for now, beside what runs (`live`) on `measured` free memory. `plans` (the start-up plan)
+/// says which contexts are the operator's.
+fn now_plans(ctx: &Ctx, cfg: &NodeConfig, b: &Budget, plans: &[Plan], live: &Live, measured: Option<u64>) -> HashMap<String, Decision> {
+    let launches = cfg.launches();
+    let resolved: HashMap<String, kvfit::Resolved> = launches
+        .iter()
+        .filter(|l| plans.iter().any(|p| p.id == l.id))
+        .filter_map(|l| kvfit::resolve(l, ctx.dir()).ok().map(|r| (l.id.clone(), r)))
+        .collect();
+    let residents: Vec<Resident> = live
+        .models
+        .iter()
+        // An adapter's row mirrors its base's; the base's cost counts the adapters.
+        .filter(|m| m.base.is_none() && matches!(m.state, ModelState::Ready | ModelState::Loading | ModelState::Draining))
+        .map(|m| {
+            let l = launches.iter().find(|l| l.id == m.id);
+            let bytes = match (l, resolved.get(&m.id)) {
+                _ if m.wrapped => 0,
+                (Some(l), Some(r)) => {
+                    // What it runs with, as ymird set it at load.
+                    let mut l = l.clone();
+                    l.context = m.context.or(l.context);
+                    l.slots = m.slots.or(l.slots);
+                    kvfit::cost(r, &l)
+                }
+                (Some(l), None) => kvfit::footprint(std::fs::metadata(&l.source).map_or(0, |x| x.len()), 0),
+                (None, _) => 0,
+            };
+            Resident {
+                id: m.id.clone(),
+                swap_group: m.swap_group.clone(),
+                bytes,
+                in_flight: m.in_flight,
+                loading: m.state == ModelState::Loading,
+                // ymird keeps when each model last had a request; here only "now or not" is known.
+                idle: if m.in_flight > 0 { Duration::ZERO } else { ctxplan::GRACE },
+            }
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for l in &launches {
+        let (Some(r), Some(p)) = (resolved.get(&l.id), plans.iter().find(|p| p.id == l.id)) else { continue };
+        let mut l = l.clone();
+        l.context = if p.explicit { p.context } else { None };
+        let ask = Ask { launch: &l, resolved: r, explicit: p.explicit };
+        out.insert(l.id.clone(), ctxplan::preview(&ask, &residents, b, measured));
+    }
+    out
+}
+
 fn list(ctx: &Ctx, out: &mut dyn Write, cfg: &NodeConfig) -> Result<()> {
     let b = budget(ctx, cfg);
-    writeln!(out, "This node: {:.1} GiB for models. Contexts ymird runs each model with:", b.usable_bytes as f64 / (1u64 << 30) as f64)?;
+    let gib = |x: u64| format!("{:.1} GiB", x as f64 / (1u64 << 30) as f64);
     let plans = plans(ctx, cfg);
+    let now = match &ctx.live {
+        Some(live) => {
+            let measured = live.measured.or_else(|| ctxplan::SystemProbe::new(&ctx.hw, &b).free_bytes());
+            writeln!(
+                out,
+                "This node: {} for models{}. Contexts ymird would give each model if it were asked for now, beside what runs:",
+                gib(b.usable_bytes),
+                measured.map_or(String::new(), |m| format!(", {} measured free", gib(m)))
+            )?;
+            now_plans(ctx, cfg, &b, &plans, live, measured)
+        }
+        None => {
+            writeln!(
+                out,
+                "This node: {} for models. ymird is not running here, so this is the plan it makes at start, which leaves room for every model in node.toml that could run beside each one:",
+                gib(b.usable_bytes)
+            )?;
+            HashMap::new()
+        }
+    };
     let mut old = Vec::new();
     for m in &cfg.model.local {
         let setting = match fixed(m) {
             Some(c) => format!("context = {c}"),
             None => "auto".to_string(),
         };
-        let line = match plans.iter().find(|p| p.id == m.id) {
-            Some(p) => p.note.clone(),
-            None if m.wrap.is_some() => "a wrapped server: its own context".to_string(),
-            None => "MLX-LM sizes its cache as it goes".to_string(),
+        let running = ctx.live.as_ref().and_then(|l| l.models.iter().find(|n| n.id == m.id && n.base.is_none()));
+        let line = match (now.get(&m.id), plans.iter().find(|p| p.id == m.id)) {
+            (Some(d), _) => {
+                let at =
+                    running.filter(|n| n.state == ModelState::Ready).and_then(|n| n.context).map_or(String::new(), |c| format!("; runs at {c} now"));
+                format!("{}{at}", d.note)
+            }
+            (None, Some(p)) => p.note.clone(),
+            (None, None) if m.wrap.is_some() => "a wrapped server: its own context".to_string(),
+            (None, None) => "MLX-LM sizes its cache as it goes".to_string(),
         };
         writeln!(out, "  {:<28} {:<16} {line}", m.id, setting)?;
         if old_default(m) && plans.iter().any(|p| p.id == m.id && p.auto_would_be.is_some()) {
