@@ -762,6 +762,50 @@ Gaps are listed in HANDOFF.md ("Gaps for the Weirdnet Lead"): launch settings fo
 (`-fa`, `--jinja`, `gpu_layers`, `idle_ttl`), MLX in `weirdnet-model`, `SearchHit` parameter counts,
 and a per-device owner role.
 
+### LoRA adapters on a loaded base (training plan P4a, 2026-11-23)
+
+An adapter is served as a model of its own, on its base's engine. The engine side is
+`weirdnet-backends` 0.4 (`LoraAdapter`, `ModelLaunch::adapters`, `Supervisor::add_adapter`): llama.cpp
+starts with one `--lora FILE` per adapter and `--lora-init-without-apply`, and each request names its
+adapter and scale in the body (`"lora": [{"id": i, "scale": s}]`; requests for the base send an empty
+list), so the base and every adapter share one llama-server and one KV cache. vLLM gets
+`--enable-lora`, one `--lora-modules` list and `--max-loras`, and each adapter is its own served model
+name. MLX, wrapped servers and embedding models take none.
+
+- **Config.** `[[model.local.lora]]` under its base: `id` (the pool id, unique among the node's models
+  and adapters, e.g. `qwen3-8b+support-v2`), `file` (a LoRA GGUF for llama.cpp, absolute or under
+  `models_dir`; a PEFT directory or Hub id for vLLM), `scale` (llama.cpp, default 1.0) and `revision`
+  (keys the answer cache like a model's, so answers from an older adapter under the same id are never
+  replayed). At start ymird checks each adapter against its base (`ModelLaunch::check_adapters`: a
+  LoRA GGUF whose architecture is the base's) and drops, with an error in the log, any that fail; the
+  base and the other adapters still serve.
+- **Catalog and routing.** The supervisor reports a status row per adapter with `base` set and the
+  base's engine, state and capabilities. Capability records carry those rows, so the pool catalog lists
+  each adapter as a model and routing, failover and the stand-in need no change: a request for the
+  adapter's id goes to a node that has it, like any model. `ymirctl status` shows "LoRA adapter on
+  BASE". Loading an adapter loads its base; unloading an adapter is refused (unload the base).
+- **Context planner.** An adapter's weights count in its base's footprint (`kvfit::resolve` adds
+  `adapters::bytes`: each GGUF's size, or a PEFT directory's weight files), so the start-up plan and
+  the load-time plan size the base's context with its adapters loaded. Adapter rows are not residents
+  of their own (they mirror the base), a request for an adapter keeps its base busy, a load of an
+  adapter is planned as its base, and an adapter added or removed at run time re-reads its base.
+- **ymirctl.** `ymirctl models adapter add BASE FILE [--id ID] [--scale S] [--revision R]` adds a
+  `[[model.local.lora]]` under its base in `node.toml` (keeping `node.toml.bak` and every other byte;
+  refused unless the result validates and, for llama.cpp, the adapter matches the base file here);
+  `adapter remove ID` takes it out (the file stays); `adapter list` shows them. Restart ymird to apply.
+  Over Weirdnet, `ymirctl models pull REPO --node NAME --adapter-for BASE [--file F] --serve` has the
+  node download the repo's adapter into `models_dir/adapters/ID/`, check it against BASE, and serve it
+  without a restart (in memory; the output gives the `adapter add` command that keeps it). `models list
+  --node` shows adapters with their base.
+- **Alerts, interim.** `weirdnet-alerts` 0.2.1's engine monitor takes `weirdnet-backends` below 0.4, so
+  ymird forwards supervisor events to the alerter itself (`ymir_core::engine_alerts`, the same
+  `engine.<kind>` observations and probes) until `weirdnet-alerts` takes 0.4.
+
+Not built yet (next P4a slice): changing an adapter's scale on a running llama-server
+(`POST /lora-adapters`) and adding an adapter to a running base without a restart of that base (both
+engines take adapters at start here, so an adapter added while its base runs serves after the base's
+next load); vLLM's runtime `load_lora_adapter` / `unload_lora_adapter`; a per-request scale over infer/2.
+
 ### Process manager (replaces llama-swap)
 
 Ymir's process manager has two halves, because models swap across nodes in the cloud:

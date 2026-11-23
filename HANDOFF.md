@@ -3,6 +3,24 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-23: LoRA adapters on a loaded base, training plan P4a first slice (branch `feat/p4a-lora-adapters`)
+
+**What changed**
+- `weirdnet-backends` 0.3 → 0.4 (its LoRA adapter release; `weirdnet-model` 0.5.2 with it). `weirdnet-alerts` 0.2.1's `backends` feature only takes `weirdnet-backends` < 0.4, so the feature is off and ymird forwards supervisor events to the alerter itself (`ymir_core::engine_alerts`, interim, same observations and probes).
+- `[[model.local.lora]]` (`id`, `file`, `scale`, `revision`) → `ModelLaunch::adapters`. Validation: unique ids across models and adapters, finite scale, llama.cpp or vLLM, not wrapped, not embedding. At start `adapters::keep_servable` drops (with an error) adapters that fail `check_adapters` (missing, not a LoRA, other architecture); the base still serves. Adapter revisions key the answer cache.
+- Context planner: adapter weights count in the base (`kvfit::resolve` + `adapters::bytes`); adapter status rows are not residents; touch/load/prepare map an adapter to its base; adapter Added/Removed re-reads the base (its explicit flag kept).
+- Catalog: `CatalogRow::base`, `NodeModel::base`; `ymirctl status` prints "LoRA adapter on BASE". Routing needed no change (adapter rows are in capability records).
+- ymirctl: `models adapter add BASE FILE [--id] [--scale] [--revision]`, `adapter remove ID`, `adapter list` (toml_edit, keeps `node.toml.bak`; checks the GGUF against the base); `models pull REPO --node NAME --adapter-for BASE [--file] --serve`; `models list --node` shows adapters.
+- Mock engine: `--lora` and per-request `"lora"`.
+- Docs: DESIGN ("LoRA adapters on a loaded base"), training.md P4a design paragraph, CHANGELOG.
+
+**Checks:** `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings` (clean apart from the old unused workspace-dependency warnings); `cargo test --workspace --locked`: **252 passed, 0 failed, 6 ignored**. New: config, `adapters` unit tests, `ymirctl` node.toml edits, `ymir-testkit` `adapters` (add/list/remove, start-up drop, chat by adapter id with its scale, base on the same engine, unload refused), `ctxplan` (adapter weights cut the base's context; adapter loads its base; base evicted with its adapter), `models_pool` (pull `--adapter-for --serve` over Weirdnet, routed chat). `ctxplan` 40/40 and adapters+models_pool 10/10 repeated runs green.
+
+**Not tested:** a real llama-server or vLLM with a real LoRA (no GPU here); vLLM adapter paths only in unit tests.
+
+**What's left (next P4a slice):** runtime scale changes (llama-server `POST /lora-adapters`) and adding an adapter to a running base without restarting it (llama.cpp, vLLM `load_lora_adapter`/`unload_lora_adapter`): both in `weirdnet-backends`; a per-request scale over infer/2 (`weirdnet-agent`); refusing an adapter trained on another base revision/quant once adapters record it; adapters in the catalog/1 entry (a `base` field in `weirdnet-agent`'s `CatalogModel`, so `/v1/models` and Bragi can show them); `weirdnet-alerts` taking backends 0.4 (then drop `engine_alerts`); `ymirctl models pull --adapter-for` without `--node`; the site's `ymirctl` page.
+
+
 ## 2026-11-22: models run with as much context as they can take (branch `feat/full-context`)
 
 **What changed**
