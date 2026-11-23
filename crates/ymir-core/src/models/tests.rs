@@ -206,7 +206,7 @@ async fn a_remote_pull_streams_progress_and_serves_the_model_without_a_restart()
 
     let (done, _) = run(&p, "beta", ModelsOp::List).await;
     let ModelsReply::List(list) = reply(&done.unwrap(), "Beta").clone() else { panic!() };
-    assert_eq!((list[0].model.id.as_str(), list[0].served_as.as_deref()), ("m-Q4_0", Some("m-Q4_0")));
+    assert_eq!((list[0].model.as_ref().unwrap().id.as_str(), list[0].served_as.as_deref()), ("m-Q4_0", Some("m-Q4_0")));
 
     // Removing stops serving it and deletes the file.
     let (done, _) = run(&p, "BETA", ModelsOp::Remove { id: "m-Q4_0".into() }).await;

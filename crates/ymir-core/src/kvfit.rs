@@ -598,7 +598,8 @@ fn safetensors_bytes(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// A model's shape and the bytes its weights take in memory.
+/// A model's shape and the bytes its weights take in memory (with its projector and its LoRA
+/// adapters, which load beside them).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub shape: KvShape,
@@ -623,7 +624,7 @@ pub fn resolve(l: &ModelLaunch, models_dir: &Path) -> Result<Resolved> {
             let f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
             let shape = gguf_shape(std::io::BufReader::new(f)).with_context(|| format!("reading the GGUF header of {}", p.display()))?;
             let mmproj = arg_value(&l.extra_args, &["--mmproj", "-mm"]).and_then(|m| std::fs::metadata(m).ok()).map_or(0, |m| m.len());
-            Ok(Resolved { shape, weights: gguf_weights(p) + mmproj })
+            Ok(Resolved { shape, weights: gguf_weights(p) + mmproj + crate::adapters::bytes(l) })
         }
         EngineKind::Vllm => {
             let p = Path::new(&l.source);
@@ -654,7 +655,7 @@ pub fn resolve(l: &ModelLaunch, models_dir: &Path) -> Result<Resolved> {
             if weights == 0 {
                 bail!("the weights' size for {} is unknown", l.source);
             }
-            Ok(Resolved { shape: config_shape(&v)?, weights })
+            Ok(Resolved { shape: config_shape(&v)?, weights: weights + crate::adapters::bytes(l) })
         }
         _ => bail!("{} sizes its cache as it goes; there is no context to plan", l.engine.name()),
     }

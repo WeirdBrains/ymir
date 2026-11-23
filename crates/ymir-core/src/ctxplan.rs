@@ -284,9 +284,16 @@ impl Planner {
         self
     }
 
-    /// Notes a request for `id` (its idle time starts again).
+    /// Notes a request for `id` (its idle time starts again). A request for a LoRA adapter keeps
+    /// its base busy.
     pub fn touch(&self, id: &str) {
-        self.busy.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), Instant::now());
+        let id = self.base(id);
+        self.busy.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Instant::now());
+    }
+
+    /// The model `id` runs on: its base for an adapter, else `id`.
+    fn base(&self, id: &str) -> String {
+        crate::adapters::base_of(&self.sup.launches(), id).unwrap_or_else(|| id.to_string())
     }
 
     fn residents(&self, status: &[ModelStatus]) -> Vec<Resident> {
@@ -296,6 +303,8 @@ impl Planner {
         let starting = self.starting.lock().unwrap_or_else(|e| e.into_inner());
         status
             .iter()
+            // An adapter's row mirrors its base's; the base's cost counts the adapters.
+            .filter(|s| s.base.is_none())
             .filter(|s| {
                 matches!(s.state, ModelState::Ready | ModelState::Loading | ModelState::Draining)
                     || (s.state == ModelState::Unloaded && starting.contains(&s.id))
@@ -333,13 +342,14 @@ impl Planner {
     /// operator's forced load does anyway).
     pub async fn prepare(&self, id: &str, force: bool) {
         let _op = self.ops.lock().await;
-        self.prepare_locked(id, force).await;
+        self.prepare_locked(&self.base(id), force).await;
     }
 
     /// [`Planner::prepare`], then the load, with no re-size between them.
     pub async fn load(&self, id: &str, force: bool) -> Result<(), weirdnet_agent::remote::RemoteError> {
         let _op = self.ops.lock().await;
-        self.prepare_locked(id, force).await;
+        // An adapter is sized and loaded as its base (the supervisor loads the base for it).
+        self.prepare_locked(&self.base(id), force).await;
         let r = self.sup.load_with(id, force).await;
         if r.is_ok() {
             self.touch(id);
@@ -566,13 +576,20 @@ impl Planner {
                         return false;
                     }
                 }
+                let launches = self.sup.launches();
+                // An adapter added to (or removed from) a base changes the base's weights: take
+                // the base in again.
+                let base = launches.iter().find(|l| l.adapters.iter().any(|a| &a.id == model)).map(|l| l.id.clone());
+                let adapter = base.is_some();
+                let model = &base.unwrap_or_else(|| model.clone());
                 let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+                // Whether the base's context is the operator's does not change with its adapters.
+                let explicit = known.get(model).map(|k| k.explicit).filter(|_| adapter);
                 known.remove(model);
-                if matches!(ev, SupervisorEvent::Added { .. })
-                    && let Some(l) = self.sup.launches().into_iter().find(|l| &l.id == model)
-                {
+                if let Some(l) = launches.into_iter().find(|l| &l.id == model) {
                     let resolved = resolvable(&l).then(|| kvfit::resolve(&l, &self.models_dir).ok()).flatten();
-                    known.insert(model.clone(), Known { resolved, explicit: l.context.is_some() });
+                    let explicit = explicit.unwrap_or(l.context.is_some());
+                    known.insert(model.clone(), Known { resolved, explicit });
                 }
                 true
             }

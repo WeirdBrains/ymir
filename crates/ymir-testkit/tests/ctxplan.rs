@@ -141,3 +141,61 @@ async fn a_load_from_elsewhere_is_followed_and_what_is_not_loaded_is_resized_bes
     sup.shutdown().await;
     Ok(())
 }
+
+/// A sparse `size`-byte LoRA GGUF for a llama base.
+fn lora(dir: &Path, name: &str, size: u64) -> String {
+    let mut h = b"GGUF".to_vec();
+    h.extend(3u32.to_le_bytes());
+    h.extend(0u64.to_le_bytes());
+    h.extend(3u64.to_le_bytes());
+    for (k, v) in [("general.architecture", "llama"), ("general.type", "adapter"), ("adapter.type", "lora")] {
+        h.extend((k.len() as u64).to_le_bytes());
+        h.extend(k.as_bytes());
+        h.extend(8u32.to_le_bytes());
+        h.extend((v.len() as u64).to_le_bytes());
+        h.extend(v.as_bytes());
+    }
+    let p = dir.join(name);
+    std::fs::write(&p, &h).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_len(size).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_counts_in_its_base_and_is_loaded_and_evicted_with_it() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let d = dir.path();
+    // a (20 GiB) carries a 22 GiB adapter: alone on the 50 GiB node it no longer gets its full
+    // 1M (4 GiB of KV); b (20 GiB) alone does.
+    let mut launches = vec![
+        ModelLaunch::new("a", EngineKind::Llamacpp, gguf(d, "a.gguf", 20 * GIB))
+            .with_adapters(vec![weirdnet_backends::LoraAdapter::new("a+tune", lora(d, "tune.gguf", 22 * GIB))]),
+        ModelLaunch::new("b", EngineKind::Llamacpp, gguf(d, "b.gguf", 20 * GIB)),
+    ];
+    for l in &mut launches {
+        l.slots = Some(1);
+    }
+    let budget = Budget { pool_bytes: 64 * GIB, reserve_bytes: 8 * GIB, usable_bytes: 50 * GIB };
+    ymir_core::kvfit::plan_launches(&mut launches, &budget, d);
+    let sup = Supervisor::new(
+        vec![EngineConfig::llamacpp(MOCK)],
+        launches.clone(),
+        SupervisorOptions { log_dir: Some(d.join("logs")), ..Default::default() },
+    );
+    let planner = Arc::new(Planner::new(sup.clone(), budget, Arc::new(NoProbe), d.into(), &HashSet::new()).with_grace(Duration::ZERO));
+    let node = LocalModelNode::new("n", sup.clone(), &launches);
+    node.set_planner(planner);
+
+    // Asked for by the adapter's id: the base is sized with the adapter's weights and loaded.
+    node.load("a+tune", false).await?;
+    assert_eq!(sup.state("a"), Some(ModelState::Ready));
+    let a = context(&node, "a").unwrap();
+    assert!((32_768..1_048_576).contains(&a), "a is cut for its adapter: {a}");
+    // b next, a idle: a (and its adapter, which is not a model of its own) makes room, and b
+    // gets its full length.
+    node.load("b", false).await?;
+    assert_eq!(sup.state("a"), Some(ModelState::Unloaded));
+    assert_eq!(context(&node, "b"), Some(1_048_576));
+    sup.shutdown().await;
+    Ok(())
+}

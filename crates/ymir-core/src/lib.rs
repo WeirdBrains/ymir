@@ -6,6 +6,7 @@
 //! calls the model role through [`ModelNode`]. Since M3 the same calls also go over Weirdnet
 //! ([`remote`]).
 
+pub mod adapters;
 pub mod balance;
 pub mod batch;
 pub mod client;
@@ -18,6 +19,7 @@ pub mod daemon;
 pub mod dataset;
 pub mod direct;
 pub mod engine;
+pub mod engine_alerts;
 pub mod fair;
 pub mod group;
 pub mod host;

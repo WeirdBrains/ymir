@@ -66,6 +66,8 @@ pub struct CatalogRow {
     pub embedding: bool,
     /// The inputs beyond text that at least one node's copy takes (images, audio).
     pub inputs: Modalities,
+    /// For a LoRA adapter: the base model it runs on (as the first node that has it says).
+    pub base: Option<String>,
 }
 
 impl CatalogRow {
@@ -273,6 +275,7 @@ impl Coordinator {
                     draining: Vec::new(),
                     embedding: crate::model_node::embeds(&s),
                     inputs: Modalities::TEXT,
+                    base: s.base.clone(),
                 });
                 row.inputs = row.inputs.union(crate::model_node::inputs_of(&s));
                 row.nodes.push((node.name().to_string(), s.state.clone()));

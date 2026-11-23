@@ -5285,15 +5285,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "weirdnet-backends",
  "weirdnet-rules",
 ]
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d66a7a3d58beac4b0b6bf471e67a0692843b5c1052fec9daec5467edc1d5206"
+checksum = "f51c9ee0095c57ca1ce7b2bd59497ea45c2efd46e8de4f18051144de286611fb"
 dependencies = [
  "async-trait",
  "axum",
@@ -5376,9 +5375,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-model"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca6fae6824c09cb00cd8540e94beb9bc4d1fc27938749e31aa69e302ec0efbfd"
+checksum = "67de1c28ee6b786514d232d3fb4651faef265ddd5675d8b4cf7707c87c09a75e"
 dependencies = [
  "dirs",
  "minijinja",

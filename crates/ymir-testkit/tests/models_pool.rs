@@ -112,6 +112,10 @@ fn hub() -> String {
                 "/api/models/o/n" => Some(info.into()),
                 "/o/n/resolve/main/m-Q4_0.gguf" => Some(gguf(4000)),
                 "/o/n/resolve/main/m-Q8_0.gguf" => Some(gguf(6000)),
+                "/api/models/o/tune" => {
+                    Some(br#"{"id":"o/tune","tags":["gguf"],"siblings":[{"rfilename":"tune-LoRA-F16.gguf","size":600}]}"#.to_vec())
+                }
+                "/o/tune/resolve/main/tune-LoRA-F16.gguf" => Some(lora(600)),
                 _ => None,
             };
             let _ = match body {
@@ -153,6 +157,23 @@ fn gguf(len: usize) -> Vec<u8> {
                 out.extend(n.to_le_bytes());
             }
         }
+    }
+    out.resize(len, 0);
+    out
+}
+
+/// A LoRA adapter GGUF header for a llama base, padded to `len` bytes.
+fn lora(len: usize) -> Vec<u8> {
+    let mut out = b"GGUF".to_vec();
+    out.extend(3u32.to_le_bytes());
+    out.extend(0u64.to_le_bytes());
+    out.extend(3u64.to_le_bytes());
+    for (k, v) in [("general.architecture", "llama"), ("general.type", "adapter"), ("adapter.type", "lora")] {
+        out.extend((k.len() as u64).to_le_bytes());
+        out.extend(k.as_bytes());
+        out.extend(8u32.to_le_bytes());
+        out.extend((v.len() as u64).to_le_bytes());
+        out.extend(v.as_bytes());
     }
     out.resize(len, 0);
     out
@@ -256,6 +277,55 @@ async fn the_pool_searches_pulls_serves_and_removes_models_over_weirdnet() -> Re
 
     ctl_d.shutdown().await;
     tiny.shutdown().await;
+    big.shutdown().await;
+    Ok(())
+}
+
+/// A LoRA adapter pulled from the Hub onto a base another device serves (training plan P4a): the
+/// node checks it against the base, serves it as its own model without a restart, lists it with
+/// its base, and a chat on this machine for the adapter's id runs on that base with it applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_is_pulled_onto_a_served_base_and_routed_by_its_name() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    unsafe { std::env::set_var("WEIRDNET_HF_URL", hub()) };
+
+    let ctl_h = home(root, "ctl", "inference,app", &[], &[])?;
+    let first = Membership::create(&ctl_h.paths.pool(), "ctl")?;
+    let big_h = home(root, "big", "model", &[], &[])?;
+    prelink(&first, &big_h, "big");
+    drop(first);
+    let big = start(&big_h).await?;
+    let ctl_h = home(root, "ctl", "inference,app", &[addr(&big_h).await?], &[])?;
+    let ctl_d = start(&ctl_h).await?;
+    eventually(40, "big answers models/1", async || Ok(ctl(&ctl_h.home, &["models", "list", "--node", "big"]).await.is_ok())).await?;
+
+    // The base first, then the adapter for it.
+    let out = ctl(&ctl_h.home, &["models", "pull", "o/n", "--file", "m-Q4_0.gguf", "--node", "big", "--serve"]).await?;
+    assert!(out.contains("big: serving `m-Q4_0` now"), "{out}");
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "pull", "o/tune", "--node", "auto", "--adapter-for", "m-Q4_0"]).await.unwrap_err());
+    assert!(err.contains("needs the node that serves the base"), "{err}");
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "pull", "o/tune", "--adapter-for", "m-Q4_0"]).await.unwrap_err());
+    assert!(err.contains("--adapter-for needs --node"), "{err}");
+    let out = ctl(&ctl_h.home, &["models", "pull", "o/tune", "--node", "big", "--adapter-for", "m-Q4_0", "--serve"]).await?;
+    assert!(out.contains("big: serving `tune-LoRA-F16` now, on `m-Q4_0`"), "{out}");
+    assert!(out.contains("ymirctl models adapter add m-Q4_0 adapters/tune-LoRA-F16/tune-LoRA-F16.gguf --id tune-LoRA-F16"), "{out}");
+    assert!(root.join("big-models/adapters/tune-LoRA-F16/tune-LoRA-F16.gguf").is_file());
+    let out = ctl(&ctl_h.home, &["models", "list", "--node", "big"]).await?;
+    assert!(out.lines().any(|l| l.contains("tune-LoRA-F16") && l.contains("adapter `tune-LoRA-F16` on `m-Q4_0`")), "{out}");
+
+    // Routed by its name from this machine, through the pool, to the base's engine on big.
+    let mut reply = String::new();
+    eventually(40, "the adapter answers through the pool", async || {
+        reply = ctl(&ctl_h.home, &["chat", "--model", "tune-LoRA-F16", "hi"]).await.unwrap_or_default();
+        Ok(!reply.is_empty())
+    })
+    .await?;
+    assert_eq!(reply.trim(), "Hello from m-Q4_0 with tune-LoRA-F16 at 1! You said: hi");
+    let reply = ctl(&ctl_h.home, &["chat", "--model", "m-Q4_0", "hi"]).await?;
+    assert_eq!(reply.trim(), "Hello from m-Q4_0! You said: hi");
+
+    ctl_d.shutdown().await;
     big.shutdown().await;
     Ok(())
 }

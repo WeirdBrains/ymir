@@ -170,6 +170,18 @@ moving traffic to the previous version, which stays loaded until the new one pro
   per version (for example 5 percent to the new one), rollback by setting the weight back, and the previous
   version kept loaded until an operator retires it. `ymirctl eval` (P1) on the same held-out set is the gate.
 
+**P4a design (first slice, 2026-11-23).** The engine work is `weirdnet-backends` 0.4 (`LoraAdapter`,
+`ModelLaunch::adapters`, `Supervisor::add_adapter`/`remove_adapter`, a status row per adapter with its `base`,
+and `models/1` pulls with `adapter_for`). Ymir adds `[[model.local.lora]]` (`id`, `file`, `scale`,
+`revision`), drops adapters that don't match their base at start, counts adapter weights in the base's
+context plan, shows adapters with their base in the status, and `ymirctl models adapter add | remove | list`
+plus `models pull --adapter-for BASE --node NAME --serve`. Details in
+[DESIGN.md](../DESIGN.md#lora-adapters-on-a-loaded-base-training-plan-p4a-2026-11-23). Next slice: adapter
+scale changes and adapters added to a running base without its restart (llama-server `POST /lora-adapters`,
+vLLM `load_lora_adapter` / `unload_lora_adapter`, both needing `weirdnet-backends`), a per-request scale over
+infer/2 (`weirdnet-agent`), and the base-revision check (refuse an adapter trained on another revision or
+quantisation of the base, once adapters record it).
+
 **Dependencies.** P4a needs nothing else and closes the loop with an adapter trained by hand. P4b needs P1's
 eval and P4a.
 

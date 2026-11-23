@@ -80,6 +80,7 @@ fn pull_args(repo: &str) -> PullArgs {
         force: false,
         serve: false,
         load: false,
+        adapter_for: None,
         dir: DirArgs { dir: None },
         node: NodeArgs::default(),
     }

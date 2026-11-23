@@ -855,6 +855,7 @@ impl YmirTools {
             force: args["force"].as_bool() == Some(true),
             serve: false,
             load: false,
+            adapter_for: None,
             dir: DirArgs { dir: None },
             node: NodeArgs::default(),
         })
