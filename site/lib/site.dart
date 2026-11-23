@@ -18,7 +18,7 @@ const siteDescription =
 const repoUrl = 'https://github.com/WeirdBrains/ymir';
 
 /// The latest release; bump with each release.
-const latestVersion = '0.2.0';
+const latestVersion = '0.3.1';
 const releaseUrl = '$repoUrl/releases/tag/v$latestVersion';
 const taurUrl = 'https://pkg.taur.weirdbrains.com';
 

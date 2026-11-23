@@ -11,7 +11,8 @@ Bragi chat app, and point Jan at it. Commands are exactly those <code>ymirctl</c
 (x86_64 and ARM64, CPU/Vulkan and CUDA), macOS and Windows on its release page. On Arch Linux, install it from
 <a href="${taur}/packages/ymir-bin">TAUR</a>: <code>${taurInstall}</code> (or <code>ymir-cuda-bin</code> for NVIDIA).
 This release gives each model the largest context that fits beside the others (<code>ymirctl models context</code>
-shows it and why). <a href="${bragiSite}download">Bragi 0.2.1</a>, the chat app, is out for every platform too, with
+shows it and why). 0.3.1 fixes the context plan so it counts both attention score matrices llama.cpp keeps for
+models such as Inkling 2 Mini, which 0.3.0 under-counted and could run a node out of memory. <a href="${bragiSite}download">Bragi 0.2.1</a>, the chat app, is out for every platform too, with
 chat and code as modes of one conversation and a desktop link that pairs your phone by QR code over Weirdnet. The bridge
 token and the Weirdnet identity are kept in files readable only by you (mode 0600).</p>
 <p>Ymir is a <a href="https://weirdbrains.com">Weird Brains</a> project. Devices find each other over

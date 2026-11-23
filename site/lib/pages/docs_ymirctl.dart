@@ -114,7 +114,8 @@ ymirctl models pull ggml-org/Inkling-2-Mini-GGUF --quant IQ4_NL --register</code
 <p>The entry gets no fixed <code>context</code> unless you pass <code>--context N</code>. <code>ymird</code> then runs each
 model with its full trained context (from the GGUF header, or <code>config.json</code> for vLLM), and cuts it only where the
 KV cache and attention buffers would not fit beside the weights and the models running next to it, keeping 20% of the
-free memory free. When a model is asked for, idle models (no request for 30 seconds) are unloaded first if it would
+free memory free. From 0.3.1 the plan counts both f32 score matrices llama.cpp keeps for attention with a score
+bias (Inkling 2 Mini, T5), so it no longer under-counts and runs a node out of memory. When a model is asked for, idle models (no request for 30 seconds) are unloaded first if it would
 otherwise be cut; busy ones never are. The log says which and why, and the catalog shows the context it runs with. Pull
 prints the context the model will get on this node.</p>
 <h3 id="models-context"><code>ymirctl models context [ID...]</code></h3>
@@ -444,7 +445,7 @@ trial, or a rollback) and print its path. With <code>--exec</code> it runs it, p
 <code>PATH</code>). This is the service's start command; <code>service install --managed-updates</code> sets it up.</li>
 </ul>
 <pre><code>ymirctl update trust --pin 3f9a...c1 --root root.signed
-ymirctl update stage ./ymir-0.2.0-bundle
+ymirctl update stage ./ymir-0.3.1-bundle
 sudo systemctl restart ymird        # or restart the user service
 ymirctl update status</code></pre>
 <p>Stage a bundle directory you built or received from the release signer.</p>

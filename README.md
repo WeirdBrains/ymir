@@ -48,8 +48,11 @@ package, `ymirctl setup --download --yes --service`, done. There are two builds:
 MLX instead: `setup --download` installs MLX-LM and the MLX weights (`--backend llamacpp` keeps llama.cpp). The
 [deployment guide](https://ymir.weirdbrains.com/docs/guides/deployment/) has the details.
 
-Ymir has no tagged release yet, so build from source (Rust 1.99) and put the pinned llama.cpp build
-(`packaging/engines/llama.cpp.toml`) next to the binaries, where `ymird` looks for it.
+[Ymir 0.3.1](https://github.com/WeirdBrains/ymir/releases/tag/v0.3.1) is out, with downloads for Linux, macOS and
+Windows, and `ymir-bin` / `ymir-cuda-bin` on [TAUR](https://pkg.taur.weirdbrains.com/packages/ymir-bin). It sizes
+each model's context to what fits beside the others, and 0.3.1 fixes the plan so it counts both attention score
+matrices llama.cpp keeps (Inkling 2 Mini no longer runs a node out of memory). To build from source (Rust 1.99), put
+the pinned llama.cpp build (`packaging/engines/llama.cpp.toml`) next to the binaries, where `ymird` looks for it.
 `python3 scripts/package.py [--variant cuda]` builds the release files themselves into `dist/`.
 
 ```sh
