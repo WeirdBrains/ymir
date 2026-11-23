@@ -3,6 +3,12 @@
 //! its own model id on the base's engine; ymird picks the change up on restart. To fetch an
 //! adapter from the Hub and serve it without a restart, use `ymirctl models pull REPO --node NAME
 //! --adapter-for BASE --serve`.
+//!
+//! `serve`, `unserve` and `scale` (with `--node`) change what a running node serves, through its
+//! ymird (models/1), without restarting the base where the engine allows: vLLM loads and unloads
+//! adapters at run time; llama-server rescales per request and re-enables a file it already has,
+//! but a new adapter file needs the base's next load. They are in memory only; node.toml is not
+//! edited.
 
 use std::io::Write;
 use std::path::Path;
@@ -23,6 +29,62 @@ pub enum AdapterCmd {
     Remove(RemoveAdapterArgs),
     /// List the adapters in node.toml, with their base and file.
     List,
+    /// Serve an adapter already on a node's disk (`ymirctl models list --node NAME`) on a model it
+    /// serves, without restarting that model where the engine allows. In memory only.
+    Serve(ServeArgs),
+    /// Stop serving an adapter on a node; its files stay. In memory only.
+    Unserve(UnserveArgs),
+    /// Change how strongly an adapter applies on a node (llama.cpp), from its next request, with
+    /// no restart. In memory only; a request can also set its own (`ymirctl chat --adapter-scale`).
+    Scale(ScaleArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServeArgs {
+    /// The stored adapter's id (as `ymirctl models list --node NAME` shows it); it serves under it.
+    pub id: String,
+    /// The model it runs on, served by that node.
+    #[arg(long)]
+    pub base: String,
+    /// How strongly it applies (llama.cpp; default 1.0).
+    #[arg(long)]
+    pub scale: Option<f32>,
+    #[command(flatten)]
+    pub node: super::NodeArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct UnserveArgs {
+    /// The adapter's served id.
+    pub id: String,
+    #[command(flatten)]
+    pub node: super::NodeArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ScaleArgs {
+    /// The adapter's served id.
+    pub id: String,
+    /// The new scale (for example 0.5); leave it out with --reset for 1.0.
+    #[arg(required_unless_present = "reset", allow_negative_numbers = true)]
+    pub scale: Option<f32>,
+    /// Back to the adapter's default (1.0).
+    #[arg(long, conflicts_with = "scale")]
+    pub reset: bool,
+    #[command(flatten)]
+    pub node: super::NodeArgs,
+}
+
+impl AdapterCmd {
+    /// The node a live change goes to (`--node`); `None` for the node.toml commands.
+    pub fn node(&self) -> Option<String> {
+        match self {
+            AdapterCmd::Serve(a) => a.node.node.clone(),
+            AdapterCmd::Unserve(a) => a.node.node.clone(),
+            AdapterCmd::Scale(a) => a.node.node.clone(),
+            AdapterCmd::Add(_) | AdapterCmd::Remove(_) | AdapterCmd::List => None,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -62,6 +124,11 @@ pub fn run(ctx: &Ctx, out: &mut dyn Write, cmd: AdapterCmd) -> Result<()> {
     let text = std::fs::read_to_string(config).with_context(|| format!("reading {} (run `ymirctl setup` first)", config.display()))?;
     let cfg: NodeConfig = toml::from_str(&text).with_context(|| format!("parsing {}", config.display()))?;
     match cmd {
+        AdapterCmd::Serve(_) | AdapterCmd::Unserve(_) | AdapterCmd::Scale(_) => {
+            bail!(
+                "this changes what a running node serves: name it with --node (this machine's name works too); to change node.toml instead, use `ymirctl models adapter add` or `remove`"
+            )
+        }
         AdapterCmd::List => list(out, &cfg),
         AdapterCmd::Add(a) => {
             let id = a.id.clone().unwrap_or_else(|| default_id(&a.base, &a.file));

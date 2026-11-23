@@ -176,11 +176,12 @@ and `models/1` pulls with `adapter_for`). Ymir adds `[[model.local.lora]]` (`id`
 `revision`), drops adapters that don't match their base at start, counts adapter weights in the base's
 context plan, shows adapters with their base in the status, and `ymirctl models adapter add | remove | list`
 plus `models pull --adapter-for BASE --node NAME --serve`. Details in
-[DESIGN.md](../DESIGN.md#lora-adapters-on-a-loaded-base-training-plan-p4a-2026-11-23). Next slice: adapter
-scale changes and adapters added to a running base without its restart (llama-server `POST /lora-adapters`,
-vLLM `load_lora_adapter` / `unload_lora_adapter`, both needing `weirdnet-backends`), a per-request scale over
-infer/2 (`weirdnet-agent`), and the base-revision check (refuse an adapter trained on another revision or
-quantisation of the base, once adapters record it).
+[DESIGN.md](../DESIGN.md#lora-adapters-on-a-loaded-base-training-plan-p4a-2026-11-23). Second slice (same
+day): live scale changes, a per-request scale over infer/2, adapters served and unserved on a running base
+(vLLM at run time; llama-server only for files it started with, a new file still restarts the base), and the
+adapter's base in catalog/1, on `weirdnet-backends` 0.4.1, `weirdnet-agent` 0.5.2 and `weirdnet-openai` 0.2.2.
+Next: the base-revision check (refuse an adapter trained on another revision or quantisation of the base, once
+adapters record it).
 
 **Dependencies.** P4a needs nothing else and closes the loop with an adapter trained by hand. P4b needs P1's
 eval and P4a.

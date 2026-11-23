@@ -803,14 +803,37 @@ name. MLX, wrapped servers and embedding models take none.
   node download the repo's adapter into `models_dir/adapters/ID/`, check it against BASE, and serve it
   without a restart (in memory; the output gives the `adapter add` command that keeps it). `models list
   --node` shows adapters with their base.
-- **Alerts, interim.** `weirdnet-alerts` 0.2.1's engine monitor takes `weirdnet-backends` below 0.4, so
-  ymird forwards supervisor events to the alerter itself (`ymir_core::engine_alerts`, the same
-  `engine.<kind>` observations and probes) until `weirdnet-alerts` takes 0.4.
+- **Alerts.** Engine events go to the alerter through `weirdnet-alerts`' own engine monitor again
+  (`weirdnet-alerts` 0.2.2 takes `weirdnet-backends` 0.4); the interim copy in Ymir is gone.
 
-Not built yet (next P4a slice): changing an adapter's scale on a running llama-server
-(`POST /lora-adapters`) and adding an adapter to a running base without a restart of that base (both
-engines take adapters at start here, so an adapter added while its base runs serves after the base's
-next load); vLLM's runtime `load_lora_adapter` / `unload_lora_adapter`; a per-request scale over infer/2.
+**Live changes (second slice, 2026-11-23).** `weirdnet-backends` 0.4.1, `weirdnet-agent` 0.5.2 and
+`weirdnet-openai` 0.2.2 change adapters while the base keeps running, where the engine allows:
+
+- **Scale.** `ymirctl models adapter scale ID S|--reset --node NAME` sets an adapter's scale from its
+  next request (`Supervisor::set_adapter_scale`; llama.cpp takes the scale per request, so nothing
+  restarts). One request can set its own: `ymirctl chat --model ID --adapter-scale S`, or
+  `"adapter_scale"` in an OpenAI body to the bridge, carried as infer/2 `Request::adapter_scale` to the
+  model node. vLLM applies adapters at full strength and refuses both. Scales must be finite and within
+  ±16.
+- **Serve and unserve.** `ymirctl models adapter serve ID --base BASE --node NAME [--scale S]` serves an
+  adapter already on the node's disk (`models list --node`) on BASE; `adapter unserve ID --node NAME`
+  stops serving it and keeps its files (models/1 `ServeAdapter`, `UnserveAdapter`, `AdapterScale`).
+  Pulling with `--adapter-for ... --serve` and `models remove` of an adapter use the same live calls.
+- **What each engine allows.** vLLM: the supervisor starts it with
+  `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` whenever LoRA is on (the base has adapters, or
+  `ModelLaunch::lora_slots`), and adds and removes adapters with `/v1/load_lora_adapter` and
+  `/v1/unload_lora_adapter` with no restart. llama-server (b12628) loads adapter files only at start
+  (`POST /lora-adapters` rescales only those): an adapter whose file the running engine already has is
+  live at once (taken off and served again, under any id), and a new file still serves after the base's
+  next load, which the first request for it triggers. ymirctl says which happened.
+- **Catalog.** catalog/1 entries carry the adapter's `base` (`CatalogModel::base`), so apps such as
+  Bragi can label adapters; the bridge's `/v1/models` shows it as `weirdnet.base`.
+- These changes are in memory only: `node.toml` keeps what `models adapter add | remove` wrote, and a
+  restart of ymird goes back to it.
+
+Not built yet: `lora_slots` in `node.toml` (so a vLLM base with no adapters at start can take them
+live), and the base-revision check (refuse an adapter trained on another revision or quantisation of
+the base, once adapters record it).
 
 ### Process manager (replaces llama-swap)
 

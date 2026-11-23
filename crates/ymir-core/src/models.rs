@@ -33,11 +33,35 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ModelsOp {
-    Search { query: String, limit: u32 },
-    Files { repo: String, context: Option<u32>, slots: Option<u32> },
+    Search {
+        query: String,
+        limit: u32,
+    },
+    Files {
+        repo: String,
+        context: Option<u32>,
+        slots: Option<u32>,
+    },
     Pull(Pull),
     List,
-    Remove { id: String },
+    Remove {
+        id: String,
+    },
+    /// Serve a stored adapter on a base the node serves, live where the engine allows.
+    ServeAdapter {
+        id: String,
+        base: String,
+        scale: Option<f32>,
+    },
+    /// Stop serving an adapter, keeping its files.
+    UnserveAdapter {
+        id: String,
+    },
+    /// Change a served adapter's scale (llama.cpp), from the next request.
+    AdapterScale {
+        id: String,
+        scale: Option<f32>,
+    },
 }
 
 /// One line of the answer on the control socket: progress while a pull runs, then `Done` or `Failed`.
@@ -230,6 +254,18 @@ impl ModelsHub {
                     let freed = svc.remove(&id).await?;
                     ModelsReply::Removed { id, freed }
                 }
+                ModelsOp::ServeAdapter { id, base, scale } => {
+                    let change = svc.serve_adapter(&id, &base, scale).await?;
+                    ModelsReply::AdapterServed { id, base, change }
+                }
+                ModelsOp::UnserveAdapter { id } => {
+                    let base = svc.unserve_adapter(&id).await?;
+                    ModelsReply::AdapterUnserved { id, base }
+                }
+                ModelsOp::AdapterScale { id, scale } => {
+                    svc.set_adapter_scale(&id, scale)?;
+                    ModelsReply::AdapterScaled { id, scale }
+                }
             });
         }
         let peer = t.peer.as_str();
@@ -244,6 +280,18 @@ impl ModelsHub {
             ModelsOp::Remove { id } => {
                 let freed = self.client.remove(peer, &id).await?;
                 ModelsReply::Removed { id, freed }
+            }
+            ModelsOp::ServeAdapter { id, base, scale } => {
+                let change = self.client.serve_adapter(peer, &id, &base, scale).await?;
+                ModelsReply::AdapterServed { id, base, change }
+            }
+            ModelsOp::UnserveAdapter { id } => {
+                let base = self.client.unserve_adapter(peer, &id).await?;
+                ModelsReply::AdapterUnserved { id, base }
+            }
+            ModelsOp::AdapterScale { id, scale } => {
+                self.client.set_adapter_scale(peer, &id, scale).await?;
+                ModelsReply::AdapterScaled { id, scale }
             }
         })
     }

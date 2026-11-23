@@ -120,6 +120,14 @@ async fn an_adapter_serves_as_its_own_model_on_the_base_engine() -> Result<()> {
     assert!(status.contains("base+support-v2") && status.contains("LoRA adapter on base"), "{status}");
     let listed = ctl(home, &["models"]).await?;
     assert!(listed.contains("base+support-v2"), "{listed}");
+    // catalog/1 names the base, so apps (Bragi) can label the adapter; the bridge shows it too.
+    let port = daemon.bridge_addr.expect("the bridge runs").port();
+    let token = ymir_core::token::load(&paths)?.unwrap();
+    let http = reqwest::Client::builder().no_proxy().build()?;
+    let v: serde_json::Value = http.get(format!("http://127.0.0.1:{port}/v1/models")).bearer_auth(&token).send().await?.json().await?;
+    let base_of = |id: &str| v["data"].as_array().unwrap().iter().find(|m| m["id"] == id).map(|m| m["weirdnet"]["base"].clone());
+    assert_eq!(base_of("base+support-v2"), Some(serde_json::json!("base")), "{v}");
+    assert_eq!(base_of("base"), Some(serde_json::Value::Null), "{v}");
 
     // Asking for the adapter loads the base (with --lora) and applies it at its scale.
     let reply = ctl(home, &["chat", "--model", "base+support-v2", "hi"]).await?;

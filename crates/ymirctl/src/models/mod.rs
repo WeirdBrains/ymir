@@ -211,7 +211,8 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::Pull(a) => a.node.node.clone(),
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
-        ModelsCmd::Context(_) | ModelsCmd::Adapter { .. } => None,
+        ModelsCmd::Adapter { cmd } => cmd.node(),
+        ModelsCmd::Context(_) => None,
     };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;

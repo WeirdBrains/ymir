@@ -14,6 +14,7 @@ use ymir_core::Paths;
 use ymir_core::control;
 use ymir_core::models::{Chosen, ModelsDone, ModelsLine, ModelsOp, NodeResult, Outcome};
 
+use super::adapters::AdapterCmd;
 use super::{Format, ModelsCmd, PullArgs, RemoveArgs, SearchArgs, gib, plan};
 
 pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, node: &str, cmd: ModelsCmd) -> Result<()> {
@@ -25,9 +26,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
         ModelsCmd::Context(_) => {
             bail!("`ymirctl models context` edits this machine's node.toml; run it on the node itself (without --node)")
         }
-        ModelsCmd::Adapter { .. } => {
-            bail!("`ymirctl models adapter` edits this machine's node.toml; run it on the node itself (without --node)")
-        }
+        ModelsCmd::Adapter { cmd } => adapter(paths, out, node, cmd).await,
     }
 }
 
@@ -246,6 +245,42 @@ async fn remove(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, nod
 
 fn explain_pick(out: &mut dyn Write, c: &Chosen) -> Result<()> {
     Ok(writeln!(out, "Picked {}: it can hold {} ({}) in its {} of model memory.", c.node.label, c.model, gib(c.size), gib(c.usable_bytes))?)
+}
+
+/// `models adapter serve | unserve | scale --node`: live adapter changes on one node.
+async fn adapter(paths: &Paths, out: &mut dyn Write, node: &str, cmd: AdapterCmd) -> Result<()> {
+    use weirdnet_backends::AdapterChange;
+    if node == "auto" {
+        bail!("`--node auto` is for pulls; name the node that serves the adapter (or `all`)");
+    }
+    let op = match &cmd {
+        AdapterCmd::Serve(a) => ModelsOp::ServeAdapter { id: a.id.clone(), base: a.base.clone(), scale: a.scale },
+        AdapterCmd::Unserve(a) => ModelsOp::UnserveAdapter { id: a.id.clone() },
+        AdapterCmd::Scale(a) => ModelsOp::AdapterScale { id: a.id.clone(), scale: if a.reset { None } else { a.scale } },
+        AdapterCmd::Add(_) | AdapterCmd::Remove(_) | AdapterCmd::List => {
+            bail!("`ymirctl models adapter add | remove | list` edit this machine's node.toml; run them on the node itself (without --node)")
+        }
+    };
+    let done = ask(paths, out, node, op).await?;
+    let (ok, failed) = answers(out, &done)?;
+    for (label, reply) in &ok {
+        match reply {
+            ModelsReply::AdapterServed { id, base, change: AdapterChange::NextLoad } => writeln!(
+                out,
+                "{label}: `{id}` is added to `{base}`, whose engine can't load a new adapter while it runs (llama-server): the first request for `{id}` restarts `{base}` with it"
+            )?,
+            ModelsReply::AdapterServed { id, base, .. } => writeln!(out, "{label}: serving `{id}` now, on `{base}` (no restart)")?,
+            ModelsReply::AdapterUnserved { id, base } => writeln!(out, "{label}: stopped serving `{id}` on `{base}`; its files are kept")?,
+            ModelsReply::AdapterScaled { id, scale } => {
+                writeln!(out, "{label}: `{id}` now applies at scale {} from its next request", scale.unwrap_or(1.0))?
+            }
+            _ => {}
+        }
+    }
+    if !ok.is_empty() {
+        writeln!(out, "This is in memory only; node.toml was not changed (`ymirctl models adapter add` on the node keeps an adapter).")?;
+    }
+    finish(failed, done.nodes.len())
 }
 
 /// What to tell the operator about an adapter pulled for `base`.

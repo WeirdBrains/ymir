@@ -3,6 +3,19 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-23: live LoRA adapter changes on new Weirdnet crates (branch `weirdnet-live-adapters`)
+
+**What changed**
+- Weirdnet crates released for it (approved by Michael): `weirdnet-agent` 0.5.2 (`Request::adapter_scale`, `CatalogModel::base`), `weirdnet-backends` 0.4.1 (live adapter add/remove on vLLM, live scale on llama.cpp, per-request scale, models/1 `ServeAdapter`/`UnserveAdapter`/`AdapterScale`), `weirdnet-alerts` 0.2.2 (takes backends 0.4), `weirdnet-openai` 0.2.2 (`adapter_scale` body field, `weirdnet.base`).
+- Ymir: those versions; `ymir_core::engine_alerts` removed (ymird uses `weirdnet_alerts::engine::monitor` again); `agent_catalog` sets each adapter's `base`; `ModelsOp::{ServeAdapter, UnserveAdapter, AdapterScale}` in process and over models/1; `ymirctl models adapter serve | unserve | scale --node`; `ymirctl chat --adapter-scale`.
+- Docs: [DESIGN.md](docs/DESIGN.md) (P4a "Live changes"), [training.md](docs/design/training.md) P4a paragraph, [CHANGELOG.md](CHANGELOG.md).
+
+**Checks run**: `cargo fmt`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace --no-fail-fast`: 260 passed, 0 failed, 6 ignored (`mcp_http::token_host_and_origin_are_checked` failed once with a connection refused and passed on its own and in the full rerun). New assertions: the over-Weirdnet adapter test (`models_pool.rs`) covers `chat --adapter-scale`, `adapter scale`, `unserve` and `serve` on a running base with no restart; `adapters.rs` checks `weirdnet.base` in `/v1/models`.
+
+**Not tested**: real llama-server and vLLM with adapters (mock engines only). vLLM run-time `load_lora_adapter`/`unload_lora_adapter` follow vLLM's docs, not run on a GPU here. llama-server cannot load a new adapter file at run time (checked in the b12628 source), so that still restarts the base.
+
+**What's left / next**: `lora_slots` in `node.toml` for a vLLM base with no adapters at start; the base-revision check.
+
 ## 2026-11-23: three fixes after the 0.3.1 rollout (branch `fix/post-031`)
 
 **What changed**
