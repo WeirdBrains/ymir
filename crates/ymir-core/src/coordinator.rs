@@ -330,6 +330,9 @@ impl Coordinator {
                 let purpose = if m.embedding { Purpose::Embedding } else { Purpose::Chat };
                 let ready = states.iter().filter(|s| ***s == ModelState::Ready).count() as u32;
                 let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready).with_inputs(m.inputs);
+                if let Some(base) = &m.base {
+                    c = c.with_base(base);
+                }
                 if !m.embedding {
                     c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
                 }

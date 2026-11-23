@@ -309,7 +309,7 @@ async fn engine_failures_raise_deduped_alerts() -> Result<()> {
         SupervisorOptions::default(),
     );
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let mon = tokio::spawn(ymir_core::engine_alerts::monitor(alerter.clone(), Some(sup.clone()), Vec::new(), Duration::from_secs(3600), stop_rx));
+    let mon = tokio::spawn(weirdnet_alerts::engine::monitor(alerter.clone(), Some(sup.clone()), Vec::new(), Duration::from_secs(3600), stop_rx));
     tokio::time::sleep(Duration::from_millis(100)).await;
     let _ = sup.load("m").await;
     let _ = sup.load("m").await;

@@ -19,7 +19,6 @@ pub mod daemon;
 pub mod dataset;
 pub mod direct;
 pub mod engine;
-pub mod engine_alerts;
 pub mod fair;
 pub mod group;
 pub mod host;

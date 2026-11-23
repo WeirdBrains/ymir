@@ -24,15 +24,15 @@ ymird = { path = "crates/ymird", version = "0.4.0" }
 ymirctl = { path = "crates/ymirctl", version = "0.4.0" }
 
 # Published Weirdnet crates, used as they are.
-weirdnet-agent = { version = "0.5.1", features = ["pool", "serve"] }
-weirdnet-backends = { version = "0.4.0", features = ["node"] }
+weirdnet-agent = { version = "0.5.2", features = ["pool", "serve"] }
+weirdnet-backends = { version = "0.4.1", features = ["node"] }
 weirdnet-device-link = "=0.3.2"
 weirdnet-model = { version = "0.5.1", default-features = false }
 weirdnet-net = "=0.8.2"
-weirdnet-openai = "0.2.1"
+weirdnet-openai = "0.2.2"
 weirdnet-semcache = "0.2.1"
 weirdnet-sync = "0.5.2"
-weirdnet-alerts = "0.2.0"
+weirdnet-alerts = { version = "0.2.2", features = ["backends"] }
 weirdnet-rules = "=0.1.1"
 weirdnet-update = "0.2.0"
 # MCP server (JSON-RPC, tool tables, stdio and HTTP transports, resources); no weirdnet-agent.

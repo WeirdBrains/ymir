@@ -325,6 +325,29 @@ async fn an_adapter_is_pulled_onto_a_served_base_and_routed_by_its_name() -> Res
     let reply = ctl(&ctl_h.home, &["chat", "--model", "m-Q4_0", "hi"]).await?;
     assert_eq!(reply.trim(), "Hello from m-Q4_0! You said: hi");
 
+    // Live changes, with the base running: a scale for one answer, then for the adapter, then
+    // off and back on (llama-server still has the file, so no restart).
+    let reply = ctl(&ctl_h.home, &["chat", "--model", "tune-LoRA-F16", "--adapter-scale", "0.5", "hi"]).await?;
+    assert_eq!(reply.trim(), "Hello from m-Q4_0 with tune-LoRA-F16 at 0.5! You said: hi");
+    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "adapter", "scale", "tune-LoRA-F16", "0.25"]).await.unwrap_err());
+    assert!(err.contains("name it with --node"), "{err}");
+    let out = ctl(&ctl_h.home, &["models", "adapter", "scale", "tune-LoRA-F16", "0.25", "--node", "big"]).await?;
+    assert!(out.contains("big: `tune-LoRA-F16` now applies at scale 0.25"), "{out}");
+    let reply = ctl(&ctl_h.home, &["chat", "--model", "tune-LoRA-F16", "hi"]).await?;
+    assert_eq!(reply.trim(), "Hello from m-Q4_0 with tune-LoRA-F16 at 0.25! You said: hi");
+    let out = ctl(&ctl_h.home, &["models", "adapter", "unserve", "tune-LoRA-F16", "--node", "big"]).await?;
+    assert!(out.contains("big: stopped serving `tune-LoRA-F16` on `m-Q4_0`; its files are kept"), "{out}");
+    assert!(root.join("big-models/adapters/tune-LoRA-F16/tune-LoRA-F16.gguf").is_file());
+    let out = ctl(&ctl_h.home, &["models", "adapter", "serve", "tune-LoRA-F16", "--base", "m-Q4_0", "--node", "big"]).await?;
+    assert!(out.contains("big: serving `tune-LoRA-F16` now, on `m-Q4_0` (no restart)"), "{out}");
+    let mut reply = String::new();
+    eventually(40, "the adapter is back in the pool", async || {
+        reply = ctl(&ctl_h.home, &["chat", "--model", "tune-LoRA-F16", "hi"]).await.unwrap_or_default();
+        Ok(reply.contains("with tune-LoRA-F16"))
+    })
+    .await?;
+    assert_eq!(reply.trim(), "Hello from m-Q4_0 with tune-LoRA-F16 at 1! You said: hi");
+
     ctl_d.shutdown().await;
     big.shutdown().await;
     Ok(())

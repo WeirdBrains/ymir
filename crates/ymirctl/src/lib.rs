@@ -118,6 +118,10 @@ pub enum Cmd {
         /// Wait for the model to load instead of taking a stand-in's answer.
         #[arg(long)]
         wait: bool,
+        /// For a LoRA adapter model on llama.cpp: how strongly the adapter applies to this answer
+        /// (its default is 1.0, or the scale set for it).
+        #[arg(long, allow_negative_numbers = true)]
+        adapter_scale: Option<f32>,
         /// The prompt; `-` reads it from stdin.
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
@@ -418,8 +422,8 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
                 Ok(())
             }
         },
-        Cmd::Chat { model, system, temperature, max_tokens, wait, prompt } => {
-            chat(&paths, out, input, model, system, temperature, max_tokens, wait, prompt).await
+        Cmd::Chat { model, system, temperature, max_tokens, wait, adapter_scale, prompt } => {
+            chat(&paths, out, input, model, system, temperature, max_tokens, wait, adapter_scale, prompt).await
         }
         Cmd::Batch { file, model, concurrency, retries, jsonl } if jsonl.jsonl => {
             batch_jsonl(&paths, out, file, model, concurrency, retries, jsonl).await
@@ -1035,6 +1039,7 @@ async fn chat(
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     wait: bool,
+    adapter_scale: Option<f32>,
     prompt: Vec<String>,
 ) -> Result<()> {
     let text = if prompt == ["-"] {
@@ -1058,6 +1063,9 @@ async fn chat(
     }
     if wait {
         extra.insert("wait_for_model".into(), Value::Bool(true));
+    }
+    if let Some(s) = adapter_scale {
+        extra.insert("adapter_scale".into(), Value::from(s));
     }
     let client = bridge(paths).await?;
     let mut io_err = None;
