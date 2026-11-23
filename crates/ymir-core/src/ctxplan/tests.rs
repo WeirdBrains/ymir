@@ -194,7 +194,61 @@ async fn the_planner_sets_the_context_the_catalog_reports_and_keeps_explicit_one
     planner.prepare("fixed", false).await;
     planner.refresh().await;
     assert_eq!(context("fixed"), Some(8192));
-    // A refresh with nothing running shares the room among those not loaded again.
-    assert!(context("inkling-2-mini").unwrap() < 721_920);
+    // A refresh with nothing running shares the room among those not loaded again, as the
+    // start-up plan does (each one's weights count against the others).
+    assert_eq!(context("inkling-2-mini"), Some(shared));
     assert_eq!(context("gemma4-e4b"), Some(131_072));
+}
+
+/// Two Inklings on a Spark, planned to share it.
+fn two_inklings(dir: &std::path::Path) -> (Supervisor, Planner, u32) {
+    let file = sparse(dir, "ink.gguf", &inkling_header(), INK_WEIGHTS);
+    let mut launches = vec![ModelLaunch::new("a", EngineKind::Llamacpp, &file), ModelLaunch::new("b", EngineKind::Llamacpp, &file)];
+    let budget = spark_budget();
+    kvfit::plan_launches(&mut launches, &budget, dir);
+    let shared = launches[0].context.unwrap();
+    let sup = Supervisor::new(vec![], launches, Default::default());
+    let planner = Planner::new(sup.clone(), budget, Arc::new(Fixed(None)), dir.into(), &HashSet::new());
+    (sup, planner, shared)
+}
+
+#[tokio::test]
+async fn a_model_whose_load_has_begun_is_not_resized_and_the_others_are_sized_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sup, planner, shared) = two_inklings(dir.path());
+    let context = |id: &str| sup.status().into_iter().find(|s| s.id == id).unwrap().context;
+    // A refresh with nothing running keeps the start-up share.
+    planner.refresh().await;
+    assert_eq!((context("a"), context("b")), (Some(shared), Some(shared)));
+    // A load of a from elsewhere has begun; the supervisor still says a is unloaded.
+    assert!(planner.note(&SupervisorEvent::Starting { model: "a".into() }));
+    assert_eq!(sup.state("a"), Some(ModelState::Unloaded));
+    planner.refresh().await;
+    planner.prepare("a", false).await;
+    assert_eq!(context("a"), Some(shared), "a is loading at its share: left alone");
+    let b = context("b").unwrap();
+    assert!(b > shared && b < 721_920, "b gets what is left beside a: {b} vs {shared}");
+    // Its load failed: a is sized again (beside nothing, sharing with b).
+    assert!(planner.note(&SupervisorEvent::LoadFailed { model: "a".into(), why: String::new() }));
+    planner.refresh().await;
+    assert_eq!((context("a"), context("b")), (Some(shared), Some(shared)));
+}
+
+#[test]
+fn a_load_that_came_in_before_a_resize_removed_the_model_is_seen() {
+    let (tx, _) = tokio::sync::broadcast::channel(16);
+    let starting = |m: &str| SupervisorEvent::Starting { model: m.into() };
+    let removed = |m: &str| SupervisorEvent::Removed { model: m.into() };
+    // a was loading when the removal got the supervisor: it stopped a.
+    let mut rx = tx.subscribe();
+    for ev in [starting("b"), starting("a"), removed("a")] {
+        tx.send(ev).unwrap();
+    }
+    assert!(loaded_before_removal(&mut rx, "a"));
+    // A load of a after its removal (or of another model) is not one.
+    let mut rx = tx.subscribe();
+    for ev in [starting("b"), removed("a"), starting("a")] {
+        tx.send(ev).unwrap();
+    }
+    assert!(!loaded_before_removal(&mut rx, "a"));
 }

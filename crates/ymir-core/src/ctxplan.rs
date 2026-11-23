@@ -18,7 +18,9 @@
 //! built from it) reports the context the engine runs with. A keeper task also re-sizes models
 //! that are not loaded whenever what runs changes, so a load that does not come through
 //! [`Planner::prepare`] (a `Load` from another device's inference node, a crash restart) starts
-//! with a context that fits beside what runs then.
+//! with a context that fits beside what runs then. A model counts as loading from its
+//! `Starting` event (the supervisor reports it `Unloaded` until its engine is spawned), so it is
+//! neither re-sized under a load nor left out of what the others are sized beside.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -242,6 +244,10 @@ pub struct Planner {
     /// Models re-added with a new context, and how many of their `Removed`/`Added` events are
     /// still to come (those are not news).
     resizing: Mutex<HashMap<String, u32>>,
+    /// Models whose load has begun (`Starting`) and not yet ended (`Ready`, `LoadFailed`,
+    /// `Unloaded`, ...). The supervisor still reports such a model `Unloaded` while it waits for
+    /// its turn and spawns the engine.
+    starting: Mutex<HashSet<String>>,
     /// One plan at a time, so two loads don't both count the same free memory.
     ops: tokio::sync::Mutex<()>,
 }
@@ -268,6 +274,7 @@ impl Planner {
             known: Mutex::new(known),
             busy: Mutex::new(HashMap::new()),
             resizing: Mutex::new(HashMap::new()),
+            starting: Mutex::new(HashSet::new()),
             ops: tokio::sync::Mutex::new(()),
         }
     }
@@ -286,9 +293,13 @@ impl Planner {
         let launches: HashMap<String, ModelLaunch> = self.sup.launches().into_iter().map(|l| (l.id.clone(), l)).collect();
         let known = self.known.lock().unwrap_or_else(|e| e.into_inner());
         let busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        let starting = self.starting.lock().unwrap_or_else(|e| e.into_inner());
         status
             .iter()
-            .filter(|s| matches!(s.state, ModelState::Ready | ModelState::Loading | ModelState::Draining))
+            .filter(|s| {
+                matches!(s.state, ModelState::Ready | ModelState::Loading | ModelState::Draining)
+                    || (s.state == ModelState::Unloaded && starting.contains(&s.id))
+            })
             .map(|s| {
                 let bytes = match (launches.get(&s.id), known.get(&s.id).and_then(|k| k.resolved.as_ref())) {
                     (Some(l), Some(r)) => kvfit::cost(r, l),
@@ -300,11 +311,20 @@ impl Planner {
                     swap_group: s.swap_group.clone(),
                     bytes,
                     in_flight: s.in_flight,
-                    loading: s.state == ModelState::Loading,
+                    loading: s.state == ModelState::Loading || starting.contains(&s.id),
                     idle: busy.get(&s.id).map_or(Duration::MAX, Instant::elapsed),
                 }
             })
             .collect()
+    }
+
+    fn is_starting(&self, id: &str) -> bool {
+        self.starting.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+    }
+
+    /// Whether `id` may be re-added with a new context now: not loaded, and no load under way.
+    fn may_resize(&self, id: &str, force: bool) -> bool {
+        resizable(self.sup.state(id), force) && !self.is_starting(id)
     }
 
     /// Readies `id`'s launch for a load: unloads idle models it needs the room of, then sets the
@@ -328,7 +348,7 @@ impl Planner {
     }
 
     async fn prepare_locked(&self, id: &str, force: bool) {
-        if !resizable(self.sup.state(id), force) {
+        if !self.may_resize(id, force) {
             return;
         }
         let Some(launch) = self.sup.launches().into_iter().find(|l| l.id == id) else { return };
@@ -370,8 +390,14 @@ impl Planner {
 
     /// Re-adds `launch` with `context`, when that is a change (the supervisor has no setter; the
     /// model is not loaded, so nothing is lost).
+    ///
+    /// The supervisor has no "re-size if still unloaded": `remove_model` waits for a load that
+    /// holds the supervisor and then stops what it loaded. So the events are watched from before
+    /// the check: a `Starting` for the model ahead of its `Removed` means a load came in between,
+    /// and the model goes back with the context it loaded with and is loaded again.
     async fn set_context(&self, launch: &ModelLaunch, context: u32, force: bool) {
-        if launch.context == Some(context) || !resizable(self.sup.state(&launch.id), force) {
+        let mut events = self.sup.subscribe();
+        if launch.context == Some(context) || !self.may_resize(&launch.id, force) {
             return;
         }
         let id = launch.id.clone();
@@ -379,7 +405,21 @@ impl Planner {
         let mut l = launch.clone();
         l.context = Some(context);
         match self.sup.remove_model(&id).await {
-            Ok(_) => {
+            Ok(removed) => {
+                if loaded_before_removal(&mut events, &id) {
+                    tracing::warn!(model = %id, "a load of {id} came in while it was re-sized to {context}; loading it again as it was");
+                    if let Err(e) = self.sup.add_model(removed) {
+                        tracing::error!(model = %id, "re-adding: {e}");
+                        return;
+                    }
+                    let sup = self.sup.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = sup.load(&id).await {
+                            tracing::warn!(model = %id, "loading again: {e}");
+                        }
+                    });
+                    return;
+                }
                 if let Err(e) = self.sup.add_model(l) {
                     tracing::error!(model = %id, "re-adding with context {context}: {e}");
                     let _ = self.sup.add_model(launch.clone());
@@ -405,10 +445,12 @@ impl Planner {
         let launches = self.sup.launches();
         let unloaded: Vec<&ModelLaunch> =
             launches.iter().filter(|l| status.iter().any(|s| s.id == l.id && s.state == ModelState::Unloaded) && resolvable(l)).collect();
+        let unloaded: Vec<&ModelLaunch> = unloaded.into_iter().filter(|l| !self.is_starting(&l.id)).collect();
         let groups = |l: &ModelLaunch| l.swap_group.clone().unwrap_or_else(|| format!("\0{}", l.id));
         let running_groups: HashSet<String> = residents.iter().map(|r| r.swap_group.clone().unwrap_or_else(|| format!("\0{}", r.id))).collect();
-        // Models not loaded that could load beside each other: automatic ones share the room,
-        // explicit ones keep theirs (the largest per swap group), as at start.
+        // Models not loaded that could load beside each other, as at start
+        // ([`kvfit::plan_launches`]): each takes its weights (an explicit one its whole cost; the
+        // largest per swap group), and the automatic ones share the room left for contexts.
         let mut waiting: HashSet<String> = HashSet::new();
         let mut fixed: HashMap<String, u64> = HashMap::new();
         for l in &unloaded {
@@ -417,8 +459,10 @@ impl Planner {
                 continue;
             }
             match self.known_of(l) {
-                Some((_, false)) => {
-                    waiting.insert(g);
+                Some((r, false)) => {
+                    waiting.insert(g.clone());
+                    let e = fixed.entry(g).or_default();
+                    *e = (*e).max(kvfit::footprint(r.weights, 0));
                 }
                 Some((r, true)) => {
                     let e = fixed.entry(g).or_default();
@@ -464,13 +508,21 @@ impl Planner {
                 tokio::select! {
                     ev = events.recv() => match ev {
                         Ok(ev) => dirty |= me.note(&ev),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => dirty = true,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => dirty = me.lagged(),
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     },
                     _ = tick.tick() => {
                         for s in me.sup.status() {
                             if s.in_flight > 0 {
                                 me.touch(&s.id);
+                            }
+                        }
+                        // Take in what has already happened (a `Starting` above all) first.
+                        loop {
+                            match events.try_recv() {
+                                Ok(ev) => dirty |= me.note(&ev),
+                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => dirty = me.lagged(),
+                                Err(_) => break,
                             }
                         }
                         if dirty || last.elapsed() >= RESIZE_EVERY {
@@ -484,14 +536,29 @@ impl Planner {
         })
     }
 
+    /// Events were missed: a load whose end went by unseen is not under way any more unless the
+    /// supervisor says it is still loading. Always `true` (anything may have changed).
+    fn lagged(&self) -> bool {
+        self.starting.lock().unwrap_or_else(|e| e.into_inner()).retain(|id| self.sup.state(id) == Some(ModelState::Loading));
+        true
+    }
+
     /// Takes in one supervisor event; `true` when what runs changed.
     fn note(&self, ev: &SupervisorEvent) -> bool {
         match ev {
+            SupervisorEvent::Starting { model } => {
+                self.starting.lock().unwrap_or_else(|e| e.into_inner()).insert(model.clone());
+                true
+            }
             SupervisorEvent::Ready { model, .. } => {
+                self.starting.lock().unwrap_or_else(|e| e.into_inner()).remove(model);
                 self.touch(model);
                 true
             }
             SupervisorEvent::Added { model } | SupervisorEvent::Removed { model } => {
+                if matches!(ev, SupervisorEvent::Removed { .. }) {
+                    self.starting.lock().unwrap_or_else(|e| e.into_inner()).remove(model);
+                }
                 {
                     let mut r = self.resizing.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(n) = r.get_mut(model).filter(|n| **n > 0) {
@@ -509,7 +576,10 @@ impl Planner {
                 }
                 true
             }
-            SupervisorEvent::Unloaded { .. } | SupervisorEvent::LoadFailed { .. } | SupervisorEvent::Crashed { .. } => true,
+            SupervisorEvent::Unloaded { model, .. } | SupervisorEvent::LoadFailed { model, .. } | SupervisorEvent::Crashed { model, .. } => {
+                self.starting.lock().unwrap_or_else(|e| e.into_inner()).remove(model);
+                true
+            }
             _ => false,
         }
     }
@@ -521,6 +591,21 @@ fn resizable(state: Option<ModelState>, force: bool) -> bool {
         Some(ModelState::Unloaded) => true,
         Some(ModelState::Failed(_)) => force,
         _ => false,
+    }
+}
+
+/// Whether `events` (subscribed before a re-size's check) show a load of `id` beginning before
+/// `id` was removed: the removal then stopped what that load brought up.
+fn loaded_before_removal(events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>, id: &str) -> bool {
+    loop {
+        match events.try_recv() {
+            Ok(SupervisorEvent::Starting { model }) if model == id => return true,
+            Ok(SupervisorEvent::Removed { model }) if model == id => return false,
+            Ok(_) => {}
+            // Missed some: what follows still holds the `Removed`.
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(_) => return false,
+        }
     }
 }
 
