@@ -38,7 +38,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 ## 2026-11-22: MLX end-to-end mock test recovered (branch `feature/mlx`)
 
-**What changed:** `crates/ymir-testkit/tests/mlx.rs` is back: one node serves a GGUF on llama.cpp (with a projector) and an MLX model, both on the mock engine; it checks the engine kinds and launches `NodeConfig` builds, chats with each model through `ymird`, and checks the capabilities each reports (the GGUF takes images and audio, the MLX model text only). It was written during the LF-18 MLX work but never committed (it lived untracked in a scratch clone and a local stash), so DESIGN.md's MLX section pointed at a file that did not exist and the macOS workflow had dropped its MLX mock step. The macOS workflow runs it again after the `ymir-core` unit tests. The rest of that stash (MLX as `EngineKind::Mlx`, the `ymir-engine` shim removal, packaging and docs) had already landed on main through LF-18 and later commits, so nothing else was carried over; main's newer Weirdnet pins stay.
+**What changed:** `crates/ymir-testkit/tests/mlx.rs` is back: one node serves a GGUF on llama.cpp (with a projector) and an MLX model, both on the mock engine; it checks the engine kinds and launches `NodeConfig` builds, chats with each model through `ymird`, and checks the capabilities each reports (the GGUF takes images and audio, the MLX model text only). It was written during the LF-18 MLX work but never committed (it lived untracked in a scratch clone and a local stash), so [DESIGN.md](docs/DESIGN.md)'s MLX section pointed at a file that did not exist and the macOS workflow had dropped its MLX mock step. The macOS workflow runs it again after the `ymir-core` unit tests. The rest of that stash (MLX as `EngineKind::Mlx`, the `ymir-engine` shim removal, packaging and docs) had already landed on main through LF-18 and later commits, so nothing else was carried over; main's newer Weirdnet pins stay.
 
 **Checks (Linux x86_64):** `cargo check --workspace --all-targets --locked` clean; `cargo test --workspace --locked`: 178 passed, 0 failed, 6 ignored across 34 test binaries, including `llamacpp_and_mlx_models_on_one_node`; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --check` clean.
 
@@ -116,7 +116,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **What changed**
 
 - Merged `feature/pool-bench` (a0f93de) into main with `--no-ff`: `ymirctl bench` (node×model matrix over Weirdnet, suites quick/standard/hard, `bench list`, `bench compare`, `bench hints`, hints from `--hint @FILE` or the `bench-hints` file) next to main's `ymirctl mcp` and `models`.
-- Conflicts resolved by keeping both sides: `README.md`, `HANDOFF.md`, `crates/ymirctl/Cargo.toml`, `crates/ymirctl/src/lib.rs` (modules, the `Mcp` and `Bench` commands, `bridge` stays `pub(crate)`), `crates/ymir-core/src/client.rs` (`post` and the timed chat/embedding calls) and `Cargo.lock` (regenerated).
+- Conflicts resolved by keeping both sides: [`README.md`](README.md), [`HANDOFF.md`](HANDOFF.md), `crates/ymirctl/Cargo.toml`, `crates/ymirctl/src/lib.rs` (modules, the `Mcp` and `Bench` commands, `bridge` stays `pub(crate)`), `crates/ymir-core/src/client.rs` (`post` and the timed chat/embedding calls) and `Cargo.lock` (regenerated).
 
 **Checks run:** `cargo fmt --all --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` (results in the merge commit message of the push).
 
