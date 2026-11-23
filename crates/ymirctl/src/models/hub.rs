@@ -135,6 +135,14 @@ impl MlxHub {
         Ok(parse_hits(&serde_json::from_str(&text).context("the Hub's search answer is not JSON")?))
     }
 
+    /// One small file of a repo (such as `config.json`) at `main`.
+    pub fn file(&self, repo: &str, name: &str) -> Result<Vec<u8>> {
+        weirdnet_model::hf::check_repo(repo).map_err(|_| anyhow::anyhow!("`{repo}` is not a repo id (use owner/name)"))?;
+        let mut resp = self.get(&format!("{}/{repo}/resolve/main/{name}", self.base), None)?;
+        self.ok(&resp, name)?;
+        resp.body_mut().read_to_vec().with_context(|| format!("reading {name}"))
+    }
+
     pub fn repo(&self, repo: &str) -> Result<RepoInfo> {
         weirdnet_model::hf::check_repo(repo).map_err(|_| anyhow::anyhow!("`{repo}` is not a repo id (use owner/name)"))?;
         let mut resp = self.get(&format!("{}/api/models/{repo}?blobs=true", self.base), None)?;

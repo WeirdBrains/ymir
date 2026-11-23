@@ -21,7 +21,9 @@ pub const INKLING_MIN_VERSION: (u64, u64, u64) = (0, 35, 0);
 /// Day-0 image with Inkling 2 Mini, including linux/arm64 for DGX Spark.
 pub const INKLING_IMAGE: &str = "vllm/vllm-openai:inkling-2-mini";
 
-/// Context cap the vLLM recipe uses on DGX Spark (GB10) so the KV cache fits.
+/// The context the vLLM recipe caps Inkling at on a DGX Spark. Ymir no longer sets it itself (ymird
+/// sizes `--max-model-len` from the model and the node, see [`crate::kvfit`]); it is only the
+/// example for a container started by hand and wrapped.
 pub const SPARK_MAX_MODEL_LEN: u32 = 262_144;
 
 /// A Hugging Face repo, file path or Hub id that is Inkling 2 Mini (or its varloop research
@@ -42,10 +44,10 @@ pub fn is_spark_class(hw: &Hardware) -> bool {
         })
 }
 
-/// Extra `vllm serve` arguments for Inkling 2 Mini. On Spark-class memory the context is capped
-/// at [`SPARK_MAX_MODEL_LEN`].
-pub fn inkling_args(spark: bool) -> Vec<String> {
-    let mut a = vec![
+/// Extra `vllm serve` arguments for Inkling 2 Mini. The context is not among them: ymird sets
+/// `--max-model-len` from the model's trained length and this node's memory ([`crate::kvfit`]).
+pub fn inkling_args() -> Vec<String> {
+    vec![
         "--reasoning-parser".into(),
         "inkling".into(),
         "--tool-call-parser".into(),
@@ -53,11 +55,7 @@ pub fn inkling_args(spark: bool) -> Vec<String> {
         "--enable-auto-tool-choice".into(),
         "--speculative-config".into(),
         r#"{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}"#.into(),
-    ];
-    if spark {
-        a.extend(["--max-model-len".into(), SPARK_MAX_MODEL_LEN.to_string()]);
-    }
-    a
+    ]
 }
 
 /// The official image to use for Inkling, if `source` is that model.
@@ -72,7 +70,7 @@ pub fn inkling_unsupported_message(found: Option<(u64, u64, u64)>) -> String {
         None => "unknown".into(),
     };
     format!(
-        "this node's vLLM ({have}) cannot load Inkling 2 Mini (inkling2_loop). It needs vLLM {}.{}.{} or a newer nightly, or the {INKLING_IMAGE} image (support is not in 0.34.0, and is not in a vLLM release yet). Point `[model] vllm` at `image:{INKLING_IMAGE}`, or start the image yourself and wrap it: `docker run --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface {INKLING_IMAGE} thinkingmachines/Inkling-2-Mini --reasoning-parser inkling --tool-call-parser inkling --enable-auto-tool-choice --max-model-len {SPARK_MAX_MODEL_LEN}` then set `wrap = \"http://127.0.0.1:8000/v1\"` on the model",
+        "this node's vLLM ({have}) cannot load Inkling 2 Mini (inkling2_loop). It needs vLLM {}.{}.{} or a newer nightly, or the {INKLING_IMAGE} image (support is not in 0.34.0, and is not in a vLLM release yet). Point `[model] vllm` at `image:{INKLING_IMAGE}`, or start the image yourself and wrap it: `docker run --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface {INKLING_IMAGE} thinkingmachines/Inkling-2-Mini --reasoning-parser inkling --tool-call-parser inkling --enable-auto-tool-choice --max-model-len {SPARK_MAX_MODEL_LEN}` then set `wrap = \"http://127.0.0.1:8000/v1\"` and `context = {SPARK_MAX_MODEL_LEN}` (the same length) on the model",
         INKLING_MIN_VERSION.0, INKLING_MIN_VERSION.1, INKLING_MIN_VERSION.2
     )
 }
@@ -308,15 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn inkling_args_cap_context_only_on_spark() {
-        let a = inkling_args(false);
+    fn inkling_args_leave_the_context_to_ymird() {
+        let a = inkling_args();
         assert!(a.windows(2).any(|w| w == ["--reasoning-parser", "inkling"]));
         assert!(a.windows(2).any(|w| w == ["--tool-call-parser", "inkling"]));
         assert!(a.iter().any(|s| s == "--enable-auto-tool-choice"));
         assert!(a.windows(2).any(|w| w[0] == "--speculative-config" && w[1].contains("dspark")));
         assert!(!a.contains(&"--max-model-len".to_string()));
-        let s = inkling_args(true);
-        assert!(s.windows(2).any(|w| w == ["--max-model-len", "262144"]));
         assert_eq!(image_for("thinkingmachines/Inkling-2-Mini"), Some(INKLING_IMAGE));
         assert!(image_for("Qwen/Qwen3-8B").is_none());
     }

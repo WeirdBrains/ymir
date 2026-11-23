@@ -104,6 +104,7 @@ impl Daemon {
         let mut model_node = None;
         let mut supervisor = None;
         let mut group_workers: Option<Arc<RpcWorkers>> = None;
+        let mut model_hw = None;
         if roles.model {
             let engines = cfg.engines(&paths);
             if engines.is_empty() {
@@ -123,6 +124,15 @@ impl Daemon {
                     false
                 }
             });
+            // Contexts: each model's full trained length, cut only where its KV cache would not fit.
+            let hw = weirdnet_model::hw::detect();
+            let budget = weirdnet_model::hw::budget(
+                &hw,
+                weirdnet_model::hw::parse_size(&cfg.model.memory_budget),
+                cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
+            );
+            crate::kvfit::log_plans(&crate::kvfit::plan_launches(&mut launches, &budget, &cfg.models_dir()));
+            model_hw = Some((hw, budget));
             // Split models (M7): the leader's llama-server is wrapped, and appears when a group is up.
             let key = group::load_or_create_key(&paths.state().join("split.key")).with_context(|| "creating the split-model key")?;
             launches.extend(cfg.split_launches(&key));
@@ -203,12 +213,15 @@ impl Daemon {
             if roles.model
                 && let Some(sup) = &supervisor
             {
-                let hw = weirdnet_model::hw::detect();
-                let budget = weirdnet_model::hw::budget(
-                    &hw,
-                    weirdnet_model::hw::parse_size(&cfg.model.memory_budget),
-                    cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
-                );
+                let (hw, budget) = model_hw.clone().unwrap_or_else(|| {
+                    let hw = weirdnet_model::hw::detect();
+                    let budget = weirdnet_model::hw::budget(
+                        &hw,
+                        weirdnet_model::hw::parse_size(&cfg.model.memory_budget),
+                        cfg.model.reserve.as_deref().and_then(weirdnet_model::hw::parse_size),
+                    );
+                    (hw, budget)
+                });
                 let (server, service) = remote::serve_model(
                     &net.node,
                     sup.clone(),

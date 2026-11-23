@@ -101,6 +101,9 @@ fn pull_picks_the_best_quant_that_fits_and_prints_a_stanza_without_touching_node
     assert!(s.contains("[[model.local]]\nid = \"tiny\"") && s.contains("role = \"main\"") && s.contains("tiny-Q8_0.gguf"), "{s}");
     assert!(s.contains("mmproj = ") && s.contains("mmproj-tiny-f16.gguf"), "{s}");
     assert!(s.contains("node.toml was not changed"));
+    // No fixed context in the entry: ymird runs it at the trained 131072, which fits here.
+    assert!(!s.contains("context = "), "{s}");
+    assert!(s.contains("Context on this node: context 131072 (the trained length is 131072"), "{s}");
     assert_eq!(std::fs::read(ctx.dir().join("tiny-Q8_0.gguf")).unwrap(), gguf_bytes(400_000, 1));
     assert_eq!(std::fs::read(ctx.dir().join("mmproj-tiny-f16.gguf")).unwrap(), b"MMPROJ");
     assert_eq!(std::fs::read_to_string(&ctx.config).unwrap(), "[node]\nname = \"n\"\n");
@@ -135,7 +138,9 @@ fn a_smaller_node_gets_a_smaller_quant_and_a_tiny_one_is_told_nothing_fits() {
     assert!(!ctx.dir().exists() || std::fs::read_dir(ctx.dir()).unwrap().next().is_none());
     let mut out = Vec::new();
     pull(&ctx, &mut out, &PullArgs { context: Some(4096), ..pull_args("acme/Tiny-GGUF") }).unwrap();
-    assert!(text(out).contains("Q8_0"));
+    let s = text(out);
+    // An asked-for context is the operator's and goes in the entry.
+    assert!(s.contains("Q8_0") && s.contains("context = 4096") && s.contains("Context on this node: context 4096 (set in node.toml)"), "{s}");
 }
 
 #[test]
@@ -305,8 +310,20 @@ fn pull_of_a_safetensors_repo_prints_a_vllm_stanza_and_downloads_nothing() {
     assert_eq!(cfg.model.local[0].image.as_deref(), Some(ymir_core::vllm::INKLING_IMAGE));
 }
 
+fn inkling_config() -> serde_json::Value {
+    json!({
+        "model_type": "inkling2_loop",
+        "text_config": {
+            "model_max_length": 1_048_576, "hidden_size": 2304, "num_hidden_layers": 24,
+            "num_attention_heads": 24, "num_key_value_heads": 8, "head_dim": 128,
+            "local_layer_ids": [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22],
+            "sliding_window_size": 1024, "loop_config": {"core_start": 6, "core_end": 18, "num_passes": 3}
+        }
+    })
+}
+
 #[test]
-fn pull_of_inkling_on_spark_caps_context_and_mlx_is_refused() {
+fn pull_of_inkling_on_spark_gets_the_full_context_and_mlx_is_refused() {
     use weirdnet_model::hw::{Accel, Gpu};
     let fx = Fixture::new();
     fx.hub.route("/api/models/thinkingmachines/Inkling-2-Mini?blobs=true", 200, inkling_repo().to_string());
@@ -325,11 +342,14 @@ fn pull_of_inkling_on_spark_caps_context_and_mlx_is_refused() {
             driver: None,
         }],
     };
+    fx.hub.route("/thinkingmachines/Inkling-2-Mini/resolve/main/config.json", 200, inkling_config().to_string());
     let mut out = Vec::new();
     pull(&ctx, &mut out, &pull_args("thinkingmachines/Inkling-2-Mini")).unwrap();
     let s = text(out);
-    assert!(s.contains("max-model-len") && s.contains("262144"), "{s}");
-    assert!(s.contains("context = 262144") || s.contains("at 262144 context"), "{s}");
+    // No recipe cap any more: ymird sizes --max-model-len, and on 128 GiB that is the full 1M.
+    assert!(!s.contains("max-model-len") && !s.contains("context = "), "{s}");
+    assert!(s.contains("Context on this node: context 1048576"), "{s}");
+    assert!(ymir_core::kvfit::vllm_meta_dir(ctx.dir(), "thinkingmachines/Inkling-2-Mini").join("config.json").is_file());
 
     fx.hub.route(
         "/api/models/mlx-community/Inkling-2-Mini-4bit?blobs=true",
@@ -360,4 +380,31 @@ fn search_lists_vllm_safetensors_repos() {
     let s = text(out);
     assert!(s.contains("thinkingmachines/Inkling-2-Mini") && s.contains("vLLM"), "{s}");
     assert!(s.contains("Inkling 2 Mini") && s.contains("0.35.0"), "{s}");
+}
+
+#[test]
+fn context_lists_each_model_and_lifts_old_pull_defaults() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    pull(&ctx, &mut Vec::new(), &PullArgs { context: Some(32_768), register: true, ..pull_args("acme/Tiny-GGUF") }).unwrap();
+    let ctx = fx.ctx(32, None);
+    let mut out = Vec::new();
+    ctxcmd::run(&ctx, &mut out, &ContextArgs { ids: vec![], auto: false, old_defaults: false, dir: DirArgs { dir: None } }).unwrap();
+    let s = text(out);
+    assert!(s.contains("context = 32768") && s.contains("--old-defaults"), "{s}");
+    let mut out = Vec::new();
+    ctxcmd::run(&ctx, &mut out, &ContextArgs { ids: vec![], auto: false, old_defaults: true, dir: DirArgs { dir: None } }).unwrap();
+    let s = text(out);
+    assert!(s.contains("Put `tiny` on the automatic context") && s.contains("auto") && s.contains("context 131072"), "{s}");
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    assert_eq!(cfg.model.local[0].context, None);
+    assert!(ctx.config.with_extension("toml.bak").exists());
+    let err = ctxcmd::run(
+        &fx.ctx(32, None),
+        &mut Vec::new(),
+        &ContextArgs { ids: vec!["nope".into()], auto: true, old_defaults: false, dir: DirArgs { dir: None } },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no [[model.local]] with id `nope`"), "{err}");
 }

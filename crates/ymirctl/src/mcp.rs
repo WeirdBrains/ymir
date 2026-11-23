@@ -232,7 +232,11 @@ const SEARCH_PARAMS: &[Param] = &[
     Param::required("query", T::String, "Words to search the Hugging Face Hub for, such as `qwen3 8b`."),
     Param::optional("format", T::Enum(&["gguf", "mlx", "all"]), "gguf, mlx or all (default: GGUF, plus MLX on Apple Silicon)."),
     Param::optional("limit", T::Integer, "Repos to show per format (default 5)."),
-    Param::optional("context", T::Integer, "Context length to size the memory estimate for (default 32768)."),
+    Param::optional(
+        "context",
+        T::Integer,
+        "Context length to size the memory estimate for (default 32768, the length a quant is picked at; ymird then runs the model with as much as fits).",
+    ),
 ];
 
 const LOAD_PARAMS: &[Param] = &[
@@ -247,7 +251,11 @@ const PULL_PARAMS: &[Param] = &[
     Param::required("repo", T::String, "The Hugging Face repo, `owner/name` (see ymir_models_search)."),
     Param::optional("quant", T::String, "The quant to take, such as Q4_K_M (default: the best that fits this node)."),
     Param::optional("file", T::String, "One exact file in the repo."),
-    Param::optional("context", T::Integer, "Context length to size for (default 32768)."),
+    Param::optional(
+        "context",
+        T::Integer,
+        "A fixed context for the entry (default: none, so ymird runs the model at its full trained length, cut only where the KV cache would not fit).",
+    ),
     Param::optional("force", T::Boolean, "Download the smallest quant even though none fits this node."),
     CONFIRM,
 ];

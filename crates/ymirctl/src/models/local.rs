@@ -286,7 +286,7 @@ mod tests {
         let path = d.path().join("node.toml");
         let original = "# my notes\n[node]\nname = \"n\"\n\n[[model.local]]\nid = \"old\"\n";
         std::fs::write(&path, original).unwrap();
-        let m = super::super::plan::local_model("new", "llamacpp", "chat", "/x/new.gguf", 4096, false);
+        let m = super::super::plan::local_model("new", "llamacpp", "chat", "/x/new.gguf", Some(4096), false);
         register(&path, "new", &super::super::plan::stanza(&m)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with(original) && text.contains("id = \"new\""));

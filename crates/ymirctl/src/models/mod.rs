@@ -10,6 +10,7 @@
 //! `weirdnet-model`'s; this directory keeps MLX (`hub.rs`, which that crate does not read), the
 //! quality-first quant choice (`plan.rs`), `node.toml` handling (`local.rs`) and the output.
 
+mod ctxcmd;
 mod hub;
 mod local;
 mod plan;
@@ -39,6 +40,25 @@ pub enum ModelsCmd {
     List(ListArgs),
     /// Delete a downloaded model's files (never edits `node.toml`).
     Remove(RemoveArgs),
+    /// Show the context each model runs with on this node and why, or put models back on the
+    /// automatic context (their full trained length, cut only where the KV cache would not fit).
+    Context(ContextArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ContextArgs {
+    /// Model ids to put on the automatic context (with --auto).
+    pub ids: Vec<String>,
+    /// Remove `context` and any `--ctx-size` / `--max-model-len` in `args` from these models (a
+    /// copy of node.toml is kept as node.toml.bak). Restart ymird to apply.
+    #[arg(long)]
+    pub auto: bool,
+    /// Like --auto, for every model whose context is still one an older `ymirctl models pull`
+    /// wrote by default: 32768, or 262144 for Inkling 2 Mini on vLLM.
+    #[arg(long)]
+    pub old_defaults: bool,
+    #[command(flatten)]
+    pub dir: DirArgs,
 }
 
 /// Run on the user's model nodes over Weirdnet instead of this machine.
@@ -78,7 +98,8 @@ pub struct SearchArgs {
     /// How many repos to show per format.
     #[arg(long, default_value_t = 5)]
     pub limit: usize,
-    /// The context length to size the KV cache for (default 32768, capped at what the model was trained for).
+    /// The context length to size the KV cache for when picking a quant (default 32768, capped at
+    /// what the model was trained for).
     #[arg(long)]
     pub context: Option<u64>,
     #[command(flatten)]
@@ -95,7 +116,9 @@ pub struct PullArgs {
     /// One exact file in the repo (a shard of a split GGUF takes the whole set).
     #[arg(long, short)]
     pub file: Option<String>,
-    /// The context length to size for and to put in the entry (default 32768, capped at the trained length).
+    /// A fixed context for the entry, also used to pick the quant. Default: none in the entry, so
+    /// ymird runs the model at its full trained length, cut only where the KV cache would not fit
+    /// (the quant is picked at 32768).
     #[arg(long)]
     pub context: Option<u64>,
     /// The id for the entry (default: the repo name in lower case).
@@ -175,6 +198,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::Pull(a) => a.node.node.clone(),
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
+        ModelsCmd::Context(_) => None,
     };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;
@@ -195,6 +219,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::Pull(a) => a.dir.dir.clone(),
         ModelsCmd::List(a) => a.dir.dir.clone(),
         ModelsCmd::Remove(a) => a.dir.dir.clone(),
+        ModelsCmd::Context(a) => a.dir.dir.clone(),
         ModelsCmd::Search(_) => None,
     };
     let env_store = ModelStore::from_env();
@@ -215,6 +240,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::Pull(a) => pull(&ctx, out, &a),
         ModelsCmd::List(_) => list(&ctx, out),
         ModelsCmd::Remove(a) => remove(&ctx, out, input, &a),
+        ModelsCmd::Context(a) => ctxcmd::run(&ctx, out, &a),
     }
 }
 
@@ -376,11 +402,7 @@ fn print_mlx(ctx: &Ctx, out: &mut dyn Write, files: &[RepoFile], cap: &Capacity)
 fn print_vllm(ctx: &Ctx, out: &mut dyn Write, repo: &str, cap: &Capacity) -> Result<()> {
     let info = ctx.mlx.repo(repo)?;
     let size: u64 = info.files.iter().filter(|f| f.name.ends_with(".safetensors") || f.name.ends_with(".json")).map(|f| f.size).sum();
-    let ctxlen = if ymir_core::vllm::is_inkling(repo) && ymir_core::vllm::is_spark_class(&ctx.hw) {
-        u64::from(ymir_core::vllm::SPARK_MAX_MODEL_LEN)
-    } else {
-        plan::DEFAULT_CONTEXT
-    };
+    let ctxlen = plan::DEFAULT_CONTEXT;
     let need = plan::footprint_of(size, None, ctxlen);
     if !ctx.hw.vllm_supported() {
         writeln!(out, "    {} of weights; vLLM is not detected on this node. Pull still records the Hub id.", gib(size))?;
@@ -618,12 +640,18 @@ fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs) -> Result<()> {
         }
     });
     let id = a.id.clone().unwrap_or(plan.id_default);
-    let mut entry = plan::local_model(&id, plan.backend, &role, &plan.main.to_string_lossy(), plan.context, cap.accelerated);
+    // MLX-LM takes the context as its answer-length limit, so MLX keeps one; llama.cpp entries get
+    // a context only when asked for, and ymird sizes the rest.
+    let fixed = if plan.backend == "mlx" { Some(plan.context) } else { a.context };
+    let mut entry = plan::local_model(&id, plan.backend, &role, &plan.main.to_string_lossy(), fixed, cap.accelerated);
     if let Some(proj) = plan.mmproj {
         entry.mmproj = Some(proj);
     }
     let stanza = plan::stanza(&entry);
     writeln!(out, "\nnode.toml entry:\n{stanza}")?;
+    if let Some(p) = ctxcmd::planned(ctx, &entry) {
+        writeln!(out, "Context on this node: {}", p.note)?;
+    }
     if a.register {
         local::register(&ctx.config, &id, &stanza)?;
         writeln!(out, "Added `{id}` to {} (the old file is {}.bak). Restart ymird to load it.", ctx.config.display(), ctx.config.display())?;
@@ -643,10 +671,15 @@ fn pull_vllm(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, info: &hub::RepoInfo)
     let cap = plan::capacity(&ctx.hw);
     let size: u64 = info.files.iter().filter(|f| f.name.ends_with(".safetensors")).map(|f| f.size).sum();
     let inkling = ymir_core::vllm::is_inkling(&a.repo);
-    let spark = ymir_core::vllm::is_spark_class(&ctx.hw);
-    let context =
-        if inkling && spark && a.context.is_none() { u64::from(ymir_core::vllm::SPARK_MAX_MODEL_LEN) } else { plan::context_for(a.context, None) };
-    let need = plan::footprint_of(size, None, context);
+    // The model's config.json sizes its KV cache; ymird reads the copy saved here (vLLM fetches
+    // the weights itself on first load).
+    let config = ctx.mlx.file(&a.repo, "config.json").ok();
+    let shape = config.as_deref().and_then(|c| serde_json::from_slice(c).ok()).and_then(|v| ymir_core::kvfit::config_shape(&v).ok());
+    let context = plan::context_for(a.context, shape.as_ref().and_then(|s| s.trained));
+    let need = match &shape {
+        Some(s) => ymir_core::kvfit::footprint(size, s.kv_bytes(context, 1, ymir_core::kvfit::CacheType::F16)),
+        None => plan::footprint_of(size, None, context),
+    };
     writeln!(
         out,
         "{}: vLLM Hub id, {} of weights (fetched into the Hugging Face cache on first load), needs about {} at {} context: {}",
@@ -678,9 +711,9 @@ fn pull_vllm(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, info: &hub::RepoInfo)
     let role =
         a.role.clone().unwrap_or_else(|| if ctx.cfg.as_ref().is_some_and(|c| c.main_model().is_some()) { "chat".into() } else { "main".into() });
     let id = a.id.clone().unwrap_or_else(|| plan::id_for_repo(&a.repo));
-    let mut entry = plan::local_model(&id, "vllm", &role, &a.repo, context, cap.accelerated);
+    let mut entry = plan::local_model(&id, "vllm", &role, &a.repo, a.context, cap.accelerated);
     if inkling {
-        entry.args = ymir_core::vllm::inkling_args(spark);
+        entry.args = ymir_core::vllm::inkling_args();
         entry.image = Some(ymir_core::vllm::INKLING_IMAGE.into());
     }
     let stanza = plan::stanza(&entry);
@@ -688,7 +721,19 @@ fn pull_vllm(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, info: &hub::RepoInfo)
         writeln!(out, "\nnode.toml entry:\n{stanza}")?;
         return Ok(writeln!(out, "Dry run: nothing was downloaded.")?);
     }
+    match &config {
+        Some(c) => ymir_core::kvfit::save_vllm_meta(ctx.dir(), &a.repo, c, size)?,
+        None => writeln!(
+            out,
+            "Note: could not read {}'s config.json; ymird will run it at {} context until it can",
+            a.repo,
+            ymir_core::kvfit::FALLBACK_CONTEXT
+        )?,
+    }
     writeln!(out, "\nnode.toml entry:\n{stanza}")?;
+    if let Some(p) = ctxcmd::planned(ctx, &entry) {
+        writeln!(out, "Context on this node: {}", p.note)?;
+    }
     if a.register {
         local::register(&ctx.config, &id, &stanza)?;
         writeln!(out, "Added `{id}` to {} (the old file is {}.bak). Restart ymird to load it.", ctx.config.display(), ctx.config.display())?;

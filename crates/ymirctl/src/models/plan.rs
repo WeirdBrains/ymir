@@ -12,7 +12,9 @@ use ymir_core::config::LocalModel;
 pub use weirdnet_model::fit::KvSource;
 
 pub const GIB: u64 = 1 << 30;
-/// The context a pulled model is sized and registered for unless `--context` says otherwise.
+/// The context a quant is picked at unless `--context` says otherwise. The entry itself gets no
+/// fixed context: ymird runs the model at its full trained length, cut only where the KV cache
+/// would not fit (`ymir_core::kvfit`).
 pub const DEFAULT_CONTEXT: u64 = 32_768;
 
 /// `Q4_K_M`, `UD-Q4_K_XL`, `BF16`, ... or the model id when the name has no quant tag.
@@ -189,14 +191,15 @@ pub fn stanza(m: &LocalModel) -> String {
     toml::to_string(&Stanza { model: StanzaModel { local: [m] } }).unwrap_or_default()
 }
 
-pub fn local_model(id: &str, backend: &str, role: &str, file: &str, context: u64, accelerated: bool) -> LocalModel {
+/// `context`: a fixed context the operator asked for; `None` leaves it to ymird.
+pub fn local_model(id: &str, backend: &str, role: &str, file: &str, context: Option<u64>, accelerated: bool) -> LocalModel {
     let llama = backend == "llamacpp";
     LocalModel {
         id: id.to_string(),
         backend: Some(backend.to_string()),
         role: Some(role.to_string()),
         file: Some(file.to_string()),
-        context: Some(context.min(u64::from(u32::MAX)) as u32),
+        context: context.map(|c| c.min(u64::from(u32::MAX)) as u32),
         gpu_layers: (llama && accelerated).then_some(99),
         idle_ttl: Some("1800s".into()),
         args: if llama { ["-fa", "on", "--jinja"].map(String::from).to_vec() } else { Vec::new() },
@@ -291,7 +294,7 @@ mod tests {
 
     #[test]
     fn stanza_mirrors_the_setup_shape_and_parses_back() {
-        let m = local_model("tiny", "llamacpp", "chat", "/srv/models/gguf/tiny-Q8_0.gguf", 32_768, true);
+        let m = local_model("tiny", "llamacpp", "chat", "/srv/models/gguf/tiny-Q8_0.gguf", Some(32_768), true);
         let s = stanza(&m);
         assert!(s.starts_with("[[model.local]]\nid = \"tiny\"\n"), "{s}");
         for want in [
@@ -308,7 +311,7 @@ mod tests {
         let cfg: ymir_core::NodeConfig = toml::from_str(&s).unwrap();
         assert_eq!(cfg.model.local[0], m);
         // No accelerator: no gpu_layers.
-        assert!(!stanza(&local_model("t", "llamacpp", "chat", "/x.gguf", 1, false)).contains("gpu_layers"));
+        assert!(!stanza(&local_model("t", "llamacpp", "chat", "/x.gguf", None, false)).contains("gpu_layers"));
     }
 
     #[test]

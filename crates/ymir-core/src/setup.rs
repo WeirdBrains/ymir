@@ -163,7 +163,10 @@ pub fn propose_with(hw: Hardware, opts: &SetupOptions, bundled: Option<crate::en
                 quant: Some(e.quant.clone()),
                 swap_group: group.map(str::to_string),
                 role: Some(role.into()),
-                context: Some(e.context),
+                // llama.cpp models get no fixed context: ymird gives each its full trained length,
+                // cut only where the KV cache would not fit (`kvfit`). MLX-LM takes it as its
+                // answer-length limit, so it keeps the catalog's.
+                context: (engine == "mlx").then_some(e.context),
                 slots: Some(if role == "embedding" { 1 } else { plan.slots }),
                 ..Default::default()
             });
@@ -294,6 +297,9 @@ mod tests {
         assert_eq!(emb.backend.as_deref(), Some("llamacpp"));
         assert!(p.to_download.iter().all(|e| e.spec.id == emb.id || e.spec.id == standin.id));
         c.validate().unwrap();
+        // llama.cpp entries leave the context to ymird (the full trained length where it fits);
+        // MLX keeps the catalog's answer-length limit.
+        assert!(standin.context.is_none() && emb.context.is_none() && main.context.is_some());
         let launch = c.launches().into_iter().find(|l| l.id == main.id).unwrap();
         assert_eq!(launch.engine, weirdnet_backends::EngineKind::Mlx);
         let src = &launch.source;
