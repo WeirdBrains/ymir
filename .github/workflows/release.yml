@@ -45,19 +45,22 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.checkout_ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - name: Packaging tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm python3.11
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
       - name: Build
         run: cargo build --release --locked -p ymird -p ymirctl
       - name: Engines run on this runner
         run: |
-          python3.11 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --out /tmp/engine-default --check
-          python3.11 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
+          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --out /tmp/engine-default --check
+          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
       - name: Package (default and CUDA)
         run: |
-          python3.11 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --engine /tmp/engine-default
-          python3.11 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --engine /tmp/engine-cuda
+          python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --engine /tmp/engine-default
+          python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --engine /tmp/engine-cuda
           rm -rf /tmp/engine-cuda .engine-cache
           ls -la dist
       - name: Smoke test the default archive with a real model
