@@ -6,9 +6,12 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
 ### Added
 
 - LoRA adapters on a loaded base (training plan P4a): `[[model.local.lora]]` (`id`, `file`, `scale`, `revision`) serves each adapter as its own model id on its base's engine (llama.cpp `--lora` with the adapter and scale per request; vLLM `--enable-lora`). The catalog and `ymirctl status` list adapters with their base, requests are routed by the adapter's id like any model, and the context planner counts adapter weights in the base's memory. `ymirctl models adapter add | remove | list` edits `node.toml`; `ymirctl models pull REPO --node NAME --adapter-for BASE --serve` pulls an adapter onto a node and serves it without a restart. Adapters that don't match their base are dropped at start with an error, and the base still serves.
+- LoRA adapters on a loaded base model, and context sizing that matches what is actually loaded.
 
 ### Fixed
 
