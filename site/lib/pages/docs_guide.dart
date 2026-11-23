@@ -7,10 +7,13 @@ const _html = r'''
 <p>This guide takes you from nothing to a working private model cloud: install Ymir, add a second device, connect the
 Bragi chat app, and point Jan at it. Commands are exactly those <code>ymirctl</code> offers; run
 <code>ymirctl --help</code> or <code>ymirctl &lt;command&gt; --help</code> for the full list.</p>
-<p><strong>What is released.</strong> <a href="${bragiSite}download">Bragi 0.1.0</a> is released, with downloads for every
-platform. Ymir's release files (step 1) are built by its release workflow; until the first Ymir release is published,
-build them from source, which takes one more command. The bridge token and the Weirdnet identity are kept in files
-readable only by you (mode 0600).</p>
+<p><strong>What is released.</strong> <a href="${release}">Ymir ${version}</a> is out, with downloads for Linux
+(x86_64 and ARM64, CPU/Vulkan and CUDA), macOS and Windows on its release page. On Arch Linux, install it from
+<a href="${taur}/packages/ymir-bin">TAUR</a>: <code>${taurInstall}</code> (or <code>ymir-cuda-bin</code> for NVIDIA).
+This release gives each model the largest context that fits beside the others (<code>ymirctl models context</code>
+shows it and why). <a href="${bragiSite}download">Bragi 0.2.1</a>, the chat app, is out for every platform too, with
+chat and code as modes of one conversation and a desktop link that pairs your phone by QR code over Weirdnet. The bridge
+token and the Weirdnet identity are kept in files readable only by you (mode 0600).</p>
 <p>Ymir is a <a href="https://weirdbrains.com">Weird Brains</a> project. Devices find each other over
 <a href="https://net.weirdbrains.com">Weirdnet</a>, so a pool needs no open ports and no API keys.</p>
 
@@ -244,6 +247,10 @@ class DeploymentGuidePage extends StatelessComponent {
       ),
       prose(
         _html
+            .replaceAll(r'${release}', releaseUrl)
+            .replaceAll(r'${version}', latestVersion)
+            .replaceAll(r'${taurInstall}', taurInstall)
+            .replaceAll(r'${taur}', taurUrl)
             .replaceAll(r'${bragiSite}', bragiSiteUrl)
             .replaceAll(r'${ymirctl}', siteLink('/docs/guides/ymirctl'))
             .replaceAll(r'${docs}', siteLink('/docs'))

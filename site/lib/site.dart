@@ -16,6 +16,14 @@ const siteDescription =
     'No hosted service, no open ports, no API keys. Open source, BSD-3-Clause.';
 
 const repoUrl = 'https://github.com/WeirdBrains/ymir';
+
+/// The latest release; bump with each release.
+const latestVersion = '0.2.0';
+const releaseUrl = '$repoUrl/releases/tag/v$latestVersion';
+const taurUrl = 'https://pkg.taur.weirdbrains.com';
+
+/// Installs ymir-bin from TAUR with yay, leaving yay's default AUR alone (TAUR docs/yay.md).
+const taurInstall = "yay --aururl $taurUrl --aurrpcurl '$taurUrl/rpc?' -S ymir-bin";
 const bragiRepoUrl = 'https://github.com/WeirdBrains/bragi';
 const orgUrl = 'https://github.com/WeirdBrains';
 const weirdnetUrl = 'https://net.weirdbrains.com';
