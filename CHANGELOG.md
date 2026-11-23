@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
 ### Changed
 
 - Models run with as much context as they can take: ymird gives each model its full trained context (GGUF header, or `config.json` with RoPE scaling for vLLM) and cuts it only where the KV cache would not fit beside the weights and the node's other models, saying why in the log. Sliding-window layers, looped layers and the KV cache type are counted. An explicit `context` is kept. `ymirctl models pull` no longer writes `context = 32768` (or `--max-model-len 262144` for Inkling on a Spark), and setup leaves llama.cpp contexts to ymird. The catalog advertises the context each server is started with.
@@ -13,6 +15,7 @@ All notable changes to Ymir are listed here. The format follows
 ### Added
 
 - `ymirctl models context` shows each model's context and why; `--auto ID` or `--old-defaults` lifts contexts that older pulls wrote by default.
+- Second public release: models get the largest context that fits.
 
 ## [0.1.0] - 2026-11-22
 
