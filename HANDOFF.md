@@ -12,7 +12,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 - Catalog: `CatalogRow::base`, `NodeModel::base`; `ymirctl status` prints "LoRA adapter on BASE". Routing needed no change (adapter rows are in capability records).
 - ymirctl: `models adapter add BASE FILE [--id] [--scale] [--revision]`, `adapter remove ID`, `adapter list` (toml_edit, keeps `node.toml.bak`; checks the GGUF against the base); `models pull REPO --node NAME --adapter-for BASE [--file] --serve`; `models list --node` shows adapters.
 - Mock engine: `--lora` and per-request `"lora"`.
-- Docs: DESIGN ("LoRA adapters on a loaded base"), training.md P4a design paragraph, CHANGELOG.
+- Docs: [DESIGN.md](docs/DESIGN.md) ("LoRA adapters on a loaded base"), the P4a design paragraph in [docs/design/training.md](docs/design/training.md), [CHANGELOG.md](CHANGELOG.md).
 
 **Checks:** `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings` (clean apart from the old unused workspace-dependency warnings); `cargo test --workspace --locked`: **252 passed, 0 failed, 6 ignored**. New: config, `adapters` unit tests, `ymirctl` node.toml edits, `ymir-testkit` `adapters` (add/list/remove, start-up drop, chat by adapter id with its scale, base on the same engine, unload refused), `ctxplan` (adapter weights cut the base's context; adapter loads its base; base evicted with its adapter), `models_pool` (pull `--adapter-for --serve` over Weirdnet, routed chat). `ctxplan` 40/40 and adapters+models_pool 10/10 repeated runs green.
 
