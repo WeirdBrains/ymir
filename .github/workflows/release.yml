@@ -11,6 +11,12 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      checkout_ref:
+        description: 'Git ref to build (for example v0.1.0). Empty uses this workflow ref.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -37,19 +43,21 @@ jobs:
       YMIR_ENGINE_CACHE: ${{ github.workspace }}/.engine-cache
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Packaging tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm python3.11
       - name: Build
         run: cargo build --release --locked -p ymird -p ymirctl
       - name: Engines run on this runner
         run: |
-          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --out /tmp/engine-default --check
-          python3 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
+          python3.11 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --out /tmp/engine-default --check
+          python3.11 scripts/engine.py fetch --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --out /tmp/engine-cuda --check
       - name: Package (default and CUDA)
         run: |
-          python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --engine /tmp/engine-default
-          python3 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --engine /tmp/engine-cuda
+          python3.11 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant default --engine /tmp/engine-default
+          python3.11 scripts/package.py --target ${{ matrix.arch }}-unknown-linux-gnu --variant cuda --engine /tmp/engine-cuda
           rm -rf /tmp/engine-cuda .engine-cache
           ls -la dist
       - name: Smoke test the default archive with a real model
@@ -71,6 +79,8 @@ jobs:
     container: archlinux:base-devel
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
       - uses: actions/download-artifact@v5
         with:
           pattern: dist-linux-*
@@ -101,6 +111,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -138,6 +150,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -163,6 +177,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
       - uses: actions/download-artifact@v5
         with:
           pattern: dist-*-pc-windows-msvc-default
@@ -216,7 +232,7 @@ jobs:
 
   sums:
     name: SHA256SUMS
-    needs: [linux, arch, macos]
+    needs: [linux, arch, macos, windows, windows-installer]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v5
