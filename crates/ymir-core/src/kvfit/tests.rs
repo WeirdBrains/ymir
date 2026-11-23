@@ -204,9 +204,10 @@ fn inkling_keeps_full_score_matrices_and_server_slots_widen_the_sliding_cache() 
     // llama-server's default: 4 slots sharing one cache, 512-token micro-batches.
     let run = Run::of(&ModelLaunch::new("ink", EngineKind::Llamacpp, "/m/ink.gguf"));
     assert_eq!((run.slots, run.ubatch, run.flash_off), (4, 512, false));
-    // At 1M: the f32 scores are 1M x 512 x 24 heads (48 GiB), beside 32 GiB of global KV and a
-    // sliding window per slot. This is what v0.2.0 missed.
-    assert_eq!(s.score_bytes(1_048_576, run), 48 * GIB);
+    // At 1M: two f32 score matrices of 1M x 512 x 24 heads (48 GiB each: the gathered bias and the
+    // scores), and the mask and relative positions, beside 32 GiB of global KV and a sliding window
+    // per slot. v0.2.0 missed the scores; v0.3.0 counted one matrix.
+    assert_eq!(s.score_bytes(1_048_576, run), 96 * GIB + 1_048_576 * 512 * 8);
     assert_eq!(s.kv_bytes(1_048_576, 4, CacheType::F16), 32 * GIB + 40 * 8 * 256 * 2 * (4 * 1024 + 512));
     // A flash-attended model has no score buffers unless `-fa off`; `-ub` and `--parallel` count.
     let g = gguf_shape(&gemma4_e4b_header()[..]).unwrap();
@@ -215,7 +216,8 @@ fn inkling_keeps_full_score_matrices_and_server_slots_widen_the_sliding_cache() 
     l.extra_args = ["-fa", "off", "-ub", "256", "--parallel", "2"].map(String::from).to_vec();
     let off = Run::of(&l);
     assert_eq!((off.slots, off.ubatch, off.flash_off), (2, 256, true));
-    assert_eq!(g.score_bytes(131_072, off), 131_072 * 256 * 8 * 4);
+    // Plain `-fa off` (no bias): one matrix and the f32 mask.
+    assert_eq!(g.score_bytes(131_072, off), 131_072 * 256 * (8 * 4 + 4));
     // `slots` in node.toml is what ymird passes as `--parallel`.
     l.slots = Some(1);
     assert_eq!(Run::of(&l).slots, 1);

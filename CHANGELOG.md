@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The context plan counts both f32 score matrices llama.cpp keeps for attention with a score bias (Inkling 2 Mini, T5), plus the mask and relative positions, as llama.cpp's own reservation shows (`llama-fit-params`: 66.4 GiB of compute at 701,440 tokens). v0.3.0 counted one and planned Inkling at 701,440 tokens (70.9 GiB) beside a busy gemma4-e4b on a 128 GB Spark; llama-server mapped 108 GiB while setting up and the node ran out of memory. Inkling now gets 437,248 tokens alone on a Spark and 397,312 beside a busy gemma4-e4b. Plain `-fa off` still counts one matrix, now with its mask.
+
 ## [0.3.0] - 2026-11-23
 
 ### Fixed

@@ -673,13 +673,18 @@ the server runs with:
   `shared_kv_layers` hold none, linear or recurrent layers hold none, and a vLLM MTP head adds its
   layers. Element size from `-ctk`/`-ctv` or `--kv-cache-dtype`, else 16-bit.
 - **Score buffers.** Attention with a per-head score bias (Inkling's relative positions, T5) cannot
-  use flash attention in llama.cpp (`build_attn_mha`, b12628), so the compute buffer holds an f32
-  score matrix of context x micro-batch (`-ub`, 512) x heads: 48 GiB for Inkling at 1M tokens. The
-  same holds for every model under `-fa off`. v0.2.0 left this out and planned Inkling at 1M on a
-  128 GB Spark from a 53.9 GiB estimate; llama-server took 104.6 GiB (16.7 GiB IQ4_NL weights and
-  mmproj, 32.7 GiB KV, the 48 GiB matrix and ~7 GiB of other buffers). That run now estimates at
-  107 GiB, and the plan gives Inkling 721,920 tokens alone on a Spark (655,360 beside a busy
-  gemma4-e4b at its full 131,072).
+  use flash attention in llama.cpp (`build_attn_mha`, b12628), so the compute buffer holds f32
+  score matrices of context x micro-batch (`-ub`, 512) x heads. With a bias there are two (the
+  gathered bias and the scores are both live at the add), plus the f32 mask and i32 relative
+  positions: 97 GiB for Inkling at 1M tokens. Under plain `-fa off` there is one, plus the mask.
+  These match llama.cpp's own reservation (`llama-fit-params -fitp on` on the ggml-org
+  Inkling-2-Mini IQ4_NL header: 68,002 MiB of compute at 701,440 tokens, 101,563 MiB at 1M; Qwen3
+  0.6B under `-fa off` at 32,768: 1,110 MiB against a 1,024 MiB matrix). v0.2.0 left the scores
+  out; v0.3.0 counted one matrix, calibrated on an RSS read after load that did not hold the whole
+  compute buffer, and planned Inkling at 701,440 tokens (70.9 GiB) beside a busy gemma4-e4b on m1,
+  where llama-server mapped 108 GiB setting up its context and the node ran out of memory. The plan
+  now gives Inkling 437,248 tokens alone on a Spark (397,312 beside a busy gemma4-e4b at its full
+  131,072, or with 93 GiB measured free as on m1).
 - **Fit.** Weights + KV + score buffers + 10% (as `weirdnet_model::fit`) against the node's model
   budget (`[model] memory_budget` / `reserve`), with 20% of the memory free for the model kept free.
   Models that can be resident together share it: each other swap group

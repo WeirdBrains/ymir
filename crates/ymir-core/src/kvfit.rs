@@ -11,8 +11,9 @@
 //! and sliding-window layers, which hold one window per server slot (llama-server runs 4 slots
 //! with a unified cache unless told otherwise). Attention that cannot use flash attention (a
 //! per-head score bias, as Inkling's relative positions, or `-fa off`) materializes its f32 score
-//! matrix, context x micro-batch x heads, in the compute buffer (48 GiB for Inkling at 1M
-//! tokens). Everything gets 10% on top, as `weirdnet_model::fit` counts a footprint, and
+//! matrix, context x micro-batch x heads, in the compute buffer: two of them where a bias is added
+//! to the scores (97 GiB for Inkling at 1M tokens), one under plain `-fa off`. Everything gets 10%
+//! on top, as `weirdnet_model::fit` counts a footprint, and
 //! [`HEADROOM_PCT`] of the memory left is kept free.
 //!
 //! `weirdnet_model::gguf::GgufInfo` has no sliding-window or loop fields yet, so the GGUF reader
@@ -46,12 +47,22 @@ pub const SERVER_AUTO_SLOTS: u32 = 4;
 /// The share of the memory free for a model that is kept free anyway: estimates are estimates, and
 /// a unified-memory node also runs its OS out of it.
 pub const HEADROOM_PCT: u64 = 20;
-/// How many context x micro-batch x heads f32 score matrices the compute buffer holds on the
-/// non-flash-attention path (llama.cpp b12628 `build_attn_mha`; ggml's allocator reuses the
-/// bias's buffer for the scores). Inkling 2 Mini IQ4_NL at 1M tokens with 4 slots used 104.6 GiB
-/// on a 128 GB Spark: 16.7 GiB of weights, 32.7 GiB of KV, and one 48 GiB matrix plus ~7 GiB of
-/// other buffers; with the 10% this estimates 107 GiB.
+/// How many context x micro-batch x heads f32 score matrices the compute buffer holds where a
+/// per-head bias is added to the scores (llama.cpp b12628 `build_attn_mha` with `kq_b`): the
+/// gathered bias and the scores are both live at the `ggml_add`, so ggml's allocator reserves two.
+/// llama.cpp's own reservation (`llama-fit-params -fitp on` on the ggml-org Inkling-2-Mini IQ4_NL
+/// header) is 68,002 MiB of compute at 701,440 tokens and 101,563 MiB at 1M: 2.07 matrices. With
+/// one, v0.3.0 planned 70.9 GiB for Inkling at 701,440 beside gemma4-e4b on m1 (a 128 GB Spark)
+/// and llama-server mapped 108 GiB while it set up its context, and the node ran out of memory.
+/// (m2's 84.1 GiB at 788,480 was read after load: not all of the compute buffer was resident.)
+const BIASED_SCORE_COPIES: u64 = 2;
+/// The same under plain `-fa off` (no bias): the softmax runs in place, so one matrix (Qwen3
+/// 0.6B at 32,768 tokens: 1,110 MiB of compute against a 1,024 MiB matrix).
 const SCORE_COPIES: u64 = 1;
+/// Bytes per token of context x micro-batch for the attention inputs beside the scores: the f32
+/// mask, and the i32 relative positions where there is a bias (llama.cpp measured ~6).
+const MASK_BYTES: u64 = 4;
+const REL_POS_BYTES: u64 = 4;
 /// The share of GPU memory vLLM takes unless `--gpu-memory-utilization` says otherwise.
 const VLLM_UTILIZATION: f64 = 0.9;
 /// How many header bytes [`gguf_shape`] reads at most (tokenizer vocabularies are the bulk).
@@ -86,13 +97,16 @@ impl KvShape {
         cache.bytes(self.full_elems.saturating_mul(context).saturating_add(self.swa_elems.saturating_mul(swa_tokens)))
     }
 
-    /// The compute buffer that grows with the context: the f32 attention scores when they are not
-    /// flash-attended (else nothing; the fixed-size rest is in [`footprint`]'s 10%).
+    /// The compute buffer that grows with the context: the f32 attention scores (two matrices with
+    /// a score bias, one under `-fa off`) and their mask, when they are not flash-attended (else
+    /// nothing; the fixed-size rest is in [`footprint`]'s 10%).
     pub fn score_bytes(&self, context: u64, run: Run) -> u64 {
         if !(self.dense_scores || run.flash_off) || self.full_layers == 0 {
             return 0;
         }
-        SCORE_COPIES.saturating_mul(context).saturating_mul(run.ubatch).saturating_mul(self.heads.max(1)).saturating_mul(4)
+        let (copies, inputs) = if self.dense_scores { (BIASED_SCORE_COPIES, MASK_BYTES + REL_POS_BYTES) } else { (SCORE_COPIES, MASK_BYTES) };
+        let per_row = copies.saturating_mul(self.heads.max(1)).saturating_mul(4).saturating_add(inputs);
+        context.saturating_mul(run.ubatch).saturating_mul(per_row)
     }
 
     /// Everything that grows with the context: the KV cache and the score buffers.

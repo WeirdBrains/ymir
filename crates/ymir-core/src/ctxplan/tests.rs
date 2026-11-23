@@ -7,6 +7,10 @@ const INK_WEIGHTS: u64 = 17_627_940_768 + 345_910_944;
 const GEMMA_WEIGHTS: u64 = 4_590_807_392;
 /// What llama-server took for Inkling at 1M tokens, 4 slots, on m2 (a 128 GB Spark).
 const M2_MEASURED_AT_1M: u64 = 104_600 * GIB / 1000;
+/// What llama-server had mapped when m1 ran out of memory loading Inkling at 701,440 tokens
+/// beside a busy gemma4-e4b (v0.3.0; the oom-killer's file-rss, 113,513,024 kB).
+const M1_MAPPED_AT_OOM: u64 = 113_513_024 * 1024;
+const MIB: u64 = 1 << 20;
 
 fn ink() -> (ModelLaunch, Resolved) {
     let l = ModelLaunch::new("inkling-2-mini", EngineKind::Llamacpp, "/m/ink.gguf");
@@ -36,7 +40,7 @@ fn inkling_alone_on_a_spark_is_cut_to_what_fits_with_its_score_buffers() {
     let b = spark_budget();
     let (l, r) = ink();
     let d = decide(&ask(&l, &r), &[], &b, None, GRACE, true);
-    assert_eq!((d.context, d.short), (721_920, true), "{}", d.note);
+    assert_eq!((d.context, d.short), (437_248, true), "{}", d.note);
     assert!(d.evict.is_empty());
     assert!(d.note.contains("cut from 1048576") && d.note.contains("20% kept free"), "{}", d.note);
     // At the chosen context the estimate, with its 10%, leaves the headroom free.
@@ -55,7 +59,7 @@ fn a_busy_neighbour_is_kept_and_the_context_shrinks_to_fit_beside_it() {
     // A request under way: never unloaded, however long since it last started one.
     let d = decide(&ask(&l, &r), &[gemma_running(1, LONG)], &b, None, GRACE, true);
     assert!(d.evict.is_empty(), "{d:?}");
-    assert_eq!(d.context, 655_360, "{}", d.note);
+    assert_eq!(d.context, 397_312, "{}", d.note);
     assert!(d.note.contains("beside gemma4-e4b"), "{}", d.note);
     // Loading counts as busy too.
     let mut loading = gemma_running(0, LONG);
@@ -69,12 +73,12 @@ fn an_idle_neighbour_is_unloaded_and_the_model_grows_to_its_alone_context() {
     let (l, r) = ink();
     let d = decide(&ask(&l, &r), &[gemma_running(0, LONG)], &b, None, GRACE, true);
     assert_eq!(d.evict, vec!["gemma4-e4b".to_string()]);
-    assert_eq!(d.context, 721_920, "{}", d.note);
+    assert_eq!(d.context, 437_248, "{}", d.note);
     assert!(d.note.contains("unloaded idle gemma4-e4b"), "{}", d.note);
     // Used within the grace period: kept (no ping-pong between two models).
     let d = decide(&ask(&l, &r), &[gemma_running(0, Duration::from_secs(5))], &b, None, GRACE, true);
     assert!(d.evict.is_empty());
-    assert_eq!(d.context, 655_360);
+    assert_eq!(d.context, 397_312);
     // Eviction off (the second pass, after unloading): nothing unloaded.
     assert!(decide(&ask(&l, &r), &[gemma_running(0, LONG)], &b, None, GRACE, false).evict.is_empty());
 }
@@ -84,7 +88,7 @@ fn nothing_is_unloaded_for_a_model_that_fits_whole_anyway() {
     let b = spark_budget();
     let (gl, gr) = gemma();
     let (mut il, ir) = ink();
-    il.context = Some(721_920);
+    il.context = Some(437_248);
     let idle_ink = Resident { id: il.id.clone(), swap_group: None, bytes: kvfit::cost(&ir, &il), in_flight: 0, loading: false, idle: LONG };
     let d = decide(&ask(&gl, &gr), &[idle_ink], &b, None, GRACE, true);
     assert!(d.evict.is_empty(), "{d:?}");
@@ -118,7 +122,7 @@ fn a_swap_group_mate_is_not_counted_and_not_evicted_here() {
     mate.swap_group = Some("main".into());
     let d = decide(&ask(&l, &r), &[mate], &b, None, GRACE, true);
     assert!(d.evict.is_empty());
-    assert_eq!(d.context, 721_920);
+    assert_eq!(d.context, 437_248);
 }
 
 #[test]
@@ -177,7 +181,7 @@ async fn the_planner_sets_the_context_the_catalog_reports_and_keeps_explicit_one
     let context = |id: &str| sup.status().into_iter().find(|s| s.id == id).unwrap().context;
     // At start the three share the node.
     let shared = context("inkling-2-mini").unwrap();
-    assert!(shared < 655_360, "{shared}");
+    assert!(shared < 397_312, "{shared}");
 
     // Asked for, with nothing running: everything free is its (the catalog says so too).
     planner.prepare("inkling-2-mini", false).await;
@@ -185,7 +189,7 @@ async fn the_planner_sets_the_context_the_catalog_reports_and_keeps_explicit_one
     let mut l = sup.launches().into_iter().find(|l| l.id == "inkling-2-mini").unwrap();
     let want = decide(&Ask { launch: &l, resolved: &r, explicit: false }, &[], &budget, None, GRACE, false);
     assert_eq!(context("inkling-2-mini"), Some(want.context));
-    assert_eq!(want.context, 721_920);
+    assert_eq!(want.context, 437_248);
     // Its other settings survive the re-add.
     l.context = None;
     assert_eq!(l.source, ink_file);
@@ -227,7 +231,7 @@ async fn a_model_whose_load_has_begun_is_not_resized_and_the_others_are_sized_be
     planner.prepare("a", false).await;
     assert_eq!(context("a"), Some(shared), "a is loading at its share: left alone");
     let b = context("b").unwrap();
-    assert!(b > shared && b < 721_920, "b gets what is left beside a: {b} vs {shared}");
+    assert!(b > shared && b < 437_248, "b gets what is left beside a: {b} vs {shared}");
     // Its load failed: a is sized again (beside nothing, sharing with b).
     assert!(planner.note(&SupervisorEvent::LoadFailed { model: "a".into(), why: String::new() }));
     planner.refresh().await;
@@ -251,4 +255,54 @@ fn a_load_that_came_in_before_a_resize_removed_the_model_is_seen() {
         tx.send(ev).unwrap();
     }
     assert!(!loaded_before_removal(&mut rx, "a"));
+}
+
+#[test]
+fn m1_beside_a_busy_gemma_is_planned_inside_what_was_measured_free() {
+    // m1 at 13:35 ET: gemma4-e4b busy, 93.0 GiB measured free. v0.3.0 planned 701,440 tokens
+    // (70.9 GiB with the weights); llama-server mapped 108 GiB setting up and the node ran out.
+    let b = spark_budget();
+    let (l, r) = ink();
+    let measured = 93 * GIB;
+    let d = decide(&ask(&l, &r), &[gemma_running(1, LONG)], &b, Some(measured), GRACE, true);
+    assert!(d.evict.is_empty(), "{d:?}");
+    assert_eq!((d.context, d.short), (397_312, true), "{}", d.note);
+    // The old plan now estimates above what m1 mapped when it was killed, and above what was free.
+    let mut old = l.clone();
+    old.context = Some(701_440);
+    assert!(kvfit::cost(&r, &old) > M1_MAPPED_AT_OOM, "{} GiB", kvfit::cost(&r, &old) / GIB);
+    assert!(kvfit::cost(&r, &old) > measured);
+    // The new one, with its 10%, fits what was measured and keeps 20% of the room beside the
+    // weights free.
+    assert!(d.free <= measured);
+    let mut at = l.clone();
+    at.context = Some(d.context);
+    assert!(kvfit::cost(&r, &at) <= d.free - (d.free - kvfit::footprint(r.weights, 0)) / 5, "{} GiB", kvfit::cost(&r, &at) / GIB);
+}
+
+#[test]
+fn m2_alone_is_planned_inside_what_was_measured_free() {
+    // m2 at 13:33 ET: nothing else running, 102.1 GiB measured free (v0.3.0 planned 788,480).
+    let b = spark_budget();
+    let (l, r) = ink();
+    let measured = 102_100 * GIB / 1000;
+    let d = decide(&ask(&l, &r), &[], &b, Some(measured), GRACE, true);
+    assert!(d.context < 788_480 && d.short, "{}", d.note);
+    assert!(d.free <= measured);
+    let mut at = l.clone();
+    at.context = Some(d.context);
+    assert!(kvfit::cost(&r, &at) <= d.free - (d.free - kvfit::footprint(r.weights, 0)) / 5);
+}
+
+#[test]
+fn inkling_context_bytes_cover_what_llama_cpp_reserves() {
+    // `llama-fit-params -fitp on` (b12628) on the ggml-org Inkling-2-Mini IQ4_NL header, 4 slots:
+    // context (KV) and compute MiB. The estimate is never below them, and within 5% above.
+    let (l, r) = ink();
+    let run = Run::of(&l);
+    for (ctx, kv, compute) in [(701_440u64, 22_163u64, 68_002u64), (788_480, 24_883, 76_417), (1_048_576, 33_011, 101_563)] {
+        let llama = (kv + compute) * MIB;
+        let ours = r.shape.context_bytes(ctx, run);
+        assert!(ours >= llama && ours <= llama / 100 * 105, "{ctx}: {} vs {} MiB", ours / MIB, llama / MIB);
+    }
 }
