@@ -41,6 +41,8 @@ sha2.workspace = true
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
+# Paused clocks for tests of long waits (prompt processing, keepalives).
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

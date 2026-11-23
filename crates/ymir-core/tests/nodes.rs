@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures::stream;
+use futures::{StreamExt, stream};
 use serde_json::json;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::catalog::ModelState as AgentState;
@@ -32,6 +32,9 @@ enum Mode {
     Words,
     /// Like `Words`, but breaks after this many words.
     WordsThenDies(usize),
+    /// Like `Works`, but the first chunk comes this many seconds after the stream opens (the
+    /// engine processing a long prompt).
+    SlowStart(u64),
 }
 
 /// What the `Words` modes say, whichever node says it.
@@ -143,6 +146,14 @@ impl ModelNode for Scripted {
                 Mode::Rejects => return Err(RemoteError::BadRequest { message: "no".into() }),
                 Mode::Words => words(None),
                 Mode::WordsThenDies(n) => words(Some(n)),
+                Mode::SlowStart(secs) => {
+                    let first = stream::once(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                        Ok(Chunk::Text(text))
+                    });
+                    let done = stream::iter([Ok(Chunk::Done { finish_reason: Some("stop".into()), usage: Some(Usage::new(1, 1)) })]);
+                    return Ok(Box::pin(first.chain(done)) as ChunkStream);
+                }
             };
             Ok(Box::pin(stream::iter(items)) as ChunkStream)
         })
@@ -541,4 +552,91 @@ async fn cached_answers_are_keyed_on_the_weights_revision() {
     b.set_revision(Some("r2"));
     say(&c2, req()).await.0.unwrap();
     assert!(c2.prepare(&req()).unwrap().cache_hit());
+}
+
+/// Keeps the text and counts the keepalives an answer sends while nothing else goes out.
+#[derive(Default)]
+struct Watch {
+    text: Mutex<String>,
+    alive: AtomicUsize,
+}
+
+impl Sink for Watch {
+    fn text(&self, t: String) {
+        self.text.lock().unwrap().push_str(&t);
+    }
+    fn reasoning(&self, _: String) {}
+    fn tool_call(&self, _: ToolCall) {}
+    fn usage(&self, _: Usage) {}
+    fn alive(&self) {
+        self.alive.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn slow_alpha(secs: u64) -> Coordinator {
+    let a = Scripted::new("a", &[("alpha", false, ModelState::Ready)]);
+    a.set(Mode::SlowStart(secs));
+    coordinator(&[&a])
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_prompt_keeps_the_asker_alive_until_the_first_token() {
+    // node-b: Inkling took 62 s on a 17.9k-token prompt before its first token.
+    let c = slow_alpha(62);
+    let req = Request::messages(vec![Message::user("hi")]).with_model("alpha");
+    let out = Watch::default();
+    c.run(c.prepare(&req).unwrap(), &req, &out, &CancelToken::new()).await.unwrap();
+    assert_eq!(*out.text.lock().unwrap(), "a says alpha");
+    // One every 5 s while the prompt was processed (5, 10, ... 60), none after the first token.
+    assert_eq!(out.alive.load(Ordering::SeqCst), 12);
+    // A quick answer sends none.
+    let c = slow_alpha(1);
+    let out = Watch::default();
+    c.run(c.prepare(&req).unwrap(), &req, &out, &CancelToken::new()).await.unwrap();
+    assert_eq!(out.alive.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_engine_that_never_starts_is_kept_alive_only_within_the_prompts_allowance() {
+    let c = slow_alpha(24 * 3600);
+    let req = Request::messages(vec![Message::user("hi")]).with_model("alpha");
+    let allowance = ymir_core::coordinator::prefill_allowance(&req);
+    assert!(allowance >= std::time::Duration::from_secs(60) && allowance < std::time::Duration::from_secs(62), "{allowance:?}");
+    let (out, cancel) = (Watch::default(), CancelToken::new());
+    let run = c.run(c.prepare(&req).unwrap(), &req, &out, &cancel);
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(600), run).await.is_err());
+    // Then quiet, so the asker's own stall timer ends it.
+    assert_eq!(out.alive.load(Ordering::SeqCst) as u64, allowance.as_secs() / 5);
+}
+
+#[test]
+fn the_allowance_grows_with_the_prompt() {
+    let short = ymir_core::coordinator::prefill_allowance(&Request::messages(vec![Message::user("hi")]));
+    // About 17.9k tokens (node-b's long prompt): minutes, not the asker's 25 s.
+    let long = ymir_core::coordinator::prefill_allowance(&Request::messages(vec![Message::user("word ".repeat(18_000))]));
+    assert!(long > short + std::time::Duration::from_secs(300) && long < std::time::Duration::from_secs(3600), "{long:?}");
+    let huge = ymir_core::coordinator::prefill_allowance(&Request::messages(vec![Message::user("x".repeat(200_000_000))]));
+    assert_eq!(huge, std::time::Duration::from_secs(2 * 3600));
+    // A remote model node is waited on as long for its first frame, and as before after it.
+    let s = ymir_core::remote::model_node_stall(long);
+    assert_eq!(s.first(), long);
+    assert_eq!(s.timeout(Some(std::time::Duration::from_millis(30))), std::time::Duration::from_secs(5));
+    assert_eq!(ymir_core::remote::model_node_stall(std::time::Duration::ZERO).first(), std::time::Duration::from_secs(12));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_prompt_is_not_taken_for_a_stall_by_the_askers_pool() {
+    // The asker's pool (weirdnet-agent's defaults, as `ymirctl chat` goes through the bridge)
+    // cancels a stream with no frame for 25 s. A 62 s prompt is answered, not cancelled.
+    let c = Arc::new(slow_alpha(62));
+    let pool = ymir_core::host::local_pool(c, "box", ymir_core::host::admission(2, 8), None);
+    let req = Request::messages(vec![Message::user("hi")]).with_model("alpha");
+    let a = pool.infer(req, &weirdnet_agent::pool::NoEvents, &CancelToken::new()).await.map_err(|i| i.error).unwrap();
+    assert_eq!(a.text, "a says alpha");
+    // Past the allowance with still nothing, the asker gives up as before.
+    let c = Arc::new(slow_alpha(24 * 3600));
+    let pool = ymir_core::host::local_pool(c, "box", ymir_core::host::admission(2, 8), None);
+    let req = Request::messages(vec![Message::user("hi")]).with_model("alpha");
+    let e = pool.infer(req, &weirdnet_agent::pool::NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(e.error, RemoteError::Stalled { .. }), "{:?}", e.error);
 }

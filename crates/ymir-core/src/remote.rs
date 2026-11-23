@@ -241,6 +241,13 @@ pub fn models_hub(
     ModelsHub::new(local.map(|s| (me, s)), dir, client)
 }
 
+/// When a model node's stream counts as stalled: no frame for 5 s, or 3x the recent gap between
+/// frames, up to 12 s; before the first frame, `first` (the prompt's processing time, from
+/// [`crate::coordinator::prefill_allowance`]) when longer.
+pub fn model_node_stall(first: Duration) -> weirdnet_agent::pool::Stall {
+    weirdnet_agent::pool::Stall::new(Duration::from_secs(5), 3, Duration::from_secs(12).max(first))
+}
+
 /// A model node on another of the user's devices.
 pub struct RemoteModelNode {
     peer: String,
@@ -315,8 +322,11 @@ impl RemoteModelNode {
         // A model node that stops talking is given up on sooner than the asker gives up on this inference
         // node (its pool stalls at 15 s or more), so the answer can move to another model node here
         // first instead of the asker's pool timing out on a silent stream.
-        let stall = weirdnet_agent::pool::Stall::new(Duration::from_secs(5), 3, Duration::from_secs(12));
-        let po = PoolOptions::default().with_cert(cert).with_accept_timeout(opts.accept_timeout).with_infer_v1_fallback(false).with_stall(stall);
+        let po = PoolOptions::default()
+            .with_cert(cert)
+            .with_accept_timeout(opts.accept_timeout)
+            .with_infer_v1_fallback(false)
+            .with_stall(model_node_stall(Duration::ZERO));
         // Raw inference goes to the model node's own protocol id, falling back to infer/2 for a node
         // on backends 0.1.0.
         let pool = Pool::new(Arc::new(RawInferDialer::new(dialer)), vec![peer.to_string()]).with_options(po);
@@ -409,7 +419,11 @@ impl ModelNode for RemoteModelNode {
             r.model = Some(model.to_string());
             let (tx, rx) = mpsc::unbounded_channel::<PoolEvent>();
             let cancel = CancelToken::new();
-            let (pool, c) = (self.pool.clone(), cancel.clone());
+            // The model node sends nothing while its engine processes the prompt: wait for the
+            // first frame as long as the prompt may take (this node keeps its own asker alive
+            // meanwhile, `Coordinator`), and after it as before.
+            let opts = self.pool.options().clone().with_stall(model_node_stall(crate::coordinator::prefill_allowance(&r)));
+            let (pool, c) = (self.pool.clone().with_options(opts), cancel.clone());
             let task = tokio::spawn(async move {
                 let sink: &dyn EventSink = &tx;
                 pool.infer(r, sink, &c).await

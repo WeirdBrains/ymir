@@ -104,8 +104,33 @@ fn retryable(e: &RemoteError) -> bool {
     )
 }
 
-/// How often a request waiting on a cold load tells its asker it is still alive.
+/// How often a request waiting on a cold load, or on its engine's first token, tells its asker
+/// it is still alive.
 pub const LOAD_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The least time an answer is given to start (its prompt processed) before the asker is no
+/// longer kept alive and its own stall timer may end it.
+const PREFILL_FLOOR: Duration = Duration::from_secs(60);
+/// The slowest prompt processing allowed for: tokens per second (Inkling 2 Mini at 479k context
+/// on a DGX Spark took 62 s for a 17.9k-token prompt, ~290 tokens/s).
+const PREFILL_TOKENS_PER_SEC: u64 = 50;
+/// The most time any answer is given to start.
+const PREFILL_MAX: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// How long `req` may take before its first token: [`PREFILL_FLOOR`] plus its prompt at
+/// [`PREFILL_TOKENS_PER_SEC`], with a token counted for every 3 bytes of the request (generous: a
+/// longer prompt only means a longer allowance), up to [`PREFILL_MAX`].
+///
+/// A model node sends nothing while its engine processes the prompt, so without this a long
+/// prompt looks like a dead node: the asker's pool (`weirdnet-agent`) cancels a stream with no
+/// frame for 25 s. Within this allowance an inference node keeps its asker alive while it waits
+/// ([`LOAD_KEEPALIVE`]), and the pool to a remote model node waits as long for the first frame.
+/// A node or engine that dies still ends the stream at once (the connection goes).
+pub fn prefill_allowance(req: &Request) -> Duration {
+    let bytes = serde_json::to_vec(req).map_or(0, |v| v.len() as u64);
+    let secs = (bytes / 3) / PREFILL_TOKENS_PER_SEC;
+    (PREFILL_FLOOR + Duration::from_secs(secs)).min(PREFILL_MAX)
+}
 
 /// Where an answer streams: infer/2's `Output`, or an infer/1 turn being collected.
 pub trait Sink: Send + Sync {
@@ -674,7 +699,26 @@ impl Coordinator {
             let base = req.assistant_prefix.as_ref().map_or("", |p| p.text.as_str());
             routed.assistant_prefix = Some(Prefix::new(format!("{base}{shown}"), ""));
         }
-        let mut stream = node.chat(model, &routed).await.map_err(|e| (e, false))?;
+        // Until the first text goes out (the engine processing the prompt, or a tool call still
+        // being collected), nothing reaches the asker: keep it alive, within the allowance.
+        let started = tokio::time::Instant::now();
+        let allowance = prefill_allowance(&routed);
+        let mut tick = tokio::time::interval_at(started + LOAD_KEEPALIVE, LOAD_KEEPALIVE);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut quiet = true;
+        let chat = node.chat(model, &routed);
+        tokio::pin!(chat);
+        let mut stream = loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err((RemoteError::Cancelled, !shown.is_empty())),
+                r = &mut chat => break r.map_err(|e| (e, !shown.is_empty()))?,
+                _ = tick.tick(), if started.elapsed() < allowance => {
+                    if started.elapsed() <= allowance {
+                        out.alive();
+                    }
+                }
+            }
+        };
         let mut sent = !shown.is_empty();
         let mut calls = ToolCalls::default();
         let mut answer = CachedAnswer::new(model.to_string(), "", "stop");
@@ -682,8 +726,17 @@ impl Coordinator {
             let next = tokio::select! {
                 _ = cancel.cancelled() => return Err((RemoteError::Cancelled, sent)),
                 n = stream.next() => n,
+                _ = tick.tick(), if quiet && started.elapsed() < allowance => {
+                    if started.elapsed() <= allowance {
+                        out.alive();
+                    }
+                    continue;
+                }
             };
             let chunk = next.ok_or_else(|| (engine_error("engine stream ended early"), sent))?.map_err(|e| (e, sent))?;
+            if matches!(chunk, Chunk::Text(_) | Chunk::Reasoning(_)) {
+                quiet = false;
+            }
             match chunk {
                 Chunk::Text(t) => {
                     sent = true;
