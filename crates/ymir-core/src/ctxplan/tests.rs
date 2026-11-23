@@ -1,15 +1,15 @@
 use super::*;
 use crate::kvfit::tests::{GIB, gemma4_e4b_header, inkling_header, spark_budget, sparse};
 
-/// Inkling 2 Mini IQ4_NL with its Q8_0 mmproj, as on m2 (ggml-org/Inkling-2-Mini-GGUF).
+/// Inkling 2 Mini IQ4_NL with its Q8_0 mmproj, as on node-b (ggml-org/Inkling-2-Mini-GGUF).
 const INK_WEIGHTS: u64 = 17_627_940_768 + 345_910_944;
 /// Gemma 4 E4B Q4_0.
 const GEMMA_WEIGHTS: u64 = 4_590_807_392;
-/// What llama-server took for Inkling at 1M tokens, 4 slots, on m2 (a 128 GB Spark).
-const M2_MEASURED_AT_1M: u64 = 104_600 * GIB / 1000;
-/// What llama-server had mapped when m1 ran out of memory loading Inkling at 701,440 tokens
+/// What llama-server took for Inkling at 1M tokens, 4 slots, on node-b (a 128 GB Spark).
+const NODE_B_MEASURED_AT_1M: u64 = 104_600 * GIB / 1000;
+/// What llama-server had mapped when node-a ran out of memory loading Inkling at 701,440 tokens
 /// beside a busy gemma4-e4b (v0.3.0; the oom-killer's file-rss, 113,513,024 kB).
-const M1_MAPPED_AT_OOM: u64 = 113_513_024 * 1024;
+const NODE_A_MAPPED_AT_OOM: u64 = 113_513_024 * 1024;
 const MIB: u64 = 1 << 20;
 
 fn ink() -> (ModelLaunch, Resolved) {
@@ -47,9 +47,9 @@ fn inkling_alone_on_a_spark_is_cut_to_what_fits_with_its_score_buffers() {
     let mut at = l.clone();
     at.context = Some(d.context);
     assert!(kvfit::cost(&r, &at) <= b.usable_bytes / 100 * 85, "{} GiB", kvfit::cost(&r, &at) / GIB);
-    // At 1M the estimate is above what m2 measured, never below it (v0.2.0 said 53.9 GiB).
+    // At 1M the estimate is above what node-b measured, never below it (v0.2.0 said 53.9 GiB).
     at.context = Some(1_048_576);
-    assert!(kvfit::cost(&r, &at) > M2_MEASURED_AT_1M);
+    assert!(kvfit::cost(&r, &at) > NODE_B_MEASURED_AT_1M);
 }
 
 #[test]
@@ -258,8 +258,8 @@ fn a_load_that_came_in_before_a_resize_removed_the_model_is_seen() {
 }
 
 #[test]
-fn m1_beside_a_busy_gemma_is_planned_inside_what_was_measured_free() {
-    // m1 at 13:35 ET: gemma4-e4b busy, 93.0 GiB measured free. v0.3.0 planned 701,440 tokens
+fn node_a_beside_a_busy_gemma_is_planned_inside_what_was_measured_free() {
+    // node-a at 13:35 ET: gemma4-e4b busy, 93.0 GiB measured free. v0.3.0 planned 701,440 tokens
     // (70.9 GiB with the weights); llama-server mapped 108 GiB setting up and the node ran out.
     let b = spark_budget();
     let (l, r) = ink();
@@ -267,10 +267,10 @@ fn m1_beside_a_busy_gemma_is_planned_inside_what_was_measured_free() {
     let d = decide(&ask(&l, &r), &[gemma_running(1, LONG)], &b, Some(measured), GRACE, true);
     assert!(d.evict.is_empty(), "{d:?}");
     assert_eq!((d.context, d.short), (397_312, true), "{}", d.note);
-    // The old plan now estimates above what m1 mapped when it was killed, and above what was free.
+    // The old plan now estimates above what node-a mapped when it was killed, and above what was free.
     let mut old = l.clone();
     old.context = Some(701_440);
-    assert!(kvfit::cost(&r, &old) > M1_MAPPED_AT_OOM, "{} GiB", kvfit::cost(&r, &old) / GIB);
+    assert!(kvfit::cost(&r, &old) > NODE_A_MAPPED_AT_OOM, "{} GiB", kvfit::cost(&r, &old) / GIB);
     assert!(kvfit::cost(&r, &old) > measured);
     // The new one, with its 10%, fits what was measured and keeps 20% of the room beside the
     // weights free.
@@ -281,8 +281,8 @@ fn m1_beside_a_busy_gemma_is_planned_inside_what_was_measured_free() {
 }
 
 #[test]
-fn m2_alone_is_planned_inside_what_was_measured_free() {
-    // m2 at 13:33 ET: nothing else running, 102.1 GiB measured free (v0.3.0 planned 788,480).
+fn node_b_alone_is_planned_inside_what_was_measured_free() {
+    // node-b at 13:33 ET: nothing else running, 102.1 GiB measured free (v0.3.0 planned 788,480).
     let b = spark_budget();
     let (l, r) = ink();
     let measured = 102_100 * GIB / 1000;
@@ -300,9 +300,86 @@ fn inkling_context_bytes_cover_what_llama_cpp_reserves() {
     // context (KV) and compute MiB. The estimate is never below them, and within 5% above.
     let (l, r) = ink();
     let run = Run::of(&l);
-    for (ctx, kv, compute) in [(701_440u64, 22_163u64, 68_002u64), (788_480, 24_883, 76_417), (1_048_576, 33_011, 101_563)] {
+    for (ctx, kv, compute) in [
+        (382_976u64, 12_211u64, 37_213u64),
+        (479_232, 15_219, 46_519),
+        (701_440, 22_163, 68_002),
+        (788_480, 24_883, 76_417),
+        (1_048_576, 33_011, 101_563),
+    ] {
         let llama = (kv + compute) * MIB;
         let ours = r.shape.context_bytes(ctx, run);
         assert!(ours >= llama && ours <= llama / 100 * 105, "{ctx}: {} vs {} MiB", ours / MIB, llama / MIB);
     }
+}
+
+/// node-b (a 128 GB Spark) as ymird sized it there under 0.3.1: `budget 108.0 GiB`, and 102.3 GiB
+/// measured free with nothing else running when Inkling was asked for.
+fn node_b_budget() -> Budget {
+    Budget { pool_bytes: 128 * GIB, reserve_bytes: 16 * GIB, usable_bytes: 108 * GIB }
+}
+const NODE_B_FREE: u64 = 102_349 * GIB / 1000;
+
+#[test]
+fn node_bs_measured_free_memory_gives_the_479232_it_launched_with() {
+    // 437,248 is the 128 GiB fixture's budget alone ((128 - 16) x 85% = 95.2 GiB); node-b had more.
+    let (l, r) = ink();
+    let d = decide(&ask(&l, &r), &[], &node_b_budget(), Some(NODE_B_FREE), GRACE, true);
+    assert_eq!(d.context, 479_232, "{}", d.note);
+    assert!(d.note.contains("61.0 GiB for KV and buffers") && d.note.contains("85.5 GiB in all with 16.7 GiB of weights"), "{}", d.note);
+    // What llama-server took there (VmHWM 79.38 GiB loaded, 80.97 GiB after a 17.9k-token
+    // prompt) is inside the whole estimate; only weights + KV and buffers (77.7 GiB) is less.
+    let mut at = l.clone();
+    at.context = Some(d.context);
+    let whole = kvfit::cost(&r, &at);
+    let node_b_peak = 84_904_664 * 1024;
+    assert!(node_b_peak < whole && whole - node_b_peak > 4 * GIB, "{whole} vs {node_b_peak}");
+    assert!(r.weights + r.shape.context_bytes(479_232, Run::of(&at)) < node_b_peak);
+    // ... and the 20% stays free beside it.
+    assert!(whole <= NODE_B_FREE - (NODE_B_FREE - kvfit::footprint(r.weights, 0)) / 5, "{whole}");
+}
+
+#[test]
+fn a_loaded_model_is_sized_with_its_own_memory_counted_back() {
+    // node-b after the fallback: Inkling loaded at 382,976 (set in node.toml) beside the embedding
+    // model, and the node measures what is free with Inkling already in memory.
+    let b = node_b_budget();
+    let (mut l, r) = ink();
+    l.context = Some(382_976);
+    let own = kvfit::cost(&r, &l);
+    let loaded = Resident { id: l.id.clone(), swap_group: None, bytes: own, in_flight: 0, loading: false, idle: LONG };
+    let embed = Resident { id: "qwen3-embedding-0.6b".into(), swap_group: None, bytes: GIB, in_flight: 0, loading: false, idle: LONG };
+    let residents = [loaded.clone(), embed.clone()];
+    let measured = Some(NODE_B_FREE - own - GIB);
+    let explicit = Ask { launch: &l, resolved: &r, explicit: true };
+    let d = preview(&explicit, &residents, &b, measured);
+    assert!(!d.short, "{}", d.note);
+    assert!(d.evict.is_empty(), "the embedding model is not unloaded for a context that fits: {d:?}");
+    assert_eq!(d.free, NODE_B_FREE - GIB);
+    assert!(d.note.contains("context 382976 (set in node.toml)") && d.note.contains("beside qwen3-embedding-0.6b"), "{}", d.note);
+    assert!(d.note.contains("it is loaded: its own") && d.note.contains("counted back"), "{}", d.note);
+    assert!(!d.note.contains("may not fit"), "{}", d.note);
+    // On the automatic context it would get what it got when asked for alone: cut from its
+    // full length, it would have the idle embedding model unloaded first, as at load.
+    let mut auto = l.clone();
+    auto.context = None;
+    let a = preview(&ask(&auto, &r), &residents, &b, measured);
+    assert_eq!(a.evict, vec!["qwen3-embedding-0.6b".to_string()]);
+    assert_eq!(a.context, 479_232, "{}", a.note);
+    // Without counting itself back it would look short of room it already has.
+    let blind = decide(&explicit, &[embed], &b, measured, GRACE, false);
+    assert!(blind.short, "{}", blind.note);
+    // A load still under way is not counted back: it has not taken all of its memory yet.
+    let mut starting = loaded;
+    starting.loading = true;
+    assert_eq!(preview(&explicit, &[starting], &b, measured).free, NODE_B_FREE - own - GIB);
+}
+
+#[test]
+fn a_preview_says_what_it_would_unload_rather_than_what_it_did() {
+    let b = spark_budget();
+    let (l, r) = ink();
+    let d = preview(&ask(&l, &r), &[gemma_running(0, LONG)], &b, None);
+    assert_eq!(d.evict, vec!["gemma4-e4b".to_string()]);
+    assert!(d.note.contains("it would unload idle gemma4-e4b") && !d.note.contains("; unloaded idle"), "{}", d.note);
 }

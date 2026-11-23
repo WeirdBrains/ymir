@@ -147,12 +147,17 @@ fn stays(ask: &ModelLaunch, r: &Resident) -> bool {
 
 /// The memory free for `ask` beside `residents` that stay: the budget less their estimates, and
 /// at most the measured free memory plus what the models that go (`gone`) give back.
+///
+/// When `ask` itself is loaded (asking what it would get if it were loaded again, as `ymirctl
+/// models context` does), the measurement already has its memory taken, so its own estimate is
+/// counted back: a model is never sized against itself. One still loading is not counted back
+/// (it has not taken all of its memory yet, and what it has is not known).
 pub fn free_beside(ask: &ModelLaunch, residents: &[Resident], gone: &HashSet<String>, budget: &Budget, measured: Option<u64>) -> u64 {
     let (mut kept, mut freed) = (0u64, 0u64);
     for r in residents {
         if stays(ask, r) && !gone.contains(&r.id) {
             kept = kept.saturating_add(r.bytes);
-        } else if r.id != ask.id {
+        } else if r.id != ask.id || !r.loading {
             freed = freed.saturating_add(r.bytes);
         }
     }
@@ -213,14 +218,32 @@ pub fn decide(ask: &Ask, residents: &[Resident], budget: &Budget, measured: Opti
     }
     let (context, short) = fit(ask, budget, free);
     let trained = ask.resolved.shape.trained.unwrap_or(u64::from(kvfit::FALLBACK_CONTEXT));
+    let kv = ask.resolved.shape.context_bytes(u64::from(context), run);
+    // The whole estimate, so a measurement is held to it (the 10% is where the engine's
+    // fixed-size buffers are counted: output, projector compute, host staging, prompt cache).
     let note = format!(
-        "context {context}{} ({} for KV and buffers): {} free for it {beside}{measured_note}, {}% kept free{evicted}",
+        "context {context}{} ({} for KV and buffers; {} in all with {} of weights and 10% for the engine's other buffers): {} free for it {beside}{measured_note}, {}% kept free{evicted}",
         if short { format!(", cut from {trained}") } else { format!(", its full {trained}") },
-        gib(ask.resolved.shape.context_bytes(u64::from(context), run)),
+        gib(kv),
+        gib(kvfit::footprint(ask.resolved.weights, kv)),
+        gib(ask.resolved.weights),
         gib(free),
         kvfit::HEADROOM_PCT,
     );
     Decision { evict, context, free, short, note }
+}
+
+/// What the load-time planner would give `ask` were it asked for now, beside `residents` (as
+/// `ymirctl models context` shows it): [`decide`] with idle models (`idle` of [`GRACE`] or more)
+/// allowed to go, worded as what would happen. A loaded `ask` is sized as if loaded again, with
+/// its own memory counted back ([`free_beside`]).
+pub fn preview(ask: &Ask, residents: &[Resident], budget: &Budget, measured: Option<u64>) -> Decision {
+    let mut d = decide(ask, residents, budget, measured, GRACE, true);
+    d.note = d.note.replace("; unloaded idle ", "; it would unload idle ");
+    if let Some(own) = residents.iter().find(|r| r.id == ask.launch.id && !r.loading) {
+        d.note.push_str(&format!(" (it is loaded: its own {} is counted back)", gib(own.bytes)));
+    }
+    d
 }
 
 // ---------------------------------------------------------------------------------------------

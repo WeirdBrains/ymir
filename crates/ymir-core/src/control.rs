@@ -161,6 +161,12 @@ pub struct NodeModel {
     /// For a LoRA adapter: the base model it runs on (it shares the base's engine and state).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// The context it is set to launch with (or runs with, once loaded), when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    /// The concurrent sequences it is set to run, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,6 +373,8 @@ impl ControlHandler {
                             crashes: s.crashes,
                             capabilities: s.capabilities,
                             base: s.base,
+                            context: s.context,
+                            slots: s.slots,
                         })
                     })
                     .collect();

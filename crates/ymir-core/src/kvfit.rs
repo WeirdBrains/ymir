@@ -52,9 +52,9 @@ pub const HEADROOM_PCT: u64 = 20;
 /// gathered bias and the scores are both live at the `ggml_add`, so ggml's allocator reserves two.
 /// llama.cpp's own reservation (`llama-fit-params -fitp on` on the ggml-org Inkling-2-Mini IQ4_NL
 /// header) is 68,002 MiB of compute at 701,440 tokens and 101,563 MiB at 1M: 2.07 matrices. With
-/// one, v0.3.0 planned 70.9 GiB for Inkling at 701,440 beside gemma4-e4b on m1 (a 128 GB Spark)
+/// one, v0.3.0 planned 70.9 GiB for Inkling at 701,440 beside gemma4-e4b on node-a (a 128 GB Spark)
 /// and llama-server mapped 108 GiB while it set up its context, and the node ran out of memory.
-/// (m2's 84.1 GiB at 788,480 was read after load: not all of the compute buffer was resident.)
+/// (node-b's 84.1 GiB at 788,480 was read after load: not all of the compute buffer was resident.)
 const BIASED_SCORE_COPIES: u64 = 2;
 /// The same under plain `-fa off` (no bias): the softmax runs in place, so one matrix (Qwen3
 /// 0.6B at 32,768 tokens: 1,110 MiB of compute against a 1,024 MiB matrix).
