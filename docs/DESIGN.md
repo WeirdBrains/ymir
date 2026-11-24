@@ -1557,8 +1557,11 @@ port = 8484                          # always 127.0.0.1; there is no address set
 
 # ---- fine-tuning (training plan P3a; optional) ----
 # [train]
-# trainer = "/path/to/trainer"       # speaks Ymir's trainer interface (docs/design/training.md)
-# build = "bNNNN"                    # the llama.cpp build it must report; any other is refused
+# trainer = "/path/to/scripts/trainer.py"  # speaks Ymir's trainer interface (docs/design/training.md)
+# build = "b12628"                   # the llama.cpp build it must report; any other is refused
+# [train.env]
+# YMIR_TRAINER_PYTHON = "/opt/ymir-trainer/bin/python"  # a venv with scripts/trainer-requirements.txt
+# YMIR_LLAMA_FINETUNE = "/opt/ymir-trainer/llama-finetune"  # scripts/engine.py build --trainer
 ```
 
 The single-box quickstart writes all three toggles as `true`. A laptop that only runs the bridge
