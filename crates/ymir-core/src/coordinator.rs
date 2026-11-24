@@ -356,6 +356,7 @@ impl Coordinator {
         let mut fallback = None;
         let mut known = false;
         let mut draining = false;
+        let mut reserved: Option<String> = None;
         let mut lacking = None;
         for node in self.nodes() {
             if let Some(s) = node.status().into_iter().find(|s| s.id == model) {
@@ -370,6 +371,10 @@ impl Coordinator {
                 // Images and audio go only to nodes whose copy of the model takes them.
                 if let Some(what) = crate::model_node::inputs_of(&s).lacking(needed) {
                     lacking = Some(what);
+                    continue;
+                }
+                if let Some(h) = node.reserved() {
+                    reserved.get_or_insert(h);
                     continue;
                 }
                 if node.draining() {
@@ -405,7 +410,16 @@ impl Coordinator {
             None if known && lacking.is_some() => {
                 Err(unavailable(format!("no other node that takes {} can answer with {model}", lacking.unwrap_or("this input"))))
             }
-            None if known && draining && exclude.is_empty() => Err(unavailable(format!("{model} is only on nodes that are draining"))),
+            None if known
+                && !draining
+                && exclude.is_empty()
+                && let Some(h) = reserved =>
+            {
+                Err(unavailable(format!("{model} is only on nodes that are reserved (held by {h}, a training run or an operator)")))
+            }
+            None if known && (draining || reserved.is_some()) && exclude.is_empty() => {
+                Err(unavailable(format!("{model} is only on nodes that are draining or reserved")))
+            }
             None if known => Err(unavailable(format!("no other node can answer with {model}"))),
             None => Err(unknown_model(model)),
         }

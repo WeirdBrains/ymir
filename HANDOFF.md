@@ -3,6 +3,32 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: training plan P3a, fine-tuning on one node (branch `feat/p3a-trainer`)
+
+**What changed**
+- Michael's decisions (2026-11-24). The trainer is upstream llama.cpp full fine-tuning plus a LoRA extraction step, pinned to one build ([docs/design/training.md](docs/design/training.md), decision 1 updated). The reserve command is approved, shipped as [`weirdnet-backends` 0.4.3](https://crates.io/crates/weirdnet-backends/0.4.3): `Supervisor::reserve`/`release`, node/1 `Reserve`/`Release`, `Capability::reserved`.
+- `ymir_core::train`:
+  - `[train]` in node.toml: `trainer`, `build`, `work_dir`, `env`.
+  - The trainer interface: `version`, `train`, `extract-lora`, JSON-line events, SIGTERM to cancel. `check_trainer` refuses another interface or build.
+  - `prepare_dataset` takes only P1 (`ymir-dataset/1`, the license checked) or P2 (`ymir-conversations/1`, the hash checked) datasets and writes the usable rows as chat JSONL.
+  - The GPU lock `state/train/lock.json` (stale once its pid is gone; `pid: None` for a hold taken by hand), and `reserve_running`/`release_running` through the control socket.
+  - `run`: lock, reserve, train, extract, install the adapter to `models_dir/adapters/ID.gguf`, write `run.json`, and release however it ends. `runs` lists them.
+- Nodes:
+  - `ModelNode::reserved`/`reserve`/`release` (local: the supervisor; remote: node/1). A reserved node reports `draining()`, so routing and placement skip it.
+  - The coordinator names the holder when a model is only on reserved nodes.
+  - `NodeSummary::reserved`; `ymirctl nodes` shows `reserved (held by …)`.
+- Control: `Reserve { node, holder, force }` and `Release { node, holder }`. Reserving is refused when the node is the only one with a loaded model ready, unless `force`; without the inference role this box can't see other nodes, so it asks for `--force`.
+- ymird: at start, a live lock reserves the supervisor, so a hold survives a restart.
+- ymirctl `train run | reserve | release | check | list`. `run --add` edits node.toml through the existing adapter code (revision = run id, plus the base's revision and quantisation when trained on the served file).
+- Testkit: the `ymir-mock-trainer` bin.
+- Docs: the training plan (status, interface, decision 1, order), [ROADMAP.md](ROADMAP.md) and the site roadmap (P3 in progress), the site's ymirctl page, [DESIGN.md](docs/DESIGN.md)'s node.toml example, [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `cargo fmt`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace` (see the phase report); new `crates/ymir-testkit/tests/p3a.rs` (4 tests: a run on a generated and on a conversation dataset with `--add`; refusals for the license, a missing or changed manifest, ids, another build and a hold by hand; failed and cancelled runs; a running ymird reserved for a run, a refused sole-server reserve, a load refused meanwhile, and a hold surviving a restart), plus unit tests for the lock, events and run ids.
+
+**Not tested**: no real trainer exists yet. A wrapper around the pinned `llama-finetune` and the extraction tool is still to write, with the build to pin. No real node, GPU or model was touched. Reserving a remote node over Weirdnet was not run end to end here: `weirdnet-backends` covers node/1 `Reserve` in its own tests.
+
+**Next**: the llama.cpp trainer wrapper (its own package, pinned build), and a first real run on a node the lead clears. Then `train run --node` for a remote node, and P3b.
+
 ## 2026-11-24: M10, cert-only server links (branch `feat/m10-cert-only`)
 
 **What changed**

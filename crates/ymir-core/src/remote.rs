@@ -373,7 +373,34 @@ impl ModelNode for RemoteModelNode {
     }
 
     fn draining(&self) -> bool {
-        self.record().is_some_and(|c| c.draining)
+        self.record().is_some_and(|c| c.draining || c.reserved.is_some())
+    }
+
+    fn reserved(&self) -> Option<String> {
+        self.record().and_then(|c| c.reserved.map(|r| r.holder))
+    }
+
+    /// A node before `weirdnet-backends` 0.4.3 can't decode the command, so the call fails.
+    fn reserve<'a>(&'a self, holder: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.permitted()?;
+            self.client.reserve(&self.peer, holder).await?;
+            if let Some(c) = self.record.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                c.reserved = Some(weirdnet_backends::Reservation::new(holder));
+            }
+            Ok(())
+        })
+    }
+
+    fn release<'a>(&'a self, holder: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.permitted()?;
+            self.client.release(&self.peer, holder).await?;
+            if let Some(c) = self.record.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                c.reserved = None;
+            }
+            Ok(())
+        })
     }
 
     fn group_jobs(&self) -> bool {

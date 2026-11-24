@@ -33,6 +33,22 @@ pub enum ControlRequest {
         #[serde(default = "yes")]
         on: bool,
     },
+    /// Hold a model node's GPU for `holder` (training plan P3a): its models unload and nothing is
+    /// placed there until `Release`. `node` defaults to this box's model role. Refused when the
+    /// node is the only one serving a loaded model, unless `force`.
+    Reserve {
+        #[serde(default)]
+        node: Option<String>,
+        holder: String,
+        #[serde(default)]
+        force: bool,
+    },
+    /// End `holder`'s reservation of `node` (default this box's model role).
+    Release {
+        #[serde(default)]
+        node: Option<String>,
+        holder: String,
+    },
     /// A device this user just linked from here (`ymirctl pool add`) joins the roster.
     PoolApprove {
         cert: weirdnet_net::user::NodeCert,
@@ -147,6 +163,9 @@ pub struct NodeSummary {
     #[serde(default)]
     pub local: bool,
     pub draining: bool,
+    /// Who holds the node's GPU, when it is reserved (a training run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved: Option<String>,
     pub models: usize,
     pub ready: usize,
     pub in_flight: usize,
@@ -324,6 +343,51 @@ pub struct ControlHandler {
 }
 
 impl ControlHandler {
+    /// The node a `Reserve` or `Release` names, else this box's model role.
+    fn reservable(&self, node: Option<&str>) -> Result<Arc<dyn ModelNode>, String> {
+        match node {
+            Some(name) => self.nodes().into_iter().find(|n| n.name() == name).ok_or_else(|| format!("no model node `{name}` (see `ymirctl nodes`)")),
+            None => match &self.model_node {
+                Some(n) => Ok(n.clone() as Arc<dyn ModelNode>),
+                None => Err("this node runs no model role; name a model node with --node".into()),
+            },
+        }
+    }
+
+    /// Refuses to reserve `n` while it is the only node with a loaded model ready: reserving it
+    /// would take that model out of the pool. Without the inference role this box can't see the
+    /// other nodes, so it can't tell; the operator decides with `force`.
+    fn sole_server_check(&self, n: &dyn ModelNode) -> Result<(), String> {
+        let ready: Vec<String> = n.status().into_iter().filter(|s| s.state == ModelState::Ready && s.base.is_none()).map(|s| s.id).collect();
+        if ready.is_empty() {
+            return Ok(());
+        }
+        let Some(c) = &self.coordinator else {
+            return Err(format!(
+                "{} serves {} and this box has no inference role, so it can't see whether another node serves them too; check, then pass --force",
+                n.name(),
+                ready.join(", ")
+            ));
+        };
+        let alone: Vec<String> = ready
+            .into_iter()
+            .filter(|id| {
+                !c.nodes()
+                    .iter()
+                    .any(|o| o.name() != n.name() && !o.draining() && o.status().iter().any(|s| &s.id == id && s.state == ModelState::Ready))
+            })
+            .collect();
+        if alone.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} is the only node serving {} right now; reserving it takes them out of the pool. Load them elsewhere first, or pass --force",
+                n.name(),
+                alone.join(", ")
+            ))
+        }
+    }
+
     fn network_status(&self) -> Option<NetworkStatus> {
         let (m, node) = self.network.as_ref()?;
         let st = node.status();
@@ -411,6 +475,7 @@ impl ControlHandler {
                             name: n.name().to_string(),
                             local: self.model_node.as_ref().is_some_and(|l| l.name() == n.name()),
                             draining: n.draining(),
+                            reserved: n.reserved(),
                             models: st.len(),
                             ready: st.iter().filter(|s| s.state == ModelState::Ready).count(),
                             in_flight: st.iter().map(|s| s.in_flight).sum(),
@@ -470,6 +535,32 @@ impl ControlHandler {
                     Ok(()) if on => ControlResponse::ok(format!("{node} is drained: no new requests, nothing in flight")),
                     Ok(()) => ControlResponse::ok(format!("{node} takes requests again")),
                     Err(e) => ControlResponse::err(format!("{node}: {e}")),
+                }
+            }
+            ControlRequest::Reserve { node, holder, force } => {
+                let n = match self.reservable(node.as_deref()) {
+                    Ok(n) => n,
+                    Err(e) => return ControlResponse::err(e),
+                };
+                if !force && let Err(e) = self.sole_server_check(n.as_ref()) {
+                    return ControlResponse::err(e);
+                }
+                match n.reserve(&holder).await {
+                    Ok(()) => ControlResponse::ok(format!(
+                        "{} is reserved for {holder}: its models are unloaded and nothing loads there until released",
+                        n.name()
+                    )),
+                    Err(e) => ControlResponse::err(format!("{}: {e}", n.name())),
+                }
+            }
+            ControlRequest::Release { node, holder } => {
+                let n = match self.reservable(node.as_deref()) {
+                    Ok(n) => n,
+                    Err(e) => return ControlResponse::err(e),
+                };
+                match n.release(&holder).await {
+                    Ok(()) => ControlResponse::ok(format!("{} is released: models load there again", n.name())),
+                    Err(e) => ControlResponse::err(format!("{}: {e}", n.name())),
                 }
             }
             ControlRequest::PoolApprove { cert } => {
