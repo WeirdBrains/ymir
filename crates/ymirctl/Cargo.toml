@@ -39,6 +39,9 @@ tempfile.workspace = true
 async-trait.workspace = true
 ymir-core.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 futures.workspace = true

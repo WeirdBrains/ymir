@@ -1557,8 +1557,11 @@ port = 8484                          # always 127.0.0.1; there is no address set
 
 # ---- fine-tuning (training plan P3a; optional) ----
 # [train]
-# trainer = "/path/to/trainer"       # speaks Ymir's trainer interface (docs/design/training.md)
-# build = "bNNNN"                    # the llama.cpp build it must report; any other is refused
+# trainer = "/path/to/scripts/trainer.py"  # speaks Ymir's trainer interface (docs/design/training.md)
+# build = "b12628"                   # the llama.cpp build it must report; any other is refused
+# [train.env]
+# YMIR_TRAINER_PYTHON = "/opt/ymir-trainer/bin/python"  # a venv with scripts/trainer-requirements.txt
+# YMIR_LLAMA_FINETUNE = "/opt/ymir-trainer/llama-finetune"  # scripts/engine.py build --trainer
 ```
 
 The single-box quickstart writes all three toggles as `true`. A laptop that only runs the bridge
@@ -2272,7 +2275,9 @@ The pieces of workload spreading that need only published crates (`weirdnet-agen
   `--include-cold`). Per model: warm-up, then N repeats of three fixed prompts (short, a 200-word story,
   a long prompt) with time to first token, decode tok/s, prompt tok/s and total latency as median and p90,
   then eight deterministic checks at temperature 0 (arithmetic, JSON format, two Python functions run
-  with CPU, memory and time limits and no network where `unshare` allows, exact-match facts).
+  with CPU, memory and time limits and no network where `unshare` allows; on Windows the limits come from a
+  Job Object and the network is not cut off; on macOS, which refuses memory limits, they are left
+  unscored; exact-match facts).
   Every request has its own seed and nonce so neither the answer cache nor a prefix cache is hit. The bridge
   cannot pin a node, so each request records the node that answered (`served_by`) and a model on several
   nodes gets a row per node. Output is a timestamped `.json` and `.md`; nodes are labelled node-a, node-b

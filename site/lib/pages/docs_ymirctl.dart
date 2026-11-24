@@ -263,13 +263,22 @@ models directory, and the run's record (<code>run.json</code>) to the run's work
 the adapter in <code>node.toml</code>. Ctrl-C cancels the run. Every run on a node that serves your pool takes it out
 of the pool while it trains.</p>
 <table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
-<tr><td><code>train run --base ID --dataset FILE [--id ADAPTER] [--epochs N] [--lr X] [--rank N] [--add]</code></td><td>One run. Also <code>--context</code>, <code>--batch</code>, <code>--seed</code>, <code>--from FILE</code> (train from an F16 copy of a quantised base), <code>--keep-full</code>, <code>--allow-unknown-license</code> and <code>--force</code>.</td></tr>
+<tr><td><code>train run --base ID --dataset FILE [--id ADAPTER] [--epochs N] [--lr X] [--rank N] [--add]</code></td><td>One run. Also <code>--context</code>, <code>--batch</code>, <code>--seed</code>, <code>--from FILE</code> (train from an F32 copy of a quantised base: llama.cpp trains F32 models only), <code>--keep-full</code>, <code>--allow-unknown-license</code> and <code>--force</code>.</td></tr>
 <tr><td><code>train reserve [--node NAME] [--force]</code>, <code>train release [--node NAME]</code></td><td>Hold a node's GPU by hand and free it. Without <code>--node</code>, this box, also across a <code>ymird</code> restart.</td></tr>
 <tr><td><code>train check</code>, <code>train list</code></td><td>The trainer against the pin; past runs with their status, loss and adapter.</td></tr>
 </tbody></table>
+<p>The trainer is <code>scripts/trainer.py</code> in Ymir's repository, at the same llama.cpp build as the engine
+Ymir ships. Upstream's release files don't include <code>llama-finetune</code>, so build it with
+<code>python3 scripts/engine.py build --trainer --out DIR</code>, and install the trainer's Python packages in a venv
+(<code>pip install -r scripts/trainer-requirements.txt</code>). It renders each conversation with the base's chat
+template and trains one sequence of <code>--context</code> tokens per step (<code>--batch</code> is not used). Set
+<code>YMIR_TRAINER_NGL=0</code> under <code>[train.env]</code> to train on the CPU.</p>
 <pre><code>[train]
-trainer = "/opt/ymir-trainer/bin/ymir-trainer-llamacpp"
-build = "b1234"
+trainer = "/opt/ymir/scripts/trainer.py"
+build = "b12628"
+[train.env]
+YMIR_TRAINER_PYTHON = "/opt/ymir-trainer/bin/python"
+YMIR_LLAMA_FINETUNE = "/opt/ymir-trainer/llama-finetune"
 
 ymirctl train run --base qwen3-8b --dataset data.jsonl --id qwen3-8b+support --epochs 2 --add</code></pre>
 <h3 id="rollout"><code>ymirctl models rollout</code>: versions, canaries and rollback</h3>
