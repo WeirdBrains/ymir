@@ -11,7 +11,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 - Control: `ContextTrain`, `ContextForTraining` (local socket); `ConversationView::training`.
 - ymirctl: `context train ID [--off]`, `context export --training OUT [--keep-system] [--redact RE]...`, `context withdrawn MANIFEST`; `context show` marks `[training]`.
 - New dependency: `regex` 1.
-- Docs: DESIGN.md (P2 section), training.md, roadmap.toml (P2 done; ROADMAP.md and the site regenerated), CHANGELOG.
+- Docs: [DESIGN.md](docs/DESIGN.md) (P2 section), [training.md](docs/design/training.md), [roadmap.toml](roadmap.toml) (P2 done; [ROADMAP.md](ROADMAP.md) and the site regenerated), [CHANGELOG.md](CHANGELOG.md).
 
 **Checks run**: fmt; clippy `--workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked --no-fail-fast`: 270 passed, 0 failed, 7 ignored; `gen_roadmap.py --check`; link check. New tests: `context::training_consent_is_its_own_record_and_off_by_default`, five in `convexport`, and end to end `p2::only_marked_conversations_are_exported_and_withdrawal_is_reported` (two daemons over Weirdnet on loopback: consent set on the app node syncs, export on the inference node, withdrawal reported).
 
