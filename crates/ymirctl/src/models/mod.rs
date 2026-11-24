@@ -20,6 +20,7 @@ mod hub;
 mod local;
 mod plan;
 mod remote;
+pub mod rollout;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -52,6 +53,12 @@ pub enum ModelsCmd {
     Adapter {
         #[command(subcommand)]
         cmd: adapters::AdapterCmd,
+    },
+    /// Versioned rollouts (training plan P4b): one name, several versions, a traffic weight each;
+    /// a canary share, an eval gate above it, and rollback.
+    Rollout {
+        #[command(subcommand)]
+        cmd: rollout::RolloutCmd,
     },
 }
 
@@ -209,13 +216,16 @@ impl Ctx {
 
 /// Runs a `models` command. With `--node` it goes to the model nodes through the local `ymird`.
 pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: ModelsCmd) -> Result<()> {
+    if let ModelsCmd::Rollout { cmd } = cmd {
+        return rollout::run(paths, out, cmd).await;
+    }
     let node = match &cmd {
         ModelsCmd::Search(a) => a.node.node.clone(),
         ModelsCmd::Pull(a) => a.node.node.clone(),
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
         ModelsCmd::Adapter { cmd } => cmd.node(),
-        ModelsCmd::Context(_) => None,
+        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } => None,
     };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;
@@ -245,7 +255,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::List(a) => a.dir.dir.clone(),
         ModelsCmd::Remove(a) => a.dir.dir.clone(),
         ModelsCmd::Context(a) => a.dir.dir.clone(),
-        ModelsCmd::Search(_) | ModelsCmd::Adapter { .. } => None,
+        ModelsCmd::Search(_) | ModelsCmd::Adapter { .. } | ModelsCmd::Rollout { .. } => None,
     };
     let env_store = ModelStore::from_env();
     let dir = dir_arg.or_else(|| cfg.as_ref().map(NodeConfig::models_dir)).unwrap_or_else(|| env_store.dir().to_path_buf());
@@ -268,6 +278,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::Remove(a) => remove(&ctx, out, input, &a),
         ModelsCmd::Context(a) => ctxcmd::run(&ctx, out, &a),
         ModelsCmd::Adapter { cmd } => adapters::run(&ctx, out, cmd),
+        ModelsCmd::Rollout { .. } => unreachable!("handled in run"),
     }
 }
 

@@ -27,6 +27,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
             bail!("`ymirctl models context` edits this machine's node.toml; run it on the node itself (without --node)")
         }
         ModelsCmd::Adapter { cmd } => adapter(paths, out, node, cmd).await,
+        ModelsCmd::Rollout { .. } => bail!("rollouts are this inference node's pool policy; run `ymirctl models rollout` on it (without --node)"),
     }
 }
 
