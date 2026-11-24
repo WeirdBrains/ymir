@@ -149,6 +149,10 @@ fn strip(c: &RawConversation, keep_system: bool, red: &mut Redactor, d: &mut Dro
     }
     let mut cut = None;
     for (i, (_, v)) in c.messages.iter().enumerate() {
+        // A deleted message (Bragi writes `{"deleted": true}` over it) is not a turn.
+        if v.get("deleted").and_then(Value::as_bool) == Some(true) || v.get("role").is_none() {
+            continue;
+        }
         let role = text(v, "role");
         d.attachments += count(v, "attachments");
         match role.as_str() {
@@ -350,6 +354,18 @@ mod tests {
         assert_eq!(m.conversations_exported, 1);
         assert_eq!(m.conversations[0].turns, 0);
         assert_eq!(m.dropped.standin, 1);
+    }
+
+    #[test]
+    fn a_deleted_message_is_skipped_not_counted() {
+        let c = conv(
+            "c",
+            None,
+            vec![json!({"role": "user", "text": "q"}), json!({"deleted": true, "at_ms": 3}), json!({"role": "assistant", "text": "a"})],
+        );
+        let (rows, m) = build(&[c], &Rules::default()).unwrap();
+        assert_eq!(rows[0].messages.len(), 2);
+        assert_eq!(m.dropped, Dropped::default());
     }
 
     #[test]
