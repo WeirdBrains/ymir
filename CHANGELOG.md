@@ -6,11 +6,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
 ### Added
 
 - `lora_slots = N` on a vLLM `[[model.local]]`: the base starts with LoRA on even with no adapters listed, so adapters can be served on it later without a restart. `ymirctl models adapter slots BASE N|--off` sets it; `adapter list` shows it.
 - The base-revision check: `[[model.local.lora]]` takes `base_revision` and `base_quant`, the base's revision and quantisation the adapter was trained on. If the base has moved on, ymird doesn't serve the adapter (an error in the log names both revisions; the base still serves) and `adapter list` marks it NOT SERVED. `ymirctl models adapter add` records the base's current ones (`--base-revision`, `--base-quant` to override) and refuses an adapter that wouldn't serve.
 - An opt-in real-vLLM test of runtime LoRA with `lora_slots` (`YMIR_TEST_VLLM_LORA`).
+- LoRA slots for vLLM bases, ymirctl models adapter slots, and the adapter base-revision check.
 
 ## [0.5.0] - 2026-11-23
 
