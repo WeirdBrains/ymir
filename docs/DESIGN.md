@@ -1806,6 +1806,7 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
 - **B6 Your own endpoints** (built 2026-11-21; see [B6 status](#b6-status-built-2026-11-21)): any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback. Built in the core, the Flutter app and the GPUI desktop shell.
 - **B7 Models on your pool** (in progress; see [B7 status](#b7-status-in-progress)): a Models screen to search, pull and remove models on your Ymir nodes. Built in both shells and tried against demo nodes and a mock Hub. Next: a check against a real Ymir node.
 - **v0.2 Chat, code and the desktop link** (shipped in Bragi v0.2.1): chat and code as modes of one conversation, a desktop linker with QR pairing over Weirdnet so the phone's code mode works against a paired desktop, project scaffolding, a shell-out command, prompt history, a notification log, mouse support in the terminal app, and thinking blocks that stay collapsed and can be expanded.
+- **v0.4 History bar and more than one pool** (shipped in Bragi v0.4.0): the history sidebar can be hidden and the choice is remembered, in the terminal app, the desktop window and a wide Flutter layout; a device can be linked to more than one Ymir pool and switch which one is active, each with its own history.
 
 ## Milestones (Ymir)
 
@@ -1856,7 +1857,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M10 Cert-only server link** (built 2026-11-24; see [M10 status](#m10-status-built-2026-11-24)).
   `weirdnet-sync` 0.7 and `weirdnet-device-link` 0.4 give service nodes a node certificate and sync keys
   without the root seed; `ymirctl pool cert-only` moves an existing node and wipes its seed copy; a node
-  can be revoked without rotating the root identity.
+  can be revoked without rotating the root identity. Bragi links a server cert-only with
+  `bragi-tui link CODE --server inference|model` (Bragi v0.5.0).
 
 ## M1 status (built 2026-11-19)
 
