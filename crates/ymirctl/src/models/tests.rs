@@ -513,7 +513,8 @@ fn with_base(fx: &Fixture) -> (Ctx, std::path::PathBuf) {
     let base = fx.dir.path().join("base.gguf");
     std::fs::write(&base, gguf_bytes(10_000, 9)).unwrap();
     let cfg = format!(
-        "[node]\nname = \"n\"\n\n[[model.local]]\nid = \"base\"\nrole = \"main\"\nfile = \"{}\"\nrevision = \"r1\"\nquant = \"Q4_K_M\"\n",
+        // A literal TOML string, so a Windows path's backslashes are not read as escapes.
+        "[node]\nname = \"n\"\n\n[[model.local]]\nid = \"base\"\nrole = \"main\"\nfile = '{}'\nrevision = \"r1\"\nquant = \"Q4_K_M\"\n",
         base.display()
     );
     (fx.ctx(32, Some(&cfg)), base)

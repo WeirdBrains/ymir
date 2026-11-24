@@ -72,7 +72,7 @@ B go to the Weirdnet lead once the plan is confirmed.
 - Publishing update bundles and announcements needs the release script and the org keys.
 - The whitepaper roadmap line (docs/whitepaper/sections/12-roadmap.tex) still says the fetcher is next; it is Michael's file.
 
-**Local state:** alien-blue `~/Projects/WeirdBrains/ymir` has a stash "alien-blue local: release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is at `~/Projects/WeirdBrains/phase-log.md` on alien-blue.
+**Local state:** the dev box's own Ymir checkout has a stash "local: release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is kept off-repo on the dev box.
 
 ## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
 
