@@ -324,6 +324,12 @@ pub struct LocalModel {
     /// and sharing this model's engine: llama.cpp and vLLM only, not wrapped, not embedding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lora: Vec<LocalAdapter>,
+    /// vLLM only: start the engine with LoRA on (`--enable-lora`, `--max-loras` at least this many
+    /// adapters at once) even with no `lora` listed, so adapters can be served on it later without
+    /// a restart (`ymirctl models adapter serve`, or a pull with `--adapter-for --serve`). A vLLM
+    /// base with adapters listed takes more at run time without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_slots: Option<u32>,
 }
 
 /// A LoRA adapter on a `[[model.local]]` base, served as its own model id (for example
@@ -343,6 +349,15 @@ pub struct LocalAdapter {
     /// model's `revision`, so answers from an older adapter under the same id are never replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// The base model's `revision` this adapter was trained on. When both it and the base's
+    /// `revision` are set and differ, the adapter is not served (a LoRA only fits the weights it
+    /// was trained on). `ymirctl models adapter add` records the base's revision here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
+    /// The base's `quant` this adapter was trained on (for example `Q4_K_M`); checked like
+    /// `base_revision` against the base's `quant`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_quant: Option<String>,
 }
 
 impl LocalModel {
@@ -352,6 +367,28 @@ impl LocalModel {
 }
 
 impl LocalAdapter {
+    /// Why this adapter doesn't fit `base`'s weights: its `base_revision` or `base_quant` differs
+    /// from the base's `revision` or `quant` (both set). `None` when they match or either is unset.
+    pub fn base_mismatch(&self, base: &LocalModel) -> Option<String> {
+        let differs = |want: &Option<String>, have: &Option<String>| match (want, have) {
+            (Some(w), Some(h)) if !w.trim().eq_ignore_ascii_case(h.trim()) => Some((w.clone(), h.clone())),
+            _ => None,
+        };
+        if let Some((w, h)) = differs(&self.base_revision, &base.revision) {
+            return Some(format!(
+                "it was trained on revision {w} of `{}`, which is now at revision {h}; retrain it, or set its base_revision if it still fits",
+                base.id
+            ));
+        }
+        if let Some((w, h)) = differs(&self.base_quant, &base.quant) {
+            return Some(format!(
+                "it was trained on the {w} quantisation of `{}`, which is now {h}; retrain it, or set its base_quant if it still fits",
+                base.id
+            ));
+        }
+        None
+    }
+
     /// The adapter path the engine takes: a path under `models_dir` when relative and present
     /// there (or not a Hub id), else as written.
     pub fn path(&self, models_dir: &Path) -> String {
@@ -585,6 +622,23 @@ impl NodeConfig {
                     bail!("model `{}`: embedding models take no LoRA adapters", m.id);
                 }
             }
+            if let Some(n) = m.lora_slots {
+                if m.backend.as_deref() != Some("vllm") {
+                    bail!(
+                        "model `{}`: lora_slots is for backend = \"vllm\" (llama-server loads adapter files only at start: list them under [[model.local.lora]])",
+                        m.id
+                    );
+                }
+                if m.wrap.is_some() {
+                    bail!("model `{}`: a wrapped server can't take LoRA adapters from ymird; start it with --enable-lora yourself", m.id);
+                }
+                if m.is_embedding() {
+                    bail!("model `{}`: embedding models take no LoRA adapters", m.id);
+                }
+                if n == 0 {
+                    bail!("model `{}`: lora_slots must be at least 1 (leave it out to keep LoRA off)", m.id);
+                }
+            }
         }
         for m in &self.model.local {
             for a in &m.lora {
@@ -812,6 +866,7 @@ impl NodeConfig {
                         }
                     }),
                 });
+                l.lora_slots = m.lora_slots;
                 l.with_adapters(
                     m.lora
                         .iter()
@@ -1102,6 +1157,67 @@ mod tests {
         assert!(bad(&|c| c.model.local[0].role = Some("embedding".into())).contains("embedding"));
         assert!(bad(&|c| c.model.local[0].wrap = Some("http://127.0.0.1:9000".into())).contains("wrapped"));
         assert!(bad(&|c| c.model.local[0].lora[0].file = String::new()).contains("file is required"));
+    }
+
+    #[test]
+    fn lora_slots_and_the_base_revision_check() {
+        let mut cfg: NodeConfig = toml::from_str(
+            r#"
+            [[model.local]]
+            id = "qwen3-8b"
+            file = "/m/qwen.gguf"
+            revision = "base-r2"
+            quant = "Q4_K_M"
+            [[model.local.lora]]
+            id = "qwen3-8b+old"
+            file = "/m/old.gguf"
+            base_revision = "base-r1"
+            [[model.local.lora]]
+            id = "qwen3-8b+q8"
+            file = "/m/q8.gguf"
+            base_quant = "Q8_0"
+            [[model.local.lora]]
+            id = "qwen3-8b+ok"
+            file = "/m/ok.gguf"
+            base_revision = "BASE-R2"
+            base_quant = "q4_k_m"
+            [[model.local.lora]]
+            id = "qwen3-8b+unknown"
+            file = "/m/unknown.gguf"
+            [[model.local]]
+            id = "big"
+            backend = "vllm"
+            file = "org/big"
+            lora_slots = 4
+            "#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let mut l = cfg.launches();
+        assert_eq!((l[0].lora_slots, l[1].lora_slots), (None, Some(4)));
+        assert!(l[1].runtime_lora() && !l[0].runtime_lora());
+
+        let base = &cfg.model.local[0];
+        assert!(base.lora[0].base_mismatch(base).unwrap().contains("revision base-r1 of `qwen3-8b`, which is now at revision base-r2"));
+        assert!(base.lora[1].base_mismatch(base).unwrap().contains("Q8_0 quantisation"));
+        assert_eq!(base.lora[2].base_mismatch(base), None, "case and spaces don't count");
+        assert_eq!(base.lora[3].base_mismatch(base), None, "nothing recorded, nothing checked");
+        let dropped = crate::adapters::drop_wrong_base(&cfg, &mut l);
+        assert_eq!(dropped.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["qwen3-8b+old", "qwen3-8b+q8"]);
+        assert_eq!(l[0].served_ids(), ["qwen3-8b", "qwen3-8b+ok", "qwen3-8b+unknown"]);
+        let back: NodeConfig = toml::from_str(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back, cfg);
+
+        let bad = |f: &dyn Fn(&mut NodeConfig)| {
+            let mut c = cfg.clone();
+            f(&mut c);
+            c.validate().unwrap_err().to_string()
+        };
+        assert!(bad(&|c| c.model.local[0].lora_slots = Some(2)).contains("lora_slots is for backend = \"vllm\""));
+        assert!(bad(&|c| c.model.local[1].lora_slots = Some(0)).contains("at least 1"));
+        assert!(bad(&|c| c.model.local[1].wrap = Some("http://127.0.0.1:9000".into())).contains("wrapped"));
+        cfg.model.local[0].revision = None;
+        assert_eq!(cfg.model.local[0].lora[0].base_mismatch(&cfg.model.local[0]), None, "a base without a revision can't be checked");
     }
 
     #[test]

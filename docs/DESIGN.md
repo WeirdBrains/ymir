@@ -831,9 +831,26 @@ name. MLX, wrapped servers and embedding models take none.
 - These changes are in memory only: `node.toml` keeps what `models adapter add | remove` wrote, and a
   restart of ymird goes back to it.
 
-Not built yet: `lora_slots` in `node.toml` (so a vLLM base with no adapters at start can take them
-live), and the base-revision check (refuse an adapter trained on another revision or quantisation of
-the base, once adapters record it).
+**LoRA slots and the base-revision check (third slice, 2026-11-23).** No Weirdnet change; P4a is
+complete with this.
+
+- **`lora_slots`.** `[[model.local]] lora_slots = N` (vLLM only) starts the base with LoRA on even with
+  no adapters listed (`ModelLaunch::lora_slots`: `--enable-lora`, `--max-loras` of at least N, and
+  runtime loading allowed), so `adapter serve` and `models pull --adapter-for --serve` add adapters to
+  it with no restart. Without it, a vLLM base started with no adapters runs without LoRA and the first
+  adapter restarts it, as with llama-server; ymirctl's "after the next load" message says so. Refused
+  for llama.cpp (adapter files load only at start: list them under `[[model.local.lora]]`), wrapped
+  servers, embedding models and 0. `ymirctl models adapter slots BASE N|--off` sets it in `node.toml`;
+  `adapter list` shows it. Restart ymird to apply.
+- **Base-revision check.** `[[model.local.lora]]` gains `base_revision` and `base_quant`: the base's
+  `revision` and `quant` the adapter was trained on. When both sides are set and differ (trimmed,
+  case-insensitive), the adapter is not served (`LocalAdapter::base_mismatch`): ymird drops it at start
+  with an error in the log naming both revisions (`adapters::drop_wrong_base`), the base and its other
+  adapters still serve, and `adapter list` marks it "NOT SERVED" with the reason. `adapter add` records
+  the base's current revision and quantisation by default (`--base-revision`, `--base-quant` to say
+  otherwise) and refuses an adapter that wouldn't serve. Nothing recorded, or a base without a
+  revision, means nothing to check. Adapters served live over Weirdnet (`serve`, `pull --serve`) are
+  not in `node.toml` and are not checked; the GGUF architecture check still applies to them.
 
 ### Process manager (replaces llama-swap)
 

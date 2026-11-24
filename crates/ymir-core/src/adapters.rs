@@ -27,6 +27,24 @@ pub fn keep_servable(launches: &mut [ModelLaunch]) {
     }
 }
 
+/// Drops, with an error in the log, each adapter trained on another revision or quantisation of
+/// its base ([`crate::config::LocalAdapter::base_mismatch`]). Returns what was dropped, as
+/// `(adapter, why)`.
+pub fn drop_wrong_base(cfg: &crate::NodeConfig, launches: &mut [ModelLaunch]) -> Vec<(String, String)> {
+    let mut dropped = Vec::new();
+    for m in &cfg.model.local {
+        let Some(l) = launches.iter_mut().find(|l| l.id == m.id) else { continue };
+        for a in &m.lora {
+            if let Some(why) = a.base_mismatch(m) {
+                tracing::error!(model = %a.id, base = %m.id, "not serving LoRA adapter {}: {why}", a.id);
+                l.adapters.retain(|x| x.id != a.id);
+                dropped.push((a.id.clone(), why));
+            }
+        }
+    }
+    dropped
+}
+
 /// The base model `id` runs on: itself for a model, its base for an adapter, `None` when unknown.
 pub fn base_of(launches: &[ModelLaunch], id: &str) -> Option<String> {
     launches.iter().find_map(|l| (l.id == id || l.adapters.iter().any(|a| a.id == id)).then(|| l.id.clone()))

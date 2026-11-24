@@ -11,6 +11,9 @@ All notable changes to Ymir are listed here. The format follows
 - Live LoRA adapter changes, without restarting the base where the engine allows: `ymirctl models adapter scale ID S|--reset --node NAME` (llama.cpp, from the next request), `adapter serve ID --base BASE --node NAME` (an adapter already on the node's disk) and `adapter unserve ID --node NAME` (its files stay). vLLM loads and unloads adapters at run time; llama-server only re-enables files it started with, so a new adapter file still serves after the base's next load. In memory only; `node.toml` is unchanged.
 - `ymirctl chat --adapter-scale S`, and `"adapter_scale"` in a bridge request body: how strongly a LoRA adapter applies to one answer (llama.cpp).
 - The catalog names each adapter's base (catalog/1 `base`; `weirdnet.base` in the bridge's `/v1/models`), so apps can label adapters.
+- `lora_slots = N` on a vLLM `[[model.local]]`: the base starts with LoRA on even with no adapters listed, so adapters can be served on it later without a restart. `ymirctl models adapter slots BASE N|--off` sets it; `adapter list` shows it.
+- The base-revision check: `[[model.local.lora]]` takes `base_revision` and `base_quant`, the base's revision and quantisation the adapter was trained on. If the base has moved on, ymird doesn't serve the adapter (an error in the log names both revisions; the base still serves) and `adapter list` marks it NOT SERVED. `ymirctl models adapter add` records the base's current ones (`--base-revision`, `--base-quant` to override) and refuses an adapter that wouldn't serve.
+- An opt-in real-vLLM test of runtime LoRA with `lora_slots` (`YMIR_TEST_VLLM_LORA`).
 
 ### Changed
 
