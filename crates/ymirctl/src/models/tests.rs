@@ -143,6 +143,7 @@ fn a_smaller_node_gets_a_smaller_quant_and_a_tiny_one_is_told_nothing_fits() {
     let s = text(out);
     // An asked-for context is the operator's and goes in the entry.
     assert!(s.contains("Q8_0") && s.contains("context = 4096") && s.contains("Context on this node: context 4096 (set in node.toml)"), "{s}");
+    assert!(s.contains("KV cache and buffers; ") && s.contains(" in all with "), "a fixed context gives its total: {s}");
 }
 
 #[test]

@@ -3,6 +3,17 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-23: plan total for a fixed context, `[[requires]]` for weirdnet-backends (branch `fix/plan-total-and-requires`)
+
+**What changed** (flagged by Infra after the 0.4.0 release)
+- The context plan note for a context set in `node.toml` now gives the whole estimate like the automatic one: KV and buffers, and the total with weights and the 10% (`ctxplan::decide` at load time, `kvfit::plan_launches` at start-up).
+- `release.toml` has `[[requires]]` for `weirdnet-backends` 0.4.1 (`pin = "none"`: checked on crates.io and in `Cargo.lock`, the manifest entry with its features is left as written).
+- Also merged before this: `fafb6bf`, Pages' `cargo doc -D warnings` failed on doc links to private consts in `coordinator.rs` (since `be81b8e`); Pages is green again.
+
+**Checks run**: fmt; clippy `--workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked --no-fail-fast`: 260 passed, 0 failed, 6 ignored; `weirdnet_release.py validate`.
+
+**Not tested**: the new note on real hardware (unit and CLI tests only).
+
 ## 2026-11-23: live LoRA adapter changes on new Weirdnet crates (branch `weirdnet-live-adapters`)
 
 **What changed**

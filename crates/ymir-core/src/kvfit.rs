@@ -836,15 +836,24 @@ pub fn plan_launches(launches: &mut [ModelLaunch], budget: &Budget, models_dir: 
         if let (false, Some(c)) = (items[i].auto, l.context) {
             let kv = r.shape.context_bytes(u64::from(c), run);
             let warn = kv > kv_budget;
+            let total = footprint(r.weights, kv);
             let note = if warn {
                 format!(
-                    "context {c} (set in node.toml): its {} {} KV cache and score buffers may not fit beside the weights ({} free for them here)",
+                    "context {c} (set in node.toml): its {} {} KV cache and score buffers may not fit beside the weights ({} free for them here; {} in all with {} of weights and 10% for the engine's other buffers)",
                     gib(kv),
                     cache.name,
-                    gib(kv_budget)
+                    gib(kv_budget),
+                    gib(total),
+                    gib(r.weights)
                 )
             } else {
-                format!("context {c} (set in node.toml)")
+                format!(
+                    "context {c} (set in node.toml) ({} {} KV cache and buffers; {} in all with {} of weights and 10% for the engine's other buffers)",
+                    gib(kv),
+                    cache.name,
+                    gib(total),
+                    gib(r.weights)
+                )
             };
             plans.push(Plan { id, context: Some(c), trained, explicit: true, clamped: false, auto_would_be: (fit > c).then_some(fit), warn, note });
             continue;
