@@ -125,6 +125,7 @@ impl Daemon {
                     false
                 }
             });
+            crate::adapters::drop_wrong_base(&cfg, &mut launches);
             crate::adapters::keep_servable(&mut launches);
             // Contexts: each model's full trained length, cut only where its KV cache would not fit.
             let hw = weirdnet_model::hw::detect();

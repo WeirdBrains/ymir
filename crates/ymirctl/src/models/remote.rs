@@ -257,8 +257,8 @@ async fn adapter(paths: &Paths, out: &mut dyn Write, node: &str, cmd: AdapterCmd
         AdapterCmd::Serve(a) => ModelsOp::ServeAdapter { id: a.id.clone(), base: a.base.clone(), scale: a.scale },
         AdapterCmd::Unserve(a) => ModelsOp::UnserveAdapter { id: a.id.clone() },
         AdapterCmd::Scale(a) => ModelsOp::AdapterScale { id: a.id.clone(), scale: if a.reset { None } else { a.scale } },
-        AdapterCmd::Add(_) | AdapterCmd::Remove(_) | AdapterCmd::List => {
-            bail!("`ymirctl models adapter add | remove | list` edit this machine's node.toml; run them on the node itself (without --node)")
+        AdapterCmd::Add(_) | AdapterCmd::Remove(_) | AdapterCmd::List | AdapterCmd::Slots(_) => {
+            bail!("`ymirctl models adapter add | remove | list | slots` edit this machine's node.toml; run them on the node itself (without --node)")
         }
     };
     let done = ask(paths, out, node, op).await?;
@@ -267,7 +267,7 @@ async fn adapter(paths: &Paths, out: &mut dyn Write, node: &str, cmd: AdapterCmd
         match reply {
             ModelsReply::AdapterServed { id, base, change: AdapterChange::NextLoad } => writeln!(
                 out,
-                "{label}: `{id}` is added to `{base}`, whose engine can't load a new adapter while it runs (llama-server): the first request for `{id}` restarts `{base}` with it"
+                "{label}: `{id}` is added to `{base}`, whose engine can't load a new adapter while it runs (llama-server, or vLLM started without LoRA: see `ymirctl models adapter slots`): the first request for `{id}` restarts `{base}` with it"
             )?,
             ModelsReply::AdapterServed { id, base, .. } => writeln!(out, "{label}: serving `{id}` now, on `{base}` (no restart)")?,
             ModelsReply::AdapterUnserved { id, base } => writeln!(out, "{label}: stopped serving `{id}` on `{base}`; its files are kept")?,

@@ -4,12 +4,13 @@
 //! (extra engine args in `YMIR_TEST_VLLM_ARGS`, such as `--gpu-memory-utilization 0.5`).
 //! Wrapping a stock `vllm serve`: `YMIR_TEST_VLLM_WRAP=http://127.0.0.1:8000` and
 //! `YMIR_TEST_VLLM_WRAP_MODEL=<served model name>`.
+//! Runtime LoRA (`lora_slots`): also `YMIR_TEST_VLLM_LORA=<PEFT dir or Hub id for that model>`.
 
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde_json::json;
-use weirdnet_backends::{Chunk, EngineConfig, EngineKind, ModelLaunch, Supervisor, SupervisorOptions, Wrap};
+use weirdnet_backends::{AdapterChange, Chunk, EngineConfig, EngineKind, LoraAdapter, ModelLaunch, Supervisor, SupervisorOptions, Wrap};
 
 async fn ask(sup: &Supervisor, id: &str, max_tokens: u64) -> (String, u64, Duration) {
     let (req, _) = weirdnet_openai::request::chat(json!({
@@ -78,4 +79,35 @@ async fn real_vllm_wrapped() {
     assert!(!text.is_empty());
     eprintln!("wrapped vLLM: {tokens} tokens in {:.2}s = {:.1} tok/s", d.as_secs_f32(), tokens as f32 / d.as_secs_f32());
     sup.unload(&model).await.unwrap();
+}
+
+/// A base started with no adapters but `lora_slots` (node.toml) takes one at run time, without a
+/// restart, and drops it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs YMIR_TEST_VLLM, YMIR_TEST_VLLM_MODEL and YMIR_TEST_VLLM_LORA (and a GPU)"]
+async fn real_vllm_runtime_lora() {
+    let program = std::env::var("YMIR_TEST_VLLM").expect("YMIR_TEST_VLLM");
+    let model = std::env::var("YMIR_TEST_VLLM_MODEL").expect("YMIR_TEST_VLLM_MODEL");
+    let lora = std::env::var("YMIR_TEST_VLLM_LORA").expect("YMIR_TEST_VLLM_LORA");
+    let mut l = ModelLaunch::new("vl", EngineKind::Vllm, model);
+    l.context = Some(4096);
+    l.lora_slots = Some(2);
+    l.extra_args = std::env::var("YMIR_TEST_VLLM_ARGS").unwrap_or_default().split_whitespace().map(str::to_string).collect();
+    let logs = tempfile::tempdir().unwrap();
+    let sup =
+        Supervisor::new(vec![EngineConfig::vllm(program)], vec![l], SupervisorOptions { log_dir: Some(logs.path().into()), ..Default::default() });
+    if let Err(e) = sup.load("vl").await {
+        let log = std::fs::read_to_string(logs.path().join("vl.log")).unwrap_or_default();
+        panic!("{e}\n{}", &log[log.len().saturating_sub(4000)..]);
+    }
+    let pid = sup.status()[0].pid;
+    let change = sup.add_adapter_live("vl", LoraAdapter::new("vl+tune", lora)).await.unwrap();
+    assert_eq!(change, AdapterChange::Live, "served without a restart");
+    let (text, ..) = ask(&sup, "vl+tune", 32).await;
+    assert!(!text.is_empty());
+    assert_eq!(sup.status()[0].pid, pid, "the base did not restart");
+    sup.remove_adapter_live("vl", "vl+tune").await.unwrap();
+    let (text, ..) = ask(&sup, "vl", 16).await;
+    assert!(!text.is_empty());
+    sup.unload("vl").await.unwrap();
 }

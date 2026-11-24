@@ -2,7 +2,7 @@
 
 <!-- Generated from roadmap.toml by site/tool/gen_roadmap.py. Edit roadmap.toml, not this file. -->
 
-Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1 is built, P4a is starting, and P2 and P3 have not started.
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1 and P4a are built, and P2 and P3 have not started.
 
 Updated 2026-11-23. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
@@ -78,11 +78,11 @@ Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests,
 
 Weirdnet crates: `weirdnet-agent`.
 
-## P4a LoRA adapters on a loaded base (In progress)
+## P4a LoRA adapters on a loaded base (Done)
 
-Serve LoRA adapters on an already-loaded base model (llama.cpp first): a first-class adapter list in the catalog, each advertised as its own model. Work is starting. Versioned rollout and canaries (P4b) wait on this. P2 and P3 have not started.
+Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come next; P2 and P3 have not started.
 
-Weirdnet crates: `weirdnet-backends`, `weirdnet-model`.
+Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`, `weirdnet-openai`, `weirdnet-alerts`.
 
 ## P2 Training data from conversations (Planned)
 

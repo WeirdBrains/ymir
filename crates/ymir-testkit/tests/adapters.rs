@@ -174,3 +174,43 @@ async fn an_adapter_that_cannot_be_served_is_dropped_and_the_base_still_serves()
     daemon.shutdown().await;
     Ok(())
 }
+
+/// The base-revision check: `adapter add` records the base's revision, refuses an adapter trained
+/// on another one, and once the base moves on, `adapter list` flags it and ymird doesn't serve it
+/// (the base still serves). `adapter slots` is for vLLM bases only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_trained_on_another_base_revision_is_not_served() -> Result<()> {
+    let n = setup().await?;
+    let home = &n.home;
+    let paths = Paths::new(home);
+    let text = std::fs::read_to_string(paths.config())?;
+    std::fs::write(paths.config(), text.replacen("id = \"base\"", "id = \"base\"\nrevision = \"r1\"", 1))?;
+
+    let out = ctl(home, &["models", "adapter", "add", "base", "adapters/support-v2.gguf"]).await?;
+    assert!(out.contains("Recorded that it was trained on revision r1 of `base`"), "{out}");
+    let err = ctl(home, &["models", "adapter", "add", "base", "adapters/support-v2.gguf", "--id", "old", "--base-revision", "r0"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`old` would not be served on `base`") && err.contains("revision r0"), "{err}");
+    let err = ctl(home, &["models", "adapter", "slots", "base", "2"]).await.unwrap_err().to_string();
+    assert!(err.contains("lora_slots is for backend = \"vllm\""), "{err}");
+    let cfg = NodeConfig::load(&paths.config())?;
+    assert_eq!(cfg.model.local[0].lora[0].base_revision.as_deref(), Some("r1"));
+
+    // The base moves on.
+    let text = std::fs::read_to_string(paths.config())?;
+    std::fs::write(paths.config(), text.replacen("revision = \"r1\"", "revision = \"r2\"", 1))?;
+    let listed = ctl(home, &["models", "adapter", "list"]).await?;
+    assert!(listed.contains("NOT SERVED") && listed.contains("now at revision r2"), "{listed}");
+
+    let cfg = NodeConfig::load(&paths.config())?;
+    let daemon = Daemon::start(cfg, paths.clone()).await?;
+    let st = models(&paths).await;
+    assert!(st.iter().any(|m| m.id == "base") && !st.iter().any(|m| m.id == "base+support-v2"), "{st:?}");
+    let reply = ctl(home, &["chat", "--model", "base", "hi"]).await?;
+    assert_eq!(reply.trim(), "Hello from base! You said: hi");
+    assert!(ctl(home, &["chat", "--model", "base+support-v2", "hi"]).await.is_err());
+    daemon.shutdown().await;
+    Ok(())
+}

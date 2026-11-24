@@ -2,7 +2,7 @@
 
 Status: plan, updated 2026-11-23. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`); the Hub
 license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
-base) is starting. P2 and P3 have not started. This document turns the four training proposals in the
+base) is built. P2 and P3 have not started. This document turns the four training proposals in the
 white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
 repository yet) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
@@ -152,7 +152,7 @@ Resume is only correct if the data order and seeds are recorded, so P3b must che
 
 ### P4. Distribution, hot swap and versioned rollout (partly built)
 
-**Status (2026-11-23).** P4a (LoRA adapters on a loaded base, llama.cpp first) is starting. P4b
+**Status (2026-11-23).** P4a (LoRA adapters on a loaded base, llama.cpp and vLLM) is built. P4b
 (versioned rollout and canaries) has not started. Pulling a merged GGUF onto any node and serving it
 without a restart is already built.
 
@@ -180,8 +180,11 @@ plus `models pull --adapter-for BASE --node NAME --serve`. Details in
 day): live scale changes, a per-request scale over infer/2, adapters served and unserved on a running base
 (vLLM at run time; llama-server only for files it started with, a new file still restarts the base), and the
 adapter's base in catalog/1, on `weirdnet-backends` 0.4.1, `weirdnet-agent` 0.5.2 and `weirdnet-openai` 0.2.2.
-Next: the base-revision check (refuse an adapter trained on another revision or quantisation of the base, once
-adapters record it).
+Third slice (same day, no Weirdnet change), which completes P4a: `lora_slots` on a vLLM `[[model.local]]` starts
+it with LoRA on so adapters can be served on it later without a restart (`ymirctl models adapter slots`), and the
+base-revision check: adapters record the base `revision` and `quant` they were trained on (`base_revision`,
+`base_quant`, filled in by `adapter add`), and one whose base has moved on is not served (logged at start,
+flagged by `adapter list`, refused by `adapter add`).
 
 **Dependencies.** P4a needs nothing else and closes the loop with an adapter trained by hand. P4b needs P1's
 eval and P4a.
@@ -196,7 +199,7 @@ Weirdnet's).
 **Risks.** A canary sends some real requests to a worse model; keep the share small and make rollback one
 command. Answers from different versions must not share answer-cache entries: done for revisions a node reports
 (`[[model.local]] revision`, keyed with `get_rev`/`put_rev`); P4 must set it for every fine-tune. Adapters are tied to the exact base revision and quantisation; loading one on another base must be
-refused, not attempted.
+refused, not attempted (done in P4a for adapters in `node.toml` that record their base).
 
 ## Order (confirmed 2026-11-22)
 
@@ -206,7 +209,7 @@ serve it as an adapter, and score it against the base through the pool.
 
 1. **P1: JSONL batch, teacher integrity, manifest, resume, and `ymirctl eval`.** Ymir only, no Weirdnet change
    needed to start, usable on day one.
-2. **P4a: LoRA adapters on a loaded base (llama.cpp first).** Starting. Small Ymir change; asks the lead for the
+2. **P4a: LoRA adapters on a loaded base (llama.cpp first).** Built (2026-11-23). Small Ymir change; asks the lead for the
    `weirdnet-backends` adapter arguments. Closes the loop.
 3. **P2: consented conversation export.** Needs the flag record agreed with the lead and Bragi.
 4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Needs the reservation in
