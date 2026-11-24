@@ -185,13 +185,30 @@ async fn completions_embeddings_and_idle_unload() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wraps_a_stock_server_without_owning_it() -> Result<()> {
     // A "stock" server started by hand (the mock, no API key).
-    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    // Port 0: the mock binds and says which port it got, so no other test can take it in between.
     let mut stock = tokio::process::Command::new(MOCK)
-        .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--alias", "stock"])
+        .args(["--host", "127.0.0.1", "--port", "0", "--alias", "stock"])
         .env("YMIR_MOCK_LOAD_MS", "0")
         .env_remove("LLAMA_API_KEY")
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
+    let port = {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut lines = tokio::io::BufReader::new(stock.stderr.take().unwrap()).lines();
+        let line = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(l) = lines.next_line().await? {
+                if l.contains("listening on") {
+                    return Ok(l);
+                }
+            }
+            anyhow::bail!("the mock exited without saying where it listens")
+        })
+        .await??;
+        let port: u16 = line.rsplit(':').next().unwrap_or_default().trim().parse().map_err(|_| anyhow::anyhow!("mock said: {line}"))?;
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        port
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     while reqwest::get(format!("http://127.0.0.1:{port}/health")).await.is_err() {
         assert!(Instant::now() < deadline);

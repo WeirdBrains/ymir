@@ -3,6 +3,17 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-23: test free-port race (branch `fix/test-port-race`)
+
+**What changed**
+- `mcp_http` tests start `ymirctl mcp --http 127.0.0.1:0` and read the bound port from its stderr line (it was: bind port 0, drop it, pass the number, so under load another test's server got the port: 401s from the wrong server, refused connections).
+- `m2::wraps_a_stock_server_without_owning_it` starts the mock engine with `--port 0` and reads the port it prints (the mock now prints `local_addr`; so does the mock rpc-server).
+- `m7`, `real_split`, `real_bundle` need ports written into node.toml or a command line before the server binds, so they use `ymir_testkit::config_port()`: a free port in 20000..32000, below the ephemeral ranges that port-0 binds and outgoing connections use.
+
+**Checks run**: fmt; clippy `-D warnings`; `cargo test --workspace --locked --no-fail-fast`: 263 passed, 0 failed, 7 ignored. Stress, 5000 runs of the `mcp_http` test binary, 48 at a time, with 48 busy loops (load average 88 to 140): new 0 failures; the old binary in the same conditions 510 failures (mostly 401 from another test's server, some refused/reset). `m2`'s wrap test 100 runs, 16 at a time: 0 failures.
+
+**Not changed**: `weirdnet-backends`' supervisor still picks a free port for each engine it starts (the engine has to be told its port); that is crate code and not touched here.
+
 ## 2026-11-23: `lora_slots` and the adapter base-revision check; P4a done (branch `p4a-slots-base-revision`)
 
 **What changed** (no Weirdnet change: `weirdnet-backends` 0.4.1 already has `ModelLaunch::lora_slots`)

@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Tests: a free-port race made `mcp_http::token_host_and_origin_are_checked` flaky under load (it picked a free port, let it go, and the server bound it later, by which time another test could have it). `ymirctl mcp --http` and the mock engine now bind port 0 in tests and the test reads the port they print; tests that must write a port into a config pick it outside the OS's ephemeral range (`ymir_testkit::config_port`). The mock engine and mock rpc-server print the port they actually bound.
+
 ## [0.6.0] - 2026-11-23
 
 ### Added
