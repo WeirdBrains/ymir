@@ -3,7 +3,8 @@
 Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`); the Hub
 license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
 base) is built. P2 (consented conversation export) is built on the Ymir side. P3a (one run on one node) is built and
-tested against a mock trainer; no real run has been made. P3b has not started. This document turns the four training proposals in the
+tested against a mock trainer; no real run has been made. P4b (versioned rollout, canary and rollback) is built and
+tested against mock models. P3b has not started. This document turns the four training proposals in the
 white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
 repository yet) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
@@ -186,8 +187,9 @@ Resume is only correct if the data order and seeds are recorded, so P3b must che
 
 ### P4. Distribution, hot swap and versioned rollout (partly built)
 
-**Status (2026-11-23).** P4a (LoRA adapters on a loaded base, llama.cpp and vLLM) is built. P4b
-(versioned rollout and canaries) has not started. Pulling a merged GGUF onto any node and serving it
+**Status (2026-11-24).** P4a (LoRA adapters on a loaded base, llama.cpp and vLLM) is built. P4b
+(versioned rollout and canaries) is built in Ymir's pool policy (decision 5) and tested against mock models; see
+"P4b design" below. Pulling a merged GGUF onto any node and serving it
 without a restart is already built.
 
 **Scope.** Built: pull a merged GGUF onto any node and serve it without a restart. Proposed: serve LoRA adapters
@@ -220,6 +222,22 @@ base-revision check: adapters record the base `revision` and `quant` they were t
 `base_quant`, filled in by `adapter add`), and one whose base has moved on is not served (logged at start,
 flagged by `adapter list`, refused by `adapter add`).
 
+**P4b design (2026-11-24, no Weirdnet change).** `[[inference.rollout]]` in the inference node's node.toml names a
+rollout and its versions (`[[inference.rollout.version]]`: `version`, `model`, `weight`); `ymir_core::rollout`.
+A request for the name goes to one version by weight, chosen from a hash of the conversation (the synced conversation
+id, else its system prompt and first user message), so a conversation stays on one version while the weights stay
+the same, and raising a canary only moves the conversations it gains. `name@N` pins a version whatever its weight
+(evals, checks). A version whose model no node has is passed over for another with traffic; with every weight at 0
+the name is refused. The catalog lists the name and each `name@N`. `Accepted` names what the app asked for, so
+a version isn't reported as a stand-in, and answers are cached under the version's model id. `ymirctl models
+rollout list | add | weight | rollback | retire` edits node.toml and applies it to the running ymird at once
+(`ControlRequest::Rollouts`). A version may take up to 10 percent of new conversations freely. More than that needs
+`--eval FILE`, a `ymirctl eval --out` file in which its model passes at least the share of the checks (and of the
+judge, when both were judged) that the version with the most traffic passes on the same rows, or `--force`.
+`rollback` moves the newest version's traffic back to the one before it. `retire` drops a version without traffic,
+and its model stays loaded until an operator unloads it. Not built: weights shared by several inference nodes
+(each reads its own node.toml), and an automatic rollback on errors.
+
 **Dependencies.** P4a needs nothing else and closes the loop with an adapter trained by hand. P4b needs P1's
 eval and P4a.
 
@@ -248,7 +266,7 @@ serve it as an adapter, and score it against the base through the pool.
 3. **P2: consented conversation export.** Built on the Ymir side (2026-11-24); the flag record is shared with Bragi.
 4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Built (2026-11-24) on the
    `weirdnet-backends` 0.4.3 reservation, tested with a mock trainer; each run on a serving node needs the lead's OK.
-5. **P4b: versions, canary weights and rollback**, gated by P1's eval.
+5. **P4b: versions, canary weights and rollback**, gated by P1's eval. Built (2026-11-24) against mock models.
 6. **P3b: synced training job record and checkpoint resume**, once `weirdnet-agent` has the synced job record.
 7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet.
 

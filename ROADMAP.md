@@ -2,7 +2,7 @@
 
 <!-- Generated from roadmap.toml by site/tool/gen_roadmap.py. Edit roadmap.toml, not this file. -->
 
-Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built, and P3a is built and tested with a mock trainer.
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built; P3a and P4b are built and tested with a mock trainer and mock models.
 
 Updated 2026-11-24. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
@@ -80,9 +80,15 @@ Weirdnet crates: `weirdnet-agent`.
 
 ## P4a LoRA adapters on a loaded base (Done)
 
-Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come later.
+Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries are P4b.
 
 Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`, `weirdnet-openai`, `weirdnet-alerts`.
+
+## P4b Versions, canaries and rollback (Done)
+
+Built: a rollout name in the pool policy with versions behind it and a traffic weight each. Each conversation stays on one version, `name@N` pins a version, and `ymirctl models rollout` adds versions, changes weights live, rolls back and retires. A version gets up to 10% of new conversations freely; more needs a `ymirctl eval` result at least as good as the current version's. Tested against mock models; not yet with a real fine-tune.
+
+Weirdnet crates: none new.
 
 ## P2 Training data from conversations (Done)
 

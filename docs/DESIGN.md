@@ -1234,6 +1234,31 @@ patterns) are written owner-only (0600) through a temporary file, are never sync
 only. `ymirctl context withdrawn MANIFEST` lists the conversations in an earlier export that are no longer consented
 or were deleted, so a dataset can be rebuilt without them.
 
+### Versioned rollouts (training plan P4b)
+
+Built 2026-11-24 (see [docs/design/training.md](design/training.md), "P4b design"). The pool policy on an inference
+node names a rollout and its versions, each a model id in the pool with a traffic weight:
+
+```toml
+[[inference.rollout]]
+name = "support"
+[[inference.rollout.version]]
+version = 2
+model = "llama-8b+support-r2"
+weight = 95
+[[inference.rollout.version]]
+version = 3
+model = "llama-8b+support-r3"
+weight = 5
+```
+
+The coordinator resolves `support` to one version per conversation (weighted, from a hash of the conversation's
+synced id or its opening messages) and `support@3` to version 3. The catalog lists `support` and every `support@N`,
+`Accepted` names what was asked for, and answers are cached under the version's model id. `ymirctl models rollout`
+changes the weights live and in node.toml. Above a 10 percent share a version needs an eval at least as good as the
+current main version's (`--eval`), or `--force`. Rollback moves the traffic back, and the old version stays loaded
+until retired and unloaded.
+
 ### Shared semantic cache
 
 `weirdnet-semcache` (new) generalizes the RedisVL `rvl-cache`:

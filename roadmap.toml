@@ -7,7 +7,7 @@
 [project]
 name = "Ymir"
 updated = "2026-11-24"
-intro = "Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built, and P3a is built and tested with a mock trainer."
+intro = "Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built; P3a and P4b are built and tested with a mock trainer and mock models."
 design = "https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md"
 unpublished = ["weirdnet-push"]   # planned crates with no crates.io page yet
 
@@ -99,8 +99,15 @@ crates = ["weirdnet-agent"]
 id = "P4a"
 title = "LoRA adapters on a loaded base"
 status = "done"
-summary = "Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come later."
+summary = "Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries are P4b."
 crates = ["weirdnet-backends", "weirdnet-agent", "weirdnet-openai", "weirdnet-alerts"]
+
+[[milestone]]
+id = "P4b"
+title = "Versions, canaries and rollback"
+status = "done"
+summary = "Built: a rollout name in the pool policy with versions behind it and a traffic weight each. Each conversation stays on one version, `name@N` pins a version, and `ymirctl models rollout` adds versions, changes weights live, rolls back and retires. A version gets up to 10% of new conversations freely; more needs a `ymirctl eval` result at least as good as the current version's. Tested against mock models; not yet with a real fine-tune."
+crates = []
 
 [[milestone]]
 id = "P2"

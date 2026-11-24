@@ -48,11 +48,13 @@ pub struct CoordinatorOptions {
     pub standin_after: Duration,
     /// Models that may be split across model nodes (M7).
     pub splits: Vec<crate::group::SplitPolicy>,
+    /// Versioned rollouts at start (P4b); [`Coordinator::set_rollouts`] changes them live.
+    pub rollouts: Vec<crate::rollout::Rollout>,
 }
 
 impl Default for CoordinatorOptions {
     fn default() -> Self {
-        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new() }
+        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new(), rollouts: Vec::new() }
     }
 }
 
@@ -178,6 +180,8 @@ pub struct Coordinator {
     fair: crate::fair::Fair,
     /// Split-model groups that are up, and why the last ones went down (M7).
     pub(crate) groups: Mutex<crate::group::GroupBook>,
+    /// Versioned rollouts (P4b), changed live by `ymirctl models rollout`.
+    rollouts: RwLock<Vec<crate::rollout::Rollout>>,
 }
 
 /// Where a request goes.
@@ -195,6 +199,9 @@ pub struct Prepared {
     /// The model that answers (the stand-in when [`Prepared::standin`] is set).
     pub model: String,
     pub standin: Option<String>,
+    /// The rollout id the request asked for (`support`, `support@3`) when a rollout chose
+    /// [`Prepared::model`]; apps are told this name, so a version is not taken for a stand-in.
+    pub asked: Option<String>,
     raw: bool,
     route: Route,
 }
@@ -207,6 +214,12 @@ enum Route {
 impl Prepared {
     pub fn cache_hit(&self) -> bool {
         matches!(self.route, Route::Cached(_))
+    }
+
+    /// The name to tell the asker: the stand-in when one answers, else the rollout id asked for,
+    /// else the model.
+    pub fn answering_name(&self) -> String {
+        if self.standin.is_some() { self.model.clone() } else { self.asked.clone().unwrap_or_else(|| self.model.clone()) }
     }
 }
 
@@ -224,12 +237,13 @@ impl Coordinator {
             nodes: RwLock::new(nodes),
             main,
             cache,
-            opts,
             loading: Arc::new(Mutex::new(HashSet::new())),
             running: Arc::new(AtomicUsize::new(0)),
             balance: Balancer::new(),
             fair: crate::fair::Fair::new(),
             groups: Mutex::new(crate::group::GroupBook::default()),
+            rollouts: RwLock::new(opts.rollouts.clone()),
+            opts,
         }
     }
 
@@ -312,8 +326,98 @@ impl Coordinator {
         by_id.into_values().collect()
     }
 
-    /// The merged catalog as catalog/1 entries; chat models name the stand-in.
+    /// The rollouts in force (P4b).
+    pub fn rollouts(&self) -> Vec<crate::rollout::Rollout> {
+        read(&self.rollouts).clone()
+    }
+
+    /// Replaces the rollouts (a weight change, a new version, a retired one); new conversations
+    /// follow at once.
+    pub fn set_rollouts(&self, rollouts: Vec<crate::rollout::Rollout>) -> Result<(), String> {
+        crate::rollout::validate(&rollouts).map_err(|e| format!("{e:#}"))?;
+        *self.rollouts.write().unwrap_or_else(|e| e.into_inner()) = rollouts;
+        Ok(())
+    }
+
+    fn in_pool(&self, model: &str) -> bool {
+        self.nodes().iter().any(|n| n.status().iter().any(|s| s.id == model))
+    }
+
+    /// The model that answers a request for `model`: a rollout name picks a version by weight
+    /// for this conversation (a version whose model no node has is passed over for the others
+    /// with traffic), `name@N` is that version, and anything else is itself.
+    fn versioned(&self, model: String, req: &Request) -> Result<String, RemoteError> {
+        let rollouts = read(&self.rollouts);
+        if let Some((name, v)) = crate::rollout::split_versioned(&model)
+            && let Some(r) = rollouts.iter().find(|r| r.name == name)
+        {
+            return r.version(v).map(|x| x.model.clone()).ok_or_else(|| {
+                let have: Vec<String> = r.versions.iter().map(|x| format!("{name}@{}", x.version)).collect();
+                bad_request(format!("rollout `{name}` has no version {v} (it has {})", have.join(", ")))
+            });
+        }
+        let Some(r) = rollouts.iter().find(|r| r.name == model) else { return Ok(model) };
+        let first = r.pick(&crate::rollout::sticky_key(req));
+        if let Some(v) = first
+            && self.in_pool(&v.model)
+        {
+            return Ok(v.model.clone());
+        }
+        let mut rest: Vec<&crate::rollout::Version> = r.versions.iter().filter(|v| v.weight > 0 && Some(*v) != first).collect();
+        rest.sort_by_key(|v| std::cmp::Reverse(v.weight));
+        if let Some(v) = rest.into_iter().find(|v| self.in_pool(&v.model)) {
+            tracing::warn!(rollout = %r.name, wanted = ?first.map(|v| v.version), using = v.version, "rollout version not in the pool; using another");
+            return Ok(v.model.clone());
+        }
+        Err(if r.total_weight() == 0 {
+            unavailable(format!("rollout `{}` sends no traffic to any version (every weight is 0)", r.name))
+        } else {
+            unavailable(format!("no version of rollout `{}` with traffic is on a model node", r.name))
+        })
+    }
+
+    /// Catalog entries for the rollouts: the name (its state the best of the versions with
+    /// traffic) and each `name@N` (as its model). Versions whose model no node has are left out.
+    fn rollout_entries(&self, base: &[AgentModel]) -> Vec<AgentModel> {
+        let mut out = Vec::new();
+        for r in read(&self.rollouts).iter() {
+            let rank = |s: &AgentState| match s {
+                AgentState::Warm => 0,
+                AgentState::Busy => 1,
+                AgentState::Loading => 2,
+                _ => 3,
+            };
+            let mut best: Option<AgentModel> = None;
+            for v in &r.versions {
+                let Some(m) = base.iter().find(|m| m.id == v.model) else { continue };
+                let mut e = m.clone();
+                e.id = format!("{}@{}", r.name, v.version);
+                out.push(e);
+                if v.weight > 0 && best.as_ref().is_none_or(|b| rank(&m.state) < rank(&b.state)) {
+                    best = Some(m.clone());
+                }
+            }
+            if let Some(mut b) = best {
+                b.id = r.name.clone();
+                b.revision = None;
+                b.base = None;
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    /// The merged catalog as catalog/1 entries; chat models name the stand-in. Rollouts add
+    /// their name and one `name@N` per version.
     pub fn agent_catalog(&self) -> Vec<AgentModel> {
+        let mut models = self.model_catalog();
+        let extra = self.rollout_entries(&models);
+        models.retain(|m| !extra.iter().any(|e| e.id == m.id));
+        models.extend(extra);
+        models
+    }
+
+    fn model_catalog(&self) -> Vec<AgentModel> {
         let standin = self.opts.standin.as_deref();
         self.merged_catalog()
             .iter()
@@ -545,6 +649,9 @@ impl Coordinator {
     pub fn prepare(&self, req: &Request) -> Result<Prepared, RemoteError> {
         let needed = req.needs();
         let model = if needed.is_text() { self.resolve(req.model.as_deref())? } else { self.resolve_for(req.model.as_deref(), needed)? };
+        let resolved = model.clone();
+        let model = self.versioned(model, req)?;
+        let asked = (model != resolved).then_some(resolved);
         // A request that continues a prefix is never answered from the cache, and waits for its
         // own model (a stand-in would continue another model's text).
         let continuing = req.assistant_prefix.is_some();
@@ -558,10 +665,10 @@ impl Coordinator {
             && let Some(rev) = self.cache_revision(&model)
             && let Some(hit) = self.cache.get_rev(&model, rev.as_deref(), req)
         {
-            return Ok(Prepared { model, standin: None, raw: false, route: Route::Cached(hit) });
+            return Ok(Prepared { model, standin: None, asked, raw: false, route: Route::Cached(hit) });
         }
         let (t, cold) = self.choose(&model, req.wait_for_model || req.raw || continuing, needed)?;
-        Ok(Prepared { model: t.model, standin: t.standin, raw: req.raw, route: Route::Node { node: t.node, cold } })
+        Ok(Prepared { model: t.model, standin: t.standin, asked, raw: req.raw, route: Route::Node { node: t.node, cold } })
     }
 
     /// The weights revision cached answers for `model` are keyed on: `Some(None)` when no node

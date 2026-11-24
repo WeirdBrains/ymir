@@ -3,6 +3,27 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: training plan P4b, versioned rollouts (branch `feat/p4b-rollouts`)
+
+**What changed**
+- `ymir_core::rollout`: `[[inference.rollout]]` (`name`, `[[inference.rollout.version]]` with `version`, `model`, `weight`), validated at load. `Rollout::pick` makes a weighted, sticky choice from a SHA-256 of the conversation key: the synced conversation id, else the system prompt and first user message, else the job id. `name@N` is parsed by `split_versioned`.
+- Coordinator:
+  - `versioned()` in `prepare`. A version whose model no node has is passed over for one with traffic, and the name is refused when every weight is 0.
+  - `rollouts()`/`set_rollouts()` (live), and catalog entries for the name and each `name@N`.
+  - `Prepared::asked` and `answering_name()`, so `Accepted` names what the app asked for. weirdnet-openai would otherwise flag a version as a stand-in, because it compares the requested model with the answering one.
+  - The host's resume check and conversation record use the version's model.
+- Control: `Rollouts { set }`.
+- ymirctl `models rollout list | add | weight | rollback | retire`. It writes node.toml through toml_edit, keeping the rest of the file, then applies to a running ymird. The eval gate: above 10% a version needs `--eval` (a `ymirctl eval --out` file in which it passes at least the incumbent's share of checks, and of judge rows when both were judged) or `--force`.
+- Docs: [docs/design/training.md](docs/design/training.md) (P4b design, status, order), [docs/DESIGN.md](docs/DESIGN.md) (Versioned rollouts), [roadmap.toml](roadmap.toml) (P4b done; [ROADMAP.md](ROADMAP.md) and the site regenerated), the site's ymirctl page (`#rollout`), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace` 290 passed, 0 failed, 7 ignored. New tests:
+- `rollout` unit tests: shares, stickiness, rollback moves only the canary's conversations, keys, validation.
+- `tests/nodes.rs` `a_rollout_sends_a_canary_share_and_rolls_back_by_weight`.
+- ymirctl `models::rollout` tests: the gate, rollback and retire, and node.toml kept.
+- `crates/ymir-testkit/tests/p4b.rs`, against a running ymird with two mock models: canary, gate, eval, live weights, pin, rollback saved, retire, and no stand-in label.
+
+**Not tested / not built**: a real fine-tune behind a rollout. Several inference nodes don't share weights: each reads its own node.toml, so set the same rollout on each. There's no automatic rollback on errors. Bragi does not show versions yet (it sees `support` and `support@N` as catalog models).
+
 ## 2026-11-24: a test that keeps `release.toml` `[[requires]]` in step (branch `test/release-requires`)
 
 Infra's cut was blocked: `release.toml` still required `weirdnet-backends` 0.4.2 after Cargo.toml moved to 0.4.3 (fixed in `f062f64`). The release script compares the lock only at cut time. Now `crates/ymir-testkit/tests/release_requires.rs` (in `cargo test --workspace`, so Linux CI) fails when a `[[requires]]` version differs from its manifest's requirement or from the one Cargo.lock entry, or when that entry isn't from crates.io. Checked by reverting the version to 0.4.2: the test fails with "release.toml [[requires]] weirdnet-backends = 0.4.2, but Cargo.toml asks for 0.4.3".
