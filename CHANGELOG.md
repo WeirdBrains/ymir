@@ -13,8 +13,13 @@ All notable changes to Ymir are listed here. The format follows
 - Training plan P4b, versioned rollouts: `[[inference.rollout]]` gives a model name versions with traffic weights. Each conversation stays on one version, `NAME@N` pins one, and the catalog lists both. `ymirctl models rollout list|add|weight|rollback|retire` changes them in node.toml and in the running ymird at once. A version gets up to 10% of new conversations freely; more needs `--eval FILE` (a `ymirctl eval --out` file in which it does at least as well as the version with the most traffic) or `--force`. Answers are cached per version, and apps are told the name they asked for.
 - `crates/ymir-testkit/tests/release_requires.rs`: CI fails when `release.toml` `[[requires]]` no longer matches Cargo.toml and Cargo.lock.
 
+### Changed
+
+- `ymirctl bench` scores code answers on Windows too: Python runs in a Job Object (5 s of CPU per process, 2 GB of memory, at most 8 processes, all killed afterwards) in an empty directory with an empty environment. The network is not cut off there, unlike `unshare` on Linux.
+
 ### Fixed
 
+- `ymirctl bench`'s code sandbox now applies its limits where `sh` is dash (Debian, Ubuntu). It used to set every limit in one `ulimit` call, which dash refuses, with the error hidden, so code ran with no CPU, memory, file-size or process limit, only the 10 s wall clock. Each limit is now set on its own, with each shell's spelling. If one can't be set, code questions are left unscored.
 - `ymirctl bench` scores code answers only on Linux, macOS and BSD, where they run in the sandbox (`ulimit`, and `unshare` when it works). On Windows, code questions are left unscored instead of failing, and Windows CI passes again.
 - The training lock is not checked for a dead process on Windows: a hold there lasts until `ymirctl train release`.
 

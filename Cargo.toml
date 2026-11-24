@@ -67,6 +67,8 @@ ureq = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ymird's Windows service (the service control manager's dispatcher and stop requests).
 windows-service = "0.8"
+# ymirctl bench's code sandbox on Windows (a Job Object).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

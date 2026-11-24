@@ -163,6 +163,16 @@ fn model_code_is_run_with_a_time_limit() {
     assert!(run_python("def f():\n    return 2", "assert f() == 2\nprint('OK')").unwrap());
     assert!(!run_python("def f():\n    return 3", "assert f() == 2\nprint('OK')").unwrap());
     assert!(!run_python("while True:\n    pass", "print('OK')").unwrap());
+    // More than the 2 GB memory limit (ulimit -v on unix, the Job Object on Windows).
+    assert!(!run_python("x = bytearray(3_000_000_000)", "print('OK')").unwrap());
+    // The environment is empty and the directory holds only the script.
+    assert!(
+        run_python(
+            "import os",
+            "assert 'HOME' not in os.environ and 'USERPROFILE' not in os.environ\nassert os.listdir('.') == ['t.py']\nprint('OK')"
+        )
+        .unwrap()
+    );
 }
 
 #[test]
