@@ -35,14 +35,16 @@ def write_model(path, dtype=np.float32, template=CHATML, arch="llama"):
     w.add_name("Tiny")
     if template is not None:
         w.add_chat_template(template)
-    w.add_token_list(["<s>", "</s>", "<|im_end|>", "a"])
+    # Control tokens (type 3) are what llama-finetune with Ymir's parse-special patch tokenizes as specials.
+    w.add_token_list(["<s>", "</s>", "<|im_start|>", "<|im_end|>", "a"])
+    w.add_token_types([3, 3, 3, 3, 1])
     w.add_bos_token_id(0)
-    w.add_eos_token_id(2)
-    w.add_tensor("token_embd.weight", rng.standard_normal((4, 6)).astype(np.float32))
+    w.add_eos_token_id(3)
+    w.add_tensor("token_embd.weight", rng.standard_normal((5, 6)).astype(np.float32))
     w.add_tensor("blk.0.attn_norm.weight", np.ones(6, np.float32))
     for name, shape in (("attn_q", (6, 6)), ("attn_k", (3, 6)), ("ffn_up", (10, 6)), ("ffn_down", (6, 10))):
         w.add_tensor(f"blk.0.{name}.weight", rng.standard_normal(shape).astype(dtype))
-    w.add_tensor("output.weight", rng.standard_normal((4, 6)).astype(np.float32))
+    w.add_tensor("output.weight", rng.standard_normal((5, 6)).astype(np.float32))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -82,10 +84,48 @@ class TrainerTest(unittest.TestCase):
         pin = tomllib.loads((HERE.parent / "packaging/engines/llama.cpp.toml").read_text())["build"]
         self.assertEqual(trainer.PINNED_BUILD, pin, "update PINNED_BUILD in scripts/trainer.py with the engine pin")
 
+    def test_required_patches_match_engine(self):
+        import engine
+
+        self.assertEqual(set(trainer.REQUIRED_PATCHES), set(engine.TRAINER_PATCHES), "the trainer requires exactly what build --trainer applies")
+        for pid, path in zip(engine.TRAINER_PATCHES, engine.trainer_patches()):
+            text = path.read_text()
+            self.assertIn(f'std::printf("{pid}\\n");', text, f"{path.name} names itself as {pid} for --ymir-patches")
+        self.assertIn("+    std::vector<llama_token> tokens  = common_tokenize(ctx, params.prompt, true, /*parse_special =*/ true);", (engine.PATCHES / engine.TRAINER_PATCHES["parse-special"]).read_text())
+
+    def test_parse_build(self):
+        self.assertEqual(trainer.parse_build("version: 1.0.0-dev (build 12628, commit 8a97fa9)\nbuilt with Clang"), "b12628")
+        self.assertEqual(trainer.parse_build("version: 12628 (8a97fa9)"), "b12628", "the format before llama.cpp 1.0")
+        self.assertEqual(trainer.parse_build("version: 1.0.0-dev (build 1, commit 8a97fa9)"), "b1", "a shallow clone without LLAMA_BUILD_NUMBER")
+        self.assertIsNone(trainer.parse_build("usage: llama-finetune ..."))
+
+    def test_unpatched_build_is_refused(self):
+        unpatched = {**self.env, "FAKE_FINETUNE_PATCHES": ""}
+        r, _ = self.run_trainer("version", env=unpatched)
+        self.assertEqual(json.loads(r.stdout)["patches"], [], "version reports what the program carries")
+        r, ev = self.train(env=unpatched)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("without Ymir's parse-special patch", ev[-1]["message"])
+        self.assertIn("engine.py build --trainer", ev[-1]["message"])
+        self.assertFalse(self.record.exists(), "nothing was trained")
+        r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(self.base), "--rank", "2", "--out", str(self.tmp / "a.gguf"), env=unpatched)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("parse-special", ev[-1]["message"])
+        r, ev = self.train(env={**self.env, "FAKE_FINETUNE_PATCHES": "something-else"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("parse-special", ev[-1]["message"])
+
+    def test_special_tokens_train_as_specials(self):
+        r, _ = self.train()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = json.loads(self.record.read_text())
+        self.assertEqual(rec["special_tokens"], ["<|im_start|>", "<|im_end|>"] * 5, "each turn's markers are single special tokens")
+        self.assertNotIn("<s>", rec["special_tokens"])
+
     def test_version(self):
         r, _ = self.run_trainer("version")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), {"interface": 1, "engine": "llama.cpp", "build": "b12628"})
+        self.assertEqual(json.loads(r.stdout), {"interface": 1, "engine": "llama.cpp", "build": "b12628", "patches": ["parse-special"]})
         r, _ = self.run_trainer("version", env={**self.env, "FAKE_FINETUNE_BUILD": "13000"})
         self.assertEqual(json.loads(r.stdout)["build"], "b13000", "version reports the real build, so Ymir's pin check sees it")
         env = {k: v for k, v in self.env.items() if k != "YMIR_LLAMA_FINETUNE"}

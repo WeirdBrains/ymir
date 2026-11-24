@@ -17,7 +17,8 @@ llama.cpp loads on the base, any quantization of it included (`--lora`, training
 Upstream's release archives don't carry `llama-finetune`; build it at the pin with
 `python3 scripts/engine.py build --trainer --out DIR`. This program finds it in
 $YMIR_LLAMA_FINETUNE, next to itself, in ../lib/ymir/llama.cpp, or on PATH, and refuses any build
-but the pinned one.
+but the pinned one, or one without Ymir's patches (REQUIRED_PATCHES, applied by `build --trainer`
+from packaging/engines/patches/; the patched program names them with `--ymir-patches`).
 
 Needs Python 3.11+, numpy and gguf 0.19.0 (llama.cpp's gguf-py at the pin), and jinja2 for chat
 templates: `pip install -r scripts/trainer-requirements.txt`. With them in a venv, set
@@ -46,6 +47,12 @@ PIN_FILE = HERE.parent / "packaging/engines/llama.cpp.toml"
 # The pin when this program is installed without the repository; test_trainer.py checks it
 # against PIN_FILE.
 PINNED_BUILD = "b12628"
+# Ymir's patches the pinned llama-finetune must carry (scripts/engine.py TRAINER_PATCHES; the
+# patched program prints these ids for `--ymir-patches`). parse-special: the training text is
+# tokenized with parse_special = true, so chat-template special tokens train as special tokens
+# (upstream b12628 tokenizes them as text). Drop it when upstream releases the fix (tracked: draft
+# ggml-org/llama.cpp#31258) and the pin moves past it.
+REQUIRED_PATCHES = ("parse-special",)
 
 
 def pinned_build():
@@ -108,22 +115,47 @@ def find_finetune():
     raise Refusal("no llama-finetune: build it at the pin (python3 scripts/engine.py build --trainer --out DIR) and set YMIR_LLAMA_FINETUNE to it")
 
 
+def parse_build(text):
+    """The llama.cpp build in `--version` output, or None: `version: 1.0.0-dev (build 12628, commit
+    abc1234)` (b12628's format) or the older `version: 12628 (abc1234)`, both -> b12628."""
+    m = re.search(r"\(build (\d+),", text) or re.search(r"version:\s*(\d+)\s*\(", text)
+    return f"b{m.group(1)}" if m else None
+
+
 def finetune_build(exe):
-    """The build `llama-finetune --version` reports (`version: 12628 (abc1234)` -> b12628)."""
+    """The build `llama-finetune --version` reports."""
     try:
         r = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=60)
     except OSError as e:
         raise Refusal(f"running {exe} --version: {e}") from e
-    m = re.search(r"version:\s*(\d+)", r.stdout + r.stderr)
-    if not m:
+    build = parse_build(r.stdout + r.stderr)
+    if not build:
         raise Refusal(f"{exe} --version printed no build ({(r.stdout + r.stderr).strip()[:200]!r})")
-    return f"b{m.group(1)}"
+    return build
+
+
+def finetune_patches(exe):
+    """The Ymir patches `llama-finetune --ymir-patches` names; none for an unpatched build (upstream
+    refuses the unknown argument)."""
+    try:
+        r = subprocess.run([str(exe), "--ymir-patches"], capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        raise Refusal(f"running {exe} --ymir-patches: {e}") from e
+    if r.returncode != 0:
+        return []
+    return [line.strip() for line in r.stdout.splitlines() if re.fullmatch(r"[a-z0-9-]+", line.strip())]
 
 
 def check_pin(exe):
     build, pin = finetune_build(exe), pinned_build()
     if build != pin:
         raise Refusal(f"{exe} is llama.cpp {build}, and this trainer is pinned to {pin} (packaging/engines/llama.cpp.toml); build the pinned one")
+    missing = [p for p in REQUIRED_PATCHES if p not in finetune_patches(exe)]
+    if missing:
+        raise Refusal(
+            f"{exe} is llama.cpp {build} without Ymir's {', '.join(missing)} patch (packaging/engines/patches); "
+            "build it with python3 scripts/engine.py build --trainer"
+        )
     return build
 
 
@@ -281,7 +313,7 @@ def read_rows(path):
 
 def cmd_version(_a):
     exe = find_finetune()
-    print(json.dumps({"interface": INTERFACE, "engine": ENGINE, "build": finetune_build(exe)}), flush=True)
+    print(json.dumps({"interface": INTERFACE, "engine": ENGINE, "build": finetune_build(exe), "patches": finetune_patches(exe)}), flush=True)
     return 0
 
 

@@ -14,10 +14,12 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
+- The llama.cpp trainer's `llama-finetune` now tokenizes the training text with `parse_special = true`, so the chat template's special tokens (`<|im_start|>` and the like) train as the tokens the model emits instead of as text. Upstream b12628 has no such option, so `scripts/engine.py build --trainer` applies `packaging/engines/patches/llama-finetune-parse-special.patch` to `llama-finetune`'s source only (`llama-server` and `rpc-server` stay upstream's), and `scripts/trainer.py` refuses a `llama-finetune` without it. `trainer.py version` also lists the patches. The patch goes when upstream releases a fix (tracked: draft ggml-org/llama.cpp#31258).
 - `ymirctl bench` scores code answers on Windows too: Python runs in a Job Object (5 s of CPU per process, 2 GB of memory, at most 8 processes, all killed afterwards) in an empty directory with an empty environment. The network is not cut off there, unlike `unshare` on Linux. On macOS code questions stay unscored, now said plainly and checked in CI: macOS refuses both memory limits (`ulimit -v` and `-d`), so the sandbox never ran code there.
 
 ### Fixed
 
+- `scripts/engine.py build` passes the pinned build number to llama.cpp, whose shallow clone otherwise reported `build 1`, and `scripts/trainer.py` reads llama.cpp 1.0's version line (`version: 1.0.0-dev (build 12628, ...)`). Before this, a `llama-finetune` from `build --trainer` was always refused as the wrong build.
 - `ymirctl bench`'s code sandbox now applies its limits where `sh` is dash (Debian, Ubuntu). It used to set every limit in one `ulimit` call, which dash refuses, with the error hidden, so code ran with no CPU, memory, file-size or process limit, only the 10 s wall clock. Each limit is now set on its own, with each shell's spelling. If one can't be set, code questions are left unscored.
 
 ## [0.8.0] - 2026-11-24
