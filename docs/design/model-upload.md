@@ -2,7 +2,8 @@
 
 Status: plan, 2026-11-24. Approved by the project lead on 2026-11-24 with two changes (U5 moved up to follow U1;
 U6 waits on Weirdnet requests B and C, with no interim peer copy in Ymir). m3talsmith answered the open questions the
-same day (see "Decisions"). U1 (local upload) is built; see "U1 as built".
+same day (see "Decisions"). U1 (local upload) and U5 (trainer outputs on the same path) are built; see "U1 as built"
+and "U5 as built".
 
 Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weirdbrains.com).
 
@@ -412,6 +413,26 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   `license` stays optional), and the free-space check moves to `ModelStore::free_bytes`. On-disk layout and file
   names stay the same, so nothing already uploaded moves. Until 0.5.3, the adapter size `weirdnet-model` 0.5.2
   reports counts `provenance.json` (a few hundred bytes).
+
+## U5 as built (2026-11-24)
+
+- **`train run` imports its own adapter** with `ymir_core::upload::import` (origin `train`): checked as a GGUF LoRA,
+  hashed, linked into `models_dir/adapters/ID/ID.gguf` (was `adapters/ID.gguf`) with `provenance.json` and
+  `adapter.json` beside it, and the run's copy removed. `train::import_spec(record, adapter)` builds the record from
+  the run: base (id, revision, quant), the dataset record (name, hash, format, license, teacher, rows) and the
+  trainer (`name`, `build`, `interface`, `run`, `node`, `trained_from`, `hyper`, `steps`, `final_loss`). The weights'
+  `license` is left empty: the dataset's license is the rows', not the adapter's.
+- **One revision for the same bytes everywhere.** `run.json`'s adapter gains `revision` (the content revision), and
+  `train run --add` registers that instead of the run id, so the adapter has the same revision on every node it
+  reaches and in every rollout. Runs recorded before this keep their run-id revisions; nothing on disk moves.
+- **`ymirctl models upload [FILE] --from-run RUN_DIR`** reads `run.json` (format `ymir-train-run/1`, status `done`,
+  an adapter) and uploads its adapter with the same record: FILE defaults to the run's adapter in this node's models
+  directory; the file's SHA-256 must be the record's; `--adapter-for` defaults to the run's base and the id to the
+  run's adapter id; a base here at another revision than the run trained on is refused. Locally this takes a run
+  copied from another node; with U2's `--node` it sends a run's adapter over Weirdnet with no new code.
+- **Left for U3:** `train run --add --rollout NAME` joining a rollout goes through U3's rollout step.
+- **Nothing here needs Weirdnet 0.5.3 / 0.4.4.** At the switch-over, `train::import_spec` maps onto
+  `weirdnet-model`'s `Provenance` the same way U1's record does.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 

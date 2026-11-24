@@ -5,8 +5,8 @@
 //! `YMIR_MOCK_TRAINER_BUILD` (default `b0000`). `train` checks every row of `--data` (a
 //! `messages` list with an assistant turn) and `--config`, reports one progress event per row
 //! and epoch with a falling loss, sleeping `YMIR_MOCK_TRAINER_STEP_MS` (default 0) per step, and
-//! writes `--out`. `extract-lora` checks that `--tuned` is its own output and writes a small
-//! adapter to `--out`. `YMIR_MOCK_TRAINER_FAIL=train` (or `extract-lora`) makes that step report
+//! writes `--out`. `extract-lora` checks that `--tuned` is its own output and writes a small GGUF
+//! LoRA adapter to `--out` (a header only: architecture `llama`, `general.name` `mock lora rank N`). `YMIR_MOCK_TRAINER_FAIL=train` (or `extract-lora`) makes that step report
 //! an error and exit 1. `YMIR_MOCK_TRAINER_RECORD=FILE` appends each command line to FILE.
 
 use std::io::Write;
@@ -77,7 +77,7 @@ fn main() {
                 die("mock trainer: the tensors differ in shape".into());
             }
             say(json!({"event": "progress", "step": 1, "steps": 1}));
-            std::fs::write(&out, format!("GGUF mock lora rank {rank}")).unwrap_or_else(|e| die(format!("{out}: {e}")));
+            std::fs::write(&out, lora(&rank)).unwrap_or_else(|e| die(format!("{out}: {e}")));
             say(json!({"event": "done"}));
         }
         other => {
@@ -85,4 +85,23 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// A GGUF LoRA adapter header with no tensors, padded: enough for Ymir to read its kind.
+fn lora(rank: &str) -> Vec<u8> {
+    let name = format!("mock lora rank {rank}");
+    let kv = [("general.architecture", "llama"), ("general.type", "adapter"), ("adapter.type", "lora"), ("general.name", name.as_str())];
+    let mut o = b"GGUF".to_vec();
+    o.extend(3u32.to_le_bytes());
+    o.extend(0u64.to_le_bytes());
+    o.extend((kv.len() as u64).to_le_bytes());
+    for (k, v) in kv {
+        o.extend((k.len() as u64).to_le_bytes());
+        o.extend(k.as_bytes());
+        o.extend(8u32.to_le_bytes());
+        o.extend((v.len() as u64).to_le_bytes());
+        o.extend(v.as_bytes());
+    }
+    o.resize(o.len() + 256, 0);
+    o
 }

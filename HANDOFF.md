@@ -3,6 +3,29 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 15:18 EST: model upload U5, trainer outputs on the upload path (branch `feature/model-upload-trainer-output`)
+
+Slice U5 of [docs/design/model-upload.md](docs/design/model-upload.md), next after U1 in the approved order.
+
+**What changed**
+- [crates/ymir-core/src/train.rs](crates/ymir-core/src/train.rs): `train run` imports its adapter with `upload::import` (origin `train`) into `models_dir/adapters/ID/ID.gguf` with `provenance.json` and `adapter.json`, instead of moving it to `adapters/ID.gguf`; the run's copy is removed. New `train::import_spec(record, adapter, ms)` builds the record (base id/revision/quant, the dataset record, the trainer with run, node, hyperparameters, steps and loss). `AdapterRecord` gains `revision` (serde default, so older `run.json` files still read). The adapter id must now pass `upload::check_id`; an old flat `adapters/ID.gguf` still blocks the id.
+- [crates/ymir-core/src/upload.rs](crates/ymir-core/src/upload.rs): `ImportSpec` gains `dataset` and `trainer` and derives `Default`.
+- [crates/ymirctl/src/train.rs](crates/ymirctl/src/train.rs): `--add` (and the printed `adapter add` line) use the content revision, falling back to the run id for older records; prints the provenance path.
+- [crates/ymirctl/src/models/upload.rs](crates/ymirctl/src/models/upload.rs): `--from-run RUN_DIR`, FILE optional with it. Reads `run.json` (format, `done`, an adapter), checks the file's SHA-256 against the record, defaults the base and id from the run, refuses a base here at another revision than the run trained on, and imports with the run's record.
+- [crates/ymir-testkit/src/bin/ymir-mock-trainer.rs](crates/ymir-testkit/src/bin/ymir-mock-trainer.rs): `extract-lora` writes a real (tensorless) GGUF LoRA header, since the import reads it.
+- Tests: `p3a` checks the new layout, the provenance record and the content revision in node.toml; `p3a_llamacpp` paths; two new ymirctl tests (`upload_from_a_run_*`: a copied run with its record, the same bytes already here, a wrong SHA-256, another base revision, an unfinished run, a missing run.json).
+- Docs: the plan ("U5 as built", status), [docs/design/training.md](docs/design/training.md), [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked` 314 passed, 0 failed, 7 ignored; `p3a_llamacpp` with `YMIR_TEST_TRAINER_PYTHON` set to a venv with `scripts/trainer-requirements.txt` (the real trainer script's adapter imports); `site/tool/check_links.py`.
+
+**Not tested**: a real training run on a GPU; a run copied between two real nodes.
+
+**Behaviour change**: new runs register the content revision, not the run id. Existing node.toml entries and adapters are untouched.
+
+**Left**: `train run --add --rollout NAME` waits for U3. Nothing in U5 needs `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4; at the switch-over `import_spec` maps onto their `Provenance`. Not released: Ymir's release is signed on the release machine, which is offline.
+
+**Next**: U2 (upload to one node over Weirdnet), once Weirdnet requests A and B ship.
+
 ## 2026-11-24 15:00 EST: llama-finetune parses special tokens (branch `feature/trainer-parse-special`)
 
 m3talsmith's updated decision 7: patch `llama-finetune` in Ymir's trainer build to tokenize with `parse_special = true`, stay on b12628, and drop the patch when upstream releases the fix (tracked: draft ggml-org/llama.cpp#31258). This replaces the "no local patch" answer in the entry below.

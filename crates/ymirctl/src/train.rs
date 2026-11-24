@@ -16,8 +16,9 @@ use ymir_core::{NodeConfig, Paths};
 #[derive(Subcommand, Debug)]
 pub enum TrainCmd {
     /// Train a LoRA adapter for a llama.cpp base on this node: a full fine-tune with the pinned
-    /// trainer, then the adapter extracted from it, written to models_dir/adapters/. The node's
-    /// GPU is held for the run (its models unload and none load until it ends). Ctrl-C cancels.
+    /// trainer, then the adapter extracted from it, written to models_dir/adapters/ID/ with its
+    /// provenance.json (as an upload of it would be). The node's GPU is held for the run (its
+    /// models unload and none load until it ends). Ctrl-C cancels.
     Run(RunArgs),
     /// Hold a model node's GPU by hand: its models unload and none load until `train release`.
     /// Without --node, this box (also kept across a ymird restart).
@@ -218,20 +219,26 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, a: RunArgs) -> Result<()> {
     let adapter = record.adapter.clone().context("the run produced no adapter")?;
     let loss = record.final_loss.map(|l| format!(", final loss {l:.4}")).unwrap_or_default();
     writeln!(out, "Done: {} steps{loss}. Adapter `{}` is {} in the models directory.", record.steps, adapter.id, adapter.file)?;
+    // The content revision, as provenance.json and an upload of the same file give it, so the same
+    // adapter has the same revision on every node it reaches.
+    let revision = adapter.revision.clone().unwrap_or_else(|| record.id.clone());
+    if let Some((dir, _)) = adapter.file.rsplit_once('/') {
+        writeln!(out, "Provenance: {dir}/{} (origin train, run {})", ymir_core::upload::PROVENANCE_FILE, record.id)?;
+    }
     let la = LocalAdapter {
         id: adapter.id.clone(),
         file: adapter.file.clone(),
         scale: None,
-        revision: Some(record.id.clone()),
+        revision: Some(revision.clone()),
         base_revision: adapter.base_revision.clone(),
         base_quant: adapter.base_quant.clone(),
     };
     if a.add {
         let new = crate::models::adapters_add(&text, &a.base, &la)?;
         crate::models::adapters_save(&config, &text, &new)?;
-        writeln!(out, "Added it to node.toml on `{}` (revision {}). Restart ymird to serve it.", a.base, record.id)?;
+        writeln!(out, "Added it to node.toml on `{}` (revision {revision}). Restart ymird to serve it.", a.base)?;
     } else {
-        writeln!(out, "To serve it: ymirctl models adapter add {} {} --id {} --revision {}", a.base, adapter.file, adapter.id, record.id)?;
+        writeln!(out, "To serve it: ymirctl models adapter add {} {} --id {} --revision {revision}", a.base, adapter.file, adapter.id)?;
     }
     Ok(())
 }
