@@ -3,6 +3,26 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 13:25 EST: state at a usage stop (open branches, what's left)
+
+**On main (ac8aa63, CI green on Linux, macOS, Windows):** the llama.cpp trainer wrapper (feafb07), the Windows bench sandbox (e8923bf), the M9 bundle fetcher (b202a74), Infra's v0.8.0 PKGBUILD hashes (b99aabc). Release-ready: ac8aa63.
+
+**Open branches, all pushed:**
+- `fix/rollout-list-no-inference` (1 commit on ac8aa63): `ymirctl models rollout list` on a running node without the inference role said "ymird is not running here"; it now says the node has no inference role (the ControlResponse refusal is told apart from a dead socket). Unit test + `p4b.rs` e2e against a model-only ymird. CI 45455967977 green on all three OSes. **Left: merge (`--no-ff`) and push.**
+- `chore/helpers-0.3.3` (1 commit): vendors weirdnet-project-helpers 0.3.3 (validate and `--dry-run` compare `[[requires]]` versions offline) and pins `helpers = "0.3.3"`. `validate` passes, and fails with requires 0.4.2 against Cargo.toml 0.4.3. CI 45456634158 (Linux, macOS green; Windows pending at writing). **Left: merge once Windows is green.**
+- `feat/m9-bsd-packages`: FreeBSD `.pkg` + rc.d service, FreeBSD/OpenBSD `tar.gz`, `engine.py` without ggml-rpc RDMA on BSD, manual `bsd.yml`. Already merged in: main up to ac8aa63 and the fetcher. In the FreeBSD VM: cargo build, engine from source, package, `pkg add`, binaries, user and home all work. **Left: `service ymird start` did not come up** (run 45451131242: no `ymirctl status` in 60 s). The rc.d pidfile fix and failure diagnostics (syslog, ps, foreground ymird) are in run 45454646555, still running at writing; read its log, fix, re-run. **Before merging: remove the TEMPORARY `push:` trigger at the top of `.github/workflows/bsd.yml`.** HANDOFF/DESIGN/CHANGELOG entries for BSD are on the branch (the HANDOFF "RESULT" placeholder needs the final run result).
+- Older local branches pushed so nothing is only on a machine (already merged or superseded, kept for reference): `feat/m10-cert-only`, `feat/p2-training-export`, `feat/p3a-trainer`, `fix/p2-tombstones`, `fix/post-031`, `deps/backends-0.4.2`, `fix/pages-doc-links`, `fix/plan-total-and-requires`, `fix/test-port-race`, `p4a-slots-base-revision`, `weirdnet-live-adapters`.
+
+**Blocked / decisions:**
+- OpenBSD: its rust package is 1.81 (7.6), the workspace needs 1.99, and rustup has no OpenBSD.
+- MLX-LM for Inkling 2 Mini: mlx-lm#2086 is still an open draft (checked 2026-11-24); latest mlx-lm 0.32.2.
+- P3a trainer: upstream `llama-finetune` tokenizes with `parse_special=false`, so chat-template special tokens train as text. Carry a one-line patch in `engine.py build --trainer`, or move the pin to a build that fixes it.
+- Bench on macOS: macOS refuses both memory limits, so code answers are left unscored there. Allow scoring with CPU, file and process limits only?
+- Publishing update bundles and announcements needs the release script and the org keys.
+- The whitepaper roadmap line (docs/whitepaper/sections/12-roadmap.tex) still says the fetcher is next; it is Michael's file.
+
+**Local state:** alien-blue `~/Projects/WeirdBrains/ymir` has a stash "alien-blue local: release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is at `~/Projects/WeirdBrains/phase-log.md` on alien-blue.
+
 ## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
 
 **What changed**
