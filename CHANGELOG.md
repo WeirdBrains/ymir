@@ -6,11 +6,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
 ### Added
 
 - Live LoRA adapter changes, without restarting the base where the engine allows: `ymirctl models adapter scale ID S|--reset --node NAME` (llama.cpp, from the next request), `adapter serve ID --base BASE --node NAME` (an adapter already on the node's disk) and `adapter unserve ID --node NAME` (its files stay). vLLM loads and unloads adapters at run time; llama-server only re-enables files it started with, so a new adapter file still serves after the base's next load. In memory only; `node.toml` is unchanged.
 - `ymirctl chat --adapter-scale S`, and `"adapter_scale"` in a bridge request body: how strongly a LoRA adapter applies to one answer (llama.cpp).
 - The catalog names each adapter's base (catalog/1 `base`; `weirdnet.base` in the bridge's `/v1/models`), so apps can label adapters.
+- Live LoRA adapter changes and per-request scale, on the current Weirdnet crates.
 
 ### Changed
 
