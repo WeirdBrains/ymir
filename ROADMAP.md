@@ -62,7 +62,7 @@ Weirdnet crates: none new.
 
 ## M9 Breadth and hardening (In progress)
 
-Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, and outside MCP servers for tasks. Next: push wake-ups, BSD packages, a bundle fetcher, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
+Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher (`ymirctl update fetch` and `update watch`, which hears announcements from a relay). Next: push wake-ups, BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 

@@ -3,6 +3,23 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
+
+**What changed**
+- `ymir_core::update`:
+  - `Updater::fetch(Source, announced, ...)`: the manifest is verified first, on a copy of the client state so nothing is recorded, and only then are files read, each up to its signed size; then `stage`.
+  - `check_announcement`, a `Source` trait with `DirSource`, and `pin()`.
+  - Root rotations in a published bundle are `roots/1.env`, `roots/2.env`, ...
+- ymirctl:
+  - `update fetch SOURCE [--announcement FILE]` (an `https://` bundle directory through ureq, `http://` only to loopback, or a directory).
+  - `update watch --relay ADDR [--fetch] [--once] [--wait-secs N]` (`/weirdnet/updates/1` from a dial-only node with a fresh key).
+- `weirdnet-update` 0.2.0 -> 0.2.2 with `wire` (Cargo.lock: that crate only).
+- Docs: [docs/DESIGN.md](docs/DESIGN.md) (M9 status), the site's `#updates`, [roadmap.toml](roadmap.toml), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `ymir-core` `update::` 8 passed (3 new: fetch happy path; unsigned, unannounced and oversized refused with nothing downloaded; announcements). `ymir-testkit/tests/update_fetch.rs` 2 passed, against a loopback HTTP server and an in-test carrier on `weirdnet-update`'s `Carrier`. `m9.rs` and `release_requires` still pass; clippy `-D warnings` on ymir-core, ymirctl and ymir-testkit.
+
+**Not tested / not built**: a running `weirdnet-relay` (the test carrier uses the same crate code, but not the relay binary), real HTTPS, and real keys. Nothing publishes bundles or announcements yet; that belongs in the release script and needs the org keys. There is no watcher in `ymird`, and no `weirdnet:` sources.
+
 ## 2026-11-24: training plan P4b, versioned rollouts (branch `feat/p4b-rollouts`)
 
 **What changed**

@@ -490,6 +490,14 @@ become healthy, the previous good release comes back.</p>
 <li><code>update trust --pin FINGERPRINT --root FILE</code>: pin the organization root that updates must chain to (the hex
 fingerprint and the first signed root file).</li>
 <li><code>update stage BUNDLE_DIR</code>: verify a bundle directory and stage it for the next start.</li>
+<li><code>update fetch SOURCE [--announcement FILE]</code>: download a bundle and stage it. <code>SOURCE</code> is the
+bundle directory's <code>https://</code> URL (<code>http://</code> only to this machine) or a directory. The manifest is
+checked against the pinned root before anything else is downloaded, and each file is read only up to its signed size.
+With <code>--announcement</code>, a signed announcement is checked first, and the source must serve the manifest it
+names. Without <code>SOURCE</code>, the announcement's first <code>https://</code> source is used.</li>
+<li><code>update watch --relay ADDR [--fetch] [--once] [--wait-secs N]</code>: hear update announcements from a Weirdnet
+relay that carries them (<code>…/p2p/ID</code>), and check each against the pinned root. With <code>--fetch</code>, it
+downloads and stages a new one. It connects from a fresh key that doesn't listen and isn't linked to your pool.</li>
 <li><code>update status</code>: whether a root is pinned, the good release, the health of a trial under way, and releases marked bad.</li>
 <li><code>update boot [--exec] [--installed PATH] [-- ARGS...]</code>: choose what to start (the good release, a candidate on
 trial, or a rollback) and print its path. With <code>--exec</code> it runs it, passing the arguments after <code>--</code>;
@@ -500,7 +508,10 @@ trial, or a rollback) and print its path. With <code>--exec</code> it runs it, p
 ymirctl update stage ./ymir-0.3.1-bundle
 sudo systemctl restart ymird        # or restart the user service
 ymirctl update status</code></pre>
-<p>Stage a bundle directory you built or received from the release signer.</p>
+<p>Stage a bundle directory you built or received from the release signer, or fetch one from where it is published. A
+published bundle is the same directory over HTTPS (<code>manifest.env</code>, an optional <code>freshness.env</code>,
+root rotations as <code>roots/1.env</code>, <code>roots/2.env</code> and so on, and the files at their paths). A relay
+can withhold an announcement, but it can't make an update acceptable: everything is checked against your pinned root.</p>
 
 <h2 id="recipes">Common tasks at a glance</h2>
 <table>
