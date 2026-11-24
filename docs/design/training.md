@@ -2,7 +2,8 @@
 
 Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`); the Hub
 license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
-base) is built. P2 (consented conversation export) is built on the Ymir side. P3 has not started. This document turns the four training proposals in the
+base) is built. P2 (consented conversation export) is built on the Ymir side. P3a (one run on one node) is built and
+tested against a mock trainer; no real run has been made. P3b has not started. This document turns the four training proposals in the
 white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
 repository yet) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
@@ -14,8 +15,8 @@ Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weird
 
 - **Training stays out of Ymir.** [DESIGN.md](../DESIGN.md#non-goals) says Ymir feeds, schedules and serves a
   separate trainer, and does not train models itself. Ymir supplies data generation, evals, serving and (later)
-  scheduling a job onto a node; the trainer is a separate program that Ymir starts or talks to: llama.cpp's
-  finetune for now.
+  scheduling a job onto a node; the trainer is a separate program that Ymir starts or talks to: upstream
+  llama.cpp's full fine-tuning plus a step that extracts a LoRA adapter, pinned to one build (decision 1).
 - **One GPU per run.** Multi-machine training over Weirdnet spends most of its time waiting on the network
   (white paper, "Why training stays on one machine or a private link"). Every slice below trains on one node.
   Two-node data-parallel LoRA on a private link is listed last, as optional.
@@ -130,6 +131,32 @@ conversations are kept 24 hours, so most chats worth training on are Bragi chats
 **Scope.** A LoRA or QLoRA run on one capable GPU node at background priority, with serving paused or moved off
 that node, checkpoints synced, and resume on another capable node if the first goes down.
 
+**Status (2026-11-24).** P3a is built: `ymirctl train run | reserve | release | check | list`
+([`crates/ymir-core/src/train.rs`](../../crates/ymir-core/src/train.rs), `crates/ymirctl/src/train.rs`) on
+`weirdnet-backends` 0.4.3's node reservation. It is tested end to end against the mock trainer
+(`ymir-mock-trainer`, [`crates/ymir-testkit/tests/p3a.rs`](../../crates/ymir-testkit/tests/p3a.rs)), with no real
+node or model. Left: the llama.cpp wrapper that speaks the interface below (its own repo or package, with the pinned
+build), a real run on a node the lead clears, and `train run --node` for a remote node (today a run trains on the
+node `ymirctl` runs on; `train reserve --node` holds a remote one by hand).
+
+What a run does: checks the trainer's interface and its build against `[train] build`, and refuses any other. It
+takes only a dataset with its manifest (P1's `ymir-dataset/1`, whose teacher license must be known unless
+`--allow-unknown-license`, or P2's `ymir-conversations/1`, whose hash must match), and writes the usable rows as
+chat JSONL. It holds the node's GPU: a lock file `ymird` honours at start, and, while `ymird` runs, a reservation that
+unloads its models and places nothing there, refused when the node is the only one serving a loaded model unless
+`--force`. Then it runs `train` and `extract-lora`, moves the adapter to `models_dir/adapters/ID.gguf`, writes
+`run.json` (dataset, license, hyperparameters, trainer build, steps, loss, adapter hash) and drops the full model
+unless `--keep-full`. With `--add` it puts the adapter in node.toml with the run id as its revision and the base's
+revision and quantisation. A failed or cancelled run (Ctrl-C sends the trainer SIGTERM) releases the GPU too.
+
+**Trainer interface (version 1).** `TRAINER version` prints `{"interface": 1, "engine": "llama.cpp", "build":
+"bNNNN"}`. `TRAINER train --base BASE.gguf --data DATA.jsonl --config CONFIG.json --out FULL.gguf` fine-tunes
+(`CONFIG.json`: `epochs`, `learning_rate`, `context`, `batch`, `seed`, `rank`), and `TRAINER extract-lora --base
+BASE.gguf --tuned FULL.gguf --rank N --out ADAPTER.gguf` writes the adapter. Both print JSON lines on stdout
+(`progress` with `step`, `steps`, `loss`; `log`; `done`; `error` with `message`); exit 0 with the output file is
+success. `[train]` in node.toml names the `trainer`, its `build`, an optional `work_dir` (the full model is as large as
+the base) and `env` for it.
+
 **Work, in two parts.**
 - **P3a, one node, no hand-off.** `ymirctl train reserve --node X` drains the node, unloads its models, and
   marks it unavailable for placement until `release` (or until the run ends); `ymirctl train run` starts the
@@ -144,9 +171,9 @@ that node, checkpoints synced, and resume on another capable node if the first g
 
 **Dependencies.** P1 or P2 for data (or a dataset supplied by hand). P4a, to serve what it produces.
 
-**Needed from Weirdnet.** A node reservation in the `weirdnet-backends` node protocol and supervisor (today
-there are `Drain`, `Load` and `Unload`, but no "hold this GPU, place nothing here"). The synced job record and
-hand-off (`weirdnet-agent`). Checkpoint transfer as content roots (`weirdnet-net`, exists).
+**Needed from Weirdnet.** A node reservation in the `weirdnet-backends` node protocol and supervisor: done in 0.4.3
+(approved by Michael 2026-11-24; `Supervisor::reserve`/`release`, node/1 `Reserve`/`Release`, `Capability::reserved`).
+The synced job record and hand-off (`weirdnet-agent`). Checkpoint transfer as content roots (`weirdnet-net`, exists).
 
 **Data and compute.** QLoRA of a 7B to 8B model fits in roughly 10 to 16 GB of GPU memory; LoRA in 16-bit needs
 about 20 to 24 GB; hours per run for tens of thousands of rows. Disk: the base model plus a few hundred MB of
@@ -219,8 +246,8 @@ serve it as an adapter, and score it against the base through the pool.
 2. **P4a: LoRA adapters on a loaded base (llama.cpp first).** Built (2026-11-23). Small Ymir change; asks the lead for the
    `weirdnet-backends` adapter arguments. Closes the loop.
 3. **P2: consented conversation export.** Built on the Ymir side (2026-11-24); the flag record is shared with Bragi.
-4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Needs the reservation in
-   `weirdnet-backends`; each run on a serving node needs the lead's OK.
+4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Built (2026-11-24) on the
+   `weirdnet-backends` 0.4.3 reservation, tested with a mock trainer; each run on a serving node needs the lead's OK.
 5. **P4b: versions, canary weights and rollback**, gated by P1's eval.
 6. **P3b: synced training job record and checkpoint resume**, once `weirdnet-agent` has the synced job record.
 7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet.
@@ -237,8 +264,11 @@ serve it as an adapter, and score it against the base through the pool.
 
 ## Decisions (2026-11-22, m3talsmith)
 
-1. **Trainer:** llama.cpp finetune for now. It reads GGUF bases and writes GGUF LoRA adapters, which is what P4a
-   serves on llama.cpp first; a PEFT/TRL trainer for vLLM can come later behind the same interface (P3a).
+1. **Trainer** (updated by m3talsmith 2026-11-24): upstream llama.cpp full fine-tuning, then a conversion step that
+   extracts a LoRA adapter from the fine-tuned weights, pinned to one specific llama.cpp build. Ymir refuses a
+   trainer that reports another build (`[train] build`). The adapter is a GGUF LoRA, which P4a serves on llama.cpp.
+   A PEFT/TRL trainer for vLLM can come later behind the same interface (P3a). The decision of 2026-11-22 was
+   llama.cpp's finetune.
 2. **Non-goal:** reworded in [DESIGN.md](../DESIGN.md#non-goals) to "Ymir feeds, schedules and serves a
    separate trainer".
 3. **First dataset and eval topic:** "Decentralized networks: how they work". Datasets stay configurable and none

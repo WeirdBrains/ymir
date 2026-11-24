@@ -11,6 +11,9 @@
 //! quality-first quant choice (`plan.rs`), `node.toml` handling (`local.rs`) and the output.
 
 mod adapters;
+
+/// `[[model.local.lora]]` editing, for `ymirctl train run --add`.
+pub(crate) use adapters::{add as adapters_add, save as adapters_save};
 mod ctxcmd;
 pub use ctxcmd::Live;
 mod hub;

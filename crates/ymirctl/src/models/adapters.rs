@@ -359,7 +359,7 @@ fn validated(new: &str, base: &str, id: &str, ctx: &Ctx) -> Result<NodeConfig> {
     Ok(cfg)
 }
 
-fn save(config: &Path, old: &str, new: &str) -> Result<()> {
+pub(crate) fn save(config: &Path, old: &str, new: &str) -> Result<()> {
     std::fs::write(config.with_extension("toml.bak"), old)?;
     let tmp = config.with_extension("toml.tmp");
     std::fs::write(&tmp, new)?;

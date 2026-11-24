@@ -1529,6 +1529,11 @@ smtp = { to = "owner@example.com", server = "smtp.gmail.com:587", user = "owner@
 # ---- app role ----
 [app.bridge]
 port = 8484                          # always 127.0.0.1; there is no address setting
+
+# ---- fine-tuning (training plan P3a; optional) ----
+# [train]
+# trainer = "/path/to/trainer"       # speaks Ymir's trainer interface (docs/design/training.md)
+# build = "bNNNN"                    # the llama.cpp build it must report; any other is refused
 ```
 
 The single-box quickstart writes all three toggles as `true`. A laptop that only runs the bridge

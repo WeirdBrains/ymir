@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod mcp_servers;
 pub mod models;
 pub mod pool;
+pub mod train;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -156,6 +157,12 @@ pub enum Cmd {
     /// Score models of the pool on a held-out JSONL file: deterministic checks (`expect`, with the
     /// bench scorers) and, with `--judge`, rubric grading by another model.
     Eval(eval::EvalArgs),
+    /// Fine-tune on this node (training plan P3a): run the pinned trainer for a LoRA adapter,
+    /// hold or free a node's GPU, check the trainer, list runs.
+    Train {
+        #[command(subcommand)]
+        cmd: train::TrainCmd,
+    },
     /// This node's place in your Weirdnet: link it, link other devices, revoke.
     Pool {
         #[command(subcommand)]
@@ -480,6 +487,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::McpServers(cmd) => mcp_servers::run(&paths, cmd, out, input).await,
         Cmd::Bench(cmd) => bench_cmd(&paths, cmd, out).await,
         Cmd::Eval(a) => eval::run(&paths, a, out).await,
+        Cmd::Train { cmd } => train::run(&paths, out, cmd).await,
         Cmd::Pool { cmd } => {
             let cfg = load_cfg(&paths)?;
             pool::run(&paths, &cfg, cmd, out, input).await
@@ -927,9 +935,14 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
 
 fn write_nodes(out: &mut dyn Write, nodes: &[control::NodeSummary]) -> Result<()> {
     for n in nodes {
-        let state = if n.draining { "draining" } else { "serving" };
+        let state = match (&n.reserved, n.draining) {
+            (Some(_), _) => "reserved",
+            (None, true) => "draining",
+            (None, false) => "serving",
+        };
         let here = if n.local { " (this box)" } else { "" };
-        writeln!(out, "  {:<24} {:<9} {} of {} models ready, {} in flight{here}", n.name, state, n.ready, n.models, n.in_flight)?;
+        let holder = n.reserved.as_ref().map(|h| format!(" (held by {h})")).unwrap_or_default();
+        writeln!(out, "  {:<24} {:<9} {} of {} models ready, {} in flight{here}{holder}", n.name, state, n.ready, n.models, n.in_flight)?;
     }
     Ok(())
 }

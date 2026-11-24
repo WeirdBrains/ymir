@@ -143,6 +143,11 @@ impl Daemon {
             launches.extend(cfg.split_launches(&key));
             let sup = Supervisor::new(engines, launches.clone(), SupervisorOptions { log_dir: Some(paths.logs()), ..Default::default() });
             supervisor = Some(sup.clone());
+            // A training run (or an operator) holds this node's GPU: start no model until it ends.
+            if let Some(lock) = crate::train::held(&paths) {
+                sup.reserve(&lock.holder).await.map_err(|e| anyhow!("reserving for {}: {e}", lock.holder))?;
+                tracing::warn!(holder = %lock.holder, "this node's GPU is held (state/train/lock.json): no model loads until it is released");
+            }
             // At load time, contexts follow what runs beside them (`ctxplan`).
             let probe = Arc::new(crate::ctxplan::SystemProbe::new(&hw, &budget));
             let planner = Arc::new(crate::ctxplan::Planner::new(sup.clone(), budget, probe, cfg.models_dir(), &explicit));

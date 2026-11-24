@@ -250,6 +250,28 @@ No dataset is built in.</p>
 temperature 0 with <code>--seed</code> (default 0) unless a row says otherwise. Prints checks and judge scores
 separately per model, with errors, cached and stand-in answers; <code>--out FILE</code> writes every answer and verdict.</p>
 <pre><code>ymirctl eval held-out.jsonl --model base-model --model fine-tuned --judge judge-model --out eval.jsonl</code></pre>
+<h3 id="train"><code>ymirctl train</code>: fine-tune on this node</h3>
+<p><code>train run</code> trains a LoRA adapter for a llama.cpp model on the node it runs on, with the trainer named in
+<code>[train]</code> in <code>node.toml</code>: upstream llama.cpp's full fine-tuning, then a step that extracts the
+adapter, pinned to one llama.cpp build (<code>build</code>). A trainer that reports another build is refused;
+<code>train check</code> shows what it reports. The dataset must have the manifest <code>batch --jsonl</code> or
+<code>context export --training</code> writes next to it, so the run can record its source and license. The node's
+GPU is held for the run. A running <code>ymird</code> unloads its models and loads none until the run ends, and
+refuses when the node is the only one serving a loaded model unless you pass <code>--force</code>. A
+<code>ymird</code> that starts meanwhile loads nothing. The adapter goes to <code>adapters/ID.gguf</code> in the
+models directory, and the run's record (<code>run.json</code>) to the run's work directory. <code>--add</code> puts
+the adapter in <code>node.toml</code>. Ctrl-C cancels the run. Every run on a node that serves your pool takes it out
+of the pool while it trains.</p>
+<table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>train run --base ID --dataset FILE [--id ADAPTER] [--epochs N] [--lr X] [--rank N] [--add]</code></td><td>One run. Also <code>--context</code>, <code>--batch</code>, <code>--seed</code>, <code>--from FILE</code> (train from an F16 copy of a quantised base), <code>--keep-full</code>, <code>--allow-unknown-license</code> and <code>--force</code>.</td></tr>
+<tr><td><code>train reserve [--node NAME] [--force]</code>, <code>train release [--node NAME]</code></td><td>Hold a node's GPU by hand and free it. Without <code>--node</code>, this box, also across a <code>ymird</code> restart.</td></tr>
+<tr><td><code>train check</code>, <code>train list</code></td><td>The trainer against the pin; past runs with their status, loss and adapter.</td></tr>
+</tbody></table>
+<pre><code>[train]
+trainer = "/opt/ymir-trainer/bin/ymir-trainer-llamacpp"
+build = "b1234"
+
+ymirctl train run --base qwen3-8b --dataset data.jsonl --id qwen3-8b+support --epochs 2 --add</code></pre>
 
 <h2 id="pool">Pool and devices</h2>
 <p>These commands manage this node's place in your Weirdnet: the identity shared by your linked devices. They need

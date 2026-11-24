@@ -1,6 +1,6 @@
 [package]
 name = "ymir-testkit"
-description = "Test support for Ymir: a mock llama-server and the end-to-end tests. Never shipped."
+description = "Test support for Ymir: a mock llama-server, a mock trainer and the end-to-end tests. Never shipped."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,11 @@ test = false
 [[bin]]
 name = "ymir-mock-engine"
 path = "src/bin/ymir-mock-engine.rs"
+test = false
+
+[[bin]]
+name = "ymir-mock-trainer"
+path = "src/bin/ymir-mock-trainer.rs"
 test = false
 
 [dependencies]
@@ -41,6 +46,7 @@ weirdnet-openai.workspace = true
 weirdnet-sync.workspace = true
 weirdnet-update.workspace = true
 semver.workspace = true
+sha2.workspace = true
 weirdnet-alerts.workspace = true
 ymirctl.workspace = true
 ymir-core.workspace = true

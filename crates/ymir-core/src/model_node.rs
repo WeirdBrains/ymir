@@ -50,9 +50,24 @@ pub trait ModelNode: Send + Sync {
     fn revision(&self, _model: &str) -> Option<String> {
         None
     }
-    /// Whether the node is draining: it finishes what it has and takes no new requests.
+    /// Whether the node is draining: it finishes what it has and takes no new requests. A
+    /// reserved node ([`ModelNode::reserved`]) counts as draining, so nothing is routed or
+    /// placed there.
     fn draining(&self) -> bool {
         false
+    }
+    /// Who holds the node's GPU, when it is reserved (training plan P3a): it runs no model until
+    /// released.
+    fn reserved(&self) -> Option<String> {
+        None
+    }
+    /// Reserves the node's GPU for `holder` (`weirdnet-backends` 0.4.3 `Reserve`): its engines
+    /// stop and none starts until [`ModelNode::release`].
+    fn reserve<'a>(&'a self, _holder: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node can't be reserved".into() }) })
+    }
+    fn release<'a>(&'a self, _holder: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node can't be reserved".into() }) })
     }
     /// Whether a request carrying an `assistant_prefix` (an answer to continue) works here.
     fn resumes(&self) -> bool {
@@ -215,7 +230,19 @@ impl ModelNode for LocalModelNode {
     }
 
     fn draining(&self) -> bool {
-        self.draining.load(Ordering::SeqCst)
+        self.draining.load(Ordering::SeqCst) || self.supervisor.reservation().is_some()
+    }
+
+    fn reserved(&self) -> Option<String> {
+        self.supervisor.reservation().map(|r| r.holder)
+    }
+
+    fn reserve<'a>(&'a self, holder: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move { self.supervisor.reserve(holder).await.map(|_| ()) })
+    }
+
+    fn release<'a>(&'a self, holder: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move { self.supervisor.release(holder).map(|_| ()) })
     }
 
     fn local(&self) -> bool {

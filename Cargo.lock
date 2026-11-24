@@ -5303,9 +5303,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efa1c7bea67d033f68cc472b2f19b13af31195f093d5e0d9fe7eba0e5bc61465"
+checksum = "f80d14773feecc00dc943c2ab33513cba0108c5b5579421ab607305c7921e5d1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5904,6 +5904,7 @@ dependencies = [
  "reqwest",
  "semver",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing-subscriber",

@@ -2,7 +2,7 @@
 
 <!-- Generated from roadmap.toml by site/tool/gen_roadmap.py. Edit roadmap.toml, not this file. -->
 
-Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built, and P3 has not started.
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built, and P3a is built and tested with a mock trainer.
 
 Updated 2026-11-24. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
@@ -90,8 +90,8 @@ Built: a per-conversation training consent that is off unless you turn it on and
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
-## P3 Fine-tuning as a pool job (Planned)
+## P3 Fine-tuning as a pool job (In progress)
 
-A LoRA or QLoRA run on one capable GPU node at background priority, with serving paused or moved off that node. Not started. A synced job record and resume on another node come later (P3b).
+P3a is built: `ymirctl train run` fine-tunes a llama.cpp base on one node with the pinned upstream llama.cpp build (a full fine-tune, then a LoRA adapter extracted from it), from a dataset with a recorded source and license. The node's GPU is held for the run with `weirdnet-backends`' new reservation, so its models unload and nothing loads there until the run ends. It is tested with a mock trainer; no real run yet. Next: the llama.cpp wrapper and a first real run. A synced job record and resume on another node come later (P3b).
 
 Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`.
