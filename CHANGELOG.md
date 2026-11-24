@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Training plan P2, consented conversation export: `ymirctl context train ID [--off]` gives or withdraws a conversation's training consent (its own `{conversation}/train` record, off unless set, synced); `context show` marks `[training]`. `ymirctl context export --training OUT.jsonl [--keep-system] [--redact REGEX]...` writes only consented, live conversations as chat-format JSONL, with system prompts, tool calls, attachments and reasoning stripped, cut at incomplete or stand-in answers, plus `OUT.manifest.json` (`ymir-conversations/1`); both owner-only, and only counts are printed. `ymirctl context withdrawn MANIFEST` lists what an earlier export should drop.
+
 ### Fixed
 
 - A model's engine could lose the port ymird told it to another process before binding it, and then fail to start, or another server answered in its place. `weirdnet-backends` 0.4.2 checks that the server on the port is the launched engine (its key, its model) and tries again on a new port, without counting a crash. `release.toml` requires 0.4.2. The mock engine's `/v1/models` is behind its key, like llama-server and vLLM.

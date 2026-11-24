@@ -13,6 +13,7 @@ pub mod client;
 pub mod config;
 pub mod context;
 pub mod control;
+pub mod convexport;
 pub mod coordinator;
 pub mod ctxplan;
 pub mod daemon;

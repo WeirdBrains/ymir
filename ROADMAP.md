@@ -2,9 +2,9 @@
 
 <!-- Generated from roadmap.toml by site/tool/gen_roadmap.py. Edit roadmap.toml, not this file. -->
 
-Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1 and P4a are built, and P2 and P3 have not started.
+Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built, and P3 has not started.
 
-Updated 2026-11-23. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
+Updated 2026-11-24. Design: [docs/DESIGN.md](https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md).
 
 ## M0 Design (Done)
 
@@ -80,13 +80,13 @@ Weirdnet crates: `weirdnet-agent`.
 
 ## P4a LoRA adapters on a loaded base (Done)
 
-Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come next; P2 and P3 have not started.
+Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come later.
 
 Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`, `weirdnet-openai`, `weirdnet-alerts`.
 
-## P2 Training data from conversations (Planned)
+## P2 Training data from conversations (Done)
 
-Export only the conversations the user has marked for training, with chosen parts stripped, as a dataset that never leaves their devices. Not started.
+Built: a per-conversation training consent that is off unless you turn it on and syncs between your devices, `ymirctl context train` to set or withdraw it, `context export --training` to write only the consented conversations as chat-format JSONL with system prompts, tools, attachments and reasoning stripped and patterns redacted, owner-only and never synced, and `context withdrawn` to list what an earlier export should drop.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
