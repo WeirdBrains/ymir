@@ -30,16 +30,20 @@ load_rc_config $name
 : ${ymird_home:="/var/db/ymir"}
 : ${ymird_log:="info"}
 
-pidfile="/var/run/${name}.pid"
-procname="%%PREFIX%%/bin/ymird"
+# daemon(8) supervises ymird: it restarts it after a crash (-r, 5 s apart), writes its output to
+# syslog, and its own pid goes in the pidfile (so rc.subr looks for daemon, the default procname).
+# daemon drops to the user before writing the pidfile, hence a directory the user owns.
+piddir="/var/run/${name}"
+pidfile="${piddir}/${name}.pid"
+ymird_bin="%%PREFIX%%/bin/ymird"
 command="/usr/sbin/daemon"
-# daemon(8) restarts ymird after a crash (-r, 5 s apart) and writes its output to syslog.
-command_args="-f -r -R 5 -T ${name} -P ${pidfile} -u ${ymird_user} /usr/bin/env YMIR_HOME=${ymird_home} YMIR_LOG=${ymird_log} ${procname}"
+command_args="-f -r -R 5 -T ${name} -P ${pidfile} -u ${ymird_user} /usr/bin/env YMIR_HOME=${ymird_home} YMIR_LOG=${ymird_log} ${ymird_bin}"
 start_precmd="${name}_prestart"
 
 ymird_prestart()
 {
 	install -d -o "${ymird_user}" -m 0700 "${ymird_home}"
+	install -d -o "${ymird_user}" -m 0755 "${piddir}"
 }
 
 run_rc_command "$1"
