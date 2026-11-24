@@ -199,6 +199,9 @@ pub struct Prepared {
     /// The model that answers (the stand-in when [`Prepared::standin`] is set).
     pub model: String,
     pub standin: Option<String>,
+    /// The rollout id the request asked for (`support`, `support@3`) when a rollout chose
+    /// [`Prepared::model`]; apps are told this name, so a version is not taken for a stand-in.
+    pub asked: Option<String>,
     raw: bool,
     route: Route,
 }
@@ -211,6 +214,12 @@ enum Route {
 impl Prepared {
     pub fn cache_hit(&self) -> bool {
         matches!(self.route, Route::Cached(_))
+    }
+
+    /// The name to tell the asker: the stand-in when one answers, else the rollout id asked for,
+    /// else the model.
+    pub fn answering_name(&self) -> String {
+        if self.standin.is_some() { self.model.clone() } else { self.asked.clone().unwrap_or_else(|| self.model.clone()) }
     }
 }
 
@@ -640,7 +649,9 @@ impl Coordinator {
     pub fn prepare(&self, req: &Request) -> Result<Prepared, RemoteError> {
         let needed = req.needs();
         let model = if needed.is_text() { self.resolve(req.model.as_deref())? } else { self.resolve_for(req.model.as_deref(), needed)? };
+        let resolved = model.clone();
         let model = self.versioned(model, req)?;
+        let asked = (model != resolved).then_some(resolved);
         // A request that continues a prefix is never answered from the cache, and waits for its
         // own model (a stand-in would continue another model's text).
         let continuing = req.assistant_prefix.is_some();
@@ -654,10 +665,10 @@ impl Coordinator {
             && let Some(rev) = self.cache_revision(&model)
             && let Some(hit) = self.cache.get_rev(&model, rev.as_deref(), req)
         {
-            return Ok(Prepared { model, standin: None, raw: false, route: Route::Cached(hit) });
+            return Ok(Prepared { model, standin: None, asked, raw: false, route: Route::Cached(hit) });
         }
         let (t, cold) = self.choose(&model, req.wait_for_model || req.raw || continuing, needed)?;
-        Ok(Prepared { model: t.model, standin: t.standin, raw: req.raw, route: Route::Node { node: t.node, cold } })
+        Ok(Prepared { model: t.model, standin: t.standin, asked, raw: req.raw, route: Route::Node { node: t.node, cold } })
     }
 
     /// The weights revision cached answers for `model` are keyed on: `Some(None)` when no node

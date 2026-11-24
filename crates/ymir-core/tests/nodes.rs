@@ -682,6 +682,9 @@ async fn a_rollout_sends_a_canary_share_and_rolls_back_by_weight() {
         assert!(cat.iter().any(|m| m.id == id), "{id} in the catalog");
     }
     assert_eq!(routed(&c, &conv(0).with_model("support@3")), "s3");
+    // Apps are told the name they asked for, so a version isn't taken for a stand-in.
+    assert_eq!(c.prepare(&conv(0).with_model("support@3")).unwrap().answering_name(), "support@3");
+    assert_eq!(c.prepare(&conv(0).with_model("s3")).unwrap().answering_name(), "s3");
     assert!(matches!(c.prepare(&conv(0).with_model("support@9")), Err(RemoteError::BadRequest { .. })));
 
     // Versions never share cached answers: each is cached under its own model id.

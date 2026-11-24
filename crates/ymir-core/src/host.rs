@@ -108,7 +108,8 @@ impl InferHost for InferenceHost {
         Ok(Arc::new(RoutedBackend {
             _hold: hold,
             coord: self.coord.clone(),
-            name: prepared.model.clone(),
+            name: prepared.answering_name(),
+            model: prepared.model.clone(),
             prepared: Mutex::new(Some(prepared)),
             context: self.context.clone(),
             caller: caller.clone(),
@@ -126,7 +127,10 @@ impl InferHost for InferenceHost {
 struct RoutedBackend {
     _hold: Option<crate::fair::Hold>,
     coord: Arc<Coordinator>,
+    /// What `Accepted` names (see [`Prepared::answering_name`]).
     name: String,
+    /// The model that answers (a rollout's version model, a stand-in, or the model asked for).
+    model: String,
     prepared: Mutex<Option<Prepared>>,
     context: Option<ContextAccess>,
     caller: Caller,
@@ -166,7 +170,7 @@ impl InferBackend for RoutedBackend {
     /// Continues an `assistant_prefix`: the model nodes' engines do (llama.cpp prefill, vLLM
     /// `continue_final_message`), so an asker whose answer was cut off can resume here.
     fn resumes(&self) -> bool {
-        self.coord.can_resume(&self.name)
+        self.coord.can_resume(&self.model)
     }
 
     async fn infer(&self, request: &v2::Request, out: &Output, cancel: &CancelToken) -> Result<Finish, RemoteError> {
@@ -191,7 +195,7 @@ impl InferBackend for RoutedBackend {
             // answer, on whichever node finishes it.
             let before = request.assistant_prefix.as_ref().map_or("", |p| p.text.as_str());
             let text = format!("{before}{}", tee.text.into_inner().unwrap_or_else(|e| e.into_inner()));
-            let model = finish.meta.standin.clone().unwrap_or_else(|| self.name.clone());
+            let model = finish.meta.standin.clone().unwrap_or_else(|| self.model.clone());
             if let Err(e) = store.append(&conv, "assistant", &text, Some(&model), Some(&request.job_id)) {
                 tracing::warn!(conversation = %conv, "writing the answer to the conversation: {e}");
             }
