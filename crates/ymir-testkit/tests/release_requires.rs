@@ -1,6 +1,7 @@
-//! `release.toml` `[[requires]]` must name the versions the workspace builds with. The release
-//! script checks the lock only when a release is cut, so a `[[requires]]` left behind after a
-//! dependency bump (0.4.2 against a Cargo.toml at 0.4.3) blocked a cut. This test fails first.
+//! `release.toml` `[[requires]]` must name the versions the workspace builds with. A
+//! `[[requires]]` left behind after a dependency bump (0.4.2 against a Cargo.toml at 0.4.3) once
+//! blocked a cut, because the release script checked the lock only then. Since helpers 0.3.3
+//! `validate` and `--dry-run` compare them too; this test keeps the check in `cargo test`.
 
 use std::path::{Path, PathBuf};
 

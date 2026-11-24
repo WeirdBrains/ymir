@@ -1,5 +1,5 @@
 # Ymir release config for weirdnet-project-helpers (scripts/weirdnet_release.py, vendored; never edit it here).
-helpers = "0.3.2"
+helpers = "0.3.3"
 project = "ymir"
 require_message = true
 next = [

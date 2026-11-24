@@ -53,7 +53,7 @@ try:
 except ImportError:  # Python < 3.11 (e.g. Ubuntu 22.04 runners): mini_toml() below
     tomllib = None
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 CONFIG = "release.toml"
 ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
@@ -937,6 +937,96 @@ def verify_required_lock(root, r, ver, cksum):
         raise ReleaseError(f"{rel}: {name} {ver} checksum {p.get('checksum')} does not match crates.io {cksum}")
 
 
+def _spec_version(spec):
+    """The version requirement in a dependency spec (`"1.2"`, `{ version = "1.2", ... }` or a table body)."""
+    s = spec.strip()
+    if s.startswith('"'):
+        return s.strip('"')
+    m = re.search(r'(?:^|[{,\s])version\s*=\s*"([^"]*)"', s, re.M)
+    return m.group(1) if m else None
+
+
+def _release_key(v):
+    """(MAJOR, MINOR, PATCH) of a partial or full version (`1`, `1.2`, `1.2.3`, pre-release dropped)."""
+    nums = [int(x) for x in re.match(r"^\d+(?:\.\d+){0,2}", v.strip()).group(0).split(".")]
+    return tuple(nums + [0] * (3 - len(nums))), len(nums)
+
+
+def req_admits(req, ver):
+    """Whether a Cargo version requirement (`1.2.3`, `^1.2`, `~1.2`, `=1.2.3`, `>=1, <2`, `1.*`)
+    admits `ver`. Pre-release requirements must name `ver` exactly."""
+    want = parse_version(ver)[:3]
+    vpre = is_prerelease(ver)
+    for part in [p.strip() for p in req.split(",") if p.strip()]:
+        m = re.match(r"^(=|\^|~|>=|<=|>|<)?\s*(.+)$", part)
+        op, v = m.group(1) or "^", m.group(2).strip()
+        if v == "*":
+            continue
+        if v.endswith(".*"):
+            op, v = "~" if v.count(".") == 2 else "^", v[:-2]
+        if "-" in v or vpre:
+            # Cargo matches pre-releases only against requirements on the same MAJOR.MINOR.PATCH.
+            if op not in ("=", "^", "~", ">=", "<=") or v.split("+")[0] != ver:
+                return False
+            continue
+        key, n = _release_key(v)
+        if op == "=":
+            ok = want[:n] == key[:n]
+        elif op == ">=":
+            ok = want >= key
+        elif op == ">":
+            ok = want > key if n == 3 else want[:n] > key[:n]
+        elif op == "<":
+            ok = want < key
+        elif op == "<=":
+            ok = want <= key if n == 3 else want[:n] <= key[:n]
+        elif op == "~":
+            ok = want >= key and want[:min(n, 2)] == key[:min(n, 2)]
+        else:  # caret
+            lead = next((i for i, x in enumerate(key[:n]) if x), n - 1)
+            ok = want >= key and want[:lead + 1] == key[:lead + 1]
+        if not ok:
+            return False
+    return True
+
+
+def check_requires_offline(root, reqs):
+    """The version comparison a cut makes, without crates.io (validate and --dry-run).
+    pin = "none" (the manifest is not rewritten): every requirement in the manifest must admit the
+    [[requires]] version and Cargo.lock must already have it, from crates.io; otherwise the cut's
+    `cargo update --precise` fails or quietly moves the dependency. Pinned entries: the cut moves
+    the lock to the version, so only a downgrade is refused. Returns notes for the dry run."""
+    notes = []
+    for r, ver, _ in reqs:
+        name, pin = r["crate"], r.get("pin", "exact")
+        if r.get("manifest") and pin == "none":
+            rel = r["manifest"]
+            for _, _, spec in dependency_specs((Path(root) / rel).read_text(encoding="utf-8"), name):
+                req = _spec_version(spec)
+                if req is not None and not req_admits(req, ver):
+                    raise ReleaseError(f"{rel}: {name} asks for {req!r}, which does not admit [[requires]] {ver}; "
+                                       "update release.toml or the manifest")
+        if not r.get("lock"):
+            continue
+        rel = r["lock"]
+        got = [p for p in lock_packages((Path(root) / rel).read_text(encoding="utf-8")) if p.get("name") == name]
+        if pin == "none":
+            try:
+                verify_required_lock(root, r, ver, None)
+            except ReleaseError as e:
+                raise ReleaseError(f"{e} ([[requires]] with pin = \"none\": the lock must already match; "
+                                   f"run `cargo update -p {name} --precise {ver}` or update release.toml)") from None
+            notes.append(f"{name}: {rel} has {ver} from crates.io")
+            continue
+        if len(got) != 1:
+            raise ReleaseError(f"{rel}: expected one {name} entry, found {len(got)}")
+        have = got[0].get("version", "")
+        if parse_version(have) > parse_version(ver):
+            raise ReleaseError(f"{rel}: {name} is {have}; [[requires]] {ver} would downgrade it")
+        notes.append(f"{name}: {rel} has {have}" + ("" if have == ver else f"; the cut moves it to {ver}"))
+    return notes
+
+
 def crate_plan(root, cfg, tag, prev_tag, edits=None):
     """[(path, name, version, action, reason)] for [crates] publish, in the configured order.
     publish = false crates are skipped; a version already on crates.io is skipped (with a warning
@@ -1049,6 +1139,7 @@ def cut(a, root):
         # Read-only checks: run in --dry-run too.
         run_cmds(root, hooks.get("pre"), ctx, henv, "pre hook", False)
     reqs = required_crates(root, cfg, ctx)
+    req_notes = check_requires_offline(root, reqs)
     plan = plan_files(root, cfg, ctx)
     plan_requires(plan, reqs)
     henv = hook_env(env, ctx, dry)
@@ -1069,6 +1160,9 @@ def cut(a, root):
     out(f"{D}{cfg['project']} {old} -> {new} ({part}) on {branch} at {head[:12]}, {date}")
     for r, ver, cksum in reqs:
         out(f"{D}requires {r['crate']} {ver}: on crates.io" + (f" (checksum {cksum[:12]})" if cksum else ""))
+        for n in req_notes:
+            if n.startswith(r["crate"] + ":"):
+                out(f"{D}lock now: {n.split(': ', 1)[1]}")
         if r.get("lock"):
             out(f"{D}lock: {' '.join(lock_update_cmd(r, ver))}; then check {r['lock']}")
     for rel, (o, n) in plan.edits.items():
@@ -1818,7 +1912,9 @@ def main(argv=None):
                    "title": "validate", "title_cell": "validate", "project": cfg["project"], "tag_prefix": pfx, "build": "",
                    **version_ctx(new)}
             plan = plan_files(root, cfg, ctx)
-            plan_requires(plan, required_crates(root, cfg, ctx, online=False))
+            reqs = required_crates(root, cfg, ctx, online=False)
+            check_requires_offline(root, reqs)
+            plan_requires(plan, reqs)
             cl = cfg.get("changelog")
             if cl:
                 p = cl.get("path", "CHANGELOG.md")
