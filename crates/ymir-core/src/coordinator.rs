@@ -117,9 +117,9 @@ const PREFILL_TOKENS_PER_SEC: u64 = 50;
 /// The most time any answer is given to start.
 const PREFILL_MAX: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// How long `req` may take before its first token: [`PREFILL_FLOOR`] plus its prompt at
-/// [`PREFILL_TOKENS_PER_SEC`], with a token counted for every 3 bytes of the request (generous: a
-/// longer prompt only means a longer allowance), up to [`PREFILL_MAX`].
+/// How long `req` may take before its first token: `PREFILL_FLOOR` plus its prompt at
+/// `PREFILL_TOKENS_PER_SEC`, with a token counted for every 3 bytes of the request (generous: a
+/// longer prompt only means a longer allowance), up to `PREFILL_MAX`.
 ///
 /// A model node sends nothing while its engine processes the prompt, so without this a long
 /// prompt looks like a dead node: the asker's pool (`weirdnet-agent`) cancels a stream with no
