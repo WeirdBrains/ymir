@@ -93,9 +93,17 @@ fn needles_scale_with_context_and_sit_at_three_depths() {
     }
 }
 
+/// Whether the sandbox can run Python. Every CI runner has Python, so there a missing one means
+/// the sandbox broke (not that the test should quietly pass).
+fn python_or_skip() -> bool {
+    let ok = score::python_available();
+    assert!(ok || std::env::var_os("CI").is_none(), "CI has Python, but the bench sandbox can't run it");
+    ok
+}
+
 #[test]
 fn the_hard_suite_expectations_hold_up() {
-    if !score::python_available() {
+    if !python_or_skip() {
         return;
     }
     // Reference solutions pass their own tests, so a failing model is the model's fault.
@@ -157,7 +165,7 @@ fn pow_last_digit(b: u64, e: u32) -> u64 {
 
 #[test]
 fn model_code_is_run_with_a_time_limit() {
-    if !score::python_available() {
+    if !python_or_skip() {
         return;
     }
     assert!(run_python("def f():\n    return 2", "assert f() == 2\nprint('OK')").unwrap());
