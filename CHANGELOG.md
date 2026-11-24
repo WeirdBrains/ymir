@@ -6,10 +6,13 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
 ### Added
 
 - `ymirctl models upload FILE [--name ID] [--adapter-for BASE] [--license L] [--no-register]`: put a GGUF model or GGUF LoRA adapter trained elsewhere into this node's models directory. The header is checked (an adapter against its base's architecture), the file is hashed while it is copied in atomically, a `provenance.json` beside it records the files, hashes, revision, license (optional) and base, and the entry is added to node.toml with that revision (`--no-register` only prints it). At least 10 percent of the disk or 20 GiB stays free. Local only; uploading to other nodes comes next ([plan](docs/design/model-upload.md)).
 - `ymirctl models upload [FILE] --from-run RUN_DIR`: upload a `ymirctl train run` adapter with its run record as the provenance (origin `train`: base, dataset record, trainer, run). The file must match the record's SHA-256 and the base here the revision it was trained on.
+- Training: llama-finetune parses chat-template special tokens; model upload (U1, U5); M9 bundle fetcher; Windows bench sandbox
 
 ### Changed
 
