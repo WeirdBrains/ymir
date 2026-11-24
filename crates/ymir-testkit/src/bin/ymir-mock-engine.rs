@@ -54,7 +54,8 @@ async fn main() {
         .route("/v1/embeddings", post(embeddings))
         .with_state(st);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await.expect("bind");
-    eprintln!("mock engine listening on {host}:{port}");
+    // With `--port 0` the OS picks the port; tests read it from this line.
+    eprintln!("mock engine listening on {}", listener.local_addr().expect("local addr"));
     axum::serve(listener, app).await.expect("serve");
 }
 

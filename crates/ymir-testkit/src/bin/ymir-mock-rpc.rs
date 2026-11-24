@@ -10,7 +10,7 @@ fn main() {
     let host = flag("-H", "--host").unwrap_or_else(|| "127.0.0.1".into());
     let port: u16 = flag("-p", "--port").and_then(|p| p.parse().ok()).unwrap_or(50052);
     let l = TcpListener::bind((host.as_str(), port)).expect("bind");
-    eprintln!("mock rpc-server listening on {host}:{port}");
+    eprintln!("mock rpc-server listening on {}", l.local_addr().expect("local addr"));
     for c in l.incoming() {
         drop(c);
     }

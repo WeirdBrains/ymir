@@ -1,6 +1,6 @@
 //! `ymirctl mcp --http` as a client would meet it: loopback only, bearer token, Host and Origin checks.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -33,22 +33,30 @@ fn start() -> Server {
     assert!(out.status.success());
     let token = String::from_utf8(out.stdout).unwrap().trim().to_string();
     assert!(!token.is_empty());
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let child = ymirctl(home.path())
-        .args(["mcp", "--read-only", "--http", &format!("127.0.0.1:{port}")])
+    // Port 0: the server binds first and then prints the address it got, so the port can't be
+    // taken by another test in between, and it is listening once the line is out.
+    let mut child = ymirctl(home.path())
+        .args(["mcp", "--read-only", "--http", "127.0.0.1:0"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let s = Server { child, port, token, _home: home };
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return s;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    panic!("the MCP server did not start");
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let line = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .find(|l| l.contains("http://127.0.0.1:"))
+        .expect("the MCP server exited without saying where it listens");
+    // Keep reading so the server never blocks on a full pipe.
+    std::thread::spawn(move || lines.for_each(drop));
+    let port = line
+        .split("http://127.0.0.1:")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no address in: {line}"));
+    Server { child, port, token, _home: home }
 }
 
 /// POSTs `body` to /mcp with the given extra header lines; returns the status and the body.

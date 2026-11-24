@@ -101,8 +101,9 @@ async fn eventually(secs: u64, what: &str, mut f: impl AsyncFnMut() -> Result<bo
 
 const MOCK_RPC: &str = env!("CARGO_BIN_EXE_ymir-mock-rpc");
 
+/// A port for a config or command line (see [`ymir_testkit::config_port`]).
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    ymir_testkit::config_port()
 }
 
 fn append(h: &Home, text: &str) -> Result<()> {
