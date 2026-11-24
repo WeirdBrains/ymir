@@ -80,7 +80,8 @@ async fn benchmarks_each_model_and_hides_node_names() {
     assert_eq!(chatty["samples"], 6);
     assert!(chatty["decode_tps"]["median"].as_f64().unwrap() > 0.0);
     let q = &chatty["quality"];
-    assert_eq!(q["ran"], 8);
+    // Two samples of each question; the code one is scored only where python3 and the sandbox are.
+    assert_eq!(q["ran"], if ymirctl::bench::python_available() { 8 } else { 6 });
     let passed = q["passed"].as_u64().unwrap();
     // arithmetic_1, json, fib (if python3 exists) and the capital are answered right; the rest are not.
     assert!((3..=4).contains(&passed), "passed {passed}");

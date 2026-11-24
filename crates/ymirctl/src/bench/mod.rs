@@ -29,7 +29,8 @@ use ymir_core::client::{BridgeClient, TimedChat};
 use ymir_core::direct::{AskOptions, Direct};
 
 pub use compare::CompareArgs;
-use score::{judge, median, python_available};
+pub use score::python_available;
+use score::{judge, median};
 pub use suites::Suite;
 use suites::{perf_suite, quality_suite};
 
