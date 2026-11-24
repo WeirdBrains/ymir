@@ -108,6 +108,15 @@ pub fn run_python(code: &str, tests: &str) -> Result<bool> {
     Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "OK")
 }
 
+/// Whether code answers can be run: python3 and the unix sandbox in `run_python`
+/// (`sh`, `ulimit`, `unshare`). Off unix, code questions are not scored.
+#[cfg(not(unix))]
+pub fn python_available() -> bool {
+    false
+}
+
+/// Whether code answers can be run: python3 and the unix sandbox in `run_python`.
+#[cfg(unix)]
 pub fn python_available() -> bool {
     Command::new("python3").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }

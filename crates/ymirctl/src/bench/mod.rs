@@ -404,7 +404,7 @@ pub struct QualityResult {
     pub check: &'static str,
     pub category: &'static str,
     pub node: String,
-    /// `None` when the check could not run (no python3).
+    /// `None` when the check could not run (no python3, or not on unix).
     pub passed: Option<bool>,
     /// The start of a wrong answer, to see why it failed.
     pub got: Option<String>,
