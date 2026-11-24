@@ -15,7 +15,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
-- `ymirctl bench` scores code answers on Windows too: Python runs in a Job Object (5 s of CPU per process, 2 GB of memory, at most 8 processes, all killed afterwards) in an empty directory with an empty environment. The network is not cut off there, unlike `unshare` on Linux.
+- `ymirctl bench` scores code answers on Windows too: Python runs in a Job Object (5 s of CPU per process, 2 GB of memory, at most 8 processes, all killed afterwards) in an empty directory with an empty environment. The network is not cut off there, unlike `unshare` on Linux. On macOS code questions stay unscored, now said plainly and checked in CI: macOS refuses both memory limits (`ulimit -v` and `-d`), so the sandbox never ran code there.
 
 ### Fixed
 

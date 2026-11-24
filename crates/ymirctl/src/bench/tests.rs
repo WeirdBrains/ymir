@@ -94,9 +94,14 @@ fn needles_scale_with_context_and_sit_at_three_depths() {
 }
 
 /// Whether the sandbox can run Python. Every CI runner has Python, so there a missing one means
-/// the sandbox broke (not that the test should quietly pass).
+/// the sandbox broke (not that the test should quietly pass). macOS refuses both memory limits
+/// (`ulimit -v` and `-d`), so there code is never run.
 fn python_or_skip() -> bool {
     let ok = score::python_available();
+    if cfg!(target_os = "macos") {
+        assert!(!ok, "macOS can't cap memory, so the sandbox must not run code there");
+        return false;
+    }
     assert!(ok || std::env::var_os("CI").is_none(), "CI has Python, but the bench sandbox can't run it:\n{}", score::sandbox_diagnose());
     ok
 }

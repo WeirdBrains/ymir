@@ -111,7 +111,7 @@ mod sandbox {
 
     /// One limit per `ulimit` (dash, Debian's and Ubuntu's sh, takes one at a time), with each
     /// shell's spelling: processes are `-u` in bash and zsh, `-p` in dash; memory is `-v`, or
-    /// `-d` where the address space can't be limited.
+    /// `-d` where the address space can't be limited. macOS refuses both, so code is not run there.
     const LIMITS: &str =
         "ulimit -t 5 && ulimit -f 1024 && { ulimit -v 2000000 2>/dev/null || ulimit -d 2000000; } && { ulimit -u 64 2>/dev/null || ulimit -p 64; }";
 
