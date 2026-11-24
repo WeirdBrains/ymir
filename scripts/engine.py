@@ -249,6 +249,10 @@ def cmd_build(a):
     ]
     if platform.machine() in ("x86_64", "AMD64", "amd64", "aarch64", "arm64") and not a.no_cpu_variants:
         defs.append("-DGGML_CPU_ALL_VARIANTS=ON")
+    if sys.platform.startswith(("freebsd", "openbsd", "netbsd", "dragonfly")):
+        # ggml-rpc turns RDMA on wherever it finds libibverbs; FreeBSD's is too old for it (and it
+        # is meant for Linux RoCE/IB clusters anyway).
+        defs.append("-DGGML_RPC_RDMA=OFF")
     backends = ["cpu"] + list(a.backend or [])
     for b in a.backend or []:
         defs.append({"vulkan": "-DGGML_VULKAN=ON", "cuda": "-DGGML_CUDA=ON", "metal": "-DGGML_METAL=ON", "rocm": "-DGGML_HIP=ON"}[b])
