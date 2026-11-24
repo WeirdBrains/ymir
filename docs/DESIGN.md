@@ -1878,7 +1878,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
 - **M8 server-a/server-b migration** (done 2026-11-20; each step approved by m3talsmith).
-- **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; and outside MCP servers for tasks. Still to do: push wake-ups (once the `weirdnet-push` front end exists), BSD packages, a bundle fetcher, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
+- **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; outside MCP servers for tasks; and a bundle fetcher (`update fetch`, `update watch`). Still to do: push wake-ups (once the `weirdnet-push` front end exists), BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
 - **M10 Cert-only server link** (built 2026-11-24; see [M10 status](#m10-status-built-2026-11-24)).
   `weirdnet-sync` 0.7 and `weirdnet-device-link` 0.4 give service nodes a node certificate and sync keys
   without the root seed; `ymirctl pool cert-only` moves an existing node and wipes its seed copy; a node
@@ -2682,8 +2682,8 @@ be expanded.
 
 The parts of "breadth and hardening" that can be built and tested on one machine are built: self-update with rollback,
 agent tasks for Bragi, the Windows service, a security review with checks that run, Inkling 2 Mini, automatic context
-sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, and outside MCP servers for tasks. Push wake-ups,
-BSD packages and a bundle fetcher are not; MLX-LM for Inkling waits on mlx-lm#2086.
+sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher
+(`update fetch`, `update watch`). Push wake-ups and BSD packages are not; MLX-LM for Inkling waits on mlx-lm#2086.
 
 **Built and run:**
 
@@ -2696,7 +2696,7 @@ BSD packages and a bundle fetcher are not; MLX-LM for Inkling waits on mlx-lm#20
   `ymir` run here; others are refused. Tests (`ymir-core/tests/tasks.rs`, in-memory transport, test identities): approved
   card reads the file and the model repeats it, a declined card never runs the tool, `../` and absolute paths error, a stranger
   and a revoked device are refused, no workspace means no tools; a unit test covers path resolution.
-- **Self-update with rollback (`ymir-core::update`, `ymirctl update`).** On `weirdnet-update` 0.2.0. `update trust --pin HEX
+- **Self-update with rollback (`ymir-core::update`, `ymirctl update`).** On `weirdnet-update` 0.2.0 (0.2.2 with `wire` since the fetcher). `update trust --pin HEX
   --root FILE` pins the org root (the first root must match the pin; a pin is never replaced). `update stage DIR` checks a bundle
   directory (`manifest.env`, optional `freshness.env`, `roots/*.env`, the files): k-of-n root chain, release-key delegation for
   `com.weirdbrains.ymir`/`stable`, expiry, replay and equivocation, no downgrade below the running version, a known-bad update,
@@ -2753,8 +2753,19 @@ BSD packages and a bundle fetcher are not; MLX-LM for Inkling waits on mlx-lm#20
 - **Push wake-ups:** `weirdnet-push` 0.1.0 has sealed payloads and APNs/FCM senders, but its Weirdnet front end (so the inference node
   can embed it with no listener) does not exist; tracked below. It also needs Apple and Google credentials from m3talsmith.
 - **BSD packages:** not built or tried. The user and system services cover systemd, launchd and Windows (see [Running as a service](#running-as-a-service)), but nothing here was packaged for a BSD. (Bragi's FreeBSD CI job is a separate item, see the Bragi B5 status.)
-- **A bundle fetcher.** `update stage` takes a directory. Announcements over `weirdnet-relay` (`/weirdnet/updates/1`, feature
-  `wire`) and downloads are the next piece; nothing is signed with a real org key (m3talsmith holds those) and no release was cut.
+- **The bundle fetcher is built (2026-11-24); publishing is not.**
+  - `update fetch SOURCE [--announcement FILE]` reads a bundle directory over HTTPS or from disk (`Updater::fetch` with a
+    `Source`). The manifest is verified against the pinned root first, on a copy of the client state so nothing is
+    recorded, and only then is anything else downloaded. Each file is read up to its signed size. An announced manifest
+    hash must match. Then the usual `stage` runs.
+  - `update watch --relay ADDR` subscribes to Ymir's app and channel on `/weirdnet/updates/1` (`weirdnet-update` 0.2.2
+    `wire`, as `weirdnet-relay` 0.6.1 `[updates]` serves it) from a dial-only node with a fresh key, and with `--fetch`
+    stages what it hears.
+  - Tests: `ymir-core` unit tests, and `ymir-testkit/tests/update_fetch.rs` against a local HTTP server and an in-test
+    carrier built on `weirdnet-update`'s `Carrier` (not a running `weirdnet-relay`).
+  - Not built: publishing (nothing writes bundles to an HTTPS host or announces them; the release script would), a
+    `weirdnet:` content source, and a watcher inside `ymird`. Nothing is signed with a real org key (m3talsmith holds
+    those) and no release was cut.
 - **Updating `ymirctl` and the engines with `ymird`:** the release directory may hold `ymirctl`, but only `ymird` is started from
   it; the service still calls the installed `ymirctl`.
 - **Self-update on a real machine** was not exercised: the tests run on one box with fake binaries and test keys.
