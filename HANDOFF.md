@@ -21,6 +21,26 @@ m3talsmith's updated decision 7: patch `llama-finetune` in Ymir's trainer build 
 
 **Next**: when upstream releases a `llama-finetune` that parses specials, move the pin (`scripts/engine.py pin bNNNN`, `PINNED_BUILD`), delete the patch, its `TRAINER_PATCHES`/`REQUIRED_PATCHES` entries and the fake's `--ymir-patches`, and redo the Inkling checks for serving.
 
+## 2026-11-24 14:30 EST: model upload plan (branch `feature/model-upload-plan`, not merged)
+
+m3talsmith asked for uploading models to Ymir through ymirctl and Bragi; the main use case is fine-tuning off the
+network and putting the result into the pool. Plan only, for the project lead's review before any code:
+[docs/design/model-upload.md](docs/design/model-upload.md). It covers what can be uploaded (GGUF models and splits,
+mmproj projectors, GGUF LoRA, PEFT adapters, safetensors for vLLM, MLX directories), a provenance record (base,
+dataset manifest, license, revision from the content hash), a chunked, resumable, SHA-256-checked `Upload` command on
+models/1, staging plus node-to-node replication for pools, a write grant for uploads, validation, quotas and disk
+checks, how an upload joins a P4b rollout at weight 0 behind the eval gate, P3a outputs on the same path
+(`--from-run`), the ymirctl and Bragi UX, requests A to D for the Weirdnet lead, risks and the slice order (U1 local
+upload with provenance first).
+
+**Checks run**: docs only; no code changed, no build. Surveyed `weirdnet-model` 0.5.2 (`ModelStore`, adapters, GGUF
+headers, download), `weirdnet-backends` 0.4.3 (models/1, `StoredEntry`, `ModelsService`), `weirdnet-agent` 0.5.2
+(`RosterAuth::require_roles`), `weirdnet-net` 0.8.2 stream limits, and Bragi main (Models screen, pools, rollouts,
+cert-only links).
+
+**What's left / next**: the lead's review and m3talsmith's answers to the plan's open questions; then U1. Requests A and
+B go to the Weirdnet lead once the plan is confirmed.
+
 ## 2026-11-24 14:30 EST: trainer pin decision, white paper link (branch `feature/trainer-pin-decision`)
 
 **What changed** (docs only): [docs/design/training.md](docs/design/training.md) links the white paper's training section ([docs/whitepaper/sections/10-training.tex](docs/whitepaper/sections/10-training.tex)) instead of saying it is not in the repository, and records m3talsmith's decisions of 2026-11-24: 7, move the llama.cpp pin to a build whose `llama-finetune` parses special tokens, with no local patch; 8, "Just release".
