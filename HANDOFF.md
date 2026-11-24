@@ -25,7 +25,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **Checks**: `cargo fmt`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace` (see the phase report); new `crates/ymir-testkit/tests/p3a.rs` (4 tests: a run on a generated and on a conversation dataset with `--add`; refusals for the license, a missing or changed manifest, ids, another build and a hold by hand; failed and cancelled runs; a running ymird reserved for a run, a refused sole-server reserve, a load refused meanwhile, and a hold surviving a restart), plus unit tests for the lock, events and run ids.
 
-**Not tested**: no real trainer exists yet. A wrapper around the pinned `llama-finetune` and the extraction tool is still to write, with the build to pin. No real node, GPU or model was touched. Reserving a remote node over Weirdnet was not run end to end here: `weirdnet-backends` covers node/1 `Reserve` in its own tests.
+**Not tested**: no real trainer exists yet. A wrapper around the pinned `llama-finetune` and the extraction tool is still to write, with the build to pin. No real node, GPU or model was touched. On Windows the lock is not checked for a dead process: it holds until `ymirctl train release`. Reserving a remote node over Weirdnet was not run end to end here: `weirdnet-backends` covers node/1 `Reserve` in its own tests.
 
 **Next**: the llama.cpp trainer wrapper (its own package, pinned build), and a first real run on a node the lead clears. Then `train run --node` for a remote node, and P3b.
 

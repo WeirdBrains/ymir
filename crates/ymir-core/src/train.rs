@@ -135,6 +135,8 @@ fn alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Not checked off unix: a lock there holds until `ymirctl train release`
+/// (or the run that took it) frees it.
 #[cfg(not(unix))]
 fn alive(_pid: u32) -> bool {
     true
@@ -803,9 +805,12 @@ mod tests {
         assert!(take_lock(&paths, "b", None, None).is_err(), "held by a live process");
         assert!(drop_lock(&paths, "b").is_err(), "not b's");
         assert!(drop_lock(&paths, "a").unwrap());
-        // A pid no process has.
-        take_lock(&paths, "a", None, Some(u32::MAX / 2)).unwrap();
-        assert!(held(&paths).is_none(), "stale");
+        // A pid no process has (only checked on unix).
+        #[cfg(unix)]
+        {
+            take_lock(&paths, "a", None, Some(u32::MAX / 2)).unwrap();
+            assert!(held(&paths).is_none(), "stale");
+        }
         take_lock(&paths, "b", None, None).unwrap();
         assert_eq!(held(&paths).unwrap().pid, None, "held until released by hand");
     }
