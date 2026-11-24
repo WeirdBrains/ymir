@@ -6,6 +6,9 @@
 name: BSD
 
 on:
+  # TEMPORARY, remove before merging: run on pushes to the BSD branch until the workflow is on main.
+  push:
+    branches: ['feat/m9-bsd-packages']
   workflow_dispatch:
     inputs:
       only:
