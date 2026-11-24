@@ -3,6 +3,31 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: M9 BSD packages (branch `feat/m9-bsd-packages`)
+
+**What changed**
+- `scripts/package.py`: FreeBSD and OpenBSD targets (x86_64, aarch64; host detection too). The `tar.gz` as on Linux; on FreeBSD also `ymir-VERSION-ARCH-freebsd.pkg` through `pkg create` (+MANIFEST in UCL/JSON, plist, post-install that creates the `ymir` user and `/var/db/ymir`). Off FreeBSD the `.pkg` is skipped with a notice. BSD targets need `--engine DIR` (from `engine.py build` on that system) or `--no-engine`.
+- `packaging/freebsd/ymird.in`: rc.d script, off until `sysrc ymird_enable=YES`; `ymird` as `ymir` under `daemon(8)` (restarts 5 s apart, syslog), pidfile in `/var/run/ymird/`.
+- `scripts/engine.py build`: `-DGGML_RPC_RDMA=OFF` on the BSDs (ggml-rpc found FreeBSD's ibverbs and failed to build against it).
+- `.github/workflows/bsd.yml` (manual): FreeBSD 14.2 VM: cargo build, engine from source, package, `pkg add`, setup as `ymir` with the mock engine, `service ymird start`, chat, stop (no engine left behind), `pkg delete`, ymir-core and ymirctl tests. OpenBSD 7.6 opt-in (`only: openbsd|both`).
+- Docs: [docs/DESIGN.md](docs/DESIGN.md) (M9 status), [roadmap.toml](roadmap.toml), the site's hardware page, [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: local dry runs of package.py (FreeBSD and OpenBSD tar.gz, Linux tar.gz/zip/deb unchanged). FreeBSD VM: see the BSD workflow runs on the branch (RESULT).
+
+**Not tested / not built**: OpenBSD: its rust package is 1.81 (7.6) and the workspace needs 1.99, and rustup has no OpenBSD, so no OpenBSD build yet. aarch64 FreeBSD, a ports entry, a package repository, GhostBSD and DragonFly. Vulkan engine builds on BSD.
+
+## 2026-11-24: a sandbox for bench code on Windows (branch `feat/bench-windows-sandbox`)
+
+**What changed**
+- `ymirctl bench` runs code answers on Windows in a Job Object (5 s of CPU per process, 2 GB, 8 processes, killed when the job closes), with an empty environment (SYSTEMROOT and PATH only) in an empty directory; Python waits for its job assignment before running anything. The network is not cut off there.
+- Unix: each limit is its own `ulimit` call (dash took none of them before, silently); if one can't be set, code stays unscored. macOS refuses both memory limits (`-v`, `-d`), so on macOS code is not run, now stated and checked.
+- Bench tests fail on CI instead of skipping when the sandbox can't run Python, and say which check failed.
+- `windows-sys` 0.61 (Windows only).
+
+**Checks**: CI green on Linux, macOS and Windows (code tests ran on Linux and Windows). Clippy clean on both targets.
+
+**Open question**: score code on macOS with CPU, file and process limits but no memory cap? Left off.
+
 ## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
 
 **What changed**
