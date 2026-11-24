@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: a test that keeps `release.toml` `[[requires]]` in step (branch `test/release-requires`)
+
+Infra's cut was blocked: `release.toml` still required `weirdnet-backends` 0.4.2 after Cargo.toml moved to 0.4.3 (fixed in `f062f64`). The release script compares the lock only at cut time. Now `crates/ymir-testkit/tests/release_requires.rs` (in `cargo test --workspace`, so Linux CI) fails when a `[[requires]]` version differs from its manifest's requirement or from the one Cargo.lock entry, or when that entry isn't from crates.io. Checked by reverting the version to 0.4.2: the test fails with "release.toml [[requires]] weirdnet-backends = 0.4.2, but Cargo.toml asks for 0.4.3".
+
 ## 2026-11-24: Windows CI green again (branches `fix/p3a-windows-lock`, `fix/bench-windows`)
 
 **What changed**
