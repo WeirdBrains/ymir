@@ -3,6 +3,14 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 16:45 EST: v0.9.0 released
+
+`release: v0.9.0` (`94c1c29`, tag [`v0.9.0`](https://github.com/WeirdBrains/ymir/releases/tag/v0.9.0)) under "Just release", cut with `scripts/weirdnet_release.py` on main `536f4ec` after CI was green there (Linux, macOS, Windows; Windows needed a second attempt in the MSI step) and the release checks passed locally (fmt, clippy `-D warnings`, `cargo test --workspace` 314 passed, 0 failed). It carries the trainer's parse-special patch and build-number fix (`0b4cf61`), model upload U1 and U5, the M9 bundle fetcher and the Windows bench sandbox. The tag's CI, macOS and Release workflows passed ([Release run 45483965006](https://github.com/WeirdBrains/ymir/actions/runs/45483965006)). The GitHub release has 31 files with `SHA256SUMS`; `weirdnet_release.py assets 0.9.0` is ok. Artifacts scanned (Linux, macOS and Windows archives): only CI runner paths, no host names or home paths.
+
+This branch records the v0.9.0 tarball hashes in `packaging/arch/ymir-bin` and `ymir-cuda-bin` (`taur-check 0.9.0` ready for both).
+
+**Left, not possible from the dev box:** publishing to TAUR (`weirdnet_release.py taur 0.9.0`; `taurctl` and its login are on the maintainer's machine) and the detached `.pkg.tar.zst.sig` signatures v0.8.0 had (the signing key is local there). crates.io does not apply (`[crates] publish = []`). The Homebrew formula still has placeholder sums, as before.
+
 ## 2026-11-24 15:18 EST: model upload U5, trainer outputs on the upload path (branch `feature/model-upload-trainer-output`)
 
 Slice U5 of [docs/design/model-upload.md](docs/design/model-upload.md), next after U1 in the approved order.
