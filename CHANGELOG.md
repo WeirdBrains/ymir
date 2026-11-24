@@ -6,12 +6,15 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
 ### Added
 
 - M10, cert-only server links: a server can join with a node certificate and a user-signed service grant, never the identity seed. `ymirctl pool add CODE --service inference|model` sends one (an inference node gets the pool's and conversations' keys, a model node none), `pool link --cert-only` accepts only that, and `pool cert-only` moves a node linked with the seed (same peer id; the `seed` file is overwritten and deleted). A cert-only node keeps `credential.json` (the user's public key) instead of `seed` and cannot link, approve or revoke devices; revoking it from a seed holder leaves the identity unchanged. `pool devices` shows cert-only nodes and their roles. Moves to `weirdnet-sync` 0.7.1 and `weirdnet-device-link` 0.4.2.
 - Training plan P3a, fine-tuning on one node: `ymirctl train run --base ID --dataset FILE` trains a LoRA adapter with the trainer in `[train]`. Michael's choice is upstream llama.cpp's full fine-tuning plus a LoRA extraction step, pinned to one build, and a trainer reporting another build is refused. Only datasets with a manifest are taken (a generated dataset's teacher license must be known). The node's GPU is held for the run: a running ymird unloads its models and loads none until the run ends, refused when the node is the only one serving a loaded model unless `--force`, and a ymird started meanwhile loads nothing. The adapter goes to `adapters/` in the models directory with a `run.json` record, and `--add` puts it in node.toml. `train reserve`/`release` hold and free a node by hand, `train check` tests the trainer, `train list` shows runs. `ymirctl nodes` shows reserved nodes. Moves to `weirdnet-backends` 0.4.3 (node reservations).
 - Training plan P4b, versioned rollouts: `[[inference.rollout]]` gives a model name versions with traffic weights. Each conversation stays on one version, `NAME@N` pins one, and the catalog lists both. `ymirctl models rollout list|add|weight|rollback|retire` changes them in node.toml and in the running ymird at once. A version gets up to 10% of new conversations freely; more needs `--eval FILE` (a `ymirctl eval --out` file in which it does at least as well as the version with the most traffic) or `--force`. Answers are cached per version, and apps are told the name they asked for.
 - `crates/ymir-testkit/tests/release_requires.rs`: CI fails when `release.toml` `[[requires]]` no longer matches Cargo.toml and Cargo.lock.
+- Cert-only server links, ymirctl train with node GPU reservations (mock trainer only), weighted model rollouts with canary, eval gate and rollback, and a green Windows CI.
 
 ### Fixed
 
