@@ -1,8 +1,8 @@
 # Uploading models to Ymir: implementation plan
 
 Status: plan, 2026-11-24. Approved by the project lead on 2026-11-24 with two changes (U5 moved up to follow U1;
-U6 waits on Weirdnet requests B and C, with no interim peer copy in Ymir). U1 is in progress. m3talsmith's open
-questions below are still open.
+U6 waits on Weirdnet requests B and C, with no interim peer copy in Ymir). m3talsmith answered the open questions the
+same day (see "Decisions"). U1 (local upload) is built; see "U1 as built".
 
 Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weirdbrains.com).
 
@@ -27,8 +27,8 @@ first-class. P3a's trainer outputs use the same path, so a run on one node can r
   never edits a `weirdnet-*` crate; each need is listed under "Requests for the Weirdnet lead".
 - **Weights are data, never code.** Pickled weights (`.bin`, `.pt`, `.pth`, `.ckpt`) and Python files are refused;
   safetensors and GGUF are parsed by header only. Nothing uploaded is ever run.
-- **Provenance is required, as for datasets.** P1 refuses a dataset whose teacher license is unknown unless the
-  operator says so; an upload is held to the same rule for its own license and its base model.
+- **Provenance is recorded, not demanded.** Every upload gets a record of its files, hashes, revision and base;
+  the license and dataset are recorded when given and are not required (decision 2).
 - **Live nodes.** Uploading onto a node that serves the pool is ordinary model management (like `pull --node`)
   but large: tests use `YMIR_HOME` in a temp directory, mock engines and tiny synthetic GGUFs, never a real model.
 
@@ -92,9 +92,9 @@ for adapters) and returned by `models list`:
 }
 ```
 
-- **License** is required (`--license`). `unknown` only with `--allow-unknown-license`, and the record says so.
-  When the base's license or the dataset's teacher license is more restrictive than the declared one, ymirctl
-  warns before sending.
+- **License** is optional (`--license`, decision 2) and recorded when given; with none the record has no
+  `license` field. When the base's license or the dataset's teacher license is known and differs from the declared
+  one, ymirctl warns.
 - **Base** is required for adapters and optional for full fine-tunes (strongly suggested: it is what lets the eval
   compare like with like). Filled from the GGUF header (`general.base_model.*`) or `config.json` when present;
   `--base` names a pool model and records its revision, quant and hash.
@@ -116,9 +116,9 @@ A new models/1 command, `Upload`, in one stream:
    projector_for, serve, replace }` with its cert.
 2. **Admission and pre-checks, before a byte of weights moves.** The node authorizes the caller (see "Auth"),
    checks names (no `/`, no `..`, no hidden files, allowed extensions), the id is free (or `replace`), the total size
-   against the per-upload limit, quota and free disk, and, for adapters, that the base is served on an engine that
-   takes this format. It answers `UploadReady { upload, have: [bytes already held per file] }` or a refusal with a
-   reason: `exists`, `too-big`, `no-space`, `quota`, `wrong-engine`, `no-base`, `bad-name`.
+   against free disk (keeping 10 percent or 20 GiB free, decision 4), and, for adapters, that the base is served on an
+   engine that takes this format. It answers `UploadReady { upload, have: [bytes already held per file] }` or a
+   refusal with a reason: `exists`, `no-space`, `wrong-engine`, `no-base`, `bad-name`.
 3. **Header first.** The client sends the first chunk of each GGUF or safetensors file before the rest; the node
    reads the header as soon as it has it and refuses early (`bad-format`, `wrong-arch`, `not-adapter`) rather than
    after gigabytes.
@@ -128,16 +128,19 @@ A new models/1 command, `Upload`, in one stream:
    pulls do.
 5. **Verify and place.** On `UploadDone` the node hashes each part, compares size and SHA-256, re-reads headers,
    runs the format checks above and the fit, then renames into the store (atomic per file, the directory last),
-   writes `provenance.json`, and, with `serve`, adds it to the supervisor as `pull --serve` does (an adapter on its
-   base with `Supervisor::add_adapter_live`). It answers `Uploaded(Pulled)` with the files, revision, whether it
-   serves, and for an adapter when it serves (`AdapterChange`).
+   writes `provenance.json` (and `adapter.json` for an adapter), and, with `serve`, adds it to the supervisor as
+   `pull --serve` does (an adapter on its base with `Supervisor::add_adapter_live`). It answers `Uploaded(Pulled)`
+   with the files, revision, whether it serves, and for an adapter when it serves (`AdapterChange`). **Only vLLM
+   loads a new adapter live.** On a llama.cpp base a new adapter file is `AdapterChange::NextLoad`: it serves after
+   the base restarts or next loads, and ymirctl and Bragi say exactly that, never that it is live.
 6. **Cancel and resume.** Closing the stream cancels; parts stay. Offering the same files again resumes from
    `have`. Abandoned parts are removed after a TTL (default 7 days) or by `models upload --abandon`.
 
-A node never edits its own `node.toml` because of an upload (as with `pull --node`): the served model lives in
-memory and the output prints the `[[model.local]]` / `adapter add` entry to keep it across a restart. `--register`
-writes it when the target is the machine ymirctl runs on. (Open question 5 asks whether uploads should persist on
-remote nodes.)
+**Persistence (decision 5).** An upload is saved into the target node's `node.toml` by default (the
+`[[model.local]]` entry, or `[[model.local.lora]]` under its base, keeping `node.toml.bak`), so it and any rollout
+version that names it survive a restart; `--no-persist` keeps it in memory only and prints the entry. This is a
+deliberate exception to `pull --node`, which never edits another node's `node.toml`. Locally (U1) the same default
+applies: `--no-register` only prints the entry.
 
 ### A pool
 
@@ -149,28 +152,36 @@ same 5 to 70 GB from a laptop once per node wastes its uplink, often through a r
   checked against the same hashes, node to node. Progress for every node streams back to the client.
 - **Fallback: push to each.** When no node can stage (older nodes, `--no-stage`), the client pushes to each target
   in turn; resume keeps a broken one cheap.
-- **Hub as staging** works today with no change: push to a private Hub repo, then `models pull --node all`. It stays
-  documented as the interim path, but it puts unreleased weights on a third-party host and loses the provenance
-  record, so it is not the main path.
+- **Hub as staging**: see "Stopgap until U2" below.
+
+### Stopgap until U2: a private Hub repo (decision 7)
+
+Until uploads over Weirdnet exist, a model trained elsewhere reaches a remote node through the Hub, with no change to
+Ymir:
+
+1. Push the GGUF (or adapter) to a private Hugging Face repo with your own Hub tools.
+2. Give each node that should pull it a read token for that repo, in its own environment or files (`HF_TOKEN`,
+   `YMIR_HF_TOKEN_FILE`, `state/hf-token`); the token never travels in Ymir's messages.
+3. `ymirctl models pull OWNER/REPO --node NAME --serve` (a model), or `ymirctl models pull OWNER/REPO --node NAME
+   --adapter-for BASE --serve` (an adapter; on llama.cpp it serves after the base's next load).
+
+It puts unreleased weights on a third-party host and records no provenance beyond the repo, so it stays a stopgap.
+On the node itself, `ymirctl models upload` (U1) works today.
 
 ## Auth and permissions
 
-- **Who.** Today models/1 admits any linked, unrevoked device of the owner (`RosterAuth` without roles). Writing
-  tens of gigabytes and new weights into the pool is more than search or pull, so `Upload` (and `Fetch` to a
-  node) gets its own check: the caller must hold a user-signed grant `ymir.models.write` in the `weirdnet-sync`
-  roster (`RosterAuth::require_roles`), which the owner grants to personal devices (`ymirctl pool grant DEVICE
-  models.write`, Bragi's device list). Cert-only service nodes (M10) hold `ymir.inference` / `ymir.model` only, so a
-  compromised server cannot push weights into the rest of the pool. `[model] upload = "granted" | "linked" | "off"`
-  (default `granted`; `linked` is today's models/1 rule). The default is open question 1.
-- **Node to node.** Staged replication needs the target node to read from the staging node: `Fetch` admits a caller
-  with the `ymir.model` grant, and only for an upload the owner started (the staging node keeps the offer, signed
-  into the target's request as the owner's upload id).
+- **Who (decision 1).** Every device linked to the owner's roster may upload, as models/1 admits today
+  (`RosterAuth` without roles). There is no `ymir.models.write` grant. Revoking a device in the roster stops its
+  uploads, like everything else it does.
+- **Node to node.** Staged replication (U6) needs the target node to read from the staging node: `Fetch` admits a
+  linked device, and only for an upload the owner started (the staging node keeps the offer and the target names it
+  by its upload id).
 - **Identity.** The caller's `NodeCert` travels in the request as for every models/1 command; Noise authenticates
   the stream. The uploading device's roster label goes in the provenance record.
-- **Disabling.** `[model] remote_manage = false` turns off all of models/1, uploads included; `upload = "off"` turns
-  off uploads only.
+- **Disabling.** `[model] remote_manage = false` turns off all of models/1, uploads included; `[model] upload =
+  false` turns off uploads only.
 
-## Validation, quotas and disk space
+## Validation and disk space
 
 - **Names and types**: as above; refuse symlinks, device files, pickles and `.py`.
 - **Headers**: GGUF via `weirdnet_model::gguf::read_header` (kind, architecture, base, split counts); safetensors
@@ -182,11 +193,9 @@ same 5 to 70 GB from a laptop once per node wastes its uplink, often through a r
 - **Fit**: full models against the node's model budget with `weirdnet_model::fit` (the same verdict `models search`
   shows). `fits` serves; `partial` serves with a warning; `too big` stores only with `--store-only` and never serves.
   Adapters add their bytes to the base's footprint.
-- **Disk**: the node reports free bytes on the models filesystem in `UploadReady`; it refuses unless free space
-  after the upload stays above `[model] keep_free` (default 10 percent of the filesystem or 20 GiB, the larger)
-  and rechecks before each rename.
-- **Quotas**: `[model] max_upload = "100GiB"` per upload and `upload_quota = "500GiB"` for everything with
-  `origin = upload` on that node; `models list` shows both. Defaults are open question 4.
+- **Disk (decision 4)**: no size cap per upload and no total per node. The one limit: 10 percent of the models
+  disk or 20 GiB, whichever is more, always stays free. The node reports free and total bytes in `UploadReady`,
+  refuses an upload that would go below that, and rechecks before each rename. U1 applies the same rule locally.
 - **Concurrency**: one upload per id at a time; a second offer for the same files joins the first (same `.part`).
 
 ## Catalog, versions and rollouts
@@ -198,7 +207,8 @@ same 5 to 70 GB from a laptop once per node wastes its uplink, often through a r
   `--replace` (same id, new revision) is allowed for a model outside any rollout; for a model that a rollout version
   names, it is refused.
 - **Feeding a rollout.** `--rollout NAME` makes the upload the next version of NAME on the inference nodes:
-  after the model node serves it, ymirctl asks the inference node (its local ymird, `ControlRequest::Rollouts`) to
+  after the model node serves it (an adapter on a llama.cpp base only after the base's next load: ymirctl says so
+  and the version waits at weight 0 until it answers), ymirctl asks the inference node (its local ymird, `ControlRequest::Rollouts`) to
   `rollout add NAME@N --model ID --weight 0`. Weight 0 means it is pinnable as `NAME@N` and takes no traffic.
   `--eval ROWS.jsonl [--judge MODEL]` then runs `ymirctl eval` on `NAME@N` and on the version with the most traffic,
   and `--canary W` sets the weight: up to 10 percent freely, more only with the eval passing the existing P4b gate
@@ -228,9 +238,9 @@ same 5 to 70 GB from a laptop once per node wastes its uplink, often through a r
 ymirctl models upload <FILE|DIR>...
     [--node NAME|peer|auto | --pool | --node all]   # default: this machine, no daemon needed
     [--adapter-for BASE] [--projector-for BASE]     # kind otherwise read from the files
-    [--name ID] [--license SPDX | --allow-unknown-license]
+    [--name ID] [--license SPDX]
     [--base MODEL] [--dataset-manifest FILE] [--from-run RUN_DIR]
-    [--serve] [--register] [--store-only] [--replace]
+    [--serve] [--no-persist | --no-register] [--store-only] [--replace]
     [--rollout NAME [--eval ROWS.jsonl [--judge MODEL]] [--canary W] [--inference NAME|all]]
     [--stage NODE | --no-stage] [--dry-run] [--abandon]
 ```
@@ -238,33 +248,47 @@ ymirctl models upload <FILE|DIR>...
 - `--dry-run` reads and hashes locally, prints kind, format, architecture, base, revision, size, the per-node fit
   and free disk, and the provenance it would send; nothing moves.
 - Progress is one line per node (`staging 41% 2.0 GB/4.9 GB 38 MB/s via relay`), as pulls show today, then the
-  served id, revision, and the `[[model.local]]` or `adapter add` line to keep it.
+  served id, revision, what was saved to node.toml, and for a llama.cpp adapter that it serves after the base's next
+  load.
 - Exit codes and refusal reasons are the protocol's (`no-space`, `wrong-arch`, ...), worded with the fix.
 - `ymirctl models list [--node]` gains `ORIGIN` and `LICENSE` columns; `--provenance ID` prints the record.
 
 ## Bragi UX
 
 - **Upload** button on the Models screen (Flutter and GPUI, same `bragi-core` state; the terminal app gets
-  `/models upload PATH`). Desktop first; on phones the system picker works for small adapters but full models are
-  not a phone job (open question 6).
+  `/models upload PATH`). Desktop first (decision 6): GPUI, then the Flutter desktop builds; phones later.
 - **Dialog**: file or folder picker; Bragi reads the files locally (same `weirdnet-model` inspection) and shows
   kind, format, architecture and size before anything is sent; target picker (auto, a node, the pool) with each
   node's fit and free disk; for adapters a base picker filtered to served bases of the matching architecture and
-  engine; name; license (required, with the "unknown" override behind a confirm); optional dataset manifest; an "Add
+  engine; name; license (optional); optional dataset manifest; an "Add
   to rollout" section (rollout name, starting weight 0, optional canary with the eval file).
 - **Progress**: one bar per node with speed and path (direct or relay), Cancel (keeps parts), Resume after a restart
   of Bragi (the upload id is the file list's hash, kept in Bragi's state), and the result row linking to the model in
   the catalog and to its rollout version.
 - **Pools**: the dialog uploads to the active pool (`pools.rs`); switching pools mid-upload is refused until it is
   cancelled or done.
-- **Permissions**: a device without the upload grant sees the button disabled with the reason ("This device can't
-  add models to the pool. Grant it on a device that can."), as the Models screen does today for unlinked devices.
+- **Permissions**: any linked device may upload (decision 1); an unlinked or revoked one sees the controls off with
+  the reason, as the Models screen does today.
 - Logic in `bragi-core` (`ModelsManager::upload`, over the `weirdnet-backends` client); the shells only draw it.
 
 ## Requests for the Weirdnet lead
 
-A, B and C were sent to the Weirdnet lead on 2026-11-24; D is held. None blocks U1 or U5; U2 needs A and B; U6
-needs B's peer pull (`Fetch`, `PullSource::Peer`) and C's grant.
+A, B and C were sent to the Weirdnet lead on 2026-11-24; D is held. The lead accepted A to C the same day as
+`weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4 (not built yet), with these changes to the shapes below:
+
+- `ArtifactKind::Adapter { format: AdapterFormat }`, and `ArtifactFormat::{Gguf { parts }, Safetensors, Mlx}` with no
+  `Peft` variant (PEFT is an adapter format). Projectors are `GgufKind::Projector`.
+- `inspect` reuses `gguf::read_header`, `hf::peft_lora` and `ModelLaunch::check_adapters`.
+- Importing an adapter also writes `adapter.json`; adapter sizes and `remove_adapter` leave `provenance.json` out
+  of the count.
+- The partial-upload staging folder lives outside the models tree.
+- Refusals are `Error::Model` with stable reason strings. There is no `StoredEntryKind` type.
+- Live serving uses `add_adapter_live`, and `ModelLaunch::mmproj` for projectors. Only vLLM loads a new adapter
+  live; on llama.cpp a new adapter file is `NextLoad` (the base must restart or reload).
+- C: with no new role (decision 1), the "any of these roles or a full-identity device" helper may not be needed;
+  uploads use plain `RosterAuth`. The lead may drop that part.
+
+None blocks U1 or U5; U2 needs A and B; U6 needs B's peer pull (`Fetch`, `PullSource::Peer`).
 
 **A. `weirdnet-model`: inspect, hash and import local artifacts, with provenance.**
 - `artifact::inspect(paths: &[PathBuf]) -> Result<Artifact>`: `Artifact { kind: ArtifactKind (Model, Adapter
@@ -285,7 +309,8 @@ needs B's peer pull (`Fetch`, `PullSource::Peer`) and C's grant.
   hashing and layout, and the store is already this crate's. Provenance next to the files is what lets a node
   answer "where did this come from" after the fact.
 
-**B. `weirdnet-backends` models/1: upload, fetch, disk and a write policy.**
+**B. `weirdnet-backends` models/1: upload, fetch, disk and a write policy.** (As sent; after decisions 1 and 4 the
+write policy needs only the free-space floor and the part TTL, no caps, quotas or separate authorizer.)
 - `ModelsCommand::Upload(Upload)`: `Upload { id, files: Vec<ArtifactFile>, provenance: Provenance, adapter_for:
   Option<String>, projector_for: Option<String>, serve: bool, replace: bool, store_only: bool }`.
   Replies: `ModelsReply::UploadReady { upload: String, have: Vec<u64>, free: u64 }`, then `Progress`, then
@@ -310,7 +335,7 @@ needs B's peer pull (`Fetch`, `PullSource::Peer`) and C's grant.
   uploads if the client is in this crate, not in Ymir. The 64 KiB frame limit and resumable parts are protocol
   concerns.
 
-**C. `weirdnet-sync` / `weirdnet-agent`: a model-write device grant.** Confirm that `DeviceGrant` roles are free-form
+**C. `weirdnet-sync` / `weirdnet-agent`: a model-write device grant (likely not needed after decision 1).** Confirm that `DeviceGrant` roles are free-form
 app strings that the owner can grant to personal (non-service) devices, so Ymir can define `ymir.models.write`; if
 not, add that. And a `RosterAuth` helper that admits a caller holding any of a role list *or* being a full-identity
 device, so `[model] upload = "linked"` and `"granted"` are one line each. Why: uploads are the first write that
@@ -322,16 +347,17 @@ should not be open to every linked device, and the 2026-11-20 rule says to autho
 ## Risks
 
 - **Disk and bandwidth.** Full models are 5 to 70+ GB; through a relay that is hours. Mitigations: resume,
-  staging and node-to-node replication, early header refusal, free-disk and quota checks before sending, a warning
+  staging and node-to-node replication, early header refusal, the free-disk check before sending, a warning
   when the path is relayed.
 - **Bad or hostile files.** A malformed GGUF or safetensors header reaching a parser or the engine. Mitigations:
-  header parsing with size caps in one tested crate, no pickles, no code, engines never run with remote code, and
-  a write grant narrower than "any linked device".
+  header parsing with size caps in one tested crate, no pickles, no code, engines never run with remote code.
+  Uploads are open to every linked device (decision 1), so a linked device that is compromised can add weights;
+  revoking it in the roster is the answer, as for everything else it can do.
 - **Wrong base.** Adapters trained on another revision or quant serve badly. Mitigations: architecture, PEFT base and
   revision/quant checks already in P4a, recorded in provenance.
 - **Licenses.** Fine-tunes inherit the base's terms and may carry a teacher's output restrictions. Mitigations:
-  license required, base and dataset licenses recorded, warnings on mismatch; Ymir cannot judge a license, only
-  record it.
+  the license recorded when given (not required, decision 2), base and dataset licenses recorded, warnings on
+  mismatch; Ymir cannot judge a license, only record it.
 - **Rollout mistakes.** Promoting an untested upload. Mitigations: weight 0 on arrival, the existing 10 percent eval
   gate, rollback.
 - **Live nodes.** Uploading and loading onto a node that serves traffic competes for disk, I/O and memory.
@@ -343,41 +369,58 @@ should not be open to every linked device, and the 2026-11-20 rule says to autho
 
 ## Suggested order (smallest end-to-end slice first)
 
-1. **U1: local upload, GGUF model and GGUF LoRA, with provenance.** `ymirctl models upload FILE [--name ID]
-   [--adapter-for BASE] --license L [--allow-unknown-license] [--register]` on the machine itself (no daemon, no
-   network): read the header, hash, import into `models_dir` / `adapters/ID/` atomically, write `provenance.json`, set
-   `revision` and print or register the entry. Interim inspection and provenance code in `ymir-core`, marked "to move
+1. **U1: local upload, GGUF model and GGUF LoRA, with provenance.** Built 2026-11-24. `ymirctl models upload FILE
+   [--name ID] [--adapter-for BASE] [--license L] [--no-register]` on the machine itself (no daemon, no network):
+   read the header, hash, import into `models_dir/uploads/ID/` / `adapters/ID/` atomically, write `provenance.json`
+   (and `adapter.json`), set `revision` and add the entry to node.toml. Interim inspection and provenance code in `ymir-core`, marked "to move
    to weirdnet-model" until A ships. Covers the main use case end to end when the fine-tune is made on, or copied to,
    a node machine, and fixes the record format.
 2. **U5: P3a outputs on the same path.** `--from-run RUN_DIR` reads `run.json`; `train run` writes the same
    `provenance.json` (origin `train`) beside its adapter; `train run --rollout` later uses U3's step. Moved up by the
    lead (2026-11-24): it needs only U1.
-3. **U2: upload to one node over Weirdnet** (`--node NAME|auto`, `--serve`), chunked, resumable, sha256-checked,
-   with the write grant, free disk and quota checks. Needs A and B. This is the main use case from a laptop.
+3. **U2: upload to one node over Weirdnet** (`--node NAME|auto`, `--serve`, saved to the node's node.toml unless
+   `--no-persist`), chunked, resumable, sha256-checked, with the free-disk check. Needs A and B. This is the main use case from a laptop.
 4. **U3: into a rollout.** `--rollout NAME [--eval ROWS] [--canary W]`, provenance in `rollout list`.
-5. **U4: Bragi upload dialog** (desktop first, then Flutter), on the Models screen, with progress, cancel, resume
+5. **U4: Bragi upload dialog** (desktop first, decision 6), on the Models screen, with progress, cancel, resume
    and "add to rollout".
 6. **U6: pools.** `--pool` / `--node all` with staging and node-to-node `Fetch`; push-to-each fallback. Waits on
-   Weirdnet B's peer pull and C's grant; Ymir does not stub a peer copy of its own (lead, 2026-11-24).
+   Weirdnet B's peer pull; Ymir does not stub a peer copy of its own (lead, 2026-11-24).
 7. **U7: more formats.** safetensors for vLLM, MLX directories, PEFT adapters, mmproj projectors.
 8. **U8 (optional): catalog origin** in Bragi's model list once D exists.
 
 Tests for each slice use temp `YMIR_HOME`s, tiny synthetic GGUF and safetensors files written by the test, mock
 engines and the in-memory or loopback Weirdnet transport (two daemons for U2, U3 and U6), including: a hash
-mismatch, a truncated part resumed, a wrong-architecture adapter refused before the body, no space, over quota, a
-device without the grant refused, a pickle refused, and a rollout version arriving at weight 0.
+mismatch, a truncated part resumed, a wrong-architecture adapter refused before the body, the free-space floor, an
+unlinked device refused, a pickle refused, and a rollout version arriving at weight 0.
 
-## Open questions for m3talsmith
+## U1 as built (2026-11-24)
 
-All open as of 2026-11-24.
+- `ymir_core::upload`: `inspect` (a regular `.gguf` file, not a symlink or a split shard; `read_header` says model or
+  LoRA; projectors and other adapter types refused), `import` (copies into a hidden temporary file in the target
+  directory while hashing, syncs, links it into place without replacing anything, then writes `provenance.json`
+  and, for adapters, `adapter.json` in `weirdnet-model`'s shape so `ModelStore::adapters` lists it like a pulled
+  one), `revision_of`, `check_adapter_base`, `check_license`, `keep_free`. The same bytes uploaded again under the same
+  id are reported and not copied; other bytes under a taken id are refused.
+- `ymirctl models upload FILE [--name ID] [--adapter-for BASE] [--license L] [--role R] [--no-register] [--dir D]`:
+  an adapter's base must be a llama.cpp `[[model.local]]` whose file is on this machine with the same
+  architecture; its `base_revision` and `base_quant` are recorded. Entries are added to node.toml by default
+  (`local::register` for models, `models adapter add`'s validated edit for adapters); the adapter message says it
+  serves after a restart or the base's next load. `--node` is refused until U2.
+- **Switch-over to Weirdnet** when `weirdnet-model` 0.5.3 ships: `inspect` becomes `artifact::inspect`, `import`
+  becomes `ModelStore::import` (which writes `adapter.json` itself), the record becomes its `Provenance`
+  (`ArtifactKind::Adapter { format }` already matches; `kind` stays `model | adapter | projector` on disk, and
+  `license` stays optional), and the free-space check moves to `ModelStore::free_bytes`. On-disk layout and file
+  names stay the same, so nothing already uploaded moves. Until 0.5.3, the adapter size `weirdnet-model` 0.5.2
+  reports counts `provenance.json` (a few hundred bytes).
 
-1. **Who may upload:** only devices holding a new `ymir.models.write` grant (proposed default), or any linked
-   device as models/1 allows today? Service nodes are excluded either way.
-2. **License:** required for every upload, with `unknown` only behind an explicit flag, as for datasets?
-3. **Pools:** stage on one node and replicate node to node (proposed), or push from the client to each node?
-4. **Quota defaults:** per-upload cap, per-node total for uploads, and the free space to keep (proposed: none, none,
-   10 percent or 20 GiB)?
-5. **Persistence on remote nodes:** keep today's rule (a remote node never edits its `node.toml`; served in memory,
-   entry printed), or let an upload persist on the target (`--persist`) so a rollout version survives a restart?
-6. **Phones:** Bragi upload on desktop only at first, or phones too (adapters only)?
-7. **Interim path:** is a private Hub repo plus `models pull` acceptable as the documented stopgap until U2?
+## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
+
+1. **Who may upload:** every linked device. No `ymir.models.write` grant.
+2. **License:** not required. Recorded when given; no `--allow-unknown-license` flag.
+3. **Pools:** upload once to one node; the other nodes copy from it (U6).
+4. **Limits:** no size cap and no per-node total; always keep 10 percent of the disk or 20 GiB free, whichever is
+   more.
+5. **Persistence:** uploads are saved into the target node's `node.toml` by default so they survive a restart;
+   `--no-persist` (remote) or `--no-register` (local) opts out.
+6. **Bragi:** desktop first.
+7. **Stopgap:** a private Hugging Face repo plus `ymirctl models pull` is fine until U2 (see "Stopgap until U2").

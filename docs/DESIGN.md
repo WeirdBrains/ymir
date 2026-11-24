@@ -768,6 +768,22 @@ Gaps are listed in HANDOFF.md ("Gaps for the Weirdnet Lead"): launch settings fo
 (`-fa`, `--jinja`, `gpu_layers`, `idle_ttl`), MLX in `weirdnet-model`, `SearchHit` parameter counts,
 and a per-device owner role.
 
+#### Uploading a model trained elsewhere (`ymirctl models upload`, 2026-11-24)
+
+Slice U1 of [docs/design/model-upload.md](design/model-upload.md), local only. `ymirctl models upload FILE [--name ID]
+[--adapter-for BASE] [--license L] [--role R] [--no-register]` takes one GGUF model or GGUF LoRA adapter on this
+machine (`ymir_core::upload`, interim until `weirdnet-model` 0.5.3's `artifact::inspect` / `ModelStore::import`):
+the header must read as a model or a LoRA (projectors, split shards, symlinks and other files are refused), an
+adapter's base must be a llama.cpp `[[model.local]]` here with the same architecture, and at least 10 percent of the
+disk or 20 GiB (whichever is more) must stay free. The file is copied in while it is hashed and linked into place
+without replacing anything: models to `models_dir/uploads/ID/`, adapters to `models_dir/adapters/ID/` (with
+`adapter.json`, so `ModelStore::adapters` lists them). `provenance.json` (`ymir-provenance/1`) beside it records
+the files and SHA-256, the revision (`sha256:` and 16 hex digits over the files), the license when given (not
+required), the architecture and, for adapters, the base's id, revision and quantisation. The entry is added to
+node.toml by default with that revision (adapters with `base_revision` and `base_quant`), so the answer cache and
+the base-revision check use it; `--no-register` only prints it. A llama.cpp adapter serves after ymird restarts or
+the base next loads. Uploads to other nodes over Weirdnet are slice U2.
+
 ### LoRA adapters on a loaded base (training plan P4a, 2026-11-23)
 
 An adapter is served as a model of its own, on its base's engine. The engine side is
