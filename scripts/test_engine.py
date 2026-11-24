@@ -39,6 +39,7 @@ class TrainerBuildTest(unittest.TestCase):
         self.assertEqual([k for k, _ in steps], ["patch"] * len(patches) + ["run", "run"], "patches go in before cmake runs")
         configure, build = (s for k, s in steps if k == "run")
         self.assertIn("-DLLAMA_BUILD_EXAMPLES=ON", configure)
+        self.assertIn(f"-DLLAMA_BUILD_NUMBER={engine.load_pin()['build'][1:]}", configure, "the programs report the pinned build, not a shallow clone's 1")
         self.assertIn("llama-finetune", build)
 
     def test_serving_build_is_unpatched(self):

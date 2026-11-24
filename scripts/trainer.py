@@ -115,16 +115,23 @@ def find_finetune():
     raise Refusal("no llama-finetune: build it at the pin (python3 scripts/engine.py build --trainer --out DIR) and set YMIR_LLAMA_FINETUNE to it")
 
 
+def parse_build(text):
+    """The llama.cpp build in `--version` output, or None: `version: 1.0.0-dev (build 12628, commit
+    abc1234)` (b12628's format) or the older `version: 12628 (abc1234)`, both -> b12628."""
+    m = re.search(r"\(build (\d+),", text) or re.search(r"version:\s*(\d+)\s*\(", text)
+    return f"b{m.group(1)}" if m else None
+
+
 def finetune_build(exe):
-    """The build `llama-finetune --version` reports (`version: 12628 (abc1234)` -> b12628)."""
+    """The build `llama-finetune --version` reports."""
     try:
         r = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=60)
     except OSError as e:
         raise Refusal(f"running {exe} --version: {e}") from e
-    m = re.search(r"version:\s*(\d+)", r.stdout + r.stderr)
-    if not m:
+    build = parse_build(r.stdout + r.stderr)
+    if not build:
         raise Refusal(f"{exe} --version printed no build ({(r.stdout + r.stderr).strip()[:200]!r})")
-    return f"b{m.group(1)}"
+    return build
 
 
 def finetune_patches(exe):

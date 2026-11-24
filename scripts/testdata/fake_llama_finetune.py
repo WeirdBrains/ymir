@@ -29,7 +29,8 @@ if args == ["--ymir-patches"]:
     print("\n".join(patches))
     sys.exit(0)
 if args == ["--version"]:
-    print(f"version: {os.environ.get('FAKE_FINETUNE_BUILD', '12628')} (deadbee)", file=sys.stderr)
+    # b12628's format (common/build-info.cpp.in).
+    print(f"version: 1.0.0-dev (build {os.environ.get('FAKE_FINETUNE_BUILD', '12628')}, commit deadbee)", file=sys.stderr)
     print("built with fake for test", file=sys.stderr)
     sys.exit(0)
 

@@ -93,6 +93,12 @@ class TrainerTest(unittest.TestCase):
             self.assertIn(f'std::printf("{pid}\\n");', text, f"{path.name} names itself as {pid} for --ymir-patches")
         self.assertIn("+    std::vector<llama_token> tokens  = common_tokenize(ctx, params.prompt, true, /*parse_special =*/ true);", (engine.PATCHES / engine.TRAINER_PATCHES["parse-special"]).read_text())
 
+    def test_parse_build(self):
+        self.assertEqual(trainer.parse_build("version: 1.0.0-dev (build 12628, commit 8a97fa9)\nbuilt with Clang"), "b12628")
+        self.assertEqual(trainer.parse_build("version: 12628 (8a97fa9)"), "b12628", "the format before llama.cpp 1.0")
+        self.assertEqual(trainer.parse_build("version: 1.0.0-dev (build 1, commit 8a97fa9)"), "b1", "a shallow clone without LLAMA_BUILD_NUMBER")
+        self.assertIsNone(trainer.parse_build("usage: llama-finetune ..."))
+
     def test_unpatched_build_is_refused(self):
         unpatched = {**self.env, "FAKE_FINETUNE_PATCHES": ""}
         r, _ = self.run_trainer("version", env=unpatched)

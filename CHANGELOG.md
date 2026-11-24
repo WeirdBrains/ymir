@@ -18,6 +18,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Fixed
 
+- `scripts/engine.py build` passes the pinned build number to llama.cpp, whose shallow clone otherwise reported `build 1`, and `scripts/trainer.py` reads llama.cpp 1.0's version line (`version: 1.0.0-dev (build 12628, ...)`). Before this, a `llama-finetune` from `build --trainer` was always refused as the wrong build.
 - `ymirctl bench`'s code sandbox now applies its limits where `sh` is dash (Debian, Ubuntu). It used to set every limit in one `ulimit` call, which dash refuses, with the error hidden, so code ran with no CPU, memory, file-size or process limit, only the 10 s wall clock. Each limit is now set on its own, with each shell's spelling. If one can't be set, code questions are left unscored.
 
 ## [0.8.0] - 2026-11-24

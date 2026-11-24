@@ -218,6 +218,14 @@ def apply_patch(src, patch):
     print(f"{patch.name}: applied", file=sys.stderr)
 
 
+def build_number(build):
+    """12628 for the llama.cpp build `b12628`."""
+    m = re.fullmatch(r"b(\d+)", build)
+    if not m:
+        sys.exit(f"{build}: a llama.cpp build is bNNNN")
+    return int(m.group(1))
+
+
 def build_plan(a, src, build):
     """The steps of `build`, in order: ("patch", PATH) for each trainer patch (with --trainer only),
     then ("run", ARGV) for cmake's configure and build."""
@@ -226,6 +234,9 @@ def build_plan(a, src, build):
         "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=" + ("ON" if a.trainer else "OFF"),
         "-DLLAMA_BUILD_SERVER=ON", "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON", "-DGGML_RPC=ON",
         f"-DCMAKE_INSTALL_RPATH={rpath}", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
+        # llama.cpp counts commits for its build number, which is 1 in our shallow clone; the
+        # programs then report `build 1`, and scripts/trainer.py's pin check would refuse them.
+        f"-DLLAMA_BUILD_NUMBER={build_number(load_pin()['build'])}",
     ]
     if platform.machine() in ("x86_64", "AMD64", "amd64", "aarch64", "arm64") and not a.no_cpu_variants:
         defs.append("-DGGML_CPU_ALL_VARIANTS=ON")
