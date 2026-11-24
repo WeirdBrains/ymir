@@ -97,7 +97,7 @@ fn needles_scale_with_context_and_sit_at_three_depths() {
 /// the sandbox broke (not that the test should quietly pass).
 fn python_or_skip() -> bool {
     let ok = score::python_available();
-    assert!(ok || std::env::var_os("CI").is_none(), "CI has Python, but the bench sandbox can't run it");
+    assert!(ok || std::env::var_os("CI").is_none(), "CI has Python, but the bench sandbox can't run it:\n{}", score::sandbox_diagnose());
     ok
 }
 

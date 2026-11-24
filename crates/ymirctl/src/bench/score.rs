@@ -90,6 +90,17 @@ pub fn python_available() -> bool {
     sandbox::python().is_some()
 }
 
+/// What stops the sandbox from running Python, for test failures.
+#[cfg(all(test, unix))]
+pub(crate) fn sandbox_diagnose() -> String {
+    sandbox::diagnose()
+}
+
+#[cfg(all(test, not(unix)))]
+pub(crate) fn sandbox_diagnose() -> String {
+    "no python.exe on PATH outside WindowsApps".into()
+}
+
 #[cfg(unix)]
 mod sandbox {
     use std::path::{Path, PathBuf};
@@ -116,6 +127,24 @@ mod sandbox {
             quiet(Command::new("python3").arg("--version")) && quiet(Command::new("sh").args(["-c", LIMITS]))
         });
         ok.then(|| "python3".into())
+    }
+
+    #[cfg(test)]
+    /// Why [`python`] says no: each check's exit and stderr (for test failures).
+    pub fn diagnose() -> String {
+        let mut out = String::new();
+        let mut run = |what: &str, c: &mut Command| {
+            let r = c.output();
+            out += &match r {
+                Ok(o) => format!("{what}: {} {}\n", o.status, String::from_utf8_lossy(&o.stderr).trim()),
+                Err(e) => format!("{what}: {e}\n"),
+            };
+        };
+        run("python3 --version", Command::new("python3").arg("--version"));
+        for part in LIMITS.split(" && ") {
+            run(part, Command::new("sh").args(["-c", part]));
+        }
+        out
     }
 
     /// Whether network isolation is available for running model code.
