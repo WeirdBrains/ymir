@@ -260,6 +260,10 @@ words are typed. Link codes work between Ymir, Morph and Bragi: <code>pool add</
 <p>Run on the <em>new</em> device. It shows a link code (good for two minutes) to open on a device already in your
 Weirdnet. Both screens show a short code; confirm they match. It refuses if this node is already linked. Restart
 <code>ymird</code> afterwards to put the node on Weirdnet.</p>
+<p>With <code>--cert-only</code> it takes only a cert-only link (sent with <code>pool add --service</code>): this server gets a
+certificate and a signed service grant, never your identity seed. If the other device sends the seed anyway, nothing is
+stored. A cert-only node serves and syncs like any other, but cannot link or revoke devices, and revoking it never means
+starting a new identity.</p>
 <h3 id="pool-add"><code>ymirctl pool add LINK</code></h3>
 <p>Run on a device that is <em>already</em> in the pool, to link another device: paste the code the other device shows.</p>
 <table>
@@ -267,15 +271,22 @@ Weirdnet. Both screens show a short code; confirm they match. It refuses if this
 <tbody>
 <tr><td><code>--profile-name NAME</code></td><td>The name the other device gets for this user (default <code>Ymir</code>).</td></tr>
 <tr><td><code>--yes</code></td><td>Skip the "same code?" prompt. Meant for tests; the codes still have to match.</td></tr>
+<tr><td><code>--service inference|model</code></td><td>Link a server cert-only, without the seed. <code>inference</code> also gets the keys for the pool's conversations; <code>model</code> gets no data keys at all. Use it for every server.</td></tr>
 </tbody></table>
 <pre><code># on the new server
-ymirctl pool link
-# on a device already linked
-ymirctl pool add 'weirdnet-ymir://link/...'
+ymirctl pool link --cert-only
+# on a device already linked that holds your identity
+ymirctl pool add 'weirdnet-ymir://link/...' --service inference
 # Pairing with Ymir on server-a: the code is 123456
 # Does the other device show the same code? [y/N] y</code></pre>
 <h3 id="pool-devices"><code>ymirctl pool devices</code></h3>
-<p>Lists the identity and each device: <em>this node</em>, <em>linked</em> or <em>revoked</em>, with its peer id.</p>
+<p>Lists the identity and each device: <em>this node</em>, <em>linked</em> or <em>revoked</em>, with its peer id, and
+<em>cert-only</em> with its role for a server linked without the seed.</p>
+<h3 id="pool-cert-only"><code>ymirctl pool cert-only</code></h3>
+<p>Moves a server that was linked with the seed to cert-only. Stop <code>ymird</code> first. It shows a link code for this
+node's own key; on a device that holds your identity run <code>ymirctl pool add CODE --service inference</code> (or
+<code>model</code>). Afterwards the node's <code>seed</code> file is overwritten and deleted; its peer id stays the same, so
+nothing else needs relinking. Snapshots and backups made earlier still hold the old seed.</p>
 <h3 id="pool-addresses"><code>ymirctl pool addresses</code></h3>
 <p>Prints where this node can be reached (<code>/ip4/…/tcp/4848/p2p/PEER</code>, from the running <code>ymird</code> or the
 configured <code>[network] listen</code>), followed by the configured <code>[network] peers</code> that are linked devices.
@@ -459,6 +470,7 @@ ymirctl update status</code></pre>
 <tr><td>check on the pool</td><td><code>ymirctl status</code>, <code>ymirctl nodes</code>, <code>ymirctl models</code></td></tr>
 <tr><td>take a node out for maintenance</td><td><code>ymirctl drain server-a</code> … <code>--resume</code></td></tr>
 <tr><td>add a device</td><td><code>ymirctl pool link</code> on it, <code>ymirctl pool add CODE</code> on a linked one</td></tr>
+<tr><td>add a server without the seed</td><td><code>ymirctl pool link --cert-only</code> on it, <code>ymirctl pool add CODE --service inference</code> (or <code>model</code>) on a device with the seed</td></tr>
 <tr><td>get or change the API key</td><td><code>ymirctl bridge token</code>, <code>--rotate</code>, then restart <code>ymird</code></td></tr>
 <tr><td>use the pool from Cursor, Claude or VS Code</td><td><a href="#mcp"><code>ymirctl mcp</code></a></td></tr>
 <tr><td>run many prompts</td><td><code>ymirctl batch prompts.txt</code></td></tr>

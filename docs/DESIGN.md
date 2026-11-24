@@ -906,7 +906,8 @@ code), then turns on the roles it should run. Until a roster member admits it,
 `Roster::check_caller` answers `NotAdmitted` and every node refuses it. Linking sends the identity
 seed to the new device (`weirdnet-device-link`), and `SyncState::new` needs that seed, so model and
 inference nodes hold m3talsmith's root seed (decided 2026-11-19; see [Root seed on service
-nodes](#root-seed-on-service-nodes)). Unlinking (revocation in the roster) cuts the device off everywhere as soon as peers see
+nodes](#root-seed-on-service-nodes)). Since M10 (2026-11-24) a server can instead be linked **cert-only**:
+it gets a node certificate and a user-signed service grant, never the seed (see [M10 status](#m10-status-built-2026-11-24)). Unlinking (revocation in the roster) cuts the device off everywhere as soon as peers see
 the roster update; `weirdnet-sync` rotates its epoch key at the same time.
 
 There are no invites, memberships or permission roles. The role toggles say what a device does,
@@ -1447,10 +1448,10 @@ Decided 2026-11-19: for now, model and inference nodes get m3talsmith's root ide
   mode 0600 owned by the service account (system installs) or the user, never in `node.toml`, logs,
   backups made by Ymir, or crash reports. `ymirctl` never prints it. Disk images and backups of
   service nodes should be treated as holding the identity.
-- **Follow-up (later milestone M10, owned by the Weirdnet lead):** a cert-only server link in
-  `weirdnet-sync`/`weirdnet-device-link`, so a service node gets a node certificate and the sync keys
-  it needs but not the seed, and can be revoked without rotating the root identity. Existing nodes
-  then re-link and their seed copies are wiped.
+- **Built in M10 (2026-11-24):** a cert-only server link (`weirdnet-sync` 0.7, `weirdnet-device-link`
+  0.4), so a service node gets a node certificate and the sync keys it needs but not the seed, and can be
+  revoked without rotating the root identity. `ymirctl pool cert-only` moves an existing node over and
+  wipes its seed copy. Nodes linked the old way keep their seed until that is run on them.
 - **No network listeners besides Weirdnet.** The OpenAI bridge binds `127.0.0.1` only and can't be
   configured otherwise. Backend ports (llama-server, vLLM) bind to loopback. Ray workers and
   llama.cpp RPC servers for groups bind to the private-link address only; they have no auth of their
@@ -1847,9 +1848,10 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
 - **M8 server-a/server-b migration** (done 2026-11-20; each step approved by m3talsmith).
 - **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; and outside MCP servers for tasks. Still to do: push wake-ups (once the `weirdnet-push` front end exists), BSD packages, a bundle fetcher, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
-- **M10 Cert-only server link** (Weirdnet lead). `weirdnet-sync`/`weirdnet-device-link` give service
-  nodes a node certificate and sync keys without the root seed; Ymir nodes re-link and wipe their seed
-  copies; a node can then be revoked without rotating the root identity.
+- **M10 Cert-only server link** (built 2026-11-24; see [M10 status](#m10-status-built-2026-11-24)).
+  `weirdnet-sync` 0.7 and `weirdnet-device-link` 0.4 give service nodes a node certificate and sync keys
+  without the root seed; `ymirctl pool cert-only` moves an existing node and wipes its seed copy; a node
+  can be revoked without rotating the root identity.
 
 ## M1 status (built 2026-11-19)
 
@@ -2051,7 +2053,7 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
   takes Morph's `weirdnet-morph://link/` and Bragi's `weirdnet-bragi://link/` codes too (same payload; `normalize_link` rewrites the scheme, and Bragi does the same for Ymir's and Morph's codes). `bragi/scripts/ymir-link-e2e.sh` links a headless Bragi core and real `ymird` nodes both ways over loopback. The signed roster label reads
   "Ymir on <name>" (the device-link hint). Linking the real identity still waits for m3talsmith.
 - Seeds are kept in 0600 files, as decision 12 says, not in the OS keyring. M10's cert-only link
-  removes the seed copies.
+  (built 2026-11-24) keeps them off servers linked that way.
 - **Flaky upstream roster propagation (found on the dev box):** `ymir-core/tests/remote.rs`
   `roster_changes_reach_other_devices` fails about half the runs, on the pre-bump versions too: when
   an app device links a third device, the inference node's pass against the app can finish with no
@@ -2706,7 +2708,8 @@ BSD packages and a bundle fetcher are not; MLX-LM for Inkling waits on mlx-lm#20
 - *Group workers (M7):* llama.cpp `rpc-server` has no authentication, so Ymir binds it to a declared private-link address only and refuses
   any address that is not loopback, RFC 1918 or link-local (tests in `m7.rs`). Anything else on that network can talk to the worker, so a
   "private link" must be a cable or an isolated VLAN, as the design already says. The M9 check does not start a group.
-- *Secrets:* the bridge token and seed are files (0600), not in the OS keyring; the keyring is still open work. The unit file
+- *Secrets:* the bridge token and seed are files (0600), not in the OS keyring; the keyring is still open work. A cert-only
+  node (M10) has `credential.json` (the user's public key) instead of a seed. The unit file
   carries no secret. Update state is 0700.
 - *Task tools:* an agent task has no tool unless the operator sets a workspace, the one tool is read-only and asks every time, and
   "always allow" answers last only for that task's session (the node builds a fresh policy per task).
@@ -2751,38 +2754,55 @@ BSD packages and a bundle fetcher are not; MLX-LM for Inkling waits on mlx-lm#20
 | Packages for Linux, macOS and Windows, plus BSD where GPUI/Rust allow | tarball and service files only; nothing signed |
 | A review by someone other than the author | the review above is the author's |
 
-## M10 status (design approved 2026-11-20; most crates published, Ymir wiring waits on update 0.2.1 and the lead's notes)
+## M10 status (built 2026-11-24)
 
-m3talsmith approved the M10 design on 2026-11-20. The Weirdnet lead has published (and is still verifying) `weirdnet-sync` 0.7.0, `weirdnet-device-link` 0.4.0,
-`weirdnet-agent` 0.4.4, `weirdnet-backends` 0.1.2 and `weirdnet-update` 0.2.1 (and a majority-vote lease as sync 0.8.0 after M10); `weirdnet-update` 0.2.1 and the adoption notes come later, and Ymir
-wires M10 up after that. Ymir still builds on the older crates, which have no cert-only mode. Ymir cannot do it alone: making a node run without the seed means changing what `SyncState` takes and
-what a device link sends. Nothing was built or faked here, so every service node still holds the root seed in a 0600 file.
+m3talsmith approved the M10 design on 2026-11-20; the Weirdnet lead published the crates (`weirdnet-sync` 0.7,
+`weirdnet-device-link` 0.4). Ymir is on `weirdnet-sync` 0.7.1 and `weirdnet-device-link` 0.4.2. Not 0.8 yet: `weirdnet-agent`
+0.5.2 and `weirdnet-backends` 0.4.2 accept sync below 0.8, and 0.8's lease is for M6's scheduler, not for this.
 
-**Where the seed is used today (read from `weirdnet-sync` 0.6.0 and Ymir), so the ask is concrete:**
+**What a cert-only node holds.** A node certificate and a user-signed `DeviceGrant` (class `Service`, its role, the sync types
+it may hold keys for) in the roster, the user's *public* key in `credential.json` (0600, the layout of
+`weirdnet_sync::Identity`), its node key, and, for an inference node, the epoch keys. Never the seed. Serving, the roster
+check and sync use only the public key and the epoch keys, so it serves and syncs like any device.
 
-- **Sealing sync traffic without a rotated key.** `sync_key(seed, user_id, type, epoch)` is an HKDF of the seed; `net.rs`
-  seals and opens envelopes under it whenever no rotated epoch key is held, and for "you are behind" refusals. A service node
-  would need a per-type sync key (or a key delivered at link time, sealed to its device key), not the seed.
-- **Admitting and revoking devices.** `Roster::self_certify`, `approve` and `revoke` need the user's private key (Ymir's
-  `Membership::revoke` derives it from the seed; `ymirctl pool link` sends the seed). Only a device that may admit others
-  needs this; a service node never should.
-- **Verifying.** `RosterAuth`, `check_caller` and the capability verifier use only the user's *public* key, which `SyncState`
-  already stores as `user_key`. So serving, sync and the roster check do not need the seed.
+- **Roles.** `--service inference` grants `ymir.inference` with the types `ymir.pool` and `ymir.context` (it reads and writes
+  sealed conversations); `--service model` grants `ymir.model` roster-only: no data keys at all, and its roster arrives in
+  clear roster swaps (`Envelope::clear`), which carry certs, revocations and grants, never records.
+- **What it cannot do.** Link, approve or revoke devices, sign grants or rotate keys (`weirdnet-sync` answers
+  `NotPermitted`; Ymir refuses first with a message naming cert-only): `pool add`, `pool revoke` and the daemon's
+  `PoolApprove`, `PoolRevoke` and `PoolServiceBundle` fail there.
+- **Revoking it.** On a device with the seed, `ymirctl pool revoke PEER` as for any device: the roster revokes the cert and
+  `weirdnet-sync` rotates, so the node cannot open anything written after. The root identity is unchanged.
 
-**The approved ask (what the releases carry):**
+**Commands.**
 
-1. `weirdnet-device-link`: a link kind that sends the user public key, a node certificate and the sync keys for the listed types
-   at the current epoch, and no seed (`Pairing::send_with` takes `&seed` today).
-2. `weirdnet-sync`: `SyncState::new` taking either the seed or a cert-only credential, with every seed use above served by the
-   per-type keys; `approve`/`revoke` refuse on a cert-only state; rotation keeps working through device keys.
-3. A way for a seed holder to revoke one cert-only node without rotating the root identity, and for the revoked node's keys
-   to stop working (an epoch rotation, as for any revoked device).
+- `ymirctl pool add CODE --service inference|model` on a device that holds the seed: signs the grant (in the running
+  `ymird` when it is on Weirdnet, so a first rotation lands in the live roster, `ControlRequest::PoolServiceBundle`, local
+  socket only), makes the bundle (`SyncState::service_bundle`) and sends it with a certificate over
+  `Pairing::send_credential`; then approves the certificate as before.
+- `ymirctl pool link --cert-only` on the new server: takes only a cert-only link (`HostNode::take_any`). If the other side sends
+  the seed anyway, nothing is stored and the link fails; the seed did cross the encrypted link to this process, so on a
+  server, send with `--service` in the first place. Without `--cert-only`, `pool link` takes either kind.
+- `ymirctl pool cert-only` (the migration) on a node that holds the seed, with `ymird` stopped: shows a link code for its
+  *own* node key, takes a cert-only link from a seed holder, keeps the roster, op log and older epoch keys it had, writes
+  `credential.json`, then overwrites the `seed` file with zeros, syncs and deletes it. The peer id stays the same, so
+  nothing else re-links. Refused for another identity or another node key. Copy-on-write filesystems, snapshots and
+  backups may still hold the old blocks.
+- `ymirctl pool devices` marks a cert-only node (`cert-only ymir.inference`) from its signed grant, and says when this node
+  is one.
 
-**Ymir side, ready when that lands:** `Membership::adopt` and `build` take the seed from the link (switch to the credential),
-`Membership::seed()` and `revoke()` fail on a cert-only node, `ymirctl pool link --cert-only` for model and inference nodes, and a
-migration that re-links existing nodes and then overwrites and deletes their `seed` files. A test would link a node cert-only,
-show it serves and syncs, show `revoke`/`approve` refused there, revoke it from the seed holder, and show the root identity unchanged.
-None of that is written yet, because the API is not published.
+**Tested** (`ymir-testkit/tests/m10.rs`, over Weirdnet on 127.0.0.1): a real `pool link --cert-only` / `pool add --service
+inference` with the 6-digit check (no `seed` file, `credential.json` 0600, the grant shown on the seed holder); `pool add`,
+`pool revoke` and `pool cert-only` refused on the cert-only node; a `--cert-only` link refusing the seed and storing
+nothing; a node linked the old way moved with `pool cert-only` (`seed` gone, same peer id and identity, grant `ymir.model`);
+revoking from the seed holder with the identity unchanged. With daemons: a cert-only model node and a cert-only inference
+node serve an app's chat; a conversation written on the app reaches the cert-only inference node; that node's daemon refuses
+`PoolRevoke` and `PoolServiceBundle`; after it is revoked, a later conversation never reaches it.
+
+**Not done or untested.** No real machine was moved: every existing server still holds the seed until `pool cert-only` is run
+on it with m3talsmith's go-ahead. Bragi and Morph send only full links until they learn `send_credential` (Bragi is next).
+Secrets are still 0600 files, not the OS keyring (`SecretStore` makes that possible later). The `[model] callers` guard
+still uses the announced app, not grant roles.
 
 ## Decisions (2026-11-19)
 

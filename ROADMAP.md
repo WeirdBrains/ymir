@@ -66,9 +66,9 @@ Built: self-update with rollback (pinned root, signed bundles, trial boots), age
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 
-## M10 Cert-only server link (Planned)
+## M10 Cert-only server link (Done)
 
-Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. The design is approved and the Weirdnet crates are published; Ymir wires it up next. A majority-vote lease follows as weirdnet-sync 0.8.0.
+Servers can be linked cert-only: a node certificate and a signed service grant, never the root seed, so a stolen server is never you and one node can be revoked without rotating your identity. `ymirctl pool add --service inference|model` sends such a link, `pool link --cert-only` takes only that, and `pool cert-only` moves a node that holds the seed and wipes its copy.
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
 

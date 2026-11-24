@@ -37,6 +37,14 @@ pub enum ControlRequest {
     PoolApprove {
         cert: weirdnet_net::user::NodeCert,
     },
+    /// The sync bundle for a cert-only link to `peer` as `role` (`inference` or `model`), made
+    /// by the running node so its grant and any first rotation land in the live roster
+    /// (`ymirctl pool add --service`). The answer's message is the bundle, hex; it holds epoch
+    /// keys for an inference node. Local socket only.
+    PoolServiceBundle {
+        peer: String,
+        role: String,
+    },
     /// Revoke a device (`ymirctl pool revoke`).
     PoolRevoke {
         peer: String,
@@ -469,6 +477,14 @@ impl ControlHandler {
                 let label = cert.label.clone();
                 match m.approve(cert) {
                     Ok(()) => ControlResponse::ok(format!("{label} is linked")),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::PoolServiceBundle { peer, role } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                let made = crate::membership::ServiceRole::parse(&role).and_then(|r| m.service_bundle(&peer, r));
+                match made {
+                    Ok(b) => ControlResponse::ok(hex::encode(b.as_slice())),
                     Err(e) => ControlResponse::err(format!("{e:#}")),
                 }
             }

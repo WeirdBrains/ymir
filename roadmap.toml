@@ -84,8 +84,8 @@ crates = ["weirdnet-update", "weirdnet-push", "weirdnet-agent"]
 [[milestone]]
 id = "M10"
 title = "Cert-only server link"
-status = "planned"
-summary = "Service nodes get their own certificate and sync keys without holding the root seed, so one node can be revoked without rotating your identity. The design is approved and the Weirdnet crates are published; Ymir wires it up next. A majority-vote lease follows as weirdnet-sync 0.8.0."
+status = "done"
+summary = "Servers can be linked cert-only: a node certificate and a signed service grant, never the root seed, so a stolen server is never you and one node can be revoked without rotating your identity. `ymirctl pool add --service inference|model` sends such a link, `pool link --cert-only` takes only that, and `pool cert-only` moves a node that holds the seed and wipes its copy."
 crates = ["weirdnet-sync", "weirdnet-device-link"]
 
 [[milestone]]
