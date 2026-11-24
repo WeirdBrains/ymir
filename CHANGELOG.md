@@ -12,6 +12,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Fixed
 
+- A model's engine could lose the port ymird told it to another process before binding it, and then fail to start, or another server answered in its place. `weirdnet-backends` 0.4.2 checks that the server on the port is the launched engine (its key, its model) and tries again on a new port, without counting a crash. `release.toml` requires 0.4.2. The mock engine's `/v1/models` is behind its key, like llama-server and vLLM.
 - Tests: a free-port race made `mcp_http::token_host_and_origin_are_checked` flaky under load (it picked a free port, let it go, and the server bound it later, by which time another test could have it). `ymirctl mcp --http` and the mock engine now bind port 0 in tests and the test reads the port they print; tests that must write a port into a config pick it outside the OS's ephemeral range (`ymir_testkit::config_port`). The mock engine and mock rpc-server print the port they actually bound.
 
 ## [0.6.0] - 2026-11-23
