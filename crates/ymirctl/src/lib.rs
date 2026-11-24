@@ -11,6 +11,7 @@ pub mod mcp_servers;
 pub mod models;
 pub mod pool;
 pub mod train;
+pub mod update_fetch;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -44,6 +45,30 @@ pub enum UpdateCmd {
     },
     /// Verify a bundle directory and stage it for the next start.
     Stage { bundle: PathBuf },
+    /// Download a bundle and stage it. SOURCE is the bundle directory's https:// URL (or a
+    /// directory). With --announcement, a signed announcement file (as relays carry them) is
+    /// checked against the pinned root first, and the source must serve the manifest it names;
+    /// without SOURCE its first https:// source is used.
+    Fetch {
+        source: Option<String>,
+        #[arg(long)]
+        announcement: Option<PathBuf>,
+    },
+    /// Hear update announcements from a Weirdnet relay that carries them (`/weirdnet/updates/1`),
+    /// check each against the pinned root, and with --fetch download and stage a new one from its
+    /// https:// source. Runs until stopped, or with --once until the first announcement.
+    Watch {
+        /// The relay's address with its peer id (`/dns4/relay.example/tcp/4001/p2p/ID`).
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        fetch: bool,
+        #[arg(long)]
+        once: bool,
+        /// With --once: how long to wait for an announcement.
+        #[arg(long, default_value_t = 30)]
+        wait_secs: u64,
+    },
     /// What is pinned, the good release, a trial under way, and releases marked bad.
     Status,
     /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
@@ -429,6 +454,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd).await,
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
         Cmd::Service { cmd } => service_cmd(cli_home.as_deref(), paths, out, cmd).await,
+        Cmd::Update { cmd: UpdateCmd::Watch { relay, fetch, once, wait_secs } } => {
+            let o = update_fetch::watch::Options { relay, fetch, once, wait: std::time::Duration::from_secs(wait_secs) };
+            update_fetch::watch::run(&paths, out, o).await
+        }
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Nodes => nodes(&paths, out).await,
@@ -1187,6 +1216,37 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             let v = u.stage(&bundle, &running, now)?;
             writeln!(out, "staged {} {}; it runs on trial at the next start", v.manifest.update_id, v.manifest.version)?;
         }
+        UpdateCmd::Fetch { source, announcement } => {
+            let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+            let mut announced = None;
+            let mut source = source;
+            if let Some(file) = &announcement {
+                let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+                let Some(a) = u.check_announcement(&bytes, now)? else {
+                    writeln!(out, "nothing new: that announcement is not newer than the update already taken")?;
+                    return Ok(());
+                };
+                writeln!(out, "announced: {} (seq {}){}", a.update_id, a.seq, if a.security { ", a security update" } else { "" })?;
+                if source.is_none() {
+                    source = a.sources.iter().find(|s| s.starts_with("https://")).cloned();
+                }
+                announced = Some(a.manifest_hash);
+            }
+            let source =
+                source.ok_or_else(|| anyhow::anyhow!("name a source: an https:// URL or a directory (the announcement has no https:// source)"))?;
+            let src = crate::update_fetch::source(&source)?;
+            let f = u.fetch(src.as_ref(), announced.as_ref(), &running, now)?;
+            writeln!(
+                out,
+                "fetched {} files ({} bytes) from {}; staged {} {}; it runs on trial at the next start",
+                f.files,
+                f.bytes,
+                src.describe(),
+                f.update.manifest.update_id,
+                f.update.manifest.version
+            )?;
+        }
+        UpdateCmd::Watch { .. } => bail!("`update watch` runs in the async dispatcher"),
         UpdateCmd::Status => {
             let s = u.status();
             writeln!(out, "root: {}", if s.trusted { "pinned" } else { "not pinned" })?;

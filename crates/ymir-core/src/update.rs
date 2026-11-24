@@ -6,9 +6,14 @@
 //! "ready" counts as failed, and after two the previous good release comes back and the update is
 //! marked bad for good.
 //!
-//! What it does not do: fetch (a bundle is a directory, which a person, a script or a later relay
-//! client puts there), or install system packages (`.deb`/`.rpm` are refused: only the `swap`
-//! formats, a set of files, are taken). Nothing is installed without `ymirctl update stage`.
+//! Fetching ([`Updater::fetch`], `ymirctl update fetch`): a bundle is read from a [`Source`], a
+//! bundle directory served over HTTPS or on disk, with the same layout as below (root rotations
+//! as `roots/1.env`, `roots/2.env`, ... in order). The manifest comes first and is verified
+//! against the pinned root before anything else is downloaded, and each file is read up to its
+//! signed size. A signed announcement (`weirdnet-update`'s, as relays carry them) can name the
+//! manifest the source must serve. It does not install system packages (`.deb`/`.rpm` are
+//! refused: only the `swap` formats, a set of files, are taken). Nothing is installed without
+//! `ymirctl update stage` or `update fetch`.
 //!
 //! Layout under `<home>/updates/`:
 //! `trust.json` (the pinned root fingerprint and the first root), `client.state` (anti-rollback
@@ -16,6 +21,7 @@
 //! A bundle directory holds `manifest.env`, optional `freshness.env` and `roots/*.env` (signed
 //! envelopes, `Signed::to_bytes`), and the files the manifest lists at their paths.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -23,7 +29,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use weirdnet_update::health::{BootChoice, BootHealth, HealthState};
 use weirdnet_update::manifest::{Arch, InstallMode, Platform};
-use weirdnet_update::{Client, ClientState, RootPin, Signed, Timestamp, UpdateBundle, UpdateKind, VerifiedUpdate, VerifyOptions};
+use weirdnet_update::{
+    Announcement, Client, ClientState, Hash32, RootPin, Signed, Timestamp, UpdateBundle, UpdateKind, UpdateManifest, VerifiedUpdate, VerifyOptions,
+};
 
 use crate::Paths;
 
@@ -118,6 +126,70 @@ fn read_opt(path: &Path) -> Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+/// The largest manifest, freshness or root envelope a source may send.
+const MAX_ENVELOPE: u64 = 1 << 20;
+/// The most root rotations read from a source.
+const MAX_ROOTS: usize = 16;
+
+/// Where [`Updater::fetch`] reads a bundle: the bundle directory's files by relative path.
+pub trait Source {
+    /// Opens `path` (`manifest.env`, `freshness.env`, `roots/N.env`, or a file the manifest
+    /// lists); `None` when the source does not have it.
+    fn open(&self, path: &str) -> Result<Option<Box<dyn std::io::Read + '_>>>;
+    /// The source, for messages.
+    fn describe(&self) -> String;
+}
+
+/// A bundle directory on disk as a [`Source`].
+pub struct DirSource(pub PathBuf);
+
+impl Source for DirSource {
+    fn open(&self, path: &str) -> Result<Option<Box<dyn std::io::Read + '_>>> {
+        match std::fs::File::open(self.0.join(path)) {
+            Ok(f) => Ok(Some(Box::new(f))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("{}", self.0.join(path).display())),
+        }
+    }
+
+    fn describe(&self) -> String {
+        self.0.display().to_string()
+    }
+}
+
+/// What [`Updater::fetch`] staged.
+#[derive(Debug)]
+pub struct Fetched {
+    pub update: VerifiedUpdate,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+fn read_capped(src: &dyn Source, path: &str, max: u64) -> Result<Option<Vec<u8>>> {
+    let Some(r) = src.open(path)? else { return Ok(None) };
+    let mut b = Vec::new();
+    r.take(max + 1).read_to_end(&mut b).with_context(|| format!("reading {path} from {}", src.describe()))?;
+    if b.len() as u64 > max {
+        bail!("{path} from {} is larger than {max} bytes", src.describe());
+    }
+    Ok(Some(b))
+}
+
+/// What Ymir installs: a full package of plain files for this machine, with the daemon in it.
+fn check_package(m: &UpdateManifest) -> Result<()> {
+    let UpdateKind::Full(pkg) = &m.kind else { bail!("only full packages are taken here, not {}", m.kind.name()) };
+    if Some((pkg.platform, pkg.arch)) != this_target() {
+        bail!("the package is for {}/{:?}, not this machine", pkg.platform.as_str(), pkg.arch);
+    }
+    if pkg.format.install_mode() != InstallMode::Swap {
+        bail!("a {:?} package needs a package manager; Ymir takes only plain file sets", pkg.format);
+    }
+    if !m.files.iter().any(|f| f.path == DAEMON_FILE) {
+        bail!("the package has no `{DAEMON_FILE}`");
+    }
+    Ok(())
 }
 
 /// The OS and CPU this build runs on, as manifests name them.
@@ -215,6 +287,11 @@ impl Updater {
         self.dir.join("releases").join(id)
     }
 
+    /// The pinned org root's fingerprint, if one is pinned.
+    pub fn pin(&self) -> Option<RootPin> {
+        self.client.as_ref().map(Client::pin)
+    }
+
     pub fn status(&self) -> Status {
         Status {
             trusted: self.client.is_some(),
@@ -227,12 +304,7 @@ impl Updater {
     /// Verifies the bundle in `bundle`, checks its files and stages the release for the next start.
     /// `running` is this build's version (a Full update may not go below it).
     pub fn stage(&mut self, bundle: &Path, running: &Version, now: Timestamp) -> Result<VerifiedUpdate> {
-        if matches!(self.health.state, HealthState::Staged { .. } | HealthState::Trial { .. }) {
-            bail!(
-                "an update is already {}; wait for it to commit or roll back",
-                if matches!(self.health.state, HealthState::Staged { .. }) { "staged" } else { "on trial" }
-            );
-        }
+        self.not_busy()?;
         let client = self.client.as_mut().ok_or_else(|| anyhow!("no update root is pinned (`ymirctl update trust`)"))?;
         let mut roots = Vec::new();
         if let Ok(rd) = std::fs::read_dir(bundle.join("roots")) {
@@ -258,16 +330,7 @@ impl Updater {
         saved?;
 
         let m = &verified.manifest;
-        let UpdateKind::Full(pkg) = &m.kind else { bail!("only full packages are taken here, not {}", m.kind.name()) };
-        if Some((pkg.platform, pkg.arch)) != this_target() {
-            bail!("the package is for {}/{:?}, not this machine", pkg.platform.as_str(), pkg.arch);
-        }
-        if pkg.format.install_mode() != InstallMode::Swap {
-            bail!("a {:?} package needs a package manager; Ymir takes only plain file sets", pkg.format);
-        }
-        if !m.files.iter().any(|f| f.path == DAEMON_FILE) {
-            bail!("the package has no `{DAEMON_FILE}`");
-        }
+        check_package(m)?;
         // Copy into a scratch directory, checking each file against the signed size and hash, then
         // move it into place in one step.
         let id = &m.update_id;
@@ -306,6 +369,96 @@ impl Updater {
         self.save_active()?;
         self.save_health()?;
         Ok(verified)
+    }
+
+    fn not_busy(&self) -> Result<()> {
+        if matches!(self.health.state, HealthState::Staged { .. } | HealthState::Trial { .. }) {
+            bail!(
+                "an update is already {}; wait for it to commit or roll back",
+                if matches!(self.health.state, HealthState::Staged { .. }) { "staged" } else { "on trial" }
+            );
+        }
+        Ok(())
+    }
+
+    /// Checks a signed announcement (`Signed::to_bytes`) against the pinned root: signed by
+    /// release keys delegated for Ymir's app and channel, current at `now`. `None` when it names
+    /// nothing newer than what was already taken.
+    pub fn check_announcement(&self, bytes: &[u8], now: Timestamp) -> Result<Option<Announcement>> {
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("no update root is pinned (`ymirctl update trust`)"))?;
+        let env = Signed::from_bytes(bytes).map_err(|e| anyhow!("the announcement: {e}"))?;
+        let a = client.verify_announcement(&env, now).map_err(|e| anyhow!("the announcement is refused: {e}"))?;
+        if let Some(a) = &a
+            && (a.app != APP || a.channel != CHANNEL)
+        {
+            bail!("the announcement is for {} on {}, not {APP} on {CHANNEL}", a.app, a.channel);
+        }
+        Ok(a)
+    }
+
+    /// Downloads a bundle from `src` and stages it ([`Updater::stage`]). The manifest is verified
+    /// first (without recording anything), so nothing it does not sign is downloaded, and each
+    /// file is read up to its signed size. With `announced`, the manifest must be the one an
+    /// announcement named (its payload hash).
+    pub fn fetch(&mut self, src: &dyn Source, announced: Option<&Hash32>, running: &Version, now: Timestamp) -> Result<Fetched> {
+        self.not_busy()?;
+        let client = self.client.as_ref().ok_or_else(|| anyhow!("no update root is pinned (`ymirctl update trust`)"))?;
+        let what = src.describe();
+        let manifest_bytes = read_capped(src, "manifest.env", MAX_ENVELOPE)?.ok_or_else(|| anyhow!("{what} has no manifest.env"))?;
+        let manifest = Signed::from_bytes(&manifest_bytes).map_err(|e| anyhow!("manifest.env from {what}: {e}"))?;
+        if let Some(h) = announced
+            && manifest.payload_hash() != *h
+        {
+            bail!("{what} serves another manifest than the announced one ({} instead of {})", manifest.payload_hash().to_hex(), h.to_hex());
+        }
+        let mut roots = Vec::new();
+        for n in 1..=MAX_ROOTS {
+            let Some(b) = read_capped(src, &format!("roots/{n}.env"), MAX_ENVELOPE)? else { break };
+            roots.push(b);
+        }
+        let freshness = read_capped(src, "freshness.env", MAX_ENVELOPE)?;
+        let parse = |b: &[u8], name: &str| Signed::from_bytes(b).map_err(|e| anyhow!("{name} from {what}: {e}"));
+        let bundle = UpdateBundle {
+            roots: roots.iter().enumerate().map(|(i, b)| parse(b, &format!("roots/{}.env", i + 1))).collect::<Result<_>>()?,
+            manifest: Some(manifest),
+            freshness: freshness.as_deref().map(|b| parse(b, "freshness.env")).transpose()?,
+        };
+        let mut probe = Client::from_state(client.pin(), client.state().clone(), now).map_err(|e| anyhow!("{e}"))?;
+        let verified =
+            probe.verify(APP, CHANNEL, &bundle, &VerifyOptions::new(now, running.clone())).map_err(|e| anyhow!("the update is refused: {e}"))?;
+        let m = &verified.manifest;
+        check_package(m)?;
+
+        let scratch = self.dir.join("downloads").join(&m.update_id);
+        let _ = std::fs::remove_dir_all(&scratch);
+        let result = (|| {
+            std::fs::create_dir_all(scratch.join("roots"))?;
+            std::fs::write(scratch.join("manifest.env"), &manifest_bytes)?;
+            for (i, b) in roots.iter().enumerate() {
+                std::fs::write(scratch.join("roots").join(format!("{:04}.env", i + 1)), b)?;
+            }
+            if let Some(b) = &freshness {
+                std::fs::write(scratch.join("freshness.env"), b)?;
+            }
+            let mut bytes = 0u64;
+            for f in &m.files {
+                let mut r = src.open(&f.path)?.ok_or_else(|| anyhow!("{what} has no {}", f.path))?;
+                let dst = scratch.join(&f.path);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut out = std::fs::File::create(&dst)?;
+                let n = std::io::copy(&mut (&mut r).take(f.size + 1), &mut out).with_context(|| format!("downloading {}", f.path))?;
+                if n != f.size {
+                    bail!("{}: {what} sent {}{n} bytes, and the manifest signs {}", f.path, if n > f.size { "more than " } else { "" }, f.size);
+                }
+                bytes += n;
+            }
+            let staged = self.stage(&scratch, running, now)?;
+            Ok(Fetched { update: staged, files: m.files.len(), bytes })
+        })();
+        let _ = std::fs::remove_dir_all(&scratch);
+        result
     }
 
     /// Call at the very start of each launch; the state is saved before the answer is acted on.
@@ -598,5 +751,97 @@ mod tests {
         let e = u.stage(&tmp.path().join("nothing"), &v("0.1.0"), NOW).unwrap_err().to_string();
         assert!(e.contains("no update root"), "{e}");
         assert!(!u.status().trusted);
+    }
+
+    /// A source that counts what was opened, and can serve too much of one file.
+    struct Counting {
+        dir: PathBuf,
+        opened: std::cell::RefCell<Vec<String>>,
+        pad: Option<&'static str>,
+    }
+
+    impl Source for Counting {
+        fn open(&self, path: &str) -> Result<Option<Box<dyn std::io::Read + '_>>> {
+            self.opened.borrow_mut().push(path.to_string());
+            let Ok(mut b) = std::fs::read(self.dir.join(path)) else { return Ok(None) };
+            if self.pad == Some(path) {
+                b.extend_from_slice(b"and more");
+            }
+            Ok(Some(Box::new(std::io::Cursor::new(b))))
+        }
+        fn describe(&self) -> String {
+            "the test source".into()
+        }
+    }
+
+    fn counting(dir: PathBuf) -> Counting {
+        Counting { dir, opened: Default::default(), pad: None }
+    }
+
+    #[test]
+    fn a_fetched_bundle_is_verified_first_then_downloaded_and_staged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let o = org();
+        let mut u = open(tmp.path(), &o);
+        let files: &[(&str, &[u8])] = &[("ymird", b"daemon two"), ("lib/ymir/llama.cpp/llama-server", b"server")];
+        bundle_with(&tmp.path().join("b1"), &o.release, "u1", 1, "0.2.0", files, here());
+        let src = counting(tmp.path().join("b1"));
+        let f = u.fetch(&src, None, &v("0.1.0"), NOW).unwrap();
+        assert_eq!((f.update.manifest.update_id.as_str(), f.files, f.bytes), ("u1", 2, 16));
+        assert_eq!(*src.opened.borrow(), ["manifest.env", "roots/1.env", "freshness.env", "ymird", "lib/ymir/llama.cpp/llama-server"]);
+        assert!(matches!(u.status().health, HealthState::Staged { .. }));
+        let Boot::Run { path, .. } = u.boot().unwrap() else { panic!("wanted a trial") };
+        assert_eq!(std::fs::read(path).unwrap(), b"daemon two");
+        assert!(!dir(&Paths::new(tmp.path().join("home"))).join("downloads/u1").exists(), "the download directory is removed");
+        // Staged or on trial: no second fetch.
+        assert!(u.fetch(&src, None, &v("0.1.0"), NOW).unwrap_err().to_string().contains("on trial"));
+    }
+
+    #[test]
+    fn a_fetch_downloads_nothing_unsigned_or_unannounced_or_oversized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let o = org();
+        let mut u = open(tmp.path(), &o);
+        // Signed by a key the root does not delegate: refused after the manifest alone.
+        bundle(&tmp.path().join("bad"), &key(99), "u1", 1, "0.2.0", b"evil", here());
+        let src = counting(tmp.path().join("bad"));
+        assert!(u.fetch(&src, None, &v("0.1.0"), NOW).unwrap_err().to_string().contains("refused"));
+        assert!(!src.opened.borrow().iter().any(|p| p == "ymird"), "{:?}", src.opened.borrow());
+        // Nothing was recorded by the refused attempt: the good one still goes through.
+        bundle(&tmp.path().join("b1"), &o.release, "u1", 1, "0.2.0", b"daemon", here());
+        // Another manifest than the announced one: refused before anything else is read.
+        let src = counting(tmp.path().join("b1"));
+        let e = u.fetch(&src, Some(&Hash32([7; 32])), &v("0.1.0"), NOW).unwrap_err().to_string();
+        assert!(e.contains("another manifest than the announced one"), "{e}");
+        assert_eq!(*src.opened.borrow(), ["manifest.env"]);
+        // More bytes than signed: refused, nothing staged.
+        let src = Counting { pad: Some("ymird"), ..counting(tmp.path().join("b1")) };
+        let e = u.fetch(&src, None, &v("0.1.0"), NOW).unwrap_err().to_string();
+        assert!(e.contains("sent more than 7 bytes, and the manifest signs 6"), "{e}");
+        assert!(matches!(u.status().health, HealthState::Idle));
+        // The real one.
+        u.fetch(&counting(tmp.path().join("b1")), None, &v("0.1.0"), NOW).unwrap();
+    }
+
+    #[test]
+    fn announcements_are_checked_against_the_pinned_root() {
+        use weirdnet_update::Announcement;
+        let tmp = tempfile::tempdir().unwrap();
+        let o = org();
+        let mut u = open(tmp.path(), &o);
+        bundle(&tmp.path().join("b1"), &o.release, "u1", 1, "0.2.0", b"daemon", here());
+        let manifest = Signed::from_bytes(&std::fs::read(tmp.path().join("b1/manifest.env")).unwrap()).unwrap();
+        let pin = RootPin::from_hex(&o.pin).unwrap();
+        let ann = |m: &Signed, signer: &SigningKey| {
+            let a = Announcement::for_manifest("weirdbrains", pin, m, NOW, 3600, vec!["https://updates.example/ymir/u1".into()]).unwrap();
+            a.sign(&[signer]).unwrap().to_bytes().unwrap()
+        };
+        let a = u.check_announcement(&ann(&manifest, &o.release), NOW).unwrap().expect("news");
+        assert_eq!((a.update_id.as_str(), a.seq, a.sources.len()), ("u1", 1, 1));
+        assert!(u.check_announcement(&ann(&manifest, &key(99)), NOW).unwrap_err().to_string().contains("refused"));
+        assert!(u.check_announcement(&ann(&manifest, &o.release), NOW.plus(7200)).is_err(), "expired");
+        // The announced manifest is fetched; then the same announcement is old news.
+        u.fetch(&DirSource(tmp.path().join("b1")), Some(&a.manifest_hash), &v("0.1.0"), NOW).unwrap();
+        assert!(u.check_announcement(&ann(&manifest, &o.release), NOW).unwrap().is_none());
     }
 }

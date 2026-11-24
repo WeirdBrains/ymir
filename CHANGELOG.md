@@ -9,6 +9,7 @@ All notable changes to Ymir are listed here. The format follows
 ### Added
 
 - The llama.cpp trainer for `ymirctl train`, `scripts/trainer.py`, pinned to the engine's llama.cpp build (b12628). `train` runs upstream `llama-finetune` on an F32 GGUF base with conversations rendered in the base's chat template, and `extract-lora` keeps the top `rank` singular directions of each weight's change as a GGUF LoRA adapter. `scripts/engine.py build --trainer` builds `llama-finetune`, which upstream's release files don't include, and `scripts/trainer-requirements.txt` lists its Python packages. Tested against a fake `llama-finetune` only.
+- M9 bundle fetcher: `ymirctl update fetch SOURCE [--announcement FILE]` downloads a signed bundle directory over HTTPS (or from a directory). Its manifest is checked against the pinned root before anything else is downloaded, each file is read up to its signed size, and an announced manifest must match. `ymirctl update watch --relay ADDR [--fetch] [--once]` hears Ymir's update announcements from a Weirdnet relay that carries them (`/weirdnet/updates/1`) and can stage what it hears. Moves to `weirdnet-update` 0.2.2 with its `wire` feature.
 
 ### Changed
 
