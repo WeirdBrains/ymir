@@ -1822,7 +1822,7 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
   Flutter app (Android): pair, catalog from one node, streaming chat with cancel, local history.
   Tests over `weirdnet-net` in-memory transports with a fake `InferHost`.
 - **B2 Pool client** (built 2026-11-19; see [B2 status](#b2-status-built-2026-11-19)): multi-node catalog, routing via
-  the `weirdnet-agent` pool, retries, automatic mid-answer failover, stand-in and cache flags, in both shells.
+  the `weirdnet-agent` pool, retries, automatic mid-answer failover, stand-in and cache flags, in both shells. A rollout (P4b) is one row with its versions under it.
 - **B3 Platforms** (in progress 2026-11-19; see [B3 status](#b3-status-in-progress-2026-11-19)): iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
 - **B4 Sync and optional extras:** history on the shared context store (after M5), and a per-chat training consent
   (the `{conversation}/train` record of training plan P2, built in every shell 2026-11-24); the optional on-device model
