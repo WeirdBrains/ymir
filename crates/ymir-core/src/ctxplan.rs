@@ -209,8 +209,12 @@ pub fn decide(ask: &Ask, residents: &[Resident], budget: &Budget, measured: Opti
     let measured_note = measured.map_or(String::new(), |m| format!(", {} measured free", gib(m)));
     if let (true, Some(c)) = (ask.explicit, ask.launch.context) {
         let short = !want(free);
+        let kv = ask.resolved.shape.context_bytes(u64::from(c), run);
         let note = format!(
-            "context {c} (set in node.toml), {} free for it {beside}{measured_note}{evicted}{}",
+            "context {c} (set in node.toml) ({} for KV and buffers; {} in all with {} of weights and 10% for the engine's other buffers), {} free for it {beside}{measured_note}{evicted}{}",
+            gib(kv),
+            gib(kvfit::footprint(ask.resolved.weights, kv)),
+            gib(ask.resolved.weights),
             gib(free),
             if short { ": it may not fit" } else { "" }
         );

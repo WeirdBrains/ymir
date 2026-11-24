@@ -357,6 +357,7 @@ fn a_loaded_model_is_sized_with_its_own_memory_counted_back() {
     assert!(d.evict.is_empty(), "the embedding model is not unloaded for a context that fits: {d:?}");
     assert_eq!(d.free, NODE_B_FREE - GIB);
     assert!(d.note.contains("context 382976 (set in node.toml)") && d.note.contains("beside qwen3-embedding-0.6b"), "{}", d.note);
+    assert!(d.note.contains(" for KV and buffers; ") && d.note.contains(" in all with "), "a fixed context gives its total too: {}", d.note);
     assert!(d.note.contains("it is loaded: its own") && d.note.contains("counted back"), "{}", d.note);
     assert!(!d.note.contains("may not fit"), "{}", d.note);
     // On the automatic context it would get what it got when asked for alone: cut from its

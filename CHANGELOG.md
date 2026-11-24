@@ -14,7 +14,12 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
+- `release.toml` requires `weirdnet-backends` 0.4.1 from crates.io (`[[requires]]`), so a release cannot go out against an unpublished or overridden engine crate.
 - `weirdnet-agent` 0.5.2, `weirdnet-backends` 0.4.1, `weirdnet-openai` 0.2.2 and `weirdnet-alerts` 0.2.2 (with `backends`). Engine alerts come from `weirdnet-alerts`' monitor again; Ymir's interim copy (`ymir_core::engine_alerts`) is removed.
+
+### Fixed
+
+- The context plan's log line gives the whole estimate for a context set in `node.toml` too (KV and buffers, and the total with weights), at start-up and at load time.
 
 ## [0.4.0] - 2026-11-23
 
