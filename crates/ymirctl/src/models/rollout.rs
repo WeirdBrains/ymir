@@ -77,12 +77,10 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: RolloutCmd) -> Result<
     let mut rollouts = cfg.inference.rollout.clone();
     if let RolloutCmd::List = cmd {
         let live = live(paths).await;
-        let (shown, note) = match live {
-            Some(l) if l != rollouts => (l, Some("ymird's live rollouts differ from node.toml (shown: live)")),
-            Some(l) => (l, None),
-            None => (rollouts, Some("ymird is not running here: shown from node.toml")),
-        };
-        return list(out, &shown, note);
+        // Suggest `add` only where rollouts are routed (or could be once ymird starts).
+        let hint = !matches!(live, Live::NoInference);
+        let (shown, note) = list_source(live, rollouts);
+        return list(out, &shown, note, hint);
     }
     let said = apply(&mut rollouts, &cmd)?;
     ymir_core::rollout::validate(&rollouts)?;
@@ -98,13 +96,48 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: RolloutCmd) -> Result<
     Ok(())
 }
 
-async fn live(paths: &Paths) -> Option<Vec<Rollout>> {
-    let r = control::request(&paths.socket(), &ControlRequest::Rollouts { set: None }).await.ok()?;
-    r.rollouts
+/// What the local ymird says about rollouts.
+#[derive(Debug)]
+pub enum Live {
+    /// The rollouts in force.
+    Rollouts(Vec<Rollout>),
+    /// ymird is running but routes no rollouts: no inference role here.
+    NoInference,
+    /// No ymird answered.
+    NotRunning,
 }
 
-fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>) -> Result<()> {
-    if rollouts.is_empty() {
+async fn live(paths: &Paths) -> Live {
+    match control::request(&paths.socket(), &ControlRequest::Rollouts { set: None }).await {
+        Ok(r) => match r.rollouts {
+            Some(l) if r.ok => Live::Rollouts(l),
+            // A running ymird without a coordinator (the only refusal of a plain read).
+            _ => Live::NoInference,
+        },
+        Err(_) => Live::NotRunning,
+    }
+}
+
+/// Which rollouts `list` shows (live or node.toml's) and the note under them.
+pub fn list_source(live: Live, file: Vec<Rollout>) -> (Vec<Rollout>, Option<&'static str>) {
+    match live {
+        Live::Rollouts(l) if l != file => (l, Some("ymird's live rollouts differ from node.toml (shown: live)")),
+        Live::Rollouts(l) => (l, None),
+        Live::NoInference if file.is_empty() => {
+            (file, Some("This node has no inference role, so no rollouts are routed here (they belong in an inference node's node.toml)."))
+        }
+        Live::NoInference => (
+            file,
+            Some(
+                "This node has no inference role, so ymird routes none of these: shown from node.toml, used only if the node gets the inference role.",
+            ),
+        ),
+        Live::NotRunning => (file, Some("ymird is not running here: shown from node.toml")),
+    }
+}
+
+fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>, hint: bool) -> Result<()> {
+    if rollouts.is_empty() && hint {
         writeln!(out, "No rollouts. Add one with `ymirctl models rollout add NAME@1 --model ID --weight 100`.")?;
     }
     for r in rollouts {
@@ -332,6 +365,26 @@ mod tests {
 
     fn add(v: &str, m: &str, w: u32, gate: Gate) -> RolloutCmd {
         RolloutCmd::Add { version: v.into(), model: m.into(), weight: w, gate }
+    }
+
+    #[test]
+    fn list_says_why_it_shows_node_toml() {
+        let say = |live, file: Vec<Rollout>, hint| {
+            let (shown, note) = list_source(live, file);
+            let mut out = Vec::new();
+            list(&mut out, &shown, note, hint).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let s = say(Live::NoInference, vec![], false);
+        assert!(s.contains("no inference role, so no rollouts are routed here") && !s.contains("not running") && !s.contains("Add one"), "{s}");
+        let s = say(Live::NoInference, ro(), false);
+        assert!(s.contains("support@2") && s.contains("no inference role") && !s.contains("not running"), "{s}");
+        let s = say(Live::NotRunning, vec![], true);
+        assert!(s.contains("Add one") && s.contains("ymird is not running here"), "{s}");
+        let s = say(Live::Rollouts(ro()), ro(), true);
+        assert!(s.contains("support@2") && !s.contains("node.toml"), "{s}");
+        let s = say(Live::Rollouts(vec![]), ro(), true);
+        assert!(s.contains("differ from node.toml"), "{s}");
     }
 
     #[test]

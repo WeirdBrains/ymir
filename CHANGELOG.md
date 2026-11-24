@@ -17,6 +17,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Fixed
 
+- `ymirctl models rollout list` on a node without the inference role said "ymird is not running here" while ymird was running. It now says the node has no inference role, so no rollouts are routed there (and lists any in node.toml without suggesting `add`).
 - `ymirctl bench`'s code sandbox now applies its limits where `sh` is dash (Debian, Ubuntu). It used to set every limit in one `ulimit` call, which dash refuses, with the error hidden, so code ran with no CPU, memory, file-size or process limit, only the 10 s wall clock. Each limit is now set on its own, with each shell's spelling. If one can't be set, code questions are left unscored.
 
 ## [0.8.0] - 2026-11-24
