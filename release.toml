@@ -37,9 +37,9 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # LoRA adapters (live changes, per-request scale) need this release on crates.io
+[[requires]]                    # live LoRA changes, and engine launches that survive a taken port, need this release
 crate = "weirdnet-backends"
-version = "0.4.1"
+version = "0.4.2"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 pin = "none"

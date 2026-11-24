@@ -3,6 +3,16 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: weirdnet-backends 0.4.2, engine port race (branch `deps/backends-0.4.2`)
+
+**What changed**
+- `weirdnet-backends` 0.4.2 (released for this, approved by Michael): before an engine is ready the supervisor checks `/v1/models` with the launch's key lists the model; if another server answers on the port, or the engine exits while loading because the port was taken, the launch is retried on a new port (3 tries) and isn't counted as a crash.
+- Ymir: `weirdnet-backends` 0.4.2 in `Cargo.toml`/`Cargo.lock`; `release.toml` `[[requires]]` 0.4.2; the mock engine's `/v1/models` checks the key, as real engines do.
+
+**Checks run**: fmt; clippy `--workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked --no-fail-fast`: 263 passed, 0 failed, 7 ignored. The `adapters` end-to-end test binary 200 times, 24 at a time, with 24 busy loops (load average about 30): 0 failures.
+
+**Not tested**: real llama-server and vLLM losing a port (the crate's tests use a mock that impersonates a stranger, logs a bind failure, or has another process hold the port).
+
 ## 2026-11-23: test free-port race (branch `fix/test-port-race`)
 
 **What changed**

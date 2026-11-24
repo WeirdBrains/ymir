@@ -73,7 +73,12 @@ fn authorized(st: &Mock, headers: &HeaderMap) -> bool {
     }
 }
 
-async fn models(State(st): State<Arc<Mock>>) -> Response {
+/// Behind the key, like llama-server (b12628) and vLLM: the supervisor checks it is talking to its
+/// own engine here before calling it ready.
+async fn models(State(st): State<Arc<Mock>>, headers: HeaderMap) -> Response {
+    if !authorized(&st, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response();
+    }
     axum::Json(json!({"object": "list", "data": [{"id": st.alias, "object": "model"}]})).into_response()
 }
 
