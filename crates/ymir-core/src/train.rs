@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::control::{self, ControlRequest};
+use crate::upload::{self, ArtifactKind, BaseRecord, ImportSpec};
 use crate::{NodeConfig, Paths};
 
 /// The trainer interface version Ymir speaks.
@@ -500,6 +501,10 @@ pub struct AdapterRecord {
     pub file: String,
     pub sha256: String,
     pub bytes: u64,
+    /// The adapter's content revision (`sha256:` and 16 hex digits, as `provenance.json` and an
+    /// upload of the same file give it). Absent in runs before the upload path (2026-11-24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// The base's `revision` it was trained on, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_revision: Option<String>,
@@ -560,7 +565,41 @@ pub enum Update {
     Event(Stage, Event),
 }
 
-/// Runs the trainer on this node and leaves the adapter in `models_dir/adapters/`. `cancel`
+/// What a run's record says about its adapter, as an upload's options (origin `train`): the base it
+/// was trained on, the dataset record and the trainer with the run's settings. `train run` imports
+/// its own adapter with these, and `ymirctl models upload --from-run` sends a copied run's adapter
+/// with the same record (docs/design/model-upload.md, slice U5).
+pub fn import_spec(record: &RunRecord, adapter: &AdapterRecord, uploaded_ms: i64) -> ImportSpec {
+    ImportSpec {
+        id: adapter.id.clone(),
+        license: None,
+        base: Some(BaseRecord {
+            id: Some(record.base.clone()),
+            hub: None,
+            revision: adapter.base_revision.clone(),
+            quant: adapter.base_quant.clone(),
+            sha256: None,
+        }),
+        origin: "train".into(),
+        uploaded_ms,
+        disk: None,
+        dataset: serde_json::to_value(&record.dataset).ok(),
+        trainer: Some(serde_json::json!({
+            "name": record.trainer.engine,
+            "build": record.trainer.build,
+            "interface": record.trainer.interface,
+            "run": record.id,
+            "node": record.node,
+            "trained_from": record.trained_from,
+            "hyper": record.hyper,
+            "steps": record.steps,
+            "final_loss": record.final_loss,
+        })),
+    }
+}
+
+/// Runs the trainer on this node and leaves the adapter in `models_dir/adapters/ID/` with its
+/// `provenance.json` (origin `train`) and `adapter.json`, through the upload path. `cancel`
 /// resolving stops the run. The GPU is held for the whole run and released however it ends.
 pub async fn run(
     paths: &Paths,
@@ -594,11 +633,11 @@ pub async fn run(
     if taken {
         bail!("`{adapter_id}` is already a model or adapter on this node; pick another --id");
     }
+    upload::check_id(&adapter_id).context("the adapter's id names its directory under models_dir/adapters; pick another --id")?;
     let models_dir = cfg.models_dir();
-    let rel = format!("adapters/{}.gguf", file_safe(&adapter_id));
-    let dest = models_dir.join(&rel);
-    if dest.exists() {
-        bail!("{} exists already; pick another --id", dest.display());
+    let target = upload::target_dir(&models_dir, ArtifactKind::Adapter { format: weirdnet_model::hf::AdapterFormat::GgufLora }, &adapter_id)?;
+    if target.exists() || models_dir.join(format!("adapters/{}.gguf", file_safe(&adapter_id))).exists() {
+        bail!("{} exists already; pick another --id", target.display());
     }
     let dir = cfg.train.work_dir(paths).join(&run_id);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -666,15 +705,17 @@ pub async fn run(
         Ok(t) => {
             record.steps = t.step.max(t.steps);
             record.final_loss = t.loss;
-            install(&adapter, &dest).map(|(sha256, bytes)| {
-                record.adapter = Some(AdapterRecord {
-                    id: adapter_id.clone(),
-                    file: rel.clone(),
-                    sha256,
-                    bytes,
-                    base_revision: base.revision.clone(),
-                    base_quant: if from == served { base.quant.clone() } else { None },
-                });
+            let made = AdapterRecord {
+                id: adapter_id.clone(),
+                file: String::new(),
+                sha256: String::new(),
+                bytes: 0,
+                revision: None,
+                base_revision: base.revision.clone(),
+                base_quant: if from == served { base.quant.clone() } else { None },
+            };
+            install(&models_dir, &adapter, &record, made).map(|a| {
+                record.adapter = Some(a);
                 record.status = RunStatus::Done;
                 if !spec.keep_full {
                     let _ = std::fs::remove_file(&full);
@@ -705,16 +746,24 @@ pub async fn run(
     Ok(record)
 }
 
-/// Moves the adapter to `dest`; returns its SHA-256 and size.
-fn install(adapter: &Path, dest: &Path) -> Result<(String, u64)> {
-    let bytes = std::fs::read(adapter)?;
-    let sha = hex::encode(Sha256::digest(&bytes));
-    std::fs::create_dir_all(dest.parent().expect("has a parent"))?;
-    if std::fs::rename(adapter, dest).is_err() {
-        std::fs::copy(adapter, dest).with_context(|| format!("copying the adapter to {}", dest.display()))?;
-        std::fs::remove_file(adapter)?;
+/// Imports the run's adapter through the upload path (checked as a GGUF LoRA, hashed, linked into
+/// `models_dir/adapters/ID/ID.gguf`, `provenance.json` and `adapter.json` beside it), removes the
+/// run's copy and fills in `made`'s file, hash, size and revision.
+fn install(models_dir: &Path, adapter: &Path, record: &RunRecord, mut made: AdapterRecord) -> Result<AdapterRecord> {
+    let mut item = upload::inspect(adapter).context("checking the trainer's adapter")?;
+    if !item.kind.is_adapter() {
+        bail!("the trainer's extract-lora step wrote a {}, not a LoRA adapter", item.kind.name());
     }
-    Ok((sha, bytes.len() as u64))
+    item.file_name = format!("{}.gguf", file_safe(&made.id));
+    let imported = upload::import(models_dir, &item, &import_spec(record, &made, now_ms()), &mut |_, _| {})?;
+    let file = &imported.provenance.files[0];
+    let dir = imported.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    made.file = format!("{}/{dir}/{}", upload::ADAPTERS_DIR, file.path);
+    made.sha256 = file.sha256.clone();
+    made.bytes = file.size;
+    made.revision = Some(imported.provenance.revision.clone());
+    let _ = std::fs::remove_file(adapter);
+    Ok(made)
 }
 
 /// The runs under the work directory, newest first.

@@ -784,6 +784,12 @@ node.toml by default with that revision (adapters with `base_revision` and `base
 the base-revision check use it; `--no-register` only prints it. A llama.cpp adapter serves after ymird restarts or
 the base next loads. Uploads to other nodes over Weirdnet are slice U2.
 
+Training outputs take the same path (slice U5): `ymirctl train run` imports its adapter with
+`ymir_core::upload::import` into `models_dir/adapters/ID/ID.gguf` with `provenance.json` (origin `train`: base,
+dataset record, trainer, run) and registers it with its content revision, and `ymirctl models upload [FILE]
+--from-run RUN_DIR` uploads a run's adapter with its run record, checked against the record's SHA-256 and base
+revision.
+
 ### LoRA adapters on a loaded base (training plan P4a, 2026-11-23)
 
 An adapter is served as a model of its own, on its base's engine. The engine side is

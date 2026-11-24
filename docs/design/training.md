@@ -146,10 +146,13 @@ takes only a dataset with its manifest (P1's `ymir-dataset/1`, whose teacher lic
 `--allow-unknown-license`, or P2's `ymir-conversations/1`, whose hash must match), and writes the usable rows as
 chat JSONL. It holds the node's GPU: a lock file `ymird` honours at start, and, while `ymird` runs, a reservation that
 unloads its models and places nothing there, refused when the node is the only one serving a loaded model unless
-`--force`. Then it runs `train` and `extract-lora`, moves the adapter to `models_dir/adapters/ID.gguf`, writes
-`run.json` (dataset, license, hyperparameters, trainer build, steps, loss, adapter hash) and drops the full model
-unless `--keep-full`. With `--add` it puts the adapter in node.toml with the run id as its revision and the base's
-revision and quantisation. A failed or cancelled run (Ctrl-C sends the trainer SIGTERM) releases the GPU too.
+`--force`. Then it runs `train` and `extract-lora`, imports the adapter through the upload path
+([model-upload.md](model-upload.md), U5, 2026-11-24) into `models_dir/adapters/ID/ID.gguf` with a `provenance.json`
+(origin `train`: base, dataset record, trainer and run) and `adapter.json` beside it, writes `run.json` (dataset,
+license, hyperparameters, trainer build, steps, loss, adapter hash and revision) and drops the full model unless
+`--keep-full`. With `--add` it puts the adapter in node.toml with its content revision (`sha256:` and 16 hex digits,
+the same an upload of the file gives; runs before 2026-11-24 used the run id) and the base's revision and
+quantisation. `ymirctl models upload --from-run RUN_DIR` takes a run's adapter with that record on another node. A failed or cancelled run (Ctrl-C sends the trainer SIGTERM) releases the GPU too.
 
 **Trainer interface (version 1).** `TRAINER version` prints `{"interface": 1, "engine": "llama.cpp", "build":
 "bNNNN"}`. `TRAINER train --base BASE.gguf --data DATA.jsonl --config CONFIG.json --out FULL.gguf` fine-tunes

@@ -299,7 +299,7 @@ fn copy_hashed(src: &Path, dir: &Path, name: &str, progress: &mut dyn FnMut(u64,
 }
 
 /// The options for one import.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImportSpec {
     pub id: String,
     pub license: Option<String>,
@@ -309,6 +309,10 @@ pub struct ImportSpec {
     /// Free and total bytes on the models disk, when known: the import is refused unless
     /// [`keep_free`] of the disk stays free after it.
     pub disk: Option<(u64, u64)>,
+    /// The dataset's summary for the record, when known (a training run's dataset record).
+    pub dataset: Option<serde_json::Value>,
+    /// The trainer for the record, when known (name, build, run, ...).
+    pub trainer: Option<serde_json::Value>,
 }
 
 /// Imports a checked file into `models_dir`: into its target directory, atomically, then writes the
@@ -367,8 +371,8 @@ pub fn import(models_dir: &Path, item: &Inspected, spec: &ImportSpec, progress: 
         license: spec.license.clone(),
         architecture: Some(item.header.architecture.clone()),
         base: spec.base.clone(),
-        dataset: None,
-        trainer: None,
+        dataset: spec.dataset.clone(),
+        trainer: spec.trainer.clone(),
         uploaded_by: None,
         uploaded_ms: spec.uploaded_ms,
         extra: BTreeMap::new(),

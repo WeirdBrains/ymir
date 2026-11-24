@@ -498,7 +498,8 @@ fn run_upload(ctx: &Ctx, out: &mut dyn Write, a: &upload::UploadArgs) -> Result<
 
 fn upload_args(file: &std::path::Path) -> upload::UploadArgs {
     upload::UploadArgs {
-        file: file.to_path_buf(),
+        file: Some(file.to_path_buf()),
+        from_run: None,
         name: None,
         adapter_for: None,
         license: Some("apache-2.0".into()),
@@ -636,4 +637,91 @@ fn upload_of_an_adapter_checks_its_base_and_says_llama_cpp_needs_a_restart() {
     let stored = ctx.store.adapters();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].id, "base+support");
+}
+
+// ---- `models upload --from-run` (docs/design/model-upload.md, U5) ----
+
+/// A finished `train run` directory whose adapter is `bytes` at `file` (relative to models_dir),
+/// trained on revision `base_revision` of `base`.
+fn finished_run(fx: &Fixture, bytes: &[u8], file: &str, base_revision: &str) -> std::path::PathBuf {
+    let dir = fx.dir.path().join("runs/20261124-150000-abcd");
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = serde_json::json!({
+        "format": ymir_core::train::RUN_FORMAT, "id": "20261124-150000-abcd", "node": "gpu1", "status": "done",
+        "base": "base", "trained_from": "base.gguf",
+        "dataset": {"name": "kad.jsonl", "sha256": "ab", "format": "ymir-dataset/1", "license": "mit", "teacher": "teacher-8b", "rows_in": 4, "rows_used": 2},
+        "hyper": {"epochs": 2, "learning_rate": 1e-5, "context": 2048, "batch": 4, "seed": 0, "rank": 8},
+        "trainer": {"interface": 1, "engine": "llama.cpp", "build": "b12628"},
+        "steps": 4, "final_loss": 0.4,
+        "adapter": {"id": "base+kad", "file": file, "sha256": sha(bytes), "bytes": bytes.len(), "base_revision": base_revision, "base_quant": "Q4_K_M"},
+        "reserved_in_ymird": false, "started_ms": 1, "ended_ms": 2
+    });
+    std::fs::write(dir.join("run.json"), serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    dir
+}
+
+fn from_run_args(run: &std::path::Path, file: Option<&std::path::Path>) -> upload::UploadArgs {
+    upload::UploadArgs { file: file.map(std::path::Path::to_path_buf), from_run: Some(run.to_path_buf()), license: None, ..upload_args(run) }
+}
+
+#[test]
+fn upload_from_a_run_carries_the_run_record_as_provenance() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let bytes = lora_bytes("llama");
+    // A run made on another node: its adapter was copied here with its run directory.
+    let copied = fx.dir.path().join("base+kad.gguf");
+    std::fs::write(&copied, &bytes).unwrap();
+    let run = finished_run(&fx, &bytes, "adapters/base+kad/base+kad.gguf", "r1");
+    // Without the file, the run's adapter must be in this node's models directory.
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, None)).unwrap_err();
+    assert!(err.to_string().contains("not in this node's models directory"), "{err}");
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &from_run_args(&run, Some(&copied))).unwrap();
+    let s = text(out);
+    assert!(s.contains("From run 20261124-150000-abcd on gpu1 (origin train)"), "{s}");
+    assert!(s.contains("Added LoRA adapter `base+kad` on `base`") && s.contains("only when its base starts"), "{s}");
+    let dir = ctx.dir().join("adapters/base+kad");
+    let p = ymir_core::upload::read_provenance(&dir).unwrap();
+    assert_eq!((p.origin.as_str(), p.license.as_deref(), p.files[0].sha256.as_str()), ("train", None, sha(&bytes).as_str()));
+    let base = p.base.clone().unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("base"), Some("r1"), Some("Q4_K_M")));
+    assert_eq!((p.dataset.as_ref().unwrap()["license"].as_str(), p.dataset.as_ref().unwrap()["teacher"].as_str()), (Some("mit"), Some("teacher-8b")));
+    let t = p.trainer.unwrap();
+    assert_eq!((t["name"].as_str(), t["build"].as_str(), t["run"].as_str()), (Some("llama.cpp"), Some("b12628"), Some("20261124-150000-abcd")));
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let a = &cfg.model.local[0].lora[0];
+    assert_eq!((a.id.as_str(), a.revision.as_deref(), a.base_revision.as_deref()), ("base+kad", Some(p.revision.as_str()), Some("r1")));
+    // Now on this node, the file can be left out: the same bytes are already there.
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { no_register: true, ..from_run_args(&run, None) }).unwrap();
+    assert!(text(out).contains("nothing was copied"));
+}
+
+#[test]
+fn upload_from_a_run_refuses_other_bytes_another_base_revision_and_unfinished_runs() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let bytes = lora_bytes("llama");
+    let copied = fx.dir.path().join("a.gguf");
+    std::fs::write(&copied, &bytes).unwrap();
+    // Another file than the run made.
+    let mut other = bytes.clone();
+    other.push(1);
+    let run = finished_run(&fx, &other, "adapters/base+kad/base+kad.gguf", "r1");
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("SHA-256 differs"), "{err}");
+    // Trained on another revision of the base than this node serves.
+    let run = finished_run(&fx, &bytes, "adapters/base+kad/base+kad.gguf", "r0");
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("trained on revision r0 of `base`"), "{err}");
+    // A run that failed has no adapter.
+    let path = run.join("run.json");
+    let t = std::fs::read_to_string(&path).unwrap().replace("\"done\"", "\"failed\"");
+    std::fs::write(&path, t).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("did not finish"), "{err}");
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&fx.dir.path().join("nope"), Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("train run"), "{err:#}");
+    assert!(!ctx.dir().join("adapters").exists(), "nothing copied before the checks pass");
 }

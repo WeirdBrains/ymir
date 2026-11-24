@@ -34,7 +34,15 @@ fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 }
 
 fn spec(id: &str) -> ImportSpec {
-    ImportSpec { id: id.into(), license: Some("apache-2.0".into()), base: None, origin: "upload".into(), uploaded_ms: 1, disk: None }
+    ImportSpec {
+        id: id.into(),
+        license: Some("apache-2.0".into()),
+        base: None,
+        origin: "upload".into(),
+        uploaded_ms: 1,
+        disk: None,
+        ..Default::default()
+    }
 }
 
 #[test]
