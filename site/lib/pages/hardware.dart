@@ -24,7 +24,8 @@ tiers.</p>
 <p>Models are big. Setup shows the download size and asks before fetching, then checks size and SHA-256.</p>
 <h2 id="platforms">Platforms</h2>
 <p>Ymir builds for Linux (x86_64 and ARM64), macOS and Windows; on Windows it runs as a logon task or as a Windows
-service. BSD packages are planned (M9).</p>
+service. On FreeBSD there is a <code>.pkg</code> with an rc.d service (<code>sysrc ymird_enable=YES</code>), built with the
+llama.cpp engine compiled there, since upstream publishes no BSD binaries.</p>
 ''';
 
 class HardwarePage extends StatelessComponent {

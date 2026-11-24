@@ -1878,7 +1878,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
 - **M8 server-a/server-b migration** (done 2026-11-20; each step approved by m3talsmith).
-- **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; outside MCP servers for tasks; and a bundle fetcher (`update fetch`, `update watch`). Still to do: push wake-ups (once the `weirdnet-push` front end exists), BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
+- **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; outside MCP servers for tasks; a bundle fetcher (`update fetch`, `update watch`); and BSD packages (FreeBSD `.pkg` with an rc.d service, FreeBSD and OpenBSD `tar.gz`). Still to do: push wake-ups (once the `weirdnet-push` front end exists) and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
 - **M10 Cert-only server link** (built 2026-11-24; see [M10 status](#m10-status-built-2026-11-24)).
   `weirdnet-sync` 0.7 and `weirdnet-device-link` 0.4 give service nodes a node certificate and sync keys
   without the root seed; `ymirctl pool cert-only` moves an existing node and wipes its seed copy; a node
@@ -2683,7 +2683,7 @@ be expanded.
 The parts of "breadth and hardening" that can be built and tested on one machine are built: self-update with rollback,
 agent tasks for Bragi, the Windows service, a security review with checks that run, Inkling 2 Mini, automatic context
 sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher
-(`update fetch`, `update watch`). Push wake-ups and BSD packages are not; MLX-LM for Inkling waits on mlx-lm#2086.
+(`update fetch`, `update watch`) and BSD packages. Push wake-ups are not; MLX-LM for Inkling waits on mlx-lm#2086.
 
 **Built and run:**
 
@@ -2752,7 +2752,18 @@ sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP se
 
 - **Push wake-ups:** `weirdnet-push` 0.1.0 has sealed payloads and APNs/FCM senders, but its Weirdnet front end (so the inference node
   can embed it with no listener) does not exist; tracked below. It also needs Apple and Google credentials from m3talsmith.
-- **BSD packages:** not built or tried. The user and system services cover systemd, launchd and Windows (see [Running as a service](#running-as-a-service)), but nothing here was packaged for a BSD. (Bragi's FreeBSD CI job is a separate item, see the Bragi B5 status.)
+- **BSD packages are built (2026-11-24); OpenBSD has no Rust new enough yet.**
+  - `scripts/package.py --target x86_64-unknown-freebsd` (or `aarch64-`) makes the `tar.gz` as on Linux, and on FreeBSD also
+    `ymir-VERSION-ARCH-freebsd.pkg` through `pkg create`: binaries under `/usr/local`, the engine in `/usr/local/lib/ymir/llama.cpp`,
+    and the rc.d script `packaging/freebsd/ymird.in` (off until `sysrc ymird_enable=YES`; runs `ymird` as the `ymir` user under
+    `daemon(8)`, restarted after 5 s, with `YMIR_HOME=/var/db/ymir`). Post-install creates the user and the home (0700).
+  - Upstream llama.cpp publishes no BSD binaries, so a BSD package needs `--engine DIR` from `engine.py build` on that system (or
+    `--no-engine`).
+  - `.github/workflows/bsd.yml` (manual) builds, packages and `pkg add`s in a FreeBSD 14.2 VM, runs the service with the mock engine,
+    chats through it, removes the package and runs the ymir-core and ymirctl tests. Its opt-in OpenBSD 7.6 job builds only when OpenBSD's
+    `rust` package meets the workspace's `rust-version` (rustup has no OpenBSD); on 2026-11-24 that package is 1.81 and the
+    workspace needs 1.99, so there is no OpenBSD build yet.
+  - Not done: a ports entry, publishing packages to a repository, and GhostBSD and DragonFly.
 - **The bundle fetcher is built (2026-11-24); publishing is not.**
   - `update fetch SOURCE [--announcement FILE]` reads a bundle directory over HTTPS or from disk (`Updater::fetch` with a
     `Source`). The manifest is verified against the pinned root first, on a copy of the client state so nothing is
