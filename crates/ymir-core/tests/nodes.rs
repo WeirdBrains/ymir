@@ -640,3 +640,69 @@ async fn a_long_prompt_is_not_taken_for_a_stall_by_the_askers_pool() {
     let e = pool.infer(req, &weirdnet_agent::pool::NoEvents, &CancelToken::new()).await.unwrap_err();
     assert!(matches!(e.error, RemoteError::Stalled { .. }), "{:?}", e.error);
 }
+
+fn rollout(weights: &[(u32, &str, u32)]) -> ymir_core::rollout::Rollout {
+    ymir_core::rollout::Rollout {
+        name: "support".into(),
+        versions: weights.iter().map(|&(v, m, w)| ymir_core::rollout::Version { version: v, model: m.into(), weight: w }).collect(),
+    }
+}
+
+/// Training plan P4b: a rollout name splits new conversations between its versions by weight,
+/// keeps each conversation on one version, pins `name@N`, and rolls back by weight.
+#[tokio::test]
+async fn a_rollout_sends_a_canary_share_and_rolls_back_by_weight() {
+    let a = Scripted::new("a", &[("s2", false, READY), ("s3", false, READY)]);
+    let c = cached(&[&a]);
+    c.set_rollouts(vec![rollout(&[(2, "s2", 90), (3, "s3", 10)])]).unwrap();
+    let conv = |i: usize| {
+        let mut r = Request::messages(vec![Message::system("help desk"), Message::user(format!("question {i}"))]);
+        r.sampling.temperature = Some(0.0); // so answers are cached
+        r
+    };
+    let routed = |c: &Coordinator, r: &Request| c.prepare(r).unwrap().model;
+    let mut on3 = 0;
+    for i in 0..400 {
+        let r = conv(i).with_model("support");
+        let m = routed(&c, &r);
+        // Later turns of the same conversation stay on its version.
+        let mut later = r.clone();
+        if let weirdnet_agent::remote::infer::v2::Input::Messages(ms) = &mut later.input {
+            ms.push(Message::assistant("an answer", Vec::new()));
+            ms.push(Message::user("and then?"));
+        }
+        assert_eq!(routed(&c, &later), m, "conversation {i} switched versions");
+        on3 += usize::from(m == "s3");
+    }
+    assert!((15..=70).contains(&on3), "about 10% on the canary, got {on3}/400");
+
+    // The catalog lists the name and each version; `name@N` pins a version.
+    let cat = c.agent_catalog();
+    for id in ["support", "support@2", "support@3", "s2", "s3"] {
+        assert!(cat.iter().any(|m| m.id == id), "{id} in the catalog");
+    }
+    assert_eq!(routed(&c, &conv(0).with_model("support@3")), "s3");
+    assert!(matches!(c.prepare(&conv(0).with_model("support@9")), Err(RemoteError::BadRequest { .. })));
+
+    // Versions never share cached answers: each is cached under its own model id.
+    say(&c, conv(1).with_model("support@3")).await.0.unwrap();
+    assert!(c.prepare(&conv(1).with_model("support@3")).unwrap().cache_hit());
+    assert!(!c.prepare(&conv(1).with_model("support@2")).unwrap().cache_hit());
+
+    // Rollback: the canary's weight to 0. Every new conversation goes to v2; v3 stays pinnable.
+    c.set_rollouts(vec![rollout(&[(2, "s2", 100), (3, "s3", 0)])]).unwrap();
+    assert!((0..100).all(|i| routed(&c, &conv(i).with_model("support")) == "s2"));
+    assert_eq!(routed(&c, &conv(0).with_model("support@3")), "s3");
+
+    // A version whose model no node has is passed over for one with traffic that is there.
+    c.set_rollouts(vec![rollout(&[(2, "s2", 1), (4, "s4", 99)])]).unwrap();
+    assert!((0..50).all(|i| routed(&c, &conv(i).with_model("support")) == "s2"));
+    assert!(!c.agent_catalog().iter().any(|m| m.id == "support@4"), "no node has v4's model");
+    // No traffic anywhere: refused, saying why.
+    c.set_rollouts(vec![rollout(&[(2, "s2", 0)])]).unwrap();
+    let e = c.prepare(&conv(0).with_model("support")).err().unwrap();
+    assert!(e.to_string().contains("every weight is 0"), "{e}");
+    // A bad set is refused and the old one kept.
+    assert!(c.set_rollouts(vec![rollout(&[(2, "s2", 1), (2, "s3", 1)])]).is_err());
+    assert_eq!(c.rollouts(), vec![rollout(&[(2, "s2", 0)])]);
+}
