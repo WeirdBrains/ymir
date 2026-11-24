@@ -26,12 +26,12 @@ ymirctl = { path = "crates/ymirctl", version = "0.6.0" }
 # Published Weirdnet crates, used as they are.
 weirdnet-agent = { version = "0.5.2", features = ["pool", "serve"] }
 weirdnet-backends = { version = "0.4.2", features = ["node"] }
-weirdnet-device-link = "=0.3.2"
+weirdnet-device-link = "0.4.2"
 weirdnet-model = { version = "0.5.1", default-features = false }
 weirdnet-net = "=0.8.2"
 weirdnet-openai = "0.2.2"
 weirdnet-semcache = "0.2.1"
-weirdnet-sync = "0.5.2"
+weirdnet-sync = "0.7.1"
 weirdnet-alerts = { version = "0.2.2", features = ["backends"] }
 weirdnet-rules = "=0.1.1"
 weirdnet-update = "0.2.0"
@@ -51,6 +51,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 semver = "1"
 sha2 = "0.10"
 regex = "1"
+hex = "0.4"
+zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

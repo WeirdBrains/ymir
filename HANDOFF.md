@@ -3,6 +3,21 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: M10, cert-only server links (branch `feat/m10-cert-only`)
+
+**What changed**
+- Dependencies: `weirdnet-sync` 0.7.1 (service devices, grants), `weirdnet-device-link` 0.4.2 (credential links); `hex` and `zeroize` added. Not sync 0.8: `weirdnet-agent` 0.5.2 and `weirdnet-backends` 0.4.2 accept below 0.8.
+- `ymir_core::membership`: `credential.json` instead of `seed` on a cert-only node (`weirdnet_sync::Identity`'s layout); `adopt_service`, `convert_to_service` (keeps roster, op log and older keys, writes the credential, then zeroes, syncs and deletes `seed`), `is_service`, `user_keypair`, `service_bundle(peer, ServiceRole)`, `grant_of`; `seed`, `approve`, `revoke` refuse on a cert-only node; `ServiceRole` (`inference`: roles `ymir.inference`, types `ymir.pool` + `ymir.context`; `model`: `ymir.model`, roster-only).
+- Control: `PoolServiceBundle { peer, role }` (local socket), so the grant and a first rotation land in the running ymird.
+- ymirctl: `pool add CODE --service inference|model`, `pool link --cert-only`, `pool cert-only` (migration, ymird stopped), `pool devices` shows grants.
+- Docs: [DESIGN.md](docs/DESIGN.md) (M10 status rewritten, root-seed section, milestone list, secrets), [roadmap.toml](roadmap.toml) (M10 done; [ROADMAP.md](ROADMAP.md) and the site regenerated), site ymirctl reference and guide, [CHANGELOG.md](CHANGELOG.md).
+
+**Checks run**: fmt; clippy `--workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked --no-fail-fast`: 273 passed, 0 failed, 7 ignored; `gen_roadmap.py --check`; link check. New: `ymir-testkit/tests/m10.rs` (real `pool link --cert-only` / `pool add --service` and `pool cert-only` over loopback; daemons with a cert-only model node and inference node serving, syncing, refusing seed-only requests, and cut off by revocation).
+
+**Not tested**: on real machines; no existing server was moved (each needs m3talsmith's go-ahead to run `pool cert-only`). Bragi and Morph still send full links only.
+
+**What's left / next**: Bragi sends cert-only links to Ymir servers (`send_credential`), on `weirdnet-sync` 0.7 and `weirdnet-device-link` 0.4.
+
 ## 2026-11-24: P2 export skips deleted messages; Bragi's toggle is in (branch `fix/p2-tombstones`)
 
 **What changed**: `convexport` skips a message whose value is Bragi's delete tombstone (`{"deleted": true}`, no role) instead of counting it as a dropped tool turn. Docs: [DESIGN.md](docs/DESIGN.md) (P2 and B4), [training.md](docs/design/training.md), [CHANGELOG.md](CHANGELOG.md): Bragi's per-chat toggle (Bragi main `72e7729`) writes the same `{conversation}/train` record.

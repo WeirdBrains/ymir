@@ -8,6 +8,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- M10, cert-only server links: a server can join with a node certificate and a user-signed service grant, never the identity seed. `ymirctl pool add CODE --service inference|model` sends one (an inference node gets the pool's and conversations' keys, a model node none), `pool link --cert-only` accepts only that, and `pool cert-only` moves a node linked with the seed (same peer id; the `seed` file is overwritten and deleted). A cert-only node keeps `credential.json` (the user's public key) instead of `seed` and cannot link, approve or revoke devices; revoking it from a seed holder leaves the identity unchanged. `pool devices` shows cert-only nodes and their roles. Moves to `weirdnet-sync` 0.7.1 and `weirdnet-device-link` 0.4.2.
 - Training plan P2, consented conversation export: `ymirctl context train ID [--off]` gives or withdraws a conversation's training consent (its own `{conversation}/train` record, off unless set, synced); `context show` marks `[training]`. `ymirctl context export --training OUT.jsonl [--keep-system] [--redact REGEX]...` writes only consented, live conversations as chat-format JSONL, with system prompts, tool calls, attachments and reasoning stripped, cut at incomplete or stand-in answers, plus `OUT.manifest.json` (`ymir-conversations/1`); both owner-only, and only counts are printed. `ymirctl context withdrawn MANIFEST` lists what an earlier export should drop. Messages deleted in Bragi are skipped.
 
 ### Fixed

@@ -116,6 +116,10 @@ already hold.</p>
 differ, answer <code>N</code>; someone else may be in the middle. When the link finishes, restart <code>ymird</code>
 on the new device so it joins Weirdnet. A code from Morph (<code>weirdnet-morph://link/…</code>) works with
 <code>pool add</code> too, and Morph accepts Ymir's codes (Identity, Add device).</p>
+<p><strong>Servers without your identity seed.</strong> For a model or inference server, link it cert-only so it never holds
+the seed: <code>ymirctl pool link --cert-only</code> on the server and <code>ymirctl pool add CODE --service inference</code>
+(or <code>--service model</code>) on a device that holds your identity. A server linked before can be moved with
+<code>ymirctl pool cert-only</code> (stop <code>ymird</code> first); its seed file is then wiped.</p>
 <p><strong>Look and tidy.</strong></p>
 <pre><code>ymirctl pool devices            # the identity and every linked device (this node, linked, revoked)
 ymirctl pool revoke PEER_ID     # cut a device off everywhere the roster reaches

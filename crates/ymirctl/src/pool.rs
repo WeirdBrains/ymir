@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
-use weirdnet_device_link::{HostNode, HostStatus, Pairing, with_link_limits};
+use weirdnet_device_link::{HostNode, HostStatus, Pairing, Received, with_link_limits};
 use weirdnet_net::{Keypair, Multiaddr, NodeConfig as NetConfig, PeerHint};
 use ymir_core::control::{self, ControlRequest};
-use ymir_core::membership::{LinkSettings, Membership, SYNC_TYPE};
+use ymir_core::membership::{LinkSettings, Membership, SYNC_TYPE, ServiceRole};
 use ymir_core::{NodeConfig, Paths};
 
 /// The link scheme Ymir shows (`weirdnet-ymir://link/…`). Never bare `weirdnet://`.
@@ -42,7 +42,16 @@ pub fn link_hint(cfg: &NodeConfig) -> String {
 #[derive(Subcommand, Debug)]
 pub enum PoolCmd {
     /// Join the user's Weirdnet: show a link code to open on a device that is already in it.
-    Link,
+    Link {
+        /// Only accept a cert-only link (a certificate and a service grant, never the seed).
+        /// The other device sends one with `ymirctl pool add CODE --service ROLE`.
+        #[arg(long)]
+        cert_only: bool,
+    },
+    /// Move this node to cert-only: show a link code for a device that holds the seed
+    /// (`ymirctl pool add CODE --service ROLE` there); then this node's `seed` file is
+    /// overwritten and deleted. Stop ymird first.
+    CertOnly,
     /// Link another device from this one: paste the code it shows.
     Add {
         /// The `weirdnet-ymir://` (or Morph's `weirdnet-morph://`, or Bragi's `weirdnet-bragi://`) code the other device shows.
@@ -53,6 +62,11 @@ pub enum PoolCmd {
         /// Skip the code check prompt (tests; the codes still have to match).
         #[arg(long)]
         yes: bool,
+        /// Link a server cert-only, as `inference` (holds the pool's and conversations' keys)
+        /// or `model` (roster only, no data keys): it gets a certificate and a user-signed
+        /// service grant, never the seed, and cannot link or revoke devices.
+        #[arg(long, value_name = "ROLE")]
+        service: Option<String>,
     },
     /// The linked devices.
     Devices,
@@ -161,54 +175,77 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
             writeln!(out, "Restart ymird to put it on Weirdnet.")?;
             Ok(())
         }
-        PoolCmd::Link => {
+        PoolCmd::Link { cert_only } => {
             if Membership::exists(&dir) {
                 bail!("this node is already linked ({}); see `ymirctl pool devices`", dir.display());
             }
             let node_key = Keypair::generate_ed25519();
             let host = HostNode::start(SCHEME, node_key.clone(), link_config(cfg)?, &link_hint(cfg)).map_err(|e| anyhow!("{e}"))?;
-            writeln!(out, "On a device that is already in your Weirdnet (Morph: Identity → Add device, or `ymirctl pool add`), open:")?;
+            if cert_only {
+                writeln!(out, "On a device that holds your identity, run `ymirctl pool add CODE --service inference` (or `--service model`) with:")?;
+            } else {
+                writeln!(out, "On a device that is already in your Weirdnet (Morph: Identity → Add device, or `ymirctl pool add`), open:")?;
+            }
             writeln!(out, "\n  {}\n", host.link())?;
             writeln!(out, "The code is good for two minutes.")?;
             out.flush()?;
-            let mut asked = false;
-            loop {
-                match host.status() {
-                    HostStatus::Waiting => {}
-                    HostStatus::Paired { sas } | HostStatus::Received { sas } if !asked => {
-                        asked = true;
-                        if !read(out, input, &format!("Does the other device show {sas}? [y/N] "))? {
-                            host.cancel();
-                            bail!("cancelled: the codes did not match");
-                        }
-                        host.confirm();
-                        writeln!(out, "Waiting for the other device to confirm…")?;
-                    }
-                    HostStatus::Received { .. } => {
-                        let t = host.take().map_err(|e| anyhow!("{e}"))?;
-                        let m = Membership::adopt(&dir, node_key, &t.seed, t.node_cert.clone(), &t.settings)?;
-                        writeln!(out, "Linked as {} ({}) to {}.", t.node_cert.label, m.peer_id(), m.user_id())?;
-                        let peers = LinkSettings::peers_in(&t.settings);
-                        if !peers.is_empty() && (!cfg.network.discovery || !cfg.network.mdns) {
-                            writeln!(out, "With discovery off, add the devices it can reach to [network] peers in node.toml:")?;
-                            for p in &peers {
-                                writeln!(out, "  {p}")?;
-                            }
-                        }
-                        writeln!(out, "Restart ymird to put it on Weirdnet.")?;
-                        return Ok(());
-                    }
-                    HostStatus::Paired { .. } => {}
-                    HostStatus::Done => bail!("the link was already used"),
-                    HostStatus::Cancelled => bail!("the other device cancelled"),
-                    HostStatus::Expired => bail!("the code expired; run `ymirctl pool link` again"),
-                    HostStatus::Failed(why) => bail!("linking failed: {why}"),
+            let (m, label, settings) = match wait_for_link(&host, out, input).await? {
+                Received::Full(t) if !cert_only => {
+                    let m = Membership::adopt(&dir, node_key, &t.seed, t.node_cert.clone(), &t.settings)?;
+                    (m, t.node_cert.label.clone(), t.settings.clone())
                 }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                Received::Full(_) => bail!("the other device sent the identity seed, and this link asked for cert-only; nothing was stored"),
+                Received::Service(c) => {
+                    let m = Membership::adopt_service(&dir, node_key, &c.user_key, c.node_cert.clone(), &c.bundle)?;
+                    (m, c.node_cert.label.clone(), c.settings.clone())
+                }
+                _ => bail!("the other device sent a kind of link this version doesn't know; nothing was stored"),
+            };
+            let kind = if m.is_service() { " cert-only" } else { "" };
+            writeln!(out, "Linked{kind} as {label} ({}) to {}.", m.peer_id(), m.user_id())?;
+            let peers = LinkSettings::peers_in(&settings);
+            if !peers.is_empty() && (!cfg.network.discovery || !cfg.network.mdns) {
+                writeln!(out, "With discovery off, add the devices it can reach to [network] peers in node.toml:")?;
+                for p in &peers {
+                    writeln!(out, "  {p}")?;
+                }
+            }
+            writeln!(out, "Restart ymird to put it on Weirdnet.")?;
+            Ok(())
+        }
+        PoolCmd::CertOnly => {
+            let m = Membership::open(&dir)?.context("this node is not linked; run `ymirctl pool link --cert-only`")?;
+            if m.is_service() {
+                bail!("this node is already cert-only");
+            }
+            if control::request(&paths.socket(), &ControlRequest::Status).await.is_ok() {
+                bail!("stop ymird first: it holds the identity and would write the seed back");
+            }
+            let node_key = m.node_key().clone();
+            drop(m);
+            let host = HostNode::start(SCHEME, node_key, link_config(cfg)?, &link_hint(cfg)).map_err(|e| anyhow!("{e}"))?;
+            writeln!(out, "On a device that holds your identity, run `ymirctl pool add CODE --service inference` (or `--service model`) with:")?;
+            writeln!(out, "\n  {}\n", host.link())?;
+            writeln!(out, "The code is good for two minutes. Afterwards this node's seed file is overwritten and deleted.")?;
+            out.flush()?;
+            match wait_for_link(&host, out, input).await? {
+                Received::Service(c) => {
+                    let m = Membership::convert_to_service(&dir, &c.user_key, c.node_cert.clone(), &c.bundle)?;
+                    writeln!(out, "{} ({}) is cert-only now; the seed file is gone. Start ymird again.", c.node_cert.label, m.peer_id())?;
+                    Ok(())
+                }
+                Received::Full(_) => {
+                    bail!("the other device sent the identity seed; run `ymirctl pool add CODE --service ROLE` there. Nothing changed")
+                }
+                _ => bail!("the other device sent a kind of link this version doesn't know; nothing changed"),
             }
         }
-        PoolCmd::Add { link, profile_name, yes } => {
+        PoolCmd::Add { link, profile_name, yes, service } => {
+            let role = service.as_deref().map(ServiceRole::parse).transpose()?;
             let m = Membership::open(&dir)?.context("this node is not linked yet; run `ymirctl pool link` or `ymirctl pool init`")?;
+            if m.is_service() {
+                bail!("this node is linked cert-only and holds no seed; link devices from one that does");
+            }
             let net = link_config(cfg)?;
             let link = normalize_link(&link);
             let mut pairing = tokio::task::spawn_blocking(move || Pairing::start(SCHEME, &link, net)).await?.map_err(|e| anyhow!("{e}"))?;
@@ -217,16 +254,39 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 let _ = tokio::task::spawn_blocking(move || pairing.cancel()).await;
                 bail!("cancelled: the codes did not match");
             }
-            let seed = m.seed()?;
             // Where the pool's nodes are: a device on another network (Bragi on a laptop, the
             // nodes on a private network with discovery off) has no other way to find them.
             let peers = addresses(paths, cfg, &m).await;
             let told = peers.len();
             let settings = m.link_settings_with(peers);
             let sync = vec![SYNC_TYPE.to_string()];
-            let cert =
-                tokio::task::spawn_blocking(move || pairing.send_with(&seed, &profile_name, &settings, &sync)).await?.map_err(|e| anyhow!("{e}"))?;
-            if daemon_on_weirdnet(paths).await {
+            let on_weirdnet = daemon_on_weirdnet(paths).await;
+            let cert = match (role, service) {
+                (Some(role), Some(name)) => {
+                    let peer = pairing.peer().to_string();
+                    let bundle = if on_weirdnet {
+                        // ymird holds the roster: the grant (and a first rotation) happen there.
+                        let r = control::request(&paths.socket(), &ControlRequest::PoolServiceBundle { peer, role: name }).await?;
+                        if !r.ok {
+                            bail!("{}", r.message.unwrap_or_default());
+                        }
+                        zeroize::Zeroizing::new(hex::decode(r.message.unwrap_or_default()).context("the sync bundle")?)
+                    } else {
+                        m.service_bundle(&peer, role)?
+                    };
+                    let user = m.user_keypair()?;
+                    tokio::task::spawn_blocking(move || pairing.send_credential(&user, &profile_name, &settings, &sync, &bundle))
+                        .await?
+                        .map_err(|e| anyhow!("{e}"))?
+                }
+                _ => {
+                    let seed = m.seed()?;
+                    tokio::task::spawn_blocking(move || pairing.send_with(&seed, &profile_name, &settings, &sync))
+                        .await?
+                        .map_err(|e| anyhow!("{e}"))?
+                }
+            };
+            if on_weirdnet {
                 let r = control::request(&paths.socket(), &ControlRequest::PoolApprove { cert: cert.clone() }).await?;
                 if !r.ok {
                     bail!("{}", r.message.unwrap_or_default());
@@ -234,7 +294,8 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
             } else {
                 m.approve(cert.clone())?;
             }
-            writeln!(out, "Linked {} ({}).", cert.label, cert.peer_id)?;
+            let kind = if role.is_some() { " cert-only" } else { "" };
+            writeln!(out, "Linked {} ({}){kind}.", cert.label, cert.peer_id)?;
             if told > 0 {
                 writeln!(out, "Sent it {told} address{} to reach your nodes at (`ymirctl pool addresses`).", if told == 1 { "" } else { "es" })?;
             }
@@ -254,7 +315,8 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
         PoolCmd::Devices => {
             let m = Membership::open(&dir)?.context("this node is not linked yet; run `ymirctl pool link`")?;
             let me = m.peer_id().to_string();
-            writeln!(out, "Identity {}", m.user_id())?;
+            let kind = if m.is_service() { " (this node is cert-only)" } else { "" };
+            writeln!(out, "Identity {}{kind}", m.user_id())?;
             for c in &m.roster().certs {
                 let state = if c.peer_id == me {
                     "this node"
@@ -263,7 +325,13 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 } else {
                     "revoked"
                 };
-                writeln!(out, "  {:<20} {:<10} {}", c.label, state, c.peer_id)?;
+                // The class and roles a device's user-signed grant gives it (labels are not signed).
+                let grant = match m.grant_of(&c.peer_id) {
+                    Some((weirdnet_sync::DeviceClass::Service, roles)) => format!("  cert-only {}", roles.join(",")),
+                    Some((_, roles)) if !roles.is_empty() => format!("  {}", roles.join(",")),
+                    _ => String::new(),
+                };
+                writeln!(out, "  {:<20} {:<10} {}{grant}", c.label, state, c.peer_id)?;
             }
             Ok(())
         }
@@ -281,6 +349,33 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
             }
             Ok(())
         }
+    }
+}
+
+/// Waits for the other device on a link code: asks the user to compare the 6-digit code, then
+/// returns what arrived (the seed, or a cert-only credential).
+async fn wait_for_link(host: &HostNode, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<Received> {
+    let mut asked = false;
+    loop {
+        match host.status() {
+            HostStatus::Waiting => {}
+            HostStatus::Paired { sas } | HostStatus::Received { sas } if !asked => {
+                asked = true;
+                if !read(out, input, &format!("Does the other device show {sas}? [y/N] "))? {
+                    host.cancel();
+                    bail!("cancelled: the codes did not match");
+                }
+                host.confirm();
+                writeln!(out, "Waiting for the other device to confirm…")?;
+            }
+            HostStatus::Received { .. } => return host.take_any().map_err(|e| anyhow!("{e}")),
+            HostStatus::Paired { .. } => {}
+            HostStatus::Done => bail!("the link was already used"),
+            HostStatus::Cancelled => bail!("the other device cancelled"),
+            HostStatus::Expired => bail!("the code expired; run the command again"),
+            HostStatus::Failed(why) => bail!("linking failed: {why}"),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
