@@ -39,7 +39,7 @@ path = "CHANGELOG.md"
 
 [[requires]]                    # live LoRA changes, and engine launches that survive a taken port, need this release
 crate = "weirdnet-backends"
-version = "0.4.2"
+version = "0.4.3"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 pin = "none"
