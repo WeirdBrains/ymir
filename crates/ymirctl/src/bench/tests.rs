@@ -331,7 +331,8 @@ async fn runs_a_node_by_model_matrix_one_request_at_a_time() {
     // node-b placed the model on node-c, and says so.
     assert_eq!(b["served_by"], json!(["node-c"]));
     assert!(md.contains("Forwarded"));
-    assert_eq!(a["quality"]["ran"], 4);
+    // The quick suite has one code question, scored only where python3 and the sandbox are.
+    assert_eq!(a["quality"]["ran"], if score::python_available() { 4 } else { 3 });
     assert!(find("cold", "node-b")["skipped"].as_str().unwrap().contains("not loaded"));
     assert_eq!(find("vec", "node-a")["embedding"]["dims"], 4);
     assert!(md.contains("node-c: skipped, node unreachable: no route"));
