@@ -9,7 +9,7 @@ upstream release archives (with their SHA-256) that make up the engine.
 
     python3 scripts/engine.py list [--json]
     python3 scripts/engine.py fetch --target TRIPLE [--variant default|cuda] --out DIR [--check]
-    python3 scripts/engine.py build --out DIR [--backend vulkan] [--backend cuda] [--jobs N] [--check]
+    python3 scripts/engine.py build --out DIR [--backend vulkan] [--backend cuda] [--jobs N] [--trainer] [--check]
     python3 scripts/engine.py pin BUILD          # rewrite the pin for llama.cpp build BUILD (bNNNN)
 
 `fetch` downloads (cached in $YMIR_ENGINE_CACHE, default ~/.cache/ymir-engines), checks every
@@ -19,6 +19,8 @@ and GPU backends, LICENSE files and engine.toml. Release files put DIR at lib/ym
 
 `build` compiles the same set from source at the pinned build, for targets upstream doesn't publish
 binaries for (FreeBSD, OpenBSD and other BSDs, or distribution builds that must build from source).
+`--trainer` adds `llama-finetune` at the same build, for scripts/trainer.py (fine-tuning, training
+plan P3a); upstream's release archives don't carry it.
 """
 
 import argparse
@@ -57,6 +59,8 @@ LAYOUT = {
 }
 
 PROGRAMS = {"llama-server": "llama-server", "ggml-rpc-server": "rpc-server", "rpc-server": "rpc-server"}
+# With `build --trainer`.
+TRAINER_PROGRAMS = {"llama-finetune": "llama-finetune"}
 LIB_PREFIXES = ("ggml", "llama", "mtmd", "cudart", "cublas")
 CUDA_NOTICE = """The CUDA runtime libraries in this directory (cudart, cuBLAS, cuBLASLt) are NVIDIA CUDA
 Toolkit redistributables, shipped unmodified under the NVIDIA CUDA Toolkit End User License
@@ -136,11 +140,13 @@ def extract(archive, into):
     shutil.rmtree(stage, ignore_errors=True)
 
 
-def keep(name):
-    """The engine's files among an upstream build's: the two programs, their libraries, licenses."""
+def keep(name, trainer=False):
+    """The engine's files among an upstream build's: the two programs (and llama-finetune with
+    `trainer`), their libraries, licenses."""
     base = name[:-4] if name.endswith(".exe") else name
-    if base in PROGRAMS:
-        return PROGRAMS[base] + (".exe" if name.endswith(".exe") else "")
+    programs = {**PROGRAMS, **TRAINER_PROGRAMS} if trainer else PROGRAMS
+    if base in programs:
+        return programs[base] + (".exe" if name.endswith(".exe") else "")
     if name.upper().startswith("LICENSE"):
         return name
     m = re.match(r"^(?:lib)?([A-Za-z0-9_.+-]+?)(?:\.so(?:\.[0-9.]+)?|\.dylib|\.dll)$", name)
@@ -150,19 +156,19 @@ def keep(name):
     if not stem.startswith(LIB_PREFIXES):
         return None
     # Each llama.cpp tool has an -impl library; only the server's is needed.
-    if stem.endswith("-impl") and not stem.startswith("llama-server-impl"):
+    if stem.endswith("-impl") and not stem.startswith("llama-server-impl") and not (trainer and stem.startswith("llama-finetune-impl")):
         return None
     return name
 
 
-def select(src, out):
+def select(src, out, trainer=False):
     """Copies what `keep` wants from `src` into `out`, keeping symlinks as symlinks."""
     out.mkdir(parents=True, exist_ok=True)
     kept = []
     for p in sorted(src.iterdir()):
         if p.is_dir() and not p.is_symlink():
             continue
-        name = keep(p.name)
+        name = keep(p.name, trainer)
         if not name:
             continue
         dest = out / name
@@ -170,7 +176,7 @@ def select(src, out):
             os.symlink(os.readlink(p), dest)
         else:
             shutil.copy2(p, dest)
-            if name in ("llama-server", "rpc-server", "llama-server.exe", "rpc-server.exe") or ".so" in name or name.endswith(".dylib"):
+            if name.removesuffix(".exe") in ("llama-server", "rpc-server", "llama-finetune") or ".so" in name or name.endswith(".dylib"):
                 dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         kept.append(name)
     # Drop symlinks whose target was not kept.
@@ -180,6 +186,8 @@ def select(src, out):
             kept.remove(p.name)
     if not any(k.startswith("llama-server") for k in kept):
         sys.exit(f"no llama-server in {src}")
+    if trainer and not any(k.startswith("llama-finetune") for k in kept):
+        sys.exit(f"no llama-finetune in {src}")
     return kept
 
 
@@ -243,7 +251,7 @@ def cmd_build(a):
         subprocess.run(["git", "clone", "--depth", "1", "--branch", pin["build"], f"https://github.com/{UPSTREAM}", str(src)], check=True)
     rpath = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
     defs = [
-        "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=OFF",
+        "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=" + ("ON" if a.trainer else "OFF"),
         "-DLLAMA_BUILD_SERVER=ON", "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON", "-DGGML_RPC=ON",
         f"-DCMAKE_INSTALL_RPATH={rpath}", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
     ]
@@ -254,10 +262,10 @@ def cmd_build(a):
         defs.append({"vulkan": "-DGGML_VULKAN=ON", "cuda": "-DGGML_CUDA=ON", "metal": "-DGGML_METAL=ON", "rocm": "-DGGML_HIP=ON"}[b])
     build = work / "build"
     subprocess.run(["cmake", "-S", str(src), "-B", str(build), "-G", "Ninja" if shutil.which("ninja") else "Unix Makefiles", *defs], check=True)
-    subprocess.run(["cmake", "--build", str(build), "--config", "Release", "-j", str(a.jobs), "--target", "llama-server", "ggml-rpc-server"], check=True)
+    subprocess.run(["cmake", "--build", str(build), "--config", "Release", "-j", str(a.jobs), "--target", "llama-server", "ggml-rpc-server", *(["llama-finetune"] if a.trainer else [])], check=True)
     if out.exists():
         shutil.rmtree(out)
-    select(build / "bin", out)
+    select(build / "bin", out, a.trainer)
     shutil.copy(src / "LICENSE", out / "LICENSE-llama.cpp")
     write_info(out, pin["build"], a.variant, backends, f"https://github.com/{UPSTREAM}/tree/{pin['build']} (built from source)")
     print(f"{out}: llama.cpp {pin['build']} built from source ({', '.join(backends)}, {dir_size(out) // (1 << 20)} MiB)")
@@ -324,6 +332,7 @@ def main():
     p.add_argument("--variant", default="default")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     p.add_argument("--work", help="source and build directory (default: a temp dir)")
+    p.add_argument("--trainer", action="store_true", help="also build llama-finetune, for scripts/trainer.py")
     p.add_argument("--no-cpu-variants", action="store_true", help="one CPU backend instead of one per CPU generation")
     p.add_argument("--check", action="store_true")
     p = sub.add_parser("pin")

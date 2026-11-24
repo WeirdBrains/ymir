@@ -31,6 +31,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: llama.cpp trainer (scripts/trainer.py, against a fake llama-finetune)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/trainer"
+          "$RUNNER_TEMP/trainer/bin/pip" install -q -r scripts/trainer-requirements.txt
+          "$RUNNER_TEMP/trainer/bin/python" scripts/test_trainer.py
+          YMIR_TEST_TRAINER_PYTHON="$RUNNER_TEMP/trainer/bin/python" cargo test --locked -p ymir-testkit --test p3a_llamacpp
       - name: setup --service --dry-run
         run: |
           cargo build --locked --bin ymird --bin ymirctl --bin ymir-mock-engine
