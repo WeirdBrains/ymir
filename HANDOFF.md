@@ -3,6 +3,17 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: Windows CI green again (branches `fix/p3a-windows-lock`, `fix/bench-windows`)
+
+**What changed**
+- Windows CI had failed on main since at least `6d21e7c`, before the v0.7.0 cut. The reason: `ymirctl bench` scored code answers through a unix-only sandbox (`sh`, `ulimit`, `unshare`), yet `python_available()` said yes on Windows. Now `bench::python_available()` (public) is false off unix, so code questions are left unscored there. The unit and end-to-end bench tests expect what is scored.
+- P3a's stale-lock unit test checked a dead pid, which Windows doesn't (a lock there holds until `ymirctl train release`). That half of the test is unix-only now.
+- [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` / Fixed.
+
+**Checks**: CI on the branch through `workflow_dispatch` ([run 45423042502](https://github.com/WeirdBrains/ymir/actions/runs/45423042502)): Linux, macOS and Windows all passed, with the Windows service, MSI and setup exe steps.
+
+**Not done**: a sandbox for code answers on Windows (a Job Object with limits would be the way).
+
 ## 2026-11-24: training plan P3a, fine-tuning on one node (branch `feat/p3a-trainer`)
 
 **What changed**
