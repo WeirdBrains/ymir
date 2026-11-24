@@ -11,6 +11,7 @@ pub mod mcp_servers;
 pub mod models;
 pub mod pool;
 pub mod train;
+pub mod update_fetch;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -44,6 +45,15 @@ pub enum UpdateCmd {
     },
     /// Verify a bundle directory and stage it for the next start.
     Stage { bundle: PathBuf },
+    /// Download a bundle and stage it. SOURCE is the bundle directory's https:// URL (or a
+    /// directory). With --announcement, a signed announcement file (as relays carry them) is
+    /// checked against the pinned root first, and the source must serve the manifest it names;
+    /// without SOURCE its first https:// source is used.
+    Fetch {
+        source: Option<String>,
+        #[arg(long)]
+        announcement: Option<PathBuf>,
+    },
     /// What is pinned, the good release, a trial under way, and releases marked bad.
     Status,
     /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
@@ -1186,6 +1196,36 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
             let v = u.stage(&bundle, &running, now)?;
             writeln!(out, "staged {} {}; it runs on trial at the next start", v.manifest.update_id, v.manifest.version)?;
+        }
+        UpdateCmd::Fetch { source, announcement } => {
+            let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+            let mut announced = None;
+            let mut source = source;
+            if let Some(file) = &announcement {
+                let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+                let Some(a) = u.check_announcement(&bytes, now)? else {
+                    writeln!(out, "nothing new: that announcement is not newer than the update already taken")?;
+                    return Ok(());
+                };
+                writeln!(out, "announced: {} (seq {}){}", a.update_id, a.seq, if a.security { ", a security update" } else { "" })?;
+                if source.is_none() {
+                    source = a.sources.iter().find(|s| s.starts_with("https://")).cloned();
+                }
+                announced = Some(a.manifest_hash);
+            }
+            let source =
+                source.ok_or_else(|| anyhow::anyhow!("name a source: an https:// URL or a directory (the announcement has no https:// source)"))?;
+            let src = crate::update_fetch::source(&source)?;
+            let f = u.fetch(src.as_ref(), announced.as_ref(), &running, now)?;
+            writeln!(
+                out,
+                "fetched {} files ({} bytes) from {}; staged {} {}; it runs on trial at the next start",
+                f.files,
+                f.bytes,
+                src.describe(),
+                f.update.manifest.update_id,
+                f.update.manifest.version
+            )?;
         }
         UpdateCmd::Status => {
             let s = u.status();
