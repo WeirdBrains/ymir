@@ -64,10 +64,41 @@ fn key(n: u8) -> SigningKey {
     SigningKey::from_seed(&[n; 32])
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn ymirctl_fetches_an_announced_bundle_over_http_and_stages_it() -> Result<()> {
+struct Fx {
+    _tmp: tempfile::TempDir,
+    dir: PathBuf,
+    home: PathBuf,
+    root: Root,
+    root_env: Signed,
+    root_file: PathBuf,
+    rel: SigningKey,
+    manifest: Signed,
+    site: PathBuf,
+    now: Timestamp,
+}
+
+impl Fx {
+    /// A signed announcement of the bundle's manifest, written to a file.
+    fn announce(&self, sources: Vec<String>, signer: &SigningKey) -> Result<(PathBuf, Signed)> {
+        let a = Announcement::for_manifest("weirdbrains", self.root.pin(), &self.manifest, self.now.minus(10), 3600, sources)?;
+        let env = a.sign(&[signer])?;
+        let f = self.dir.join("announcement.env");
+        std::fs::write(&f, env.to_bytes()?)?;
+        Ok((f, env))
+    }
+
+    async fn trust(&self) -> Result<()> {
+        ctl(&self.home, &["update", "trust", "--pin", &self.root.pin().to_string(), "--root", self.root_file.to_str().unwrap()]).await?;
+        Ok(())
+    }
+}
+
+/// An org root (test keys), and a signed bundle `fetch-1` (ymird and an engine file) under
+/// `site/ymir/fetch-1`.
+fn fixture() -> Result<Fx> {
     let tmp = tempfile::tempdir()?;
-    let home = tmp.path().join("home");
+    let dir = tmp.path().to_path_buf();
+    let home = dir.join("home");
     let (r1, r2, rel) = (key(1), key(2), key(10));
     let root = Root {
         version: 1,
@@ -80,11 +111,12 @@ async fn ymirctl_fetches_an_announced_bundle_over_http_and_stages_it() -> Result
         timestamp_threshold: 0,
         expires: None,
     };
-    let root_file = tmp.path().join("root.env");
-    std::fs::write(&root_file, Signed::sign(Domain::Root, &root, &[&r1, &r2]).unwrap().to_bytes().unwrap())?;
+    let root_file = dir.join("root.env");
+    let root_env = Signed::sign(Domain::Root, &root, &[&r1, &r2]).unwrap();
+    std::fs::write(&root_file, root_env.to_bytes().unwrap())?;
     let (platform, arch) = ymir_core::update::this_target().expect("a supported platform");
     let now = Timestamp::now();
-    let site = tmp.path().join("site");
+    let site = dir.join("site");
     let bundle = site.join("ymir/fetch-1");
     let files: [(&str, &[u8]); 2] = [("ymird", b"#!/bin/sh\nexit 0\n"), ("lib/ymir/llama.cpp/engine.toml", b"engine = \"llama.cpp\"\n")];
     for (p, body) in files {
@@ -113,13 +145,14 @@ async fn ymirctl_fetches_an_announced_bundle_over_http_and_stages_it() -> Result
     };
     let manifest = Signed::sign(Domain::Manifest, &m, &[&rel]).unwrap();
     std::fs::write(bundle.join("manifest.env"), manifest.to_bytes().unwrap())?;
-    let announce = |sources: Vec<String>, signer: &SigningKey| -> Result<PathBuf> {
-        let a = Announcement::for_manifest("weirdbrains", root.pin(), &manifest, now.minus(10), 3600, sources)?;
-        let f = tmp.path().join("announcement.env");
-        std::fs::write(&f, a.sign(&[signer])?.to_bytes()?)?;
-        Ok(f)
-    };
-    let (url, log) = serve(site.clone());
+    Ok(Fx { _tmp: tmp, dir, home, root, root_env, root_file, rel, manifest, site, now })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ymirctl_fetches_an_announced_bundle_over_http_and_stages_it() -> Result<()> {
+    let fx = fixture()?;
+    let home = fx.home.clone();
+    let (url, log) = serve(fx.site.clone());
     let src = format!("{url}/ymir/fetch-1");
 
     // Plain http to another machine is refused; nothing is pinned yet, so nothing is taken.
@@ -127,16 +160,16 @@ async fn ymirctl_fetches_an_announced_bundle_over_http_and_stages_it() -> Result
     assert!(e.contains("must be an https:// URL"), "{e}");
     let e = ctl(&home, &["update", "fetch", &src]).await.unwrap_err().to_string();
     assert!(e.contains("no update root"), "{e}");
-    ctl(&home, &["update", "trust", "--pin", &root.pin().to_string(), "--root", root_file.to_str().unwrap()]).await?;
+    fx.trust().await?;
 
     // An announcement signed by someone else is refused before any download.
-    let bad = announce(vec!["https://updates.example/ymir/fetch-1".into()], &key(99))?;
+    let (bad, _) = fx.announce(vec!["https://updates.example/ymir/fetch-1".into()], &key(99))?;
     let e = ctl(&home, &["update", "fetch", "--announcement", bad.to_str().unwrap(), &src]).await.unwrap_err().to_string();
     assert!(e.contains("announcement is refused"), "{e}");
     assert!(log.lock().unwrap().is_empty());
 
     // The announced manifest, fetched from the local mirror.
-    let good = announce(vec!["https://updates.example/ymir/fetch-1".into()], &rel)?;
+    let (good, _) = fx.announce(vec!["https://updates.example/ymir/fetch-1".into()], &fx.rel)?;
     let out = ctl(&home, &["update", "fetch", "--announcement", good.to_str().unwrap(), &src]).await?;
     assert!(out.contains("announced: fetch-1 (seq 1)"), "{out}");
     assert!(out.contains("fetched 2 files (38 bytes) from") && out.contains("staged fetch-1 99.0.0"), "{out}");
@@ -158,5 +191,84 @@ async fn ymirctl_fetches_an_announced_bundle_over_http_and_stages_it() -> Result
     // Heard again, the same announcement is old news.
     let out = ctl(&home, &["update", "fetch", "--announcement", good.to_str().unwrap()]).await?;
     assert!(out.contains("nothing new"), "{out}");
+    Ok(())
+}
+
+struct NoRequests;
+impl weirdnet_net::Handler<(), ()> for NoRequests {
+    fn request(&self, _from: &weirdnet_net::PeerId, _req: ()) {}
+}
+
+/// A carrier on 127.0.0.1 speaking `/weirdnet/updates/1` with weirdnet-update's own `Carrier`
+/// (what a relay with `[updates]` runs): it trusts `root` and holds `held`. Returns its address.
+async fn carrier(root: &Root, root_env: &Signed, held: &[Signed], now: Timestamp) -> Result<(Arc<weirdnet_net::Node<(), ()>>, String)> {
+    use futures::{AsyncReadExt, AsyncWriteExt};
+    use weirdnet_net::{DiscoveryMode, Keypair, Limits, Node, NodeConfig, WEIRDNET};
+    use weirdnet_update::announce::Carrier;
+    use weirdnet_update::announce::wire::{self, FromCarrier, PROTOCOL, ToCarrier};
+
+    let mut c = Carrier::new(16);
+    c.trust(root.pin(), std::slice::from_ref(root_env), now)?;
+    for e in held {
+        c.offer(e, now)?;
+    }
+    let c = Arc::new(Mutex::new(c));
+    let cfg = NodeConfig { listen: vec!["/ip4/127.0.0.1/tcp/0".parse()?], discovery: DiscoveryMode::Disabled, ..Default::default() };
+    let node =
+        Arc::new(Node::<(), ()>::start(&WEIRDNET, Keypair::generate_ed25519(), cfg, Arc::new(NoRequests)).map_err(|e| anyhow::anyhow!("{e}"))?);
+    let mut incoming = node.accept_streams(PROTOCOL, Limits::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    tokio::spawn(async move {
+        while let Some(s) = incoming.next().await {
+            let c = c.clone();
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                if let Ok(Some(ToCarrier::Subscribe { topics, .. })) = wire::read::<_, ToCarrier>(&mut r).await {
+                    let held = c.lock().unwrap().matching(&topics, now);
+                    let _ = wire::write(&mut w, &FromCarrier::Subscribed { keepalive_s: 10 }).await;
+                    for env in held {
+                        let _ = wire::write(&mut w, &FromCarrier::Envelope(env)).await;
+                    }
+                    let mut b = [0u8; 64];
+                    while matches!(r.read(&mut b).await, Ok(n) if n > 0) {}
+                    let _ = w.close().await;
+                }
+            });
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(a) = node.status().listening.into_iter().find(|a| a.starts_with("/ip4/127.0.0.1/tcp/")) {
+            let addr = if a.contains("/p2p/") { a } else { format!("{a}/p2p/{}", node.peer_id()) };
+            return Ok((node, addr));
+        }
+        anyhow::ensure!(std::time::Instant::now() < deadline, "the carrier never listened");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ymirctl_watch_hears_an_announcement_from_a_carrier_and_fetches_it() -> Result<()> {
+    let fx = fixture()?;
+    fx.trust().await?;
+    let (url, log) = serve(fx.site.clone());
+    // An announcement names https:// sources only; this one points at a port on this machine
+    // where nothing answers, so `--fetch` fails without leaving the box.
+    let (_, env) = fx.announce(vec!["https://127.0.0.1:9/ymir/fetch-1".into()], &fx.rel)?;
+    let (_carrier, addr) = carrier(&fx.root, &fx.root_env, &[env], fx.now).await?;
+
+    let out = ctl(&fx.home, &["update", "watch", "--relay", &addr, "--once", "--wait-secs", "20"]).await?;
+    assert!(out.contains("subscribed to com.weirdbrains.ymir on stable"), "{out}");
+    assert!(out.contains("announced: fetch-1 (seq 1)") && out.contains("not fetched (run with --fetch"), "{out}");
+    assert!(log.lock().unwrap().is_empty(), "nothing was downloaded");
+
+    // With --fetch, the https:// source can't be reached here, and that is reported, not staged.
+    let out = ctl(&fx.home, &["update", "watch", "--relay", &addr, "--once", "--fetch", "--wait-secs", "20"]).await?;
+    assert!(out.contains("fetching https://127.0.0.1:9/ymir/fetch-1 failed"), "{out}");
+    let st = ctl(&fx.home, &["update", "status"]).await?;
+    assert!(st.contains("Idle"), "{st}");
+    // Fetched by hand from the mirror, after which the carrier's announcement is old news.
+    ctl(&fx.home, &["update", "fetch", &format!("{url}/ymir/fetch-1")]).await?;
+    let out = ctl(&fx.home, &["update", "watch", "--relay", &addr, "--once", "--wait-secs", "20"]).await?;
+    assert!(out.contains("not newer than the update already taken"), "{out}");
     Ok(())
 }

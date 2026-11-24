@@ -287,6 +287,11 @@ impl Updater {
         self.dir.join("releases").join(id)
     }
 
+    /// The pinned org root's fingerprint, if one is pinned.
+    pub fn pin(&self) -> Option<RootPin> {
+        self.client.as_ref().map(Client::pin)
+    }
+
     pub fn status(&self) -> Status {
         Status {
             trusted: self.client.is_some(),

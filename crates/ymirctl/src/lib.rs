@@ -54,6 +54,21 @@ pub enum UpdateCmd {
         #[arg(long)]
         announcement: Option<PathBuf>,
     },
+    /// Hear update announcements from a Weirdnet relay that carries them (`/weirdnet/updates/1`),
+    /// check each against the pinned root, and with --fetch download and stage a new one from its
+    /// https:// source. Runs until stopped, or with --once until the first announcement.
+    Watch {
+        /// The relay's address with its peer id (`/dns4/relay.example/tcp/4001/p2p/ID`).
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        fetch: bool,
+        #[arg(long)]
+        once: bool,
+        /// With --once: how long to wait for an announcement.
+        #[arg(long, default_value_t = 30)]
+        wait_secs: u64,
+    },
     /// What is pinned, the good release, a trial under way, and releases marked bad.
     Status,
     /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
@@ -439,6 +454,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd).await,
         Cmd::Load { model, node } => admin(&paths, out, ControlRequest::Load { model, node }).await,
         Cmd::Service { cmd } => service_cmd(cli_home.as_deref(), paths, out, cmd).await,
+        Cmd::Update { cmd: UpdateCmd::Watch { relay, fetch, once, wait_secs } } => {
+            let o = update_fetch::watch::Options { relay, fetch, once, wait: std::time::Duration::from_secs(wait_secs) };
+            update_fetch::watch::run(&paths, out, o).await
+        }
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Nodes => nodes(&paths, out).await,
@@ -1227,6 +1246,7 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
                 f.update.manifest.version
             )?;
         }
+        UpdateCmd::Watch { .. } => bail!("`update watch` runs in the async dispatcher"),
         UpdateCmd::Status => {
             let s = u.status();
             writeln!(out, "root: {}", if s.trusted { "pinned" } else { "not pinned" })?;

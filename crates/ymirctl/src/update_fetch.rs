@@ -74,3 +74,106 @@ pub fn source(s: &str) -> Result<Box<dyn Source>> {
     }
     Ok(Box::new(DirSource(dir)))
 }
+
+/// `ymirctl update watch`: hears Ymir's update announcements from a carrier (a Weirdnet relay
+/// with `[updates]`, protocol `/weirdnet/updates/1`), checks each against the pinned root, and
+/// with `fetch` downloads and stages a new one from its first https:// source.
+pub mod watch {
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use anyhow::{Context, Result, anyhow, bail};
+    use weirdnet_net::{DiscoveryMode, Keypair, Limits, Multiaddr, Node, NodeConfig, PeerId, WEIRDNET};
+    use weirdnet_update::announce::Topic;
+    use weirdnet_update::announce::wire::{PROTOCOL, Subscription};
+    use weirdnet_update::envelope::Domain;
+    use ymir_core::Paths;
+    use ymir_core::update::{APP, CHANNEL, Updater};
+
+    pub struct Options {
+        pub relay: String,
+        pub fetch: bool,
+        /// Stop after the first announcement (or after `wait` with none).
+        pub once: bool,
+        pub wait: Duration,
+    }
+
+    struct NoRequests;
+    impl weirdnet_net::Handler<(), ()> for NoRequests {
+        fn request(&self, _from: &PeerId, _req: ()) {}
+    }
+
+    fn peer_of(a: &Multiaddr) -> Option<PeerId> {
+        a.to_string().rsplit_once("/p2p/").and_then(|(_, id)| id.split('/').next()?.parse().ok())
+    }
+
+    pub async fn run(paths: &Paths, out: &mut dyn Write, o: Options) -> Result<()> {
+        let pin = Updater::open(paths, weirdnet_update::Timestamp::now())?
+            .pin()
+            .ok_or_else(|| anyhow!("no update root is pinned (`ymirctl update trust`)"))?;
+        let addr: Multiaddr = o.relay.parse().with_context(|| format!("--relay {}", o.relay))?;
+        let peer = peer_of(&addr).ok_or_else(|| anyhow!("--relay needs the relay's peer id (…/p2p/ID)"))?;
+        // A dial-only node with a fresh key: no listener, no discovery, nothing that names this machine.
+        let cfg = NodeConfig { discovery: DiscoveryMode::Disabled, ..Default::default() };
+        let node = Arc::new(Node::<(), ()>::start(&WEIRDNET, Keypair::generate_ed25519(), cfg, Arc::new(NoRequests)).map_err(|e| anyhow!("{e}"))?);
+        let stream =
+            node.open_stream_async(peer, std::slice::from_ref(&addr), PROTOCOL, Limits::default()).await.map_err(|e| anyhow!("{}: {e}", o.relay))?;
+        let mut sub = Subscription::start(stream, vec![Topic { pin, app: APP.into(), channel: CHANNEL.into() }], false)
+            .await
+            .map_err(|e| anyhow!("{}: {e}", o.relay))?;
+        writeln!(out, "subscribed to {APP} on {CHANNEL} at {}", o.relay)?;
+        out.flush()?;
+        let idle = if o.once { o.wait } else { Duration::from_secs(u64::from(sub.keepalive_s.max(10)) * 3) };
+        loop {
+            let env = match tokio::time::timeout(idle, sub.next()).await {
+                Err(_) if o.once => {
+                    writeln!(out, "no announcement within {} s", o.wait.as_secs())?;
+                    return Ok(());
+                }
+                Err(_) => bail!("{} went quiet (no keepalive)", o.relay),
+                Ok(Ok(Some(env))) => env,
+                Ok(Ok(None)) => bail!("{} closed the subscription", o.relay),
+                Ok(Err(e)) => bail!("{}: {e}", o.relay),
+            };
+            if env.domain != Domain::Announcement {
+                continue; // root rotations arrive with the bundle too
+            }
+            let now = weirdnet_update::Timestamp::now();
+            let mut u = Updater::open(paths, now)?;
+            let bytes = env.to_bytes().map_err(|e| anyhow!("{e}"))?;
+            match u.check_announcement(&bytes, now) {
+                Err(e) => writeln!(out, "ignored an announcement: {e:#}")?,
+                Ok(None) => writeln!(out, "heard an announcement that is not newer than the update already taken")?,
+                Ok(Some(a)) => {
+                    writeln!(out, "announced: {} (seq {}){}", a.update_id, a.seq, if a.security { ", a security update" } else { "" })?;
+                    let source = a.sources.iter().find(|s| s.starts_with("https://")).cloned();
+                    match (o.fetch, source) {
+                        (false, _) => writeln!(out, "not fetched (run with --fetch, or `ymirctl update fetch` with the announcement)")?,
+                        (true, None) => writeln!(out, "not fetched: the announcement has no https:// source")?,
+                        (true, Some(src)) => {
+                            let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+                            let hash = a.manifest_hash;
+                            let r = tokio::task::block_in_place(|| -> Result<_> {
+                                let s = super::source(&src)?;
+                                u.fetch(s.as_ref(), Some(&hash), &running, now)
+                            });
+                            match r {
+                                Ok(f) => writeln!(
+                                    out,
+                                    "fetched {} files ({} bytes) from {src}; staged {} {}; it runs on trial at the next start",
+                                    f.files, f.bytes, f.update.manifest.update_id, f.update.manifest.version
+                                )?,
+                                Err(e) => writeln!(out, "fetching {src} failed: {e:#}")?,
+                            }
+                        }
+                    }
+                }
+            }
+            out.flush()?;
+            if o.once {
+                return Ok(());
+            }
+        }
+    }
+}

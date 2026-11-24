@@ -34,7 +34,7 @@ weirdnet-semcache = "0.2.1"
 weirdnet-sync = "0.7.1"
 weirdnet-alerts = { version = "0.2.2", features = ["backends"] }
 weirdnet-rules = "=0.1.1"
-weirdnet-update = "0.2.0"
+weirdnet-update = { version = "0.2.2", features = ["wire"] }
 # MCP server (JSON-RPC, tool tables, stdio and HTTP transports, resources); no weirdnet-agent.
 weirdnet-mcp = { version = "0.6", features = ["stdio-server", "axum"] }
 
