@@ -8,6 +8,9 @@
 //! - `{conversation}/m/{time}-{id}`: one message each, append-only. An assistant message is written
 //!   when its answer completes, under the job's id, so a retry or a resume on another node
 //!   writes the same record and the conversation never holds an answer twice.
+//! - `{conversation}/train`: the user's training consent ([`Train`], training plan P2), a
+//!   last-writer-wins register of its own, so an older client that rewrites `meta` never clears
+//!   it. Absent means "not for training"; it is never inferred.
 //!
 //! An inference node assembles the prompt for a `ContextRef` request from this store. This module
 //! is the generic part that belongs in `weirdnet-agent`'s `context` module (Weirdnet lead); it
@@ -47,6 +50,29 @@ pub struct Stored {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub at_ms: i64,
+}
+
+/// The training consent record (`{conversation}/train`). Only a conversation whose latest
+/// record says `on` is exported for training (`ymirctl context export --training`); turning it
+/// off withdraws consent for later exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Train {
+    #[serde(default)]
+    pub on: bool,
+    /// When the user set it.
+    #[serde(default)]
+    pub at_ms: i64,
+}
+
+/// A conversation with its raw message values (other apps' extra fields kept), for the
+/// training export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawConversation {
+    pub id: String,
+    pub meta: Meta,
+    pub train: Train,
+    /// `(message id, value)` in the order the conversation reads.
+    pub messages: Vec<(String, serde_json::Value)>,
 }
 
 /// A conversation as read back.
@@ -146,6 +172,66 @@ impl ContextStore {
         let mut meta = self.load(conversation).map(|c| c.meta).unwrap_or_default();
         meta.deleted = true;
         self.set_meta(conversation, meta)
+    }
+
+    /// Sets or withdraws a conversation's training consent. The conversation has to exist here.
+    pub fn set_train(&self, conversation: &str, on: bool) -> Result<Train> {
+        check_id(conversation)?;
+        if self.load(conversation).is_none() {
+            anyhow::bail!("no conversation `{conversation}` here");
+        }
+        let t = Train { on, at_ms: now_ms() };
+        self.m.write_record(CONTEXT_TYPE, &format!("{conversation}/train"), &serde_json::to_vec(&t)?)?;
+        Ok(t)
+    }
+
+    /// A conversation's training consent (off when never set).
+    pub fn train(&self, conversation: &str) -> Train {
+        let want = format!("{conversation}/train");
+        self.m.records(CONTEXT_TYPE).into_iter().find(|(id, _)| *id == want).and_then(|(_, v)| serde_json::from_slice(&v).ok()).unwrap_or_default()
+    }
+
+    /// Every live conversation whose consent is on, oldest id first, with raw message values.
+    pub fn for_training(&self) -> Vec<RawConversation> {
+        let mut all: BTreeMap<String, RawConversation> = BTreeMap::new();
+        let mut at: BTreeMap<(String, String), i64> = BTreeMap::new();
+        for (id, value) in self.m.records(CONTEXT_TYPE) {
+            let mut parts = id.splitn(3, '/');
+            let (Some(conv), Some(kind)) = (parts.next(), parts.next()) else { continue };
+            let c = all.entry(conv.to_string()).or_insert_with(|| RawConversation {
+                id: conv.to_string(),
+                meta: Meta::default(),
+                train: Train::default(),
+                messages: Vec::new(),
+            });
+            match (kind, parts.next()) {
+                ("meta", None) => {
+                    if let Ok(m) = serde_json::from_slice(&value) {
+                        c.meta = m;
+                    }
+                }
+                ("train", None) => {
+                    if let Ok(t) = serde_json::from_slice(&value) {
+                        c.train = t;
+                    }
+                }
+                ("m", Some(mid)) => {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&value) {
+                        at.insert((conv.to_string(), mid.to_string()), v.get("at_ms").and_then(|a| a.as_i64()).unwrap_or(0));
+                        c.messages.push((mid.to_string(), v));
+                    }
+                }
+                _ => {}
+            }
+        }
+        all.into_values()
+            .filter(|c| c.train.on && !c.meta.deleted)
+            .map(|mut c| {
+                let key = |mid: &String| (at.get(&(c.id.clone(), mid.clone())).copied().unwrap_or(0), mid.clone());
+                c.messages.sort_by_key(|(mid, _)| key(mid));
+                c
+            })
+            .collect()
     }
 
     /// Every live conversation, newest first.
@@ -255,6 +341,30 @@ mod tests {
         assert_eq!(s.expire(5), 1);
         assert!(s.list().is_empty());
         assert!(s.append("a/b", "user", "z", None, None).is_err());
+    }
+
+    #[test]
+    fn training_consent_is_its_own_record_and_off_by_default() {
+        let (_d, s) = store();
+        s.set_meta("c", Meta { title: "T".into(), ..Default::default() }).unwrap();
+        s.append("c", "user", "q", None, None).unwrap();
+        s.append("other", "user", "q2", None, None).unwrap();
+        assert!(!s.train("c").on);
+        assert!(s.for_training().is_empty());
+        assert!(s.set_train("missing", true).is_err());
+        s.set_train("c", true).unwrap();
+        // A later meta write (an older client renaming the chat) does not clear it.
+        s.set_meta("c", Meta { title: "Renamed".into(), ..Default::default() }).unwrap();
+        let t = s.for_training();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].id, "c");
+        assert_eq!(t[0].messages.len(), 1);
+        // Withdrawn, then deleted: neither is exported.
+        s.set_train("c", false).unwrap();
+        assert!(s.for_training().is_empty());
+        s.set_train("c", true).unwrap();
+        s.delete("c").unwrap();
+        assert!(s.for_training().is_empty());
     }
 
     #[test]

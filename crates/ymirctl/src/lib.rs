@@ -384,6 +384,31 @@ pub enum ContextCmd {
     },
     /// Delete a conversation on every node (a tombstone that syncs).
     Delete { conversation: String },
+    /// Mark a conversation for training, or with `--off` withdraw it (training plan P2). Off
+    /// unless you turn it on; it syncs to your other devices.
+    Train {
+        conversation: String,
+        #[arg(long)]
+        off: bool,
+    },
+    /// Write the conversations marked for training to OUT as chat-format JSONL, with system
+    /// prompts, tool calls, attachments and reasoning stripped, plus OUT.manifest.json. Both
+    /// are owner-only and stay on this device; only counts are printed.
+    Export {
+        /// Required: the export is for training data.
+        #[arg(long, required = true)]
+        training: bool,
+        /// Keep system prompts.
+        #[arg(long)]
+        keep_system: bool,
+        /// Replace matches of this regular expression with `[redacted]` (repeatable).
+        #[arg(long = "redact", value_name = "REGEX")]
+        redact: Vec<String>,
+        out: std::path::PathBuf,
+    },
+    /// List the conversations an earlier export's manifest holds that are no longer for
+    /// training here (withdrawn or deleted), so the dataset can be rebuilt without them.
+    Withdrawn { manifest: std::path::PathBuf },
 }
 
 pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Result<()> {
@@ -987,8 +1012,53 @@ async fn models(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+async fn for_training(paths: &Paths) -> Result<Vec<ymir_core::context::RawConversation>> {
+    let r = control::request(&paths.socket(), &ControlRequest::ContextForTraining).await?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    Ok(r.training)
+}
+
 async fn context_cmd(paths: &Paths, out: &mut dyn Write, cmd: ContextCmd) -> Result<()> {
+    use ymir_core::convexport;
     let req = match cmd {
+        ContextCmd::Export { training: _, keep_system, redact, out: path } => {
+            let all = for_training(paths).await?;
+            let m = convexport::export(&all, &convexport::Rules { keep_system, redact }, &path)?;
+            writeln!(
+                out,
+                "{} of {} conversation(s) marked for training written to {} ({} turns, {} redaction(s)); manifest {}",
+                m.conversations_exported,
+                m.conversations_flagged,
+                path.display(),
+                m.turns_exported,
+                m.redactions,
+                convexport::manifest_path(&path).display()
+            )?;
+            let d = &m.dropped;
+            writeln!(
+                out,
+                "stripped: {} system, {} tool, {} attachment(s), {} reasoning; cut at {} incomplete and {} stand-in answer(s), {} message(s) after a cut",
+                d.system, d.tool, d.attachments, d.reasoning, d.incomplete, d.standin, d.after_cut
+            )?;
+            return Ok(());
+        }
+        ContextCmd::Withdrawn { manifest } => {
+            let earlier: convexport::Manifest =
+                serde_json::from_slice(&std::fs::read(&manifest).with_context(|| format!("reading {}", manifest.display()))?)
+                    .with_context(|| format!("{} is not a conversation export manifest", manifest.display()))?;
+            if earlier.format != convexport::FORMAT {
+                bail!("{} is a `{}` manifest, not `{}`", manifest.display(), earlier.format, convexport::FORMAT);
+            }
+            let gone = convexport::withdrawn(&earlier, &for_training(paths).await?);
+            for id in &gone {
+                writeln!(out, "{id}")?;
+            }
+            writeln!(out, "# {} of {} conversation(s) in that export are no longer for training", gone.len(), earlier.conversations.len())?;
+            return Ok(());
+        }
+        ContextCmd::Train { conversation, off } => ControlRequest::ContextTrain { conversation, on: !off },
         ContextCmd::Show { conversation } => ControlRequest::ContextShow { conversation },
         ContextCmd::Add { conversation, text, role } => ControlRequest::ContextAdd { conversation, role, text },
         ContextCmd::Ask { conversation, text, model } => ControlRequest::Chat { conversation, text, model },
@@ -1008,7 +1078,8 @@ async fn context_cmd(paths: &Paths, out: &mut dyn Write, cmd: ContextCmd) -> Res
         }
     } else if !r.conversations.is_empty() {
         for c in r.conversations {
-            writeln!(out, "{}  {}  ({} messages)", c.id, if c.title.is_empty() { "-" } else { &c.title }, c.messages.len())?;
+            let train = if c.training { "  [training]" } else { "" };
+            writeln!(out, "{}  {}  ({} messages){train}", c.id, if c.title.is_empty() { "-" } else { &c.title }, c.messages.len())?;
             for (role, text) in c.messages {
                 writeln!(out, "  {role}: {text}")?;
             }

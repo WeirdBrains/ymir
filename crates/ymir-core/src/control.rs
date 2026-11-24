@@ -58,6 +58,14 @@ pub enum ControlRequest {
     ContextDelete {
         conversation: String,
     },
+    /// Give or withdraw a conversation's training consent (training plan P2). It syncs.
+    ContextTrain {
+        conversation: String,
+        on: bool,
+    },
+    /// The conversations whose training consent is on, with their raw messages, for
+    /// `ymirctl context export --training`, which strips and writes them. Local transport only.
+    ContextForTraining,
     /// Add `text` to `conversation` as the user and ask the pool to answer it from the
     /// conversation (a `context_ref`): the inference node that answers writes the answer back.
     Chat {
@@ -220,6 +228,9 @@ pub struct ControlResponse {
     pub chat: Option<ChatResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversations: Vec<ConversationView>,
+    /// The answer to [`ControlRequest::ContextForTraining`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub training: Vec<crate::context::RawConversation>,
     /// The outcomes of a [`ControlRequest::Batch`], in prompt order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub batch: Vec<crate::batch::BatchItem>,
@@ -250,6 +261,9 @@ pub struct ConversationView {
     pub id: String,
     pub title: String,
     pub messages: Vec<(String, String)>,
+    /// The user's training consent is on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub training: bool,
 }
 
 impl ControlResponse {
@@ -260,6 +274,7 @@ impl ControlResponse {
             status: None,
             chat: None,
             conversations: Vec::new(),
+            training: Vec::new(),
             batch: Vec::new(),
             groups: Vec::new(),
             group_losses: Vec::new(),
@@ -272,6 +287,7 @@ impl ControlResponse {
             status: None,
             chat: None,
             conversations: Vec::new(),
+            training: Vec::new(),
             batch: Vec::new(),
             groups: Vec::new(),
             group_losses: Vec::new(),
@@ -398,6 +414,7 @@ impl ControlHandler {
                     message: None,
                     chat: None,
                     conversations: Vec::new(),
+                    training: Vec::new(),
                     batch: Vec::new(),
                     groups: Vec::new(),
                     group_losses: Vec::new(),
@@ -476,6 +493,7 @@ impl ControlHandler {
                     .into_iter()
                     .map(|c| ConversationView {
                         title: c.meta.title.clone(),
+                        training: store.train(&c.id).on,
                         messages: c.messages.into_iter().map(|m| (m.role, m.text)).collect(),
                         id: c.id,
                     })
@@ -488,6 +506,21 @@ impl ControlHandler {
                     Ok(()) => ControlResponse::ok(format!("{conversation} is deleted")),
                     Err(e) => ControlResponse::err(format!("{e:#}")),
                 }
+            }
+            ControlRequest::ContextTrain { conversation, on } => {
+                let Some(store) = &self.context else { return no_context() };
+                match store.set_train(&conversation, on) {
+                    Ok(_) if on => ControlResponse::ok(format!("{conversation} is marked for training")),
+                    Ok(_) => ControlResponse::ok(format!("{conversation} is no longer for training")),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::ContextForTraining => {
+                let Some(store) = &self.context else { return no_context() };
+                let all = store.for_training();
+                let mut r = ControlResponse::ok(format!("{} conversation(s) marked for training", all.len()));
+                r.training = all;
+                r
             }
             ControlRequest::Chat { conversation, text, model } => {
                 let (Some(store), Some(pool)) = (&self.context, &self.pool) else {

@@ -1211,6 +1211,26 @@ one (none reporting one is plain `get`/`put`); when replicas differ the cache is
 aren't known in advance. Answers carry the revision in `Meta::revision`. This is what keeps a fine-tuned model under
 the same id (P4) from replaying answers of its old weights.
 
+### Training data from conversations, with consent (training plan P2)
+
+Built 2026-11-24, Ymir side (see [docs/design/training.md](design/training.md)). Consent is its own record in
+`ymir.context`: `{conversation}/train`, a last-writer-wins register `{"on": bool, "at_ms": ms}`
+(`ymir_core::context::Train`), not a field in `meta`, so an older client that rewrites `meta` never clears it.
+Absent means off; it is never inferred. `ymirctl context train ID [--off]` sets it (the conversation must exist here;
+it syncs like any context record) and `context show` marks consented ones `[training]`. Bragi writes the same record.
+
+`ymirctl context export --training OUT.jsonl` asks the local ymird for the consented, live conversations with their raw
+message values (`ControlRequest::ContextForTraining`, local transport) and writes them with `ymir_core::convexport`:
+one chat-format row per conversation (`{"id", "messages": [{"role", "content"}], "models"}`). Strip rules: system
+prompts dropped unless `--keep-system`; tool calls and results, attachments and reasoning dropped (only message text
+is kept); the conversation is cut at the first answer that is not complete (stopped, failed, streaming) or came from
+a stand-in, and trailing user turns go, so a row ends on an answer; `--redact REGEX` (repeatable) replaces matches with
+`[redacted]`. The output and `OUT.manifest.json` (`ymir-conversations/1`: conversation ids with consent and update
+times, kept turns, what was dropped by kind, redaction count, the number and SHA-256 of the patterns but never the
+patterns) are written owner-only (0600) through a temporary file, are never synced, and the command prints counts
+only. `ymirctl context withdrawn MANIFEST` lists the conversations in an earlier export that are no longer consented
+or were deleted, so a dataset can be rebuilt without them.
+
 ### Shared semantic cache
 
 `weirdnet-semcache` (new) generalizes the RedisVL `rvl-cache`:
@@ -2150,7 +2170,7 @@ nodes and sync among them. On published crates only: `weirdnet-agent` 0.4.2, `we
   (sealed values) and reloaded, so sequence numbers carry on after a restart.
 - **`context_ref` requests.** The inference node assembles the prompt (system prompt, messages through
   `head`) from its store. A request that names a conversation pulls from the caller first, so the newest turn
-  is there before the periodic pass; the cache is never used for these. `ymirctl context show|add|ask|delete`
+  is there before the periodic pass; the cache is never used for these. `ymirctl context show|add|ask|delete|train|export|withdrawn`
   drives it; `ask` adds a user turn on the app node and has the pool answer it.
 - **Sync.** Inference and app nodes pull `ymir.context` on every sync pass (`[network] sync_secs`, default 30);
   a model-only node doesn't carry conversations. A lone device starts its own key chain; with several,

@@ -6,8 +6,8 @@
 
 [project]
 name = "Ymir"
-updated = "2026-11-23"
-intro = "Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1 and P4a are built, and P2 and P3 have not started."
+updated = "2026-11-24"
+intro = "Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built, and P3 has not started."
 design = "https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md"
 unpublished = ["weirdnet-push"]   # planned crates with no crates.io page yet
 
@@ -99,14 +99,14 @@ crates = ["weirdnet-agent"]
 id = "P4a"
 title = "LoRA adapters on a loaded base"
 status = "done"
-summary = "Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come next; P2 and P3 have not started."
+summary = "Built: LoRA adapters served on a loaded base, on llama.cpp and vLLM, each advertised in the catalog as its own model with its base. `ymirctl models adapter` adds, lists, serves and rescales them, `models pull --adapter-for` fetches them, a vLLM base can keep LoRA slots free to take adapters without a restart, and an adapter trained on another revision of its base is not served. Versioned rollout and canaries (P4b) come later."
 crates = ["weirdnet-backends", "weirdnet-agent", "weirdnet-openai", "weirdnet-alerts"]
 
 [[milestone]]
 id = "P2"
 title = "Training data from conversations"
-status = "planned"
-summary = "Export only the conversations the user has marked for training, with chosen parts stripped, as a dataset that never leaves their devices. Not started."
+status = "done"
+summary = "Built: a per-conversation training consent that is off unless you turn it on and syncs between your devices, `ymirctl context train` to set or withdraw it, `context export --training` to write only the consented conversations as chat-format JSONL with system prompts, tools, attachments and reasoning stripped and patterns redacted, owner-only and never synced, and `context withdrawn` to list what an earlier export should drop."
 crates = ["weirdnet-agent", "weirdnet-sync"]
 
 [[milestone]]

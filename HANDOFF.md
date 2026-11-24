@@ -3,6 +3,22 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: training plan P2, consented conversation export (branch `feat/p2-training-export`)
+
+**What changed**
+- `ymir_core::context`: `{conversation}/train` record (`Train { on, at_ms }`), its own LWW register so a `meta` rewrite never clears it; `set_train` (conversation must exist), `train`, `for_training` (consented, live, raw message values with other apps' fields).
+- `ymir_core::convexport` (new): strip rules (system prompts unless `--keep-system`; tools, attachments, reasoning; cut at incomplete or stand-in answers; trailing user turns; `--redact REGEX`), chat-format rows, `ymir-conversations/1` manifest (ids, consent/update times, drop counts, pattern count and hash, never patterns or content), owner-only atomic writes, `withdrawn`.
+- Control: `ContextTrain`, `ContextForTraining` (local socket); `ConversationView::training`.
+- ymirctl: `context train ID [--off]`, `context export --training OUT [--keep-system] [--redact RE]...`, `context withdrawn MANIFEST`; `context show` marks `[training]`.
+- New dependency: `regex` 1.
+- Docs: DESIGN.md (P2 section), training.md, roadmap.toml (P2 done; ROADMAP.md and the site regenerated), CHANGELOG.
+
+**Checks run**: fmt; clippy `--workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked --no-fail-fast`: 270 passed, 0 failed, 7 ignored; `gen_roadmap.py --check`; link check. New tests: `context::training_consent_is_its_own_record_and_off_by_default`, five in `convexport`, and end to end `p2::only_marked_conversations_are_exported_and_withdrawal_is_reported` (two daemons over Weirdnet on loopback: consent set on the app node syncs, export on the inference node, withdrawal reported).
+
+**Not tested**: on real nodes with real Bragi history (only Ymir-written and synthetic Bragi-shaped records); training on an export (P3).
+
+**What's left / next**: Bragi's per-conversation toggle writing the same record (Bragi side). Next in the plan: P3a (reserve a node and run the external trainer), then P4b.
+
 ## 2026-11-23: test free-port race (branch `fix/test-port-race`)
 
 **What changed**
