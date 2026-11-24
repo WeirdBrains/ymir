@@ -94,8 +94,8 @@ biased toward their own family; report judge and deterministic scores separately
 interim context module, the same record Bragi writes, since `weirdnet-agent` has no `context` module yet), `ymirctl
 context train ID [--off]`, `context export --training OUT.jsonl [--keep-system] [--redact REGEX]...` with the strip
 rules below, an owner-only output and a `ymir-conversations/1` manifest, and `context withdrawn MANIFEST`. See
-[DESIGN.md](../DESIGN.md#training-data-from-conversations-with-consent-training-plan-p2). The Bragi toggle is tracked
-with Bragi.
+[DESIGN.md](../DESIGN.md#training-data-from-conversations-with-consent-training-plan-p2). Bragi's per-chat toggle
+writes the same record in every shell (Bragi main, 2026-11-24).
 
 **Scope.** A trainer running on one of the user's linked devices exports only the conversations the user has
 marked for training, with chosen parts stripped, as a dataset. Model nodes never hold conversations, and

@@ -1217,7 +1217,9 @@ Built 2026-11-24, Ymir side (see [docs/design/training.md](design/training.md)).
 `ymir.context`: `{conversation}/train`, a last-writer-wins register `{"on": bool, "at_ms": ms}`
 (`ymir_core::context::Train`), not a field in `meta`, so an older client that rewrites `meta` never clears it.
 Absent means off; it is never inferred. `ymirctl context train ID [--off]` sets it (the conversation must exist here;
-it syncs like any context record) and `context show` marks consented ones `[training]`. Bragi writes the same record.
+it syncs like any context record) and `context show` marks consented ones `[training]`. Bragi writes the same record
+(a cap button in the Flutter app bar, a Training button in the GPUI shell, `/train` in the terminal app). Messages
+deleted in Bragi (`{"deleted": true}` over the record) are skipped.
 
 `ymirctl context export --training OUT.jsonl` asks the local ymird for the consented, live conversations with their raw
 message values (`ControlRequest::ContextForTraining`, local transport) and writes them with `ymir_core::convexport`:
@@ -1791,7 +1793,8 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
 - **B2 Pool client** (built 2026-11-19; see [B2 status](#b2-status-built-2026-11-19)): multi-node catalog, routing via
   the `weirdnet-agent` pool, retries, automatic mid-answer failover, stand-in and cache flags, in both shells.
 - **B3 Platforms** (in progress 2026-11-19; see [B3 status](#b3-status-in-progress-2026-11-19)): iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
-- **B4 Sync and optional extras:** history on the shared context store (after M5); the optional on-device model
+- **B4 Sync and optional extras:** history on the shared context store (after M5), and a per-chat training consent
+  (the `{conversation}/train` record of training plan P2, built in every shell 2026-11-24); the optional on-device model
   and push wake-ups, on both shells.
 - **B5 Breadth** (in progress; see [B5 status](#b5-status-in-progress-2026-11-20)): attachments (text, image and audio) and agent mode are built on both shells. The BSD desktop window does not build yet, so on BSD it is the terminal app only.
 - **B6 Your own endpoints** (built 2026-11-21; see [B6 status](#b6-status-built-2026-11-21)): any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback. Built in the core, the Flutter app and the GPUI desktop shell.

@@ -3,6 +3,14 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: P2 export skips deleted messages; Bragi's toggle is in (branch `fix/p2-tombstones`)
+
+**What changed**: `convexport` skips a message whose value is Bragi's delete tombstone (`{"deleted": true}`, no role) instead of counting it as a dropped tool turn. Docs: [DESIGN.md](docs/DESIGN.md) (P2 and B4), [training.md](docs/design/training.md), [CHANGELOG.md](CHANGELOG.md): Bragi's per-chat toggle (Bragi main `72e7729`) writes the same `{conversation}/train` record.
+
+**Checks run**: fmt; clippy `--workspace --all-targets --locked -D warnings`; `cargo test -p ymir-core` and the `p2` end-to-end test; new `convexport::tests::a_deleted_message_is_skipped_not_counted`.
+
+**What's left / next**: P3a (reserve a node, run the external trainer) needs a `weirdnet-backends` node reservation.
+
 ## 2026-11-24: training plan P2, consented conversation export (branch `feat/p2-training-export`)
 
 **What changed**
