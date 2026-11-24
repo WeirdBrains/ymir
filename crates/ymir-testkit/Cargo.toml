@@ -46,6 +46,7 @@ weirdnet-openai.workspace = true
 weirdnet-sync.workspace = true
 weirdnet-update.workspace = true
 semver.workspace = true
+toml.workspace = true
 sha2.workspace = true
 weirdnet-alerts.workspace = true
 ymirctl.workspace = true
