@@ -38,6 +38,7 @@ pub mod tasks;
 pub mod token;
 pub mod train;
 pub mod update;
+pub mod upload;
 pub mod vision;
 pub mod vllm;
 
