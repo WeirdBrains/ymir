@@ -433,6 +433,9 @@ pub struct InferenceSection {
     /// Models that may be split across model nodes (M7). Off unless listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<crate::group::SplitPolicy>,
+    /// Versioned rollouts (training plan P4b): a name, its versions and their traffic weights.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollout: Vec<crate::rollout::Rollout>,
 }
 
 fn standin_after() -> String {
@@ -455,6 +458,7 @@ impl Default for InferenceSection {
             standin_warm: true,
             alerts: weirdnet_alerts::AlertsConfig::default(),
             split: Vec::new(),
+            rollout: Vec::new(),
         }
     }
 }
@@ -668,6 +672,7 @@ impl NodeConfig {
         }
         crate::mcp_servers::validate(&self.inference.agent.mcp)?;
         self.validate_splits()?;
+        crate::rollout::validate(&self.inference.rollout).context("[[inference.rollout]]")?;
         parse_duration(&self.inference.standin_after).context("inference.standin_after")?;
         self.network.hints()?;
         if let Some(s) = &self.inference.standin
@@ -740,6 +745,7 @@ impl NodeConfig {
             standin: self.standin(),
             standin_after: parse_duration(&self.inference.standin_after).unwrap_or(std::time::Duration::from_secs(10)),
             splits: self.inference.split.clone(),
+            rollouts: self.inference.rollout.clone(),
         }
     }
 

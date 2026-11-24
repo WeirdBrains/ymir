@@ -31,6 +31,7 @@ pub mod model_node;
 pub mod models;
 pub mod paths;
 pub mod remote;
+pub mod rollout;
 pub mod service;
 pub mod setup;
 pub mod tasks;

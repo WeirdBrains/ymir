@@ -142,6 +142,12 @@ pub enum ControlRequest {
         node: String,
         request: crate::models::ModelsOp,
     },
+    /// The versioned rollouts in force (P4b), or, with `set`, replace them live (new
+    /// conversations follow at once). `ymirctl models rollout` also writes them to node.toml.
+    Rollouts {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set: Option<Vec<crate::rollout::Rollout>>,
+    },
     /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
     /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
     Shutdown,
@@ -267,6 +273,9 @@ pub struct ControlResponse {
     /// Groups that went down by themselves, newest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_losses: Vec<crate::group::GroupLoss>,
+    /// The rollouts in force, for [`ControlRequest::Rollouts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollouts: Option<Vec<crate::rollout::Rollout>>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -305,6 +314,7 @@ impl ControlResponse {
             batch: Vec::new(),
             groups: Vec::new(),
             group_losses: Vec::new(),
+            rollouts: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -318,6 +328,7 @@ impl ControlResponse {
             batch: Vec::new(),
             groups: Vec::new(),
             group_losses: Vec::new(),
+            rollouts: None,
         }
     }
 }
@@ -437,6 +448,19 @@ impl ControlHandler {
         match req {
             // Streamed by `stream_models`, which `connection` calls instead.
             ControlRequest::Models { .. } => ControlResponse::err("models requests are streamed"),
+            ControlRequest::Rollouts { set } => {
+                let Some(c) = &self.coordinator else {
+                    return ControlResponse::err("rollouts are routed by an inference node; this one has no inference role");
+                };
+                if let Some(r) = set
+                    && let Err(e) = c.set_rollouts(r)
+                {
+                    return ControlResponse::err(e);
+                }
+                let mut resp = ControlResponse::ok("rollouts");
+                resp.rollouts = Some(c.rollouts());
+                resp
+            }
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -491,6 +515,7 @@ impl ControlHandler {
                     batch: Vec::new(),
                     groups: Vec::new(),
                     group_losses: Vec::new(),
+                    rollouts: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
