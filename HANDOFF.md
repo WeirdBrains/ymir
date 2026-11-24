@@ -24,6 +24,37 @@ m3talsmith's updated decision 7: patch `llama-finetune` in Ymir's trainer build 
 
 **Next**: when upstream releases a `llama-finetune` that parses specials, move the pin (`scripts/engine.py pin bNNNN`, `PINNED_BUILD`), delete the patch, its `TRAINER_PATCHES`/`REQUIRED_PATCHES` entries and the fake's `--ymir-patches`, and redo the Inkling checks for serving.
 
+## 2026-11-24 14:50 EST: model upload U1, local `ymirctl models upload` (branch `feature/model-upload-local`)
+
+The plan ([docs/design/model-upload.md](docs/design/model-upload.md)) was approved by the lead (order U1, U5, U2, U3,
+U4, U6, U7, U8; merged to main in 5ad1242) and m3talsmith answered its seven questions at 2:22 PM ET; the plan now
+records them under "Decisions" (every linked device may upload, license optional, no caps but 10 percent or 20 GiB
+kept free, uploads saved to node.toml by default, Bragi desktop first, private Hub repo as the stopgap), the Weirdnet
+lead's accepted shapes for A to C (`weirdnet-model` 0.5.3, `weirdnet-backends` 0.4.4, not built yet) and the
+switch-over to them.
+
+**What changed**
+- `ymir_core::upload` (interim, marked to move to `weirdnet-model`): `inspect` a GGUF model or LoRA (refuses
+  projectors, split shards, symlinks, non-GGUF, other adapter types), `import` (hash while copying into a hidden
+  temp file, sync, hard-link into place without replacing; `provenance.json`, and `adapter.json` for adapters in
+  `weirdnet-model`'s shape), `revision_of`, `check_adapter_base`, `check_license` (optional), `keep_free`.
+- `ymirctl models upload FILE [--name] [--adapter-for BASE] [--license] [--role] [--no-register] [--dir]`: adds the
+  entry to node.toml by default with the upload's revision (adapters through the same validated edit as `models adapter
+  add`, with `base_revision`/`base_quant`); says a llama.cpp adapter serves after a restart or the base's next load;
+  `--node` refused until U2. `hub::disk_space` (free and total) backs `free_bytes`.
+- Docs: DESIGN ("Uploading a model trained elsewhere"), the plan ("U1 as built", "Decisions", "Stopgap until U2"),
+  CHANGELOG.
+
+**Checks run**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo
+test --workspace --locked --no-fail-fast`: 312 passed, 0 failed, 7 ignored. New tests: 11 in `upload::tests`
+(ymir-core) and 5 `models::tests::upload_*` (ymirctl), all on synthetic GGUF headers in temp dirs; the CLI tests pass
+the disk figures in, so they don't depend on the machine's free space.
+
+**Not tested**: a real fine-tuned model or adapter served after upload; Windows and macOS (CI runs on push to main).
+
+**What's left / next**: U5 (`--from-run`, `train run` writing `provenance.json`), then U2 once `weirdnet-model` 0.5.3
+and `weirdnet-backends` 0.4.4 are published. Roadmap entry not added yet.
+
 ## 2026-11-24 14:30 EST: model upload plan (branch `feature/model-upload-plan`, not merged)
 
 m3talsmith asked for uploading models to Ymir through ymirctl and Bragi; the main use case is fine-tuning off the
@@ -74,7 +105,7 @@ B go to the Weirdnet lead once the plan is confirmed.
 - Publishing update bundles and announcements needs the release script and the org keys.
 - The whitepaper roadmap line (docs/whitepaper/sections/12-roadmap.tex) still says the fetcher is next; it is Michael's file.
 
-**Local state:** the maintainer's own checkout has a stash "release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is kept outside this repository.
+**Local state:** the dev box's own Ymir checkout has a stash "local: release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is kept off-repo on the dev box.
 
 ## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
 

@@ -21,6 +21,7 @@ mod local;
 mod plan;
 mod remote;
 pub mod rollout;
+mod upload;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -46,6 +47,9 @@ pub enum ModelsCmd {
     List(ListArgs),
     /// Delete a downloaded model's files (never edits `node.toml`).
     Remove(RemoveArgs),
+    /// Put a model or LoRA adapter trained elsewhere (a GGUF file) into this node's model
+    /// directory, with a provenance record, and print its node.toml entry. Local only for now.
+    Upload(upload::UploadArgs),
     /// Show the context each model runs with on this node and why, or put models back on the
     /// automatic context (their full trained length, cut only where the KV cache would not fit).
     Context(ContextArgs),
@@ -225,7 +229,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
         ModelsCmd::Adapter { cmd } => cmd.node(),
-        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } => None,
+        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } | ModelsCmd::Upload(_) => None,
     };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;
@@ -255,6 +259,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::List(a) => a.dir.dir.clone(),
         ModelsCmd::Remove(a) => a.dir.dir.clone(),
         ModelsCmd::Context(a) => a.dir.dir.clone(),
+        ModelsCmd::Upload(a) => a.dir.dir.clone(),
         ModelsCmd::Search(_) | ModelsCmd::Adapter { .. } | ModelsCmd::Rollout { .. } => None,
     };
     let env_store = ModelStore::from_env();
@@ -278,6 +283,7 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::Remove(a) => remove(&ctx, out, input, &a),
         ModelsCmd::Context(a) => ctxcmd::run(&ctx, out, &a),
         ModelsCmd::Adapter { cmd } => adapters::run(&ctx, out, cmd),
+        ModelsCmd::Upload(a) => upload::run(&ctx, out, &a),
         ModelsCmd::Rollout { .. } => unreachable!("handled in run"),
     }
 }

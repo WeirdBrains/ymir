@@ -471,3 +471,169 @@ fn context_with_ymird_running_sizes_a_loaded_model_with_its_own_memory_counted_b
     let big = s.lines().find(|l| l.trim_start().starts_with("big")).unwrap();
     assert!(big.contains("it would unload idle tiny") && !big.contains("may not fit"), "{big}");
 }
+
+// ---- `models upload` (docs/design/model-upload.md, U1) ----
+
+/// A LoRA adapter GGUF header for `arch`, plus some weight bytes.
+fn lora_bytes(arch: &str) -> Vec<u8> {
+    let mut o = b"GGUF".to_vec();
+    o.extend(3u32.to_le_bytes());
+    o.extend(0u64.to_le_bytes());
+    o.extend(3u64.to_le_bytes());
+    for (k, v) in [("general.architecture", arch), ("general.type", "adapter"), ("adapter.type", "lora")] {
+        o.extend((k.len() as u64).to_le_bytes());
+        o.extend(k.as_bytes());
+        o.extend(8u32.to_le_bytes());
+        o.extend((v.len() as u64).to_le_bytes());
+        o.extend(v.as_bytes());
+    }
+    o.resize(o.len() + 2048, 5);
+    o
+}
+
+/// Uploads without looking at the real disk's free space (the box or CI runner may be nearly full).
+fn run_upload(ctx: &Ctx, out: &mut dyn Write, a: &upload::UploadArgs) -> Result<()> {
+    upload::run_with(ctx, out, a, None)
+}
+
+fn upload_args(file: &std::path::Path) -> upload::UploadArgs {
+    upload::UploadArgs {
+        file: file.to_path_buf(),
+        name: None,
+        adapter_for: None,
+        license: Some("apache-2.0".into()),
+        role: None,
+        no_register: false,
+        dir: DirArgs { dir: None },
+    }
+}
+
+/// A node.toml with a llama.cpp base `base` (file `base.gguf` in the fixture, revision r1).
+fn with_base(fx: &Fixture) -> (Ctx, std::path::PathBuf) {
+    let base = fx.dir.path().join("base.gguf");
+    std::fs::write(&base, gguf_bytes(10_000, 9)).unwrap();
+    let cfg = format!(
+        // A literal TOML string, so a Windows path's backslashes are not read as escapes.
+        "[node]\nname = \"n\"\n\n[[model.local]]\nid = \"base\"\nrole = \"main\"\nfile = '{}'\nrevision = \"r1\"\nquant = \"Q4_K_M\"\n",
+        base.display()
+    );
+    (fx.ctx(32, Some(&cfg)), base)
+}
+
+#[test]
+fn upload_of_a_model_imports_it_with_provenance_and_prints_its_entry() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let src = fx.dir.path().join("my-tune-Q4_K_M.gguf");
+    let bytes = gguf_bytes(50_000, 6);
+    std::fs::write(&src, &bytes).unwrap();
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { no_register: true, ..upload_args(&src) }).unwrap();
+    let s = text(out);
+    let dest = ctx.dir().join("uploads/my-tune-q4_k_m/my-tune-Q4_K_M.gguf");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    let p = ymir_core::upload::read_provenance(dest.parent().unwrap()).unwrap();
+    assert_eq!((p.license.as_deref(), p.files[0].sha256.as_str()), (Some("apache-2.0"), sha(&bytes).as_str()));
+    assert!(s.contains("model (llama)") && s.contains(&format!("revision {}", p.revision)), "{s}");
+    assert!(s.contains("[[model.local]]\nid = \"my-tune-q4_k_m\"") && s.contains(&format!("revision = \"{}\"", p.revision)), "{s}");
+    assert!(s.contains("node.toml was not changed"), "{s}");
+    assert_eq!(std::fs::read_to_string(&ctx.config).unwrap(), "[node]\nname = \"n\"\n");
+    // It lists like any downloaded model, and uploading it again copies nothing.
+    let mut out = Vec::new();
+    list(&ctx, &mut out).unwrap();
+    assert!(text(out).contains("my-tune-q4_k_m"));
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { name: Some("my-tune-q4_k_m".into()), no_register: true, ..upload_args(&src) }).unwrap();
+    assert!(text(out).contains("nothing was copied"));
+}
+
+#[test]
+fn upload_adds_the_model_to_node_toml_by_default_and_refuses_a_taken_id() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let src = fx.dir.path().join("tuned.gguf");
+    std::fs::write(&src, gguf_bytes(20_000, 7)).unwrap();
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload_args(&src)).unwrap();
+    assert!(text(out).contains("Added `tuned`"));
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let m = cfg.model.local.iter().find(|m| m.id == "tuned").unwrap();
+    assert_eq!(m.role.as_deref(), Some("chat"));
+    assert!(m.revision.as_deref().is_some_and(|r| r.starts_with("sha256:")));
+    let ctx = fx.ctx(32, None);
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { name: Some("base".into()), ..upload_args(&src) }).unwrap_err();
+    assert!(err.to_string().contains("already has a model or adapter `base`"), "{err}");
+    // Without node.toml there is nothing to add it to: it imports and says so.
+    let bare = Fixture::new();
+    let ctx = bare.ctx(32, None);
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload_args(&src)).unwrap();
+    assert!(text(out).contains("nothing was registered"));
+}
+
+#[test]
+fn upload_records_a_license_when_given_and_does_not_need_one() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let src = fx.dir.path().join("m.gguf");
+    std::fs::write(&src, gguf_bytes(5_000, 1)).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { license: Some("bad/license".into()), ..upload_args(&src) }).unwrap_err();
+    assert!(err.to_string().contains("license id"), "{err}");
+    assert!(!ctx.dir().join("uploads").exists(), "nothing copied before the checks pass");
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { license: None, no_register: true, ..upload_args(&src) }).unwrap();
+    assert!(!text(out).contains("license"));
+    assert_eq!(ymir_core::upload::read_provenance(&ctx.dir().join("uploads/m")).unwrap().license, None);
+}
+
+#[test]
+fn upload_keeps_ten_percent_or_twenty_gib_of_the_disk_free() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let src = fx.dir.path().join("m.gguf");
+    std::fs::write(&src, gguf_bytes(5_000, 1)).unwrap();
+    let err = upload::run_with(&ctx, &mut Vec::new(), &upload_args(&src), Some((20 << 30, 100 << 30))).unwrap_err();
+    assert!(err.to_string().contains("must stay free"), "{err}");
+    upload::run_with(&ctx, &mut Vec::new(), &upload_args(&src), Some((21 << 30, 100 << 30))).unwrap();
+}
+
+#[test]
+fn upload_of_an_adapter_checks_its_base_and_says_llama_cpp_needs_a_restart() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let src = fx.dir.path().join("support.gguf");
+    std::fs::write(&src, lora_bytes("llama")).unwrap();
+    // An adapter needs its base named, and a model must not name one.
+    let err = run_upload(&ctx, &mut Vec::new(), &upload_args(&src)).unwrap_err();
+    assert!(err.to_string().contains("--adapter-for"), "{err}");
+    let model = fx.dir.path().join("full.gguf");
+    std::fs::write(&model, gguf_bytes(5_000, 2)).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { adapter_for: Some("base".into()), ..upload_args(&model) }).unwrap_err();
+    assert!(err.to_string().contains("full model"), "{err}");
+    // A base that isn't in node.toml, and one of another architecture, are refused before copying.
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { adapter_for: Some("nope".into()), ..upload_args(&src) }).unwrap_err();
+    assert!(err.to_string().contains("no [[model.local]] with id `nope`"), "{err}");
+    let other = fx.dir.path().join("other.gguf");
+    std::fs::write(&other, lora_bytes("qwen3")).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { adapter_for: Some("base".into()), ..upload_args(&other) }).unwrap_err();
+    assert!(err.to_string().contains("different model"), "{err}");
+    assert!(!ctx.dir().join("adapters").exists());
+    // The right one imports, registers with its revision and the base's, and says when it serves.
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { adapter_for: Some("base".into()), ..upload_args(&src) }).unwrap();
+    let s = text(out);
+    assert!(s.contains("Added LoRA adapter `base+support`") && s.contains("llama.cpp loads a new adapter file only when its base starts"), "{s}");
+    assert!(!s.to_ascii_lowercase().contains("live"), "never claims the adapter is live: {s}");
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let a = &cfg.model.local[0].lora[0];
+    assert_eq!((a.id.as_str(), a.base_revision.as_deref(), a.base_quant.as_deref()), ("base+support", Some("r1"), Some("Q4_K_M")));
+    assert!(a.revision.as_deref().is_some_and(|r| r.starts_with("sha256:")));
+    let dir = ctx.dir().join("adapters/base+support");
+    let p = ymir_core::upload::read_provenance(&dir).unwrap();
+    let base = p.base.unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref()), (Some("base"), Some("r1")));
+    assert!(dir.join("adapter.json").is_file());
+    let stored = ctx.store.adapters();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].id, "base+support");
+}

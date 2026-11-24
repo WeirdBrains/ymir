@@ -154,6 +154,12 @@ impl MlxHub {
 
 /// Free bytes on the disk holding `dir` (which must exist), or `None` where that isn't known.
 pub fn free_bytes(dir: &Path) -> Option<u64> {
+    disk_space(dir).map(|(free, _)| free)
+}
+
+/// Free and total bytes on the disk holding `dir` (which must exist), or `None` where that isn't
+/// known. Free is what an unprivileged user may still write.
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -168,7 +174,9 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
         let s = unsafe { s.assume_init() };
         // The field types differ by platform (u32 on macOS), so the conversion is needed there.
         #[allow(clippy::useless_conversion)]
-        Some(u64::from(s.f_bavail).saturating_mul(u64::from(s.f_frsize)))
+        let frsize = u64::from(s.f_frsize);
+        #[allow(clippy::useless_conversion)]
+        Some((u64::from(s.f_bavail).saturating_mul(frsize), u64::from(s.f_blocks).saturating_mul(frsize)))
     }
     #[cfg(windows)]
     {
@@ -178,10 +186,10 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
             fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
         }
         let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut available = 0u64;
-        // SAFETY: `wide` is a NUL-terminated UTF-16 path; `available` is a valid out pointer and the two optional ones are null.
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
-        (ok != 0).then_some(available)
+        let (mut available, mut total) = (0u64, 0u64);
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path; `available` and `total` are valid out pointers and the last one is null.
+        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, std::ptr::null_mut()) };
+        (ok != 0).then_some((available, total))
     }
     #[cfg(not(any(unix, windows)))]
     {

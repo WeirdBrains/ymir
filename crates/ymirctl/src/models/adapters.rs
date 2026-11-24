@@ -340,7 +340,7 @@ pub fn remove(text: &str, id: &str) -> Result<(String, String)> {
 
 /// The edited config, refused unless it loads and validates, and (for a llama.cpp base whose file
 /// is here) unless the adapter is a LoRA GGUF for the base's architecture.
-fn validated(new: &str, base: &str, id: &str, ctx: &Ctx) -> Result<NodeConfig> {
+pub(super) fn validated(new: &str, base: &str, id: &str, ctx: &Ctx) -> Result<NodeConfig> {
     let mut cfg: NodeConfig = toml::from_str(new).context("the edited node.toml does not parse")?;
     if ctx.cfg.as_ref().and_then(|c| c.model.models_dir.as_ref()).is_none() && cfg.model.models_dir.is_none() {
         cfg.model.models_dir = Some(ctx.dir().to_path_buf());

@@ -28,6 +28,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
         }
         ModelsCmd::Adapter { cmd } => adapter(paths, out, node, cmd).await,
         ModelsCmd::Rollout { .. } => bail!("rollouts are this inference node's pool policy; run `ymirctl models rollout` on it (without --node)"),
+        ModelsCmd::Upload(_) => bail!("uploading over Weirdnet is not built yet; run `ymirctl models upload` on the node itself"),
     }
 }
 
