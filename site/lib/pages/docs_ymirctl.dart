@@ -272,6 +272,25 @@ trainer = "/opt/ymir-trainer/bin/ymir-trainer-llamacpp"
 build = "b1234"
 
 ymirctl train run --base qwen3-8b --dataset data.jsonl --id qwen3-8b+support --epochs 2 --add</code></pre>
+<h3 id="rollout"><code>ymirctl models rollout</code>: versions, canaries and rollback</h3>
+<p>A rollout is one name your apps ask for, with versions behind it, each a model in the pool with a traffic weight.
+It lives in this inference node's <code>node.toml</code> (<code>[[inference.rollout]]</code>). Each conversation stays
+on one version; <code>NAME@N</code> asks for a version whatever its weight. Changes apply to the running
+<code>ymird</code> at once. A version may take up to 10% of new conversations; more needs <code>--eval FILE</code>
+(an <code>ymirctl eval --out</code> file where it does at least as well as the version with the most traffic on the
+same rows) or <code>--force</code>.</p>
+<table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>models rollout list</code></td><td>Rollouts, versions, weights and shares (live when <code>ymird</code> runs).</td></tr>
+<tr><td><code>models rollout add NAME@N --model ID [--weight W]</code></td><td>Add a version (weight 0 by default: pinnable, no traffic yet).</td></tr>
+<tr><td><code>models rollout weight NAME@N W [--eval FILE] [--force]</code></td><td>Change a version's weight.</td></tr>
+<tr><td><code>models rollout rollback NAME</code></td><td>Move the newest version's traffic back to the version before it.</td></tr>
+<tr><td><code>models rollout retire NAME@N [--force]</code></td><td>Drop a version with no traffic; its model stays loaded until you unload it.</td></tr>
+</tbody></table>
+<pre><code>ymirctl models rollout add support@3 --model qwen3-8b+support-r3 --weight 5
+ymirctl eval held-out.jsonl --model qwen3-8b+support-r2 --model qwen3-8b+support-r3 --out eval.jsonl
+ymirctl models rollout weight support@3 100 --eval eval.jsonl
+ymirctl models rollout weight support@2 0
+ymirctl models rollout rollback support</code></pre>
 
 <h2 id="pool">Pool and devices</h2>
 <p>These commands manage this node's place in your Weirdnet: the identity shared by your linked devices. They need
