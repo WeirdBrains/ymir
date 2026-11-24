@@ -17,8 +17,14 @@ and writes, with PKG = ymir for the default variant and ymir-cuda for the CUDA o
   PKG-bin-PKGVER-1-ARCH.pkg.tar.zst      makepkg on the TAUR recipe with local sources (Arch only)
   PKG-VERSION-1.ARCH.rpm                 only when rpmbuild is installed (skipped with a notice)
   macOS: PKG-VERSION-TRIPLE.tar.gz, .zip (same layout as Linux; Homebrew installs from the tar.gz)
+  FreeBSD: PKG-VERSION-TRIPLE.tar.gz, and PKG-VERSION-ARCH-freebsd.pkg with `pkg create` (only on
+           FreeBSD; skipped with a notice elsewhere): /usr/local, and an rc.d service, off by default
+  OpenBSD: PKG-VERSION-TRIPLE.tar.gz
   Windows: PKG-VERSION-TRIPLE.zip        ymird.exe, ymirctl.exe and llama.cpp\\ side by side
   SHA256SUMS, and .minisig files when minisign and MINISIGN_KEY are set (else skipped)
+
+On the BSDs upstream publishes no llama.cpp binaries: build the engine there with
+`scripts/engine.py build` and pass it with --engine (or use --no-engine).
 
 ymird finds the engine relative to its own executable, so every layout works without
 configuration. --recipe rewrites packaging/arch/PKG-bin/PKGBUILD for VERSION with the sha256 of the
@@ -87,7 +93,17 @@ def target_dir():
 
 
 def host_triple():
-    return f"{platform.machine()}-unknown-linux-gnu"
+    m = {"amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine(), platform.machine())
+    system = platform.system()
+    if system == "FreeBSD":
+        return f"{m}-unknown-freebsd"
+    if system == "OpenBSD":
+        return f"{m}-unknown-openbsd"
+    return f"{m}-unknown-linux-gnu"
+
+
+def bsd(triple):
+    return triple.endswith(("-unknown-freebsd", "-unknown-openbsd"))
 
 
 def exe_suffix(triple):
@@ -215,6 +231,8 @@ def build_tar_zip(out, v, triple, bdir, engine, variant):
             for name, data, mode, link in entries:
                 add_entry(tar, f"{top}/{name}", data, mode, link)
         made.append(tgz)
+    if bsd(triple):
+        return made
     z = out / f"{top}.zip"
     with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, data, mode, link in entries:
@@ -406,6 +424,88 @@ def build_rpm(out, v, arch, bdir, engine, variant):
     return sorted(out.glob(f"{name}-{v.replace('-', '~')}-1.{arch}.rpm"))
 
 
+FREEBSD_ARCH = {"x86_64": "amd64", "aarch64": "aarch64"}
+FREEBSD_PREFIX = "/usr/local"
+# The service user, created when the package is installed (and kept when it is removed, with
+# its node folder: the identity and models live there).
+FREEBSD_POST_INSTALL = """\
+if ! pw usershow ymir >/dev/null 2>&1; then
+  pw useradd ymir -c "Ymir node" -d /var/db/ymir -s /usr/sbin/nologin -w no
+fi
+install -d -o ymir -m 0700 /var/db/ymir
+"""
+
+
+def freebsd_files(bdir, engine):
+    """Entries under / for the FreeBSD package (prefix /usr/local)."""
+    p = FREEBSD_PREFIX.lstrip("/")
+    rc = (ROOT / "packaging/freebsd/ymird.in").read_text().replace("%%PREFIX%%", FREEBSD_PREFIX).encode()
+    return [
+        (f"{p}/bin/ymird", (bdir / "ymird").read_bytes(), 0o755, None),
+        (f"{p}/bin/ymirctl", (bdir / "ymirctl").read_bytes(), 0o755, None),
+        (f"{p}/etc/rc.d/ymird", rc, 0o755, None),
+        (f"{p}/share/doc/ymir/README.md", (ROOT / "README.md").read_bytes(), 0o644, None),
+        (f"{p}/share/licenses/ymir/LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644, None),
+    ] + engine_entries(engine, f"{p}/{ENGINE_DIR}")
+
+
+def freebsd_manifest(v, variant, files=None):
+    """`pkg create`'s +MANIFEST (UCL; JSON is UCL). The files are in the plist; `pkg create` fills in
+    the ABI, sizes and sums."""
+    import json
+
+    return json.dumps(
+        {
+            "name": pkg_name(variant),
+            "origin": "sysutils/ymir",
+            "version": v,
+            "comment": SUMMARY,
+            "desc": "Ymir runs your own models on your own machines as one private pool: ymird (the node daemon) and ymirctl (its CLI), with a pinned llama.cpp engine. The rc.d service (ymird_enable) is off by default.",
+            "maintainer": "m3talsmith@gmail.com",
+            "www": URL,
+            "prefix": FREEBSD_PREFIX,
+            "licenselogic": "single",
+            "licenses": ["BSD3CLAUSE"],
+            "categories": ["sysutils", "net"],
+            "conflict": [f"{o}-*" for o in other_pkgs(variant)],
+            "scripts": {"post-install": FREEBSD_POST_INSTALL},
+        },
+        indent=1,
+    )
+
+
+def build_freebsd_pkg(out, v, arch, bdir, engine, variant):
+    files = freebsd_files(bdir, engine)
+    pkg = shutil.which("pkg")
+    if not pkg or platform.system() != "FreeBSD":
+        print(f"skipping the FreeBSD .pkg: `pkg create` runs only on FreeBSD (the tar.gz is built)", file=sys.stderr)
+        return []
+    with tempfile.TemporaryDirectory() as t:
+        stage = Path(t) / "root"
+        for name, data, mode, link in files:
+            dst = stage / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if link is not None:
+                os.symlink(link, dst)
+            else:
+                dst.write_bytes(data)
+                dst.chmod(mode)
+        man = Path(t) / "+MANIFEST"
+        man.write_text(freebsd_manifest(v, variant, files))
+        # The plist, as a port's pkg-plist: paths relative to the prefix.
+        plist = Path(t) / "plist"
+        plist.write_text("".join(n.removeprefix(FREEBSD_PREFIX.lstrip("/") + "/") + "\n" for n, *_ in files))
+        built = Path(t) / "out"
+        built.mkdir()
+        subprocess.run([pkg, "create", "-M", str(man), "-p", str(plist), "-r", str(stage), "-o", str(built)], check=True)
+        made = sorted(built.glob("*.pkg"))
+        if len(made) != 1:
+            sys.exit(f"pkg create made {[p.name for p in made]}")
+        dst = out / f"{pkg_name(variant)}-{v}-{FREEBSD_ARCH[arch]}-freebsd.pkg"
+        shutil.move(made[0], dst)
+    return [dst]
+
+
 def sign(files):
     key = os.environ.get("MINISIGN_KEY")
     if not (shutil.which("minisign") and key and Path(key).is_file()):
@@ -464,8 +564,10 @@ def main():
         for triple in a.target or [host_triple()]:
             arch = triple.split("-")[0]
             linux = triple.endswith("-linux-gnu")
-            if arch not in ARCH or not (linux or triple.endswith("-apple-darwin") or triple.endswith("-pc-windows-msvc")):
-                sys.exit(f"{triple}: only x86_64/aarch64 Linux GNU, macOS and Windows MSVC targets are packaged here")
+            if arch not in ARCH or not (linux or bsd(triple) or triple.endswith("-apple-darwin") or triple.endswith("-pc-windows-msvc")):
+                sys.exit(f"{triple}: only x86_64/aarch64 Linux GNU, FreeBSD, OpenBSD, macOS and Windows MSVC targets are packaged here")
+            if bsd(triple) and not (a.engine or a.no_engine):
+                sys.exit(f"{triple}: upstream publishes no llama.cpp for the BSDs; build it there (scripts/engine.py build --out DIR) and pass --engine DIR, or --no-engine")
             bdir = bin_dir(triple)
             engine = None
             if a.engine:
@@ -476,6 +578,8 @@ def main():
                 sys.exit(f"{engine} has no llama-server")
             tz = build_tar_zip(out, v, triple, bdir, engine, a.variant)
             made += tz
+            if triple.endswith("-unknown-freebsd"):
+                made += build_freebsd_pkg(out, v, arch, bdir, engine, a.variant)
             if not linux:
                 continue
             sums[arch] = sha256(tz[0])

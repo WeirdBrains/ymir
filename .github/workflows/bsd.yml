@@ -1,0 +1,107 @@
+# BSD packages (M9), in VMs: FreeBSD builds ymird and ymirctl, builds the pinned llama.cpp from
+# source (upstream publishes no BSD binaries), packages the tar.gz and the .pkg with
+# scripts/package.py, installs the .pkg, runs the rc.d service as the `ymir` user with the mock
+# engine, chats through it, and removes the package. OpenBSD builds and packages the tar.gz when
+# its Rust is new enough for the workspace's rust-version. Manual only: the VMs take a while.
+name: BSD
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Run one job only: freebsd or openbsd (default: both)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  freebsd:
+    if: ${{ github.event.inputs.only == '' || github.event.inputs.only == 'freebsd' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cross-platform-actions/action@v0.29.0
+        with:
+          operating_system: freebsd
+          version: '14.2'
+          memory: 8G
+          cpu_count: 4
+          run: |
+            set -eux
+            sudo pkg install -y ca_root_nss curl cmake ninja pkgconf git python3
+            # The pkg `rust` lags the workspace's rust-version, so use rustup's stable.
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --release --locked -p ymird -p ymirctl
+            cargo build --locked -p ymir-testkit --bin ymir-mock-engine
+            python3 scripts/engine.py build --out /tmp/engine --no-cpu-variants --jobs 4 --check
+            python3 scripts/package.py --target x86_64-unknown-freebsd --engine /tmp/engine --out dist
+            ls -l dist
+            sudo pkg add dist/ymir-*-amd64-freebsd.pkg
+            pkg info -l ymir
+            /usr/local/bin/ymird --version
+            /usr/local/bin/ymirctl --version
+            /usr/local/lib/ymir/llama.cpp/llama-server --version
+            id ymir
+            test -d /var/db/ymir
+            # The service, as the ymir user, with the mock engine and a stand-in model.
+            sudo install -m 0755 target/debug/ymir-mock-engine /usr/local/bin/ymir-mock-engine
+            printf 'GGUF mock' | sudo tee /var/db/ymir-tiny.gguf > /dev/null
+            sudo chmod 0644 /var/db/ymir-tiny.gguf
+            as_ymir() { sudo su -m ymir -c "$*"; }
+            as_ymir "/usr/local/bin/ymirctl --home /var/db/ymir setup --name bsd --backend llamacpp --llama-server /usr/local/bin/ymir-mock-engine --model /var/db/ymir-tiny.gguf --port 18484"
+            sudo sysrc ymird_enable=YES
+            sudo service ymird start
+            up() { for i in $(seq 60); do as_ymir "/usr/local/bin/ymirctl --home /var/db/ymir status" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+            up
+            for i in $(seq 30); do as_ymir "/usr/local/bin/ymirctl --home /var/db/ymir chat hi" > chat.txt 2>&1 && grep -q 'You said: hi' chat.txt && break; sleep 2; done
+            cat chat.txt
+            grep -q 'You said: hi' chat.txt
+            sudo service ymird status
+            sudo service ymird stop
+            sleep 2
+            if pgrep -f ymir-mock-engine; then echo "an engine outlived ymird"; exit 1; fi
+            sudo pkg delete -y ymir
+            test ! -e /usr/local/etc/rc.d/ymird
+            # The library and CLI tests, on FreeBSD.
+            cargo test --locked -p ymir-core -p ymirctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ymir-freebsd
+          path: dist/
+
+  openbsd:
+    if: ${{ github.event.inputs.only == '' || github.event.inputs.only == 'openbsd' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cross-platform-actions/action@v0.29.0
+        with:
+          operating_system: openbsd
+          version: '7.6'
+          memory: 8G
+          cpu_count: 4
+          run: |
+            set -eux
+            # rustup does not support OpenBSD: its own rust package is the only toolchain.
+            sudo pkg_add -I rust cmake ninja git python3 || sudo pkg_add -I rust cmake ninja git python%3.11
+            need=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+            have=$(rustc --version | awk '{print $2}')
+            if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+              echo "OpenBSD's rust is $have and the workspace needs $need: no OpenBSD build until its package catches up"
+              exit 1
+            fi
+            cargo build --release --locked -p ymird -p ymirctl
+            python3 scripts/engine.py build --out /tmp/engine --no-cpu-variants --jobs 4 --check
+            python3 scripts/package.py --target x86_64-unknown-openbsd --engine /tmp/engine --out dist
+            ./target/release/ymird --version
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ymir-openbsd
+          path: dist/
+          if-no-files-found: ignore
