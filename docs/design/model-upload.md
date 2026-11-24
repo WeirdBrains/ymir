@@ -1,6 +1,8 @@
 # Uploading models to Ymir: implementation plan
 
-Status: plan, 2026-11-24. Nothing here is built. For review by the project lead before any code.
+Status: plan, 2026-11-24. Approved by the project lead on 2026-11-24 with two changes (U5 moved up to follow U1;
+U6 waits on Weirdnet requests B and C, with no interim peer copy in Ymir). U1 is in progress. m3talsmith's open
+questions below are still open.
 
 Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weirdbrains.com).
 
@@ -261,7 +263,8 @@ ymirctl models upload <FILE|DIR>...
 
 ## Requests for the Weirdnet lead
 
-Ready to send. None blocks slice 1; slice 2 needs A and B.
+A, B and C were sent to the Weirdnet lead on 2026-11-24; D is held. None blocks U1 or U5; U2 needs A and B; U6
+needs B's peer pull (`Fetch`, `PullSource::Peer`) and C's grant.
 
 **A. `weirdnet-model`: inspect, hash and import local artifacts, with provenance.**
 - `artifact::inspect(paths: &[PathBuf]) -> Result<Artifact>`: `Artifact { kind: ArtifactKind (Model, Adapter
@@ -340,18 +343,22 @@ should not be open to every linked device, and the 2026-11-20 rule says to autho
 
 ## Suggested order (smallest end-to-end slice first)
 
-1. **U1: local upload, GGUF model and GGUF LoRA, with provenance.** `ymirctl models upload FILE [--adapter-for BASE]
-   --license L [--base] [--dataset-manifest] [--register]` on the machine itself (no daemon, no network): inspect,
-   hash, copy into `models_dir` / `adapters/ID/`, write `provenance.json`, set `revision` and print or register the
-   entry. Interim inspection code in `ymir-core` marked "to move to weirdnet-model" until A ships. Covers the main
-   use case end to end when the fine-tune is made on, or copied to, a node machine, and fixes the record format.
-2. **U2: upload to one node over Weirdnet** (`--node NAME|auto`, `--serve`), chunked, resumable, sha256-checked,
+1. **U1: local upload, GGUF model and GGUF LoRA, with provenance.** `ymirctl models upload FILE [--name ID]
+   [--adapter-for BASE] --license L [--allow-unknown-license] [--register]` on the machine itself (no daemon, no
+   network): read the header, hash, import into `models_dir` / `adapters/ID/` atomically, write `provenance.json`, set
+   `revision` and print or register the entry. Interim inspection and provenance code in `ymir-core`, marked "to move
+   to weirdnet-model" until A ships. Covers the main use case end to end when the fine-tune is made on, or copied to,
+   a node machine, and fixes the record format.
+2. **U5: P3a outputs on the same path.** `--from-run RUN_DIR` reads `run.json`; `train run` writes the same
+   `provenance.json` (origin `train`) beside its adapter; `train run --rollout` later uses U3's step. Moved up by the
+   lead (2026-11-24): it needs only U1.
+3. **U2: upload to one node over Weirdnet** (`--node NAME|auto`, `--serve`), chunked, resumable, sha256-checked,
    with the write grant, free disk and quota checks. Needs A and B. This is the main use case from a laptop.
-3. **U3: into a rollout.** `--rollout NAME [--eval ROWS] [--canary W]`, provenance in `rollout list`.
-4. **U4: Bragi upload dialog** (desktop first, then Flutter), on the Models screen, with progress, cancel, resume
+4. **U3: into a rollout.** `--rollout NAME [--eval ROWS] [--canary W]`, provenance in `rollout list`.
+5. **U4: Bragi upload dialog** (desktop first, then Flutter), on the Models screen, with progress, cancel, resume
    and "add to rollout".
-5. **U5: P3a outputs.** `--from-run RUN_DIR`, `provenance.json` written by `train run`, `train run --rollout`.
-6. **U6: pools.** `--pool` / `--node all` with staging and node-to-node `Fetch`; push-to-each fallback.
+6. **U6: pools.** `--pool` / `--node all` with staging and node-to-node `Fetch`; push-to-each fallback. Waits on
+   Weirdnet B's peer pull and C's grant; Ymir does not stub a peer copy of its own (lead, 2026-11-24).
 7. **U7: more formats.** safetensors for vLLM, MLX directories, PEFT adapters, mmproj projectors.
 8. **U8 (optional): catalog origin** in Bragi's model list once D exists.
 
@@ -361,6 +368,8 @@ mismatch, a truncated part resumed, a wrong-architecture adapter refused before 
 device without the grant refused, a pickle refused, and a rollout version arriving at weight 0.
 
 ## Open questions for m3talsmith
+
+All open as of 2026-11-24.
 
 1. **Who may upload:** only devices holding a new `ymir.models.write` grant (proposed default), or any linked
    device as models/1 allows today? Service nodes are excluded either way.
