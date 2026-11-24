@@ -1,0 +1,26 @@
+diff --git a/examples/training/finetune.cpp b/examples/training/finetune.cpp
+index 44b2843..8e009f7 100644
+--- a/examples/training/finetune.cpp
++++ b/examples/training/finetune.cpp
+@@ -17,6 +17,12 @@
+ int main(int argc, char ** argv) {
+     std::setlocale(LC_NUMERIC, "C");
+ 
++    // Ymir: name the local patches, so its trainer can refuse an unpatched build.
++    if (argc == 2 && std::strcmp(argv[1], "--ymir-patches") == 0) {
++        std::printf("parse-special\n");
++        return 0;
++    }
++
+     common_params params;
+     params.escape = false;
+ 
+@@ -58,7 +64,7 @@ int main(int argc, char ** argv) {
+         LOG_INF("%s\n", common_params_get_system_info(params).c_str());
+     }
+ 
+-    std::vector<llama_token> tokens  = common_tokenize(ctx, params.prompt, true);
++    std::vector<llama_token> tokens  = common_tokenize(ctx, params.prompt, true, /*parse_special =*/ true);
+     ggml_opt_dataset_t       dataset = common_opt_dataset_init(ctx, tokens, llama_n_ctx(ctx) / 2);
+ 
+     struct lr_opt & lr = params.lr;

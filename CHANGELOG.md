@@ -13,6 +13,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
+- The llama.cpp trainer's `llama-finetune` now tokenizes the training text with `parse_special = true`, so the chat template's special tokens (`<|im_start|>` and the like) train as the tokens the model emits instead of as text. Upstream b12628 has no such option, so `scripts/engine.py build --trainer` applies `packaging/engines/patches/llama-finetune-parse-special.patch` to `llama-finetune`'s source only (`llama-server` and `rpc-server` stay upstream's), and `scripts/trainer.py` refuses a `llama-finetune` without it. `trainer.py version` also lists the patches. The patch goes when upstream releases a fix (tracked: draft ggml-org/llama.cpp#31258).
 - `ymirctl bench` scores code answers on Windows too: Python runs in a Job Object (5 s of CPU per process, 2 GB of memory, at most 8 processes, all killed afterwards) in an empty directory with an empty environment. The network is not cut off there, unlike `unshare` on Linux. On macOS code questions stay unscored, now said plainly and checked in CI: macOS refuses both memory limits (`ulimit -v` and `-d`), so the sandbox never ran code there.
 
 ### Fixed

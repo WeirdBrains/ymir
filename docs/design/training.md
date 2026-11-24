@@ -178,13 +178,19 @@ build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.to
   pin. The Python side needs numpy, gguf 0.19.0 (llama.cpp's gguf-py at the pin) and jinja2
   ([`scripts/trainer-requirements.txt`](../../scripts/trainer-requirements.txt)), in a venv named by
   `YMIR_TRAINER_PYTHON`, never installed system-wide.
-- Known limit at this build: `llama-finetune` tokenizes with `parse_special = false`, so the chat template's
-  special tokens (`<|im_start|>` and the like) are trained as plain text rather than as the tokens the model
-  emits. Until upstream changes that, an adapter may learn turn markers the model does not use. Decision 7: the
-  pin moves to the first upstream build that parses them, with no local patch. No such build exists yet (checked
-  2026-11-24, see decision 7), so the pin stays at b12628.
+- Special tokens: upstream `llama-finetune` at b12628 tokenizes with `parse_special = false`, so the chat
+  template's special tokens (`<|im_start|>` and the like) would train as plain text rather than as the tokens
+  the model emits. Decision 7: `engine.py build --trainer` applies
+  [`packaging/engines/patches/llama-finetune-parse-special.patch`](../../packaging/engines/patches/llama-finetune-parse-special.patch)
+  to `examples/training/finetune.cpp` only (`parse_special = true`, and `--ymir-patches` prints
+  `parse-special`), and the trainer refuses a `llama-finetune` that doesn't name it (`REQUIRED_PATCHES` in
+  `trainer.py`). `trainer.py version` lists the patches next to the build. `llama-server` and `rpc-server` are
+  built from unpatched sources.
 - Tests: [`scripts/test_trainer.py`](../../scripts/test_trainer.py) (a fake `llama-finetune` with upstream's
-  arguments, version line and progress bars; the extracted adapter reproduces a rank-2 change exactly) and
+  arguments, version line and progress bars, `--ymir-patches`, and the base's control tokens tokenized as specials;
+  the extracted adapter reproduces a rank-2 change exactly), [`scripts/test_engine.py`](../../scripts/test_engine.py)
+  (`build --trainer` applies the patch before cmake, a serving build doesn't, and the patch applies to the
+  pinned upstream source) and
   [`crates/ymir-testkit/tests/p3a_llamacpp.rs`](../../crates/ymir-testkit/tests/p3a_llamacpp.rs) (`ymirctl train run`
   through the real wrapper). Linux CI runs both. No model has been trained with it.
 
@@ -330,16 +336,19 @@ serve it as an adapter, and score it against the base through the pool.
 
 ## Decisions (2026-11-24, m3talsmith)
 
-7. **Trainer pin and special tokens:** move the llama.cpp pin to a newer upstream build whose `llama-finetune`
-   tokenizes the chat template's special tokens as specials; do not patch `llama-finetune` locally. As of
-   2026-11-24 no upstream build does: `examples/training/finetune.cpp` calls `common_tokenize(ctx, params.prompt,
+7. **Trainer pin and special tokens** (updated by m3talsmith 2026-11-24): patch `llama-finetune` in Ymir's
+   trainer build to tokenize with `parse_special = true`, staying on b12628, and drop the patch once upstream
+   releases the fix and the pin moves past it. This replaces the same day's first answer (move the pin, no local
+   patch), because no upstream build has the fix: `examples/training/finetune.cpp` calls `common_tokenize(ctx, params.prompt,
    true)` (`parse_special` defaults to false) at b12628, at the latest build b12680 and at `v1.0.0`, and the file
    was last changed in ggml-org/llama.cpp#20834 (2026-07-23). The fix in flight is draft
    ggml-org/llama.cpp#31258 (LoRA fine-tuning with a chat-rendering path that tokenizes with `parse_special =
-   true`), not merged. The pin stays at b12628 until a build with the fix is released. The trainer and the bundled
+   true`), not merged. The patch is
+   [`packaging/engines/patches/llama-finetune-parse-special.patch`](../../packaging/engines/patches/llama-finetune-parse-special.patch),
+   applied by `engine.py build --trainer` only and required by `trainer.py`. The trainer and the bundled
    serving engine share one pin ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.toml):
-   `engine.py build --trainer` builds `llama-finetune` at it, and `trainer.py` refuses any other build), so moving
-   it moves the serving engine too, and needs the Inkling checks in [DESIGN.md](../DESIGN.md) redone at the new
+   `engine.py build --trainer` builds `llama-finetune` at it, and `trainer.py` refuses any other build), so a later
+   pin move moves the serving engine too, and needs the Inkling checks in [DESIGN.md](../DESIGN.md) redone at the new
    build. `weirdnet-backends` does not pin a llama.cpp build.
 8. **Releases ("Just release"):** once work is on main and CI is green, agents tag, publish and release without
    waiting for m3talsmith's approval, following AGENTS.md. This replaces "nothing publishes without m3talsmith's

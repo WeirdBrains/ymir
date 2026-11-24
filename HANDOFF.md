@@ -3,6 +3,24 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 15:00 EST: llama-finetune parses special tokens (branch `feature/trainer-parse-special`)
+
+m3talsmith's updated decision 7: patch `llama-finetune` in Ymir's trainer build to tokenize with `parse_special = true`, stay on b12628, and drop the patch when upstream releases the fix (tracked: draft ggml-org/llama.cpp#31258). This replaces the "no local patch" answer in the entry below.
+
+**What changed**
+- [packaging/engines/patches/llama-finetune-parse-special.patch](packaging/engines/patches/llama-finetune-parse-special.patch): `examples/training/finetune.cpp` only. `common_tokenize(ctx, params.prompt, true, /*parse_special =*/ true)`, and `llama-finetune --ymir-patches` prints `parse-special` (upstream refuses that argument, so an unpatched build is told apart).
+- [scripts/engine.py](scripts/engine.py): `TRAINER_PATCHES`, `build_plan` (the steps of `build`: the patches, with `--trainer` only, before cmake), `apply_patch` (`git apply --check` first; a reused `--work` tree that has it is left alone; exits if it doesn't apply), `engine.toml` gets `trainer_patches`. A build without `--trainer` is unchanged, and `llama-server`/`rpc-server` compile from unpatched sources either way.
+- [scripts/trainer.py](scripts/trainer.py): `REQUIRED_PATCHES = ("parse-special",)`; `check_pin` (train and extract-lora) refuses a `llama-finetune` at the pin without it; `version` adds `"patches"` (Ymir's `TrainerVersion` ignores the extra field; `build` stays `b12628`, so `[train] build` in node.toml is unchanged).
+- The fake `llama-finetune` answers `--ymir-patches` (`FAKE_FINETUNE_PATCHES`, empty acts unpatched) and records the base's control tokens it tokenized as specials. The test base has `<|im_start|>`/`<|im_end|>` as control tokens.
+- Tests: new [scripts/test_engine.py](scripts/test_engine.py) (stdlib: the trainer build applies the patch before cmake, a serving build applies none, the patch touches only `finetune.cpp`, `engine.toml` names it, and the patch applies to the pinned upstream `finetune.cpp` read from GitHub, then is seen as applied on a reused tree). [scripts/test_trainer.py](scripts/test_trainer.py) adds: required patches match engine.py's and each patch names its id; an unpatched build is refused for train and extract-lora (nothing runs); the special tokens of every turn train as single tokens. CI runs `test_engine.py` in the trainer step.
+- Docs: [docs/design/training.md](docs/design/training.md) (decision 7 updated, the special-token bullet, tests), [CHANGELOG.md](CHANGELOG.md) (Changed).
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked`; `p3a_llamacpp` with `YMIR_TEST_TRAINER_PYTHON`; `python3 scripts/test_engine.py` 5 passed; `scripts/test_trainer.py` 13 passed; the patch applies with `git apply --check` to a b12628 checkout (8a97fa9), and the patched `finetune.cpp` passes `clang++ -std=c++17 -fsyntax-only` against b12628's headers; `site/tool/check_links.py`.
+
+**Not tested**: a full `engine.py build --trainer` (cmake build of `llama-finetune`) or a real training run; tokenization was checked with the fake, not with a real vocabulary.
+
+**Next**: when upstream releases a `llama-finetune` that parses specials, move the pin (`scripts/engine.py pin bNNNN`, `PINNED_BUILD`), delete the patch, its `TRAINER_PATCHES`/`REQUIRED_PATCHES` entries and the fake's `--ymir-patches`, and redo the Inkling checks for serving.
+
 ## 2026-11-24 14:30 EST: trainer pin decision, white paper link (branch `feature/trainer-pin-decision`)
 
 **What changed** (docs only): [docs/design/training.md](docs/design/training.md) links the white paper's training section ([docs/whitepaper/sections/10-training.tex](docs/whitepaper/sections/10-training.tex)) instead of saying it is not in the repository, and records m3talsmith's decisions of 2026-11-24: 7, move the llama.cpp pin to a build whose `llama-finetune` parses special tokens, with no local patch; 8, "Just release".
@@ -28,7 +46,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **Blocked / decisions:**
 - OpenBSD: its rust package is 1.81 (7.6), the workspace needs 1.99, and rustup has no OpenBSD.
 - MLX-LM for Inkling 2 Mini: mlx-lm#2086 is still an open draft (checked 2026-11-24); latest mlx-lm 0.32.2.
-- P3a trainer: upstream `llama-finetune` tokenizes with `parse_special=false`, so chat-template special tokens train as text. Decided 2026-11-24: move the pin to an upstream build that fixes it, no local patch; no such build exists yet (see the entry above).
+- P3a trainer: upstream `llama-finetune` tokenizes with `parse_special=false`, so chat-template special tokens train as text. Decided 2026-11-24: patched in the trainer build (`feature/trainer-parse-special`) until upstream releases a fix (draft ggml-org/llama.cpp#31258).
 - Bench on macOS: macOS refuses both memory limits, so code answers are left unscored there. Allow scoring with CPU, file and process limits only?
 - Publishing update bundles and announcements needs the release script and the org keys.
 - The whitepaper roadmap line (docs/whitepaper/sections/12-roadmap.tex) still says the fetcher is next; it is Michael's file.
