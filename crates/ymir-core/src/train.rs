@@ -5,8 +5,8 @@
 //! record and the adapter it produces. The trainer Michael chose (2026-11-24) is upstream
 //! llama.cpp: a full fine-tune of a GGUF base with its pinned `llama-finetune`, then a
 //! conversion step that extracts a LoRA adapter from the difference, which P4a serves on the
-//! base. A wrapper program puts both behind the interface; Ymir checks the build it reports
-//! against `[train] build` and refuses any other.
+//! base. A wrapper program puts both behind the interface (`scripts/trainer.py`); Ymir checks
+//! the build it reports against `[train] build` and refuses any other.
 //!
 //! The trainer interface (version [`INTERFACE`]):
 //!
@@ -480,8 +480,9 @@ pub struct RunSpec {
     pub dataset: PathBuf,
     /// The adapter's pool id (default `BASE+ft-RUN`).
     pub id: Option<String>,
-    /// Train from this GGUF instead of the served file (an F16 or F32 copy of the same model,
-    /// when the served file is quantised). The adapter then records no `base_quant`.
+    /// Train from this GGUF instead of the served file (an F32 copy of the same model when the
+    /// served file is quantised; llama.cpp's trainer trains F32 models only). The adapter then
+    /// records no `base_quant`.
     pub from: Option<PathBuf>,
     pub hyper: Hyper,
     pub allow_unknown_license: bool,

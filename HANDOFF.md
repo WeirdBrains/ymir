@@ -3,6 +3,17 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24: the llama.cpp trainer for P3a (branch `feat/p3a-llamacpp-trainer`)
+
+**What changed**
+- [scripts/trainer.py](scripts/trainer.py) speaks trainer interface 1 around upstream `llama-finetune`, pinned to the engine's build (b12628, [packaging/engines/llama.cpp.toml](packaging/engines/llama.cpp.toml)). `train` needs an F32 base (upstream's limit), renders conversations with the base's chat template, relays progress bars as events, and removes its 0600 training text. `extract-lora` writes a GGUF LoRA (truncated SVD of each `blk.*` matrix's change, `alpha = rank`, llama.cpp's `lora_a`/`lora_b` layout). `YMIR_TRAINER_PYTHON` re-runs it in a venv.
+- `scripts/engine.py build --trainer` also builds `llama-finetune` (upstream's archives don't ship it).
+- Docs: [docs/design/training.md](docs/design/training.md) ("The llama.cpp trainer"), [docs/DESIGN.md](docs/DESIGN.md) (`[train]` sample), the site's `#train`, `--from` help (F32, not F16), [roadmap.toml](roadmap.toml), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `python scripts/test_trainer.py` 10 passed (fake `llama-finetune` in [scripts/testdata](scripts/testdata/fake_llama_finetune.py)); `crates/ymir-testkit/tests/p3a_llamacpp.rs` passed with `YMIR_TEST_TRAINER_PYTHON` (it skips without it); clippy `-p ymir-testkit --all-targets -D warnings`; `check_links.py`, `gen_roadmap.py --check`. Linux CI runs both trainer tests in a venv.
+
+**Not tested**: no real `llama-finetune` run, no `engine.py build --trainer` build, and no adapter loaded by a real llama-server. Known limit: at b12628 `llama-finetune` tokenizes with `parse_special = false`, so chat-template special tokens are trained as text. That needs a decision: a one-line patch at build, or a later pin.
+
 ## 2026-11-24: training plan P4b, versioned rollouts (branch `feat/p4b-rollouts`)
 
 **What changed**

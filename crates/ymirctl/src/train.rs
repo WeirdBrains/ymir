@@ -51,8 +51,8 @@ pub struct RunArgs {
     /// The adapter's id in the pool (default BASE+ft-RUN).
     #[arg(long)]
     pub id: Option<String>,
-    /// Train from this GGUF instead of the served file (an F16 copy of the same model when the
-    /// served file is quantised).
+    /// Train from this GGUF instead of the served file (an F32 copy of the same model when the
+    /// served file is quantised: llama.cpp's trainer trains F32 models only).
     #[arg(long)]
     pub from: Option<PathBuf>,
     #[arg(long, default_value_t = Hyper::default().epochs)]

@@ -136,9 +136,10 @@ that node, checkpoints synced, and resume on another capable node if the first g
 ([`crates/ymir-core/src/train.rs`](../../crates/ymir-core/src/train.rs), `crates/ymirctl/src/train.rs`) on
 `weirdnet-backends` 0.4.3's node reservation. It is tested end to end against the mock trainer
 (`ymir-mock-trainer`, [`crates/ymir-testkit/tests/p3a.rs`](../../crates/ymir-testkit/tests/p3a.rs)), with no real
-node or model. Left: the llama.cpp wrapper that speaks the interface below (its own repo or package, with the pinned
-build), a real run on a node the lead clears, and `train run --node` for a remote node (today a run trains on the
-node `ymirctl` runs on; `train reserve --node` holds a remote one by hand).
+node or model. The llama.cpp trainer that speaks the interface below is
+[`scripts/trainer.py`](../../scripts/trainer.py) (see "The llama.cpp trainer"), tested against a fake
+`llama-finetune`. Left: a real run on a node the lead clears, and `train run --node` for a remote node (today a run
+trains on the node `ymirctl` runs on; `train reserve --node` holds a remote one by hand).
 
 What a run does: checks the trainer's interface and its build against `[train] build`, and refuses any other. It
 takes only a dataset with its manifest (P1's `ymir-dataset/1`, whose teacher license must be known unless
@@ -157,6 +158,34 @@ BASE.gguf --tuned FULL.gguf --rank N --out ADAPTER.gguf` writes the adapter. Bot
 (`progress` with `step`, `steps`, `loss`; `log`; `done`; `error` with `message`); exit 0 with the output file is
 success. `[train]` in node.toml names the `trainer`, its `build`, an optional `work_dir` (the full model is as large as
 the base) and `env` for it.
+
+**The llama.cpp trainer** ([`scripts/trainer.py`](../../scripts/trainer.py), 2026-11-24). It is pinned to the engine's
+build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.toml), b12628) and refuses any other;
+`version` reports the build `llama-finetune --version` prints, so Ymir's check sees the real one.
+- `train` runs upstream `llama-finetune` on an F32 GGUF base (upstream trains F32 models only, so a quantised served
+  model trains from an F32 copy with `--from`). Each conversation is rendered with the base's chat template (jinja2)
+  into one text, written 0600 next to the output and removed afterwards. Upstream tokenizes that text as a whole,
+  in sequences of `context` tokens with half-overlap, and trains on every token, prompts included; `-c`, `-b` and
+  `-ub` are all `context` (`n_ctx % n_batch == 0`), so `batch` is not used. GPU layers: `YMIR_TRAINER_NGL`
+  (default all), flash attention off (it has no backward pass). Upstream's progress bars become `progress` events
+  over all epochs, and the last validation loss a `log`.
+- `extract-lora` takes every `blk.*` matrix's difference between the tuned model and the base and keeps its top
+  `rank` singular directions (truncated SVD): `lora_b = U·S` [out, rank], `lora_a = Vᵀ` [rank, in], the layout
+  `convert_lora_to_gguf.py` writes, with `adapter.lora.alpha = rank` so llama.cpp applies it at scale 1. Matrices
+  smaller than the rank are zero-padded; unchanged ones are left out; norms, embeddings and the output head stay
+  the base's. It logs how much of the change the rank keeps.
+- Upstream's release archives don't carry `llama-finetune`: `scripts/engine.py build --trainer` builds it at the
+  pin. The Python side needs numpy, gguf 0.19.0 (llama.cpp's gguf-py at the pin) and jinja2
+  ([`scripts/trainer-requirements.txt`](../../scripts/trainer-requirements.txt)), in a venv named by
+  `YMIR_TRAINER_PYTHON`, never installed system-wide.
+- Known limit at this build: `llama-finetune` tokenizes with `parse_special = false`, so the chat template's
+  special tokens (`<|im_start|>` and the like) are trained as plain text rather than as the tokens the model
+  emits. Until upstream changes that, an adapter may learn turn markers the model does not use. Options: carry a
+  one-line patch in `engine.py build --trainer`, or move the pin to an upstream build that parses them.
+- Tests: [`scripts/test_trainer.py`](../../scripts/test_trainer.py) (a fake `llama-finetune` with upstream's
+  arguments, version line and progress bars; the extracted adapter reproduces a rank-2 change exactly) and
+  [`crates/ymir-testkit/tests/p3a_llamacpp.rs`](../../crates/ymir-testkit/tests/p3a_llamacpp.rs) (`ymirctl train run`
+  through the real wrapper). Linux CI runs both. No model has been trained with it.
 
 **Work, in two parts.**
 - **P3a, one node, no hand-off.** `ymirctl train reserve --node X` drains the node, unloads its models, and
@@ -277,8 +306,8 @@ serve it as an adapter, and score it against the base through the pool.
 - Integration tests in `ymir-testkit` against a fake pool with mock engines: a generation run with a stand-in
   answer (excluded), a cached answer (skipped), retries, resume; an eval comparing two mock models; an adapter
   advertised in the catalog.
-- No test downloads a model, starts a GPU backend or trains; a real-trainer test is `#[ignore]` and runs only
-  on a node the lead has cleared.
+- No test downloads a model, starts a GPU backend or trains. The llama.cpp trainer is tested against a fake
+  `llama-finetune`; a real-trainer run happens only on a node the lead has cleared.
 
 ## Decisions (2026-11-22, m3talsmith)
 
