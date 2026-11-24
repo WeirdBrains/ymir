@@ -5,8 +5,8 @@ license lookup, seed prompts and a synced job record are still left. P4a (LoRA a
 base) is built. P2 (consented conversation export) is built on the Ymir side. P3a (one run on one node) is built and
 tested against a mock trainer; no real run has been made. P4b (versioned rollout, canary and rollback) is built and
 tested against mock models. P3b has not started. This document turns the four training proposals in the
-white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
-repository yet) into work items, maps each onto the modules
+white paper's "Training and fine-tuning (proposal)" section
+([`docs/whitepaper/sections/10-training.tex`](../whitepaper/sections/10-training.tex)) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
 m3talsmith answered the open questions the same day (see "Decisions").
 
@@ -180,8 +180,9 @@ build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.to
   `YMIR_TRAINER_PYTHON`, never installed system-wide.
 - Known limit at this build: `llama-finetune` tokenizes with `parse_special = false`, so the chat template's
   special tokens (`<|im_start|>` and the like) are trained as plain text rather than as the tokens the model
-  emits. Until upstream changes that, an adapter may learn turn markers the model does not use. Options: carry a
-  one-line patch in `engine.py build --trainer`, or move the pin to an upstream build that parses them.
+  emits. Until upstream changes that, an adapter may learn turn markers the model does not use. Decision 7: the
+  pin moves to the first upstream build that parses them, with no local patch. No such build exists yet (checked
+  2026-11-24, see decision 7), so the pin stays at b12628.
 - Tests: [`scripts/test_trainer.py`](../../scripts/test_trainer.py) (a fake `llama-finetune` with upstream's
   arguments, version line and progress bars; the extracted adapter reproduces a rank-2 change exactly) and
   [`crates/ymir-testkit/tests/p3a_llamacpp.rs`](../../crates/ymir-testkit/tests/p3a_llamacpp.rs) (`ymirctl train run`
@@ -324,8 +325,25 @@ serve it as an adapter, and score it against the base through the pool.
 4. **Conversation training flag (P2):** the Bragi toggle comes after Bragi v1; the Ymir side of P2 can be built
    before it, but nothing is exported until a conversation can be flagged.
 5. **Version traffic weights (P4b):** in Ymir's `balance` for now (see the proposal below).
-6. **White paper:** to be committed under `docs/whitepaper/` by m3talsmith. Until it is on main, this plan refers to
-   its "Training and fine-tuning (proposal)" section by title; a link to the section's source replaces this note then.
+6. **White paper:** committed under [`docs/whitepaper/`](../whitepaper/) by m3talsmith. The proposals this plan
+   implements are in [`sections/10-training.tex`](../whitepaper/sections/10-training.tex).
+
+## Decisions (2026-11-24, m3talsmith)
+
+7. **Trainer pin and special tokens:** move the llama.cpp pin to a newer upstream build whose `llama-finetune`
+   tokenizes the chat template's special tokens as specials; do not patch `llama-finetune` locally. As of
+   2026-11-24 no upstream build does: `examples/training/finetune.cpp` calls `common_tokenize(ctx, params.prompt,
+   true)` (`parse_special` defaults to false) at b12628, at the latest build b12680 and at `v1.0.0`, and the file
+   was last changed in ggml-org/llama.cpp#20834 (2026-07-23). The fix in flight is draft
+   ggml-org/llama.cpp#31258 (LoRA fine-tuning with a chat-rendering path that tokenizes with `parse_special =
+   true`), not merged. The pin stays at b12628 until a build with the fix is released. The trainer and the bundled
+   serving engine share one pin ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.toml):
+   `engine.py build --trainer` builds `llama-finetune` at it, and `trainer.py` refuses any other build), so moving
+   it moves the serving engine too, and needs the Inkling checks in [DESIGN.md](../DESIGN.md) redone at the new
+   build. `weirdnet-backends` does not pin a llama.cpp build.
+8. **Releases ("Just release"):** once work is on main and CI is green, agents tag, publish and release without
+   waiting for m3talsmith's approval, following AGENTS.md. This replaces "nothing publishes without m3talsmith's
+   OK" from 2026-11-22.
 
 ### Proposal: where version weights could live later
 

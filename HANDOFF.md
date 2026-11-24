@@ -3,6 +3,18 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 14:30 EST: trainer pin decision, white paper link (branch `feature/trainer-pin-decision`)
+
+**What changed** (docs only): [docs/design/training.md](docs/design/training.md) links the white paper's training section ([docs/whitepaper/sections/10-training.tex](docs/whitepaper/sections/10-training.tex)) instead of saying it is not in the repository, and records m3talsmith's decisions of 2026-11-24: 7, move the llama.cpp pin to a build whose `llama-finetune` parses special tokens, with no local patch; 8, "Just release".
+
+**Upstream check (2026-11-24):** no llama.cpp build fixes it. `examples/training/finetune.cpp` calls `common_tokenize(ctx, params.prompt, true)` with `parse_special` left at its default `false` at b12628, at the latest build b12680 and at `v1.0.0`; the file's last change is ggml-org/llama.cpp#20834 (2026-07-23). The only fix in flight is draft ggml-org/llama.cpp#31258 (its chat path tokenizes with `parse_special = true`), not merged. **The pin stays at b12628**; nothing in `scripts/trainer.py`, `packaging/engines/llama.cpp.toml`, CI or packaging changed.
+
+**Coupling:** the trainer and the bundled serving engine share the one pin in `packaging/engines/llama.cpp.toml` (`engine.py build --trainer` builds `llama-finetune` there; `trainer.py` refuses another build), so the move also moves serving and needs the Inkling checks redone. `weirdnet-backends` has no llama.cpp pin (only b12628 in comments and its HANDOFF), so no Weirdnet request.
+
+**Checks:** `site/tool/check_links.py`, `site/tool/gen_roadmap.py --check`, and every relative link in the training plan resolves. Also reworded the usage-stop entry's local-state line, which named a machine and a home path (check_links failed on it). No code changed, so no cargo run.
+
+**Not done:** a test that the trainer's text tokenizes specials as specials: it needs a `llama-finetune` that parses them (or a real tokenizer), which no upstream build has. When #31258 or another fix is released: `scripts/engine.py pin bNNNN`, update `PINNED_BUILD`, the fake `llama-finetune`, the tests and docs that say b12628, and add a tokenization check against a tiny vocab fixture.
+
 ## 2026-11-24 13:25 EST: state at a usage stop (open branches, what's left)
 
 **On main (ac8aa63, CI green on Linux, macOS, Windows):** the llama.cpp trainer wrapper (feafb07), the Windows bench sandbox (e8923bf), the M9 bundle fetcher (b202a74), Infra's v0.8.0 PKGBUILD hashes (b99aabc). Release-ready: ac8aa63.
@@ -16,12 +28,12 @@ A running log of finished work, newest first. Each entry says what changed, the 
 **Blocked / decisions:**
 - OpenBSD: its rust package is 1.81 (7.6), the workspace needs 1.99, and rustup has no OpenBSD.
 - MLX-LM for Inkling 2 Mini: mlx-lm#2086 is still an open draft (checked 2026-11-24); latest mlx-lm 0.32.2.
-- P3a trainer: upstream `llama-finetune` tokenizes with `parse_special=false`, so chat-template special tokens train as text. Carry a one-line patch in `engine.py build --trainer`, or move the pin to a build that fixes it.
+- P3a trainer: upstream `llama-finetune` tokenizes with `parse_special=false`, so chat-template special tokens train as text. Decided 2026-11-24: move the pin to an upstream build that fixes it, no local patch; no such build exists yet (see the entry above).
 - Bench on macOS: macOS refuses both memory limits, so code answers are left unscored there. Allow scoring with CPU, file and process limits only?
 - Publishing update bundles and announcements needs the release script and the org keys.
 - The whitepaper roadmap line (docs/whitepaper/sections/12-roadmap.tex) still says the fetcher is next; it is Michael's file.
 
-**Local state:** alien-blue `~/Projects/WeirdBrains/ymir` has a stash "alien-blue local: release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is at `~/Projects/WeirdBrains/phase-log.md` on alien-blue.
+**Local state:** the maintainer's own checkout has a stash "release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is kept outside this repository.
 
 ## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
 
