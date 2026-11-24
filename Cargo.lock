@@ -5953,6 +5953,7 @@ dependencies = [
  "weirdnet-net",
  "weirdnet-sync",
  "weirdnet-update",
+ "windows-sys 0.61.2",
  "ymir-core",
  "zeroize",
 ]

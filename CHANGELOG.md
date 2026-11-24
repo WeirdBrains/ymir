@@ -10,6 +10,14 @@ All notable changes to Ymir are listed here. The format follows
 
 - The llama.cpp trainer for `ymirctl train`, `scripts/trainer.py`, pinned to the engine's llama.cpp build (b12628). `train` runs upstream `llama-finetune` on an F32 GGUF base with conversations rendered in the base's chat template, and `extract-lora` keeps the top `rank` singular directions of each weight's change as a GGUF LoRA adapter. `scripts/engine.py build --trainer` builds `llama-finetune`, which upstream's release files don't include, and `scripts/trainer-requirements.txt` lists its Python packages. Tested against a fake `llama-finetune` only.
 
+### Changed
+
+- `ymirctl bench` scores code answers on Windows too: Python runs in a Job Object (5 s of CPU per process, 2 GB of memory, at most 8 processes, all killed afterwards) in an empty directory with an empty environment. The network is not cut off there, unlike `unshare` on Linux. On macOS code questions stay unscored, now said plainly and checked in CI: macOS refuses both memory limits (`ulimit -v` and `-d`), so the sandbox never ran code there.
+
+### Fixed
+
+- `ymirctl bench`'s code sandbox now applies its limits where `sh` is dash (Debian, Ubuntu). It used to set every limit in one `ulimit` call, which dash refuses, with the error hidden, so code ran with no CPU, memory, file-size or process limit, only the 10 s wall clock. Each limit is now set on its own, with each shell's spelling. If one can't be set, code questions are left unscored.
+
 ## [0.8.0] - 2026-11-24
 
 ### Added

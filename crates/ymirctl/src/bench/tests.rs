@@ -93,9 +93,22 @@ fn needles_scale_with_context_and_sit_at_three_depths() {
     }
 }
 
+/// Whether the sandbox can run Python. Every CI runner has Python, so there a missing one means
+/// the sandbox broke (not that the test should quietly pass). macOS refuses both memory limits
+/// (`ulimit -v` and `-d`), so there code is never run.
+fn python_or_skip() -> bool {
+    let ok = score::python_available();
+    if cfg!(target_os = "macos") {
+        assert!(!ok, "macOS can't cap memory, so the sandbox must not run code there");
+        return false;
+    }
+    assert!(ok || std::env::var_os("CI").is_none(), "CI has Python, but the bench sandbox can't run it:\n{}", score::sandbox_diagnose());
+    ok
+}
+
 #[test]
 fn the_hard_suite_expectations_hold_up() {
-    if !score::python_available() {
+    if !python_or_skip() {
         return;
     }
     // Reference solutions pass their own tests, so a failing model is the model's fault.
@@ -157,12 +170,22 @@ fn pow_last_digit(b: u64, e: u32) -> u64 {
 
 #[test]
 fn model_code_is_run_with_a_time_limit() {
-    if !score::python_available() {
+    if !python_or_skip() {
         return;
     }
     assert!(run_python("def f():\n    return 2", "assert f() == 2\nprint('OK')").unwrap());
     assert!(!run_python("def f():\n    return 3", "assert f() == 2\nprint('OK')").unwrap());
     assert!(!run_python("while True:\n    pass", "print('OK')").unwrap());
+    // More than the 2 GB memory limit (ulimit -v on unix, the Job Object on Windows).
+    assert!(!run_python("x = bytearray(3_000_000_000)", "print('OK')").unwrap());
+    // The environment is empty and the directory holds only the script.
+    assert!(
+        run_python(
+            "import os",
+            "assert 'HOME' not in os.environ and 'USERPROFILE' not in os.environ\nassert os.listdir('.') == ['t.py']\nprint('OK')"
+        )
+        .unwrap()
+    );
 }
 
 #[test]
