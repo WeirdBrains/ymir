@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 00:05 EST: v0.11.0 cut; GitHub upload, signatures and TAUR in progress
+
+**v0.11.0** (release commit 8ff1654, tag v0.11.0, cut with `weirdnet_release.py cut --minor` on main bc665df after CI and Pages were green there; the cut's own checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 325 passed, 0 failed): model uploads to other nodes (U2) on `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4. CI, macOS and the Release workflow passed on the tag. Artifacts downloaded into `dist/`, checked against the workflow's sums and scanned (Linux, macOS, Windows archives: no host names or home paths). This commit records the v0.11.0 tarball hashes in both Arch recipes (`taur-check 0.11.0` ready for both).
+
+**In progress at this entry:** `weirdnet_release.py github 0.11.0` (a draft release, uploading 31 files); then `assets 0.11.0`, detached signatures for the four Arch packages with the WeirdBrains Muninn packages key (as v0.8.0/v0.9.0), and `weirdnet_release.py taur 0.11.0`.
+
 ## 2026-11-24 23:05 EST: model upload U2, `ymirctl models upload FILE --node X` (branch `feature/model-upload-remote`)
 
 Slice U2 of [docs/design/model-upload.md](docs/design/model-upload.md) on `weirdnet-backends` 0.4.4's models/1 upload; no Weirdnet crate edited. Details in the plan's "U2 as built".
