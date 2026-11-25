@@ -6,9 +6,15 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-11-25
+
 ### Added
 
 - `ymirctl update status` shows whether self-update is on, its interval and feed, and the last check's result (kept in `updates/autoupdate.json`).
+
+### Fixed
+
+- Ymirctl update status shows the self-update settings and the last check.
 
 ## [0.15.3] - 2026-11-25
 
