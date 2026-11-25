@@ -329,7 +329,7 @@ serve it as an adapter, and score it against the base through the pool.
 2. **Non-goal:** reworded in [DESIGN.md](../DESIGN.md#non-goals) to "Ymir feeds, schedules and serves a
    separate trainer".
 3. **First dataset and eval topic:** "Decentralized networks: how they work". Datasets stay configurable and none
-   is built in; the tests use a small synthetic fixture on this topic. Sources for the real dataset can be fetched
+   is built in; the tests use a small synthetic fixture on this topic (`crates/ymir-testkit/tests/fixtures/decentralized-networks.jsonl` as batch input, and `decentralized-networks.dataset.jsonl` with its manifest as a dataset `train run` takes). Sources for the real dataset can be fetched
    by m3talsmith when needed.
 4. **Conversation training flag (P2):** the Bragi toggle comes after Bragi v1; the Ymir side of P2 can be built
    before it, but nothing is exported until a conversation can be flagged.
