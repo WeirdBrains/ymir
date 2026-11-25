@@ -37,10 +37,16 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # live LoRA changes, and engine launches that survive a taken port, need this release
+[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision) need this release
 crate = "weirdnet-backends"
-version = "0.4.3"
+version = "0.4.4"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
+lock = "Cargo.lock"
+
+[[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads
+crate = "weirdnet-model"
+version = "0.5.3"
+manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
 

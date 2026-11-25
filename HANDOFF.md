@@ -3,6 +3,25 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+
+## 2026-11-24 22:37 EST: weirdnet-model 0.5.3 / weirdnet-backends 0.4.4; upload code on weirdnet-model (branch `feature/weirdnet-model-0.5.3`)
+
+The Weirdnet lead released `weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4 (crates.io) with the model upload pieces Ymir asked for. This moves U1/U5's interim code onto them; behaviour is kept.
+
+**What changed**
+- `Cargo.toml`/`Cargo.lock`: `weirdnet-model` 0.5.3, `weirdnet-backends` 0.4.4; [release.toml](release.toml) `[[requires]]` for both.
+- [crates/ymir-core/src/upload.rs](crates/ymir-core/src/upload.rs): `inspect` checks Ymir's rules (one GGUF model or LoRA; symlinks, split shards, projectors and other adapter types refused) and hashes with `artifact::inspect_with`; `Inspected` holds the `Artifact`. `import` copies into a staging directory beside the models directory (`<models_dir>.importing/`, outside the store; the system temp directory if that can't be made), then `ModelStore::import` places it whole with `provenance.json` and `adapter.json`. The record is `weirdnet_model::artifact::Provenance` (`weirdnet-provenance/1`); `architecture` goes in its extra fields. `provenance(item, spec)` builds the record (also for uploads over Weirdnet next). `keep_free` is `KeepFree::default().of(total)`. Ymir's own `Provenance`, `BaseRecord`, `RecordKind`, `ArtifactKind`, `revision_of` and `adapter.json` writer are gone.
+- [crates/ymir-core/src/train.rs](crates/ymir-core/src/train.rs): `import_spec` maps a run onto `ProvenanceBase`, `ProvenanceDataset` (format, hash, rows used, `rows_in`/`rows_used` counts, the license) and `ProvenanceTrainer` (name, build, run); the rest of the run (dataset name, teacher, node, settings, steps, loss) goes in the `ymir_train` extra field.
+- One layout change: an uploaded model goes to `models_dir/<id>/` (the store's layout, as uploads over Weirdnet) instead of `models_dir/uploads/<id>/`. Models uploaded there before stay, and uploading the same bytes again still answers "already there". Old `ymir-provenance/1` records read as `Provenance` (tested).
+- Tests: core upload tests on the new types (the source left alone, no staging left, the store lists the entry with its record, the legacy layout); ymirctl and `p3a` assertions on the new record fields.
+- Docs: the plan ("Switched to Weirdnet"), [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` 320 passed, 0 failed, 7 ignored; `p3a_llamacpp` with `YMIR_TEST_TRAINER_PYTHON` (the real trainer script's adapter imports through `weirdnet-model`); `site/tool/check_links.py`.
+
+**Not tested**: multi-GB files (three reads: hash, copy, the store's check); a staging directory on another filesystem than the models directory (the store copies then).
+
+**Next**: U2, `ymirctl models upload FILE --node X` over models/1.
+
 ## 2026-11-24 21:45 EST: `train run --node` (P3a option C) and a trainable dataset fixture
 
 **Dataset fixture (merged d871bc9):** `crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl` (5 synthetic rows: 4 usable, 1 cached duplicate marked unusable) with its `ymir-dataset/1` manifest (teacher `synthetic-fixture`, CC0-1.0, input and sources hashes of the existing fixtures). `tests/dataset.rs` checks that `train::prepare_dataset` takes it (4 rows trained) and that the manifest's hashes and counts match. The 21:45 entry's run command named the batch prompt input, which has no manifest; it now names this file.

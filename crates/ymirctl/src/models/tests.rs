@@ -531,7 +531,7 @@ fn upload_of_a_model_imports_it_with_provenance_and_prints_its_entry() {
     let mut out = Vec::new();
     run_upload(&ctx, &mut out, &upload::UploadArgs { no_register: true, ..upload_args(&src) }).unwrap();
     let s = text(out);
-    let dest = ctx.dir().join("uploads/my-tune-q4_k_m/my-tune-Q4_K_M.gguf");
+    let dest = ctx.dir().join("my-tune-q4_k_m/my-tune-Q4_K_M.gguf");
     assert_eq!(std::fs::read(&dest).unwrap(), bytes);
     let p = ymir_core::upload::read_provenance(dest.parent().unwrap()).unwrap();
     assert_eq!((p.license.as_deref(), p.files[0].sha256.as_str()), (Some("apache-2.0"), sha(&bytes).as_str()));
@@ -580,11 +580,11 @@ fn upload_records_a_license_when_given_and_does_not_need_one() {
     std::fs::write(&src, gguf_bytes(5_000, 1)).unwrap();
     let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { license: Some("bad/license".into()), ..upload_args(&src) }).unwrap_err();
     assert!(err.to_string().contains("license id"), "{err}");
-    assert!(!ctx.dir().join("uploads").exists(), "nothing copied before the checks pass");
+    assert!(!ctx.dir().join("m").exists(), "nothing copied before the checks pass");
     let mut out = Vec::new();
     run_upload(&ctx, &mut out, &upload::UploadArgs { license: None, no_register: true, ..upload_args(&src) }).unwrap();
     assert!(!text(out).contains("license"));
-    assert_eq!(ymir_core::upload::read_provenance(&ctx.dir().join("uploads/m")).unwrap().license, None);
+    assert_eq!(ymir_core::upload::read_provenance(&ctx.dir().join("m")).unwrap().license, None);
 }
 
 #[test]
@@ -686,9 +686,11 @@ fn upload_from_a_run_carries_the_run_record_as_provenance() {
     assert_eq!((p.origin.as_str(), p.license.as_deref(), p.files[0].sha256.as_str()), ("train", None, sha(&bytes).as_str()));
     let base = p.base.clone().unwrap();
     assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("base"), Some("r1"), Some("Q4_K_M")));
-    assert_eq!((p.dataset.as_ref().unwrap()["license"].as_str(), p.dataset.as_ref().unwrap()["teacher"].as_str()), (Some("mit"), Some("teacher-8b")));
-    let t = p.trainer.unwrap();
-    assert_eq!((t["name"].as_str(), t["build"].as_str(), t["run"].as_str()), (Some("llama.cpp"), Some("b12628"), Some("20261124-150000-abcd")));
+    let d = p.dataset.clone().unwrap();
+    assert_eq!((d.licenses, d.rows, d.format.as_deref()), (vec!["mit".to_string()], Some(2), Some("ymir-dataset/1")));
+    assert_eq!(p.extra["ymir_train"]["teacher"], "teacher-8b");
+    let t = p.trainer.clone().unwrap();
+    assert_eq!((t.name.as_deref(), t.build.as_deref(), t.run.as_deref()), (Some("llama.cpp"), Some("b12628"), Some("20261124-150000-abcd")));
     let cfg = NodeConfig::load(&ctx.config).unwrap();
     let a = &cfg.model.local[0].lora[0];
     assert_eq!((a.id.as_str(), a.revision.as_deref(), a.base_revision.as_deref()), ("base+kad", Some(p.revision.as_str()), Some("r1")));

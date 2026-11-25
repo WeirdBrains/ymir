@@ -14,7 +14,7 @@ use weirdnet_backends::EngineKind;
 use ymir_core::NodeConfig;
 use ymir_core::config::LocalAdapter;
 use ymir_core::train::{self, AdapterRecord, RunRecord, RunStatus};
-use ymir_core::upload::{self, ArtifactKind, BaseRecord, ImportSpec};
+use ymir_core::upload::{self, ArtifactKind, ImportSpec, ProvenanceBase};
 
 use super::plan::{self, id_for_file};
 use super::{Ctx, DirArgs, Meter, adapters, gib, hub, local};
@@ -62,7 +62,7 @@ fn existing(dir: &Path) -> Option<&Path> {
 }
 
 /// The adapter's base in node.toml, checked: served by llama.cpp, its file here, same architecture.
-fn check_base(ctx: &Ctx, base: &str, item: &upload::Inspected) -> Result<BaseRecord> {
+fn check_base(ctx: &Ctx, base: &str, item: &upload::Inspected) -> Result<ProvenanceBase> {
     let cfg: &NodeConfig =
         ctx.cfg.as_ref().with_context(|| format!("{} not found or not readable (run `ymirctl setup` first)", ctx.config.display()))?;
     let Some(m) = cfg.model.local.iter().find(|m| m.id == base) else {
@@ -76,13 +76,12 @@ fn check_base(ctx: &Ctx, base: &str, item: &upload::Inspected) -> Result<BaseRec
         bail!("{base}'s model file {} is not on this machine, so the adapter can't be checked against it", launch.source);
     }
     let header = upload::check_adapter_base(item, Path::new(&launch.source))?;
-    Ok(BaseRecord {
-        id: Some(base.to_string()),
-        hub: item.header.base_model.clone().or(header.repo).or(header.base_model),
-        revision: m.revision.clone(),
-        quant: m.quant.clone(),
-        sha256: None,
-    })
+    let mut b = ProvenanceBase::default();
+    b.id = Some(base.to_string());
+    b.hub = item.header.base_model.clone().or(header.repo).or(header.base_model);
+    b.revision = m.revision.clone();
+    b.quant = m.quant.clone();
+    Ok(b)
 }
 
 /// A finished run's record and its adapter, from `RUN_DIR/run.json`.
@@ -130,7 +129,7 @@ pub(super) fn run_with(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Opt
     let item = upload::inspect(&file)?;
     let adapter_for = a.adapter_for.clone().or_else(|| run.as_ref().map(|(r, _)| r.base.clone()));
     if let Some((r, ad)) = &run {
-        if !item.kind.is_adapter() {
+        if !item.kind().is_adapter() {
             bail!("{} is a full model; run {} made a LoRA adapter", item.file_name, r.id);
         }
         let (sha, _) = upload::sha256_file(&file)?;
@@ -138,7 +137,7 @@ pub(super) fn run_with(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Opt
             bail!("{} is not the adapter run {} made: its SHA-256 differs from the run record's", file.display(), r.id);
         }
     }
-    let base = match (item.kind, &adapter_for) {
+    let base = match (item.kind(), &adapter_for) {
         (ArtifactKind::Adapter { .. }, None) => {
             bail!("{} is a LoRA adapter: say which model it goes on with --adapter-for BASE", item.file_name)
         }
@@ -184,9 +183,9 @@ pub(super) fn run_with(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Opt
         out,
         "{}: {} ({}), {}{}",
         item.file_name,
-        item.kind.name(),
+        upload::kind_name(item.kind()),
         item.header.architecture,
-        gib(item.size),
+        gib(item.size()),
         base.as_ref().and_then(|b| b.id.as_deref()).map(|b| format!(", for `{b}`")).unwrap_or_default()
     )?;
     let models_dir = ctx.dir().to_path_buf();
@@ -196,13 +195,13 @@ pub(super) fn run_with(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Opt
             id: id.clone(),
             license: license.clone(),
             base: base.clone(),
-            origin: "upload".into(),
-            uploaded_ms: now_ms(),
+            origin: upload::ORIGIN_UPLOAD.into(),
+            uploaded_ms: now_ms().max(0) as u64,
             disk,
             ..Default::default()
         },
     };
-    let mut meter = Meter { out: &mut *out, total: item.size, tty: ctx.tty, last: 0 };
+    let mut meter = Meter { out: &mut *out, total: item.size(), tty: ctx.tty, last: 0 };
     let imported = upload::import(&models_dir, &item, &spec, &mut |done, _| meter.tick(&id, done))?;
     if ctx.tty {
         writeln!(out)?;
@@ -252,7 +251,7 @@ fn register_adapter(
     base: &str,
     id: &str,
     file: &str,
-    rec: Option<&BaseRecord>,
+    rec: Option<&ProvenanceBase>,
     revision: &str,
 ) -> Result<()> {
     let la = LocalAdapter {
