@@ -220,3 +220,37 @@ async fn eval_scores_models_with_checks_and_a_judge() -> Result<()> {
 fn line_of(said: &str, m: &str) -> Vec<String> {
     said.lines().find(|l| l.starts_with(m)).unwrap_or_default().split_whitespace().map(str::to_string).collect()
 }
+
+const DATASET_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks.dataset.jsonl");
+
+/// The synthetic training dataset next to the prompt fixture: hand-written answers in
+/// `ymirctl batch --jsonl`'s output format with its `ymir-dataset/1` manifest, so `ymirctl train
+/// run --dataset` takes it as it is (training plan P3a's first run).
+#[test]
+fn the_fixture_dataset_is_accepted_for_training() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let out = dir.path().join("DATA.jsonl");
+    let rec = ymir_core::train::prepare_dataset(Path::new(DATASET_FIXTURE), false, &out)?;
+    assert_eq!(rec.format, ymir_core::dataset::MANIFEST_FORMAT);
+    assert_eq!((rec.rows_in, rec.rows_used), (5, 4), "the cached repeat is not trained on");
+    assert_eq!(rec.license, "CC0-1.0");
+    assert_eq!(rec.teacher.as_deref(), Some("synthetic-fixture"));
+    let train: Vec<Value> = rows(&out);
+    assert_eq!(train.len(), 4);
+    for r in &train {
+        let turns = r["messages"].as_array().expect("messages");
+        assert_eq!(turns.last().expect("a turn")["role"], "assistant");
+        assert!(turns.iter().any(|t| t["role"] == "user"));
+    }
+    assert_eq!(train[2]["messages"][0]["role"], "system", "a row's system prompt is kept");
+
+    // The manifest stays true to the files next to it.
+    let m: ymir_core::dataset::Manifest =
+        serde_json::from_str(&std::fs::read_to_string(ymir_core::dataset::manifest_path(Path::new(DATASET_FIXTURE)))?)?;
+    let sha =
+        |p: &str| -> Result<String> { Ok(<sha2::Sha256 as sha2::Digest>::digest(std::fs::read(p)?).iter().map(|b| format!("{b:02x}")).collect()) };
+    assert_eq!(m.input_sha256, sha(FIXTURE)?, "the prompt fixture changed: update input_sha256 in the dataset manifest");
+    assert_eq!(m.sources.as_ref().expect("sources").sha256, sha(SOURCES_FIXTURE)?, "the sources fixture changed: update the dataset manifest");
+    assert_eq!((m.rows_in_input, m.rows_usable, m.cache_hits), (5, 4, 1));
+    Ok(())
+}

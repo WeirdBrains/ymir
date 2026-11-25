@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A trainable dataset fixture, `crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl` with its `ymir-dataset/1` manifest (synthetic, CC0-1.0), which `ymirctl train run --dataset` accepts; a test checks the manifest's hashes and counts against the fixtures.
+
 ## [0.9.0] - 2026-11-24
 
 ### Added
