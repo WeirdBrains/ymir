@@ -407,12 +407,14 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   architecture; its `base_revision` and `base_quant` are recorded. Entries are added to node.toml by default
   (`local::register` for models, `models adapter add`'s validated edit for adapters); the adapter message says it
   serves after a restart or the base's next load. `--node` is refused until U2.
-- **Switch-over to Weirdnet** when `weirdnet-model` 0.5.3 ships: `inspect` becomes `artifact::inspect`, `import`
-  becomes `ModelStore::import` (which writes `adapter.json` itself), the record becomes its `Provenance`
-  (`ArtifactKind::Adapter { format }` already matches; `kind` stays `model | adapter | projector` on disk, and
-  `license` stays optional), and the free-space check moves to `ModelStore::free_bytes`. On-disk layout and file
-  names stay the same, so nothing already uploaded moves. Until 0.5.3, the adapter size `weirdnet-model` 0.5.2
-  reports counts `provenance.json` (a few hundred bytes).
+- **Switched to Weirdnet (2026-11-24, `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4):** `inspect` hashes with
+  `artifact::inspect`, `import` stages a copy outside the store (`<models_dir>.importing/`) and places it with
+  `ModelStore::import` (which writes `adapter.json` itself), the record is `weirdnet-model`'s `Provenance`
+  (`weirdnet-provenance/1`; the architecture and a run's settings go in its extra fields), and the free-space floor is
+  `KeepFree::default()`. Ymir keeps its own rules on top (one GGUF model or LoRA, ids, optional license, the "same
+  bytes again" answer). One change: a model now goes to `models_dir/<id>/` (the store's layout, the same as an
+  upload over Weirdnet) instead of `models_dir/uploads/<id>/`; models uploaded there before stay, and uploading the
+  same bytes again still finds them. Old `ymir-provenance/1` records read as `Provenance`.
 
 ## U5 as built (2026-11-24)
 

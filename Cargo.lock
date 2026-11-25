@@ -1340,6 +1340,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5303,9 +5313,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f80d14773feecc00dc943c2ab33513cba0108c5b5579421ab607305c7921e5d1"
+checksum = "afa0412e31605ee4e06a5895a8aea27d53a298aa25a0eb2d2f74f212b20d66af"
 dependencies = [
  "async-trait",
  "axum",
@@ -5388,11 +5398,12 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-model"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67de1c28ee6b786514d232d3fb4651faef265ddd5675d8b4cf7707c87c09a75e"
+checksum = "4750fdc0b5125596bfab08f0460c2cbab50b0a28e6f62a7d391e3365e89b9002"
 dependencies = [
  "dirs",
+ "fs4",
  "minijinja",
  "minijinja-contrib",
  "serde",

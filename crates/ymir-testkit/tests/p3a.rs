@@ -170,12 +170,10 @@ async fn a_run_trains_an_adapter_with_the_pinned_trainer_and_adds_it() -> Result
     assert_eq!(Some(p.revision.clone()), a.revision);
     let base = p.base.clone().unwrap();
     assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("alpha"), Some("r1"), Some("Q4_K_M")));
-    assert_eq!(p.dataset.as_ref().unwrap()["license"], "apache-2.0");
+    assert_eq!(p.dataset.as_ref().unwrap().licenses, ["apache-2.0"]);
     let t = p.trainer.clone().unwrap();
-    assert_eq!(
-        (t["name"].as_str(), t["build"].as_str(), t["run"].as_str(), t["hyper"]["rank"].as_u64()),
-        (Some("mock"), Some("b0000"), Some(r.id.as_str()), Some(8))
-    );
+    assert_eq!((t.name.as_deref(), t.build.as_deref(), t.run.as_deref()), (Some("mock"), Some("b0000"), Some(r.id.as_str())));
+    assert_eq!(p.extra["ymir_train"]["hyper"]["rank"], 8);
     assert!(stored.join("adapter.json").is_file(), "listed like a pulled adapter");
     assert!(!dir.join("full.gguf").exists(), "the full model is dropped unless --keep-full");
     // The trainer got the usable rows only, each ending in the teacher's answer.

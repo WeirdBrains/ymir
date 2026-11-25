@@ -49,9 +49,10 @@ fn spec(id: &str) -> ImportSpec {
 fn inspect_tells_models_from_lora_adapters() {
     let d = tempfile::tempdir().unwrap();
     let m = inspect(&write(d.path(), "tuned-Q4_K_M.gguf", &model("qwen3"))).unwrap();
-    assert_eq!((m.kind, m.header.architecture.as_str()), (ArtifactKind::Model, "qwen3"));
+    assert_eq!((m.kind(), m.header.architecture.as_str()), (ArtifactKind::Model, "qwen3"));
+    assert_eq!(m.sha256(), hex::encode(Sha256::digest(model("qwen3"))));
     let a = inspect(&write(d.path(), "support.gguf", &lora("qwen3"))).unwrap();
-    assert_eq!(a.kind, ArtifactKind::Adapter { format: AdapterFormat::GgufLora });
+    assert_eq!(a.kind(), ArtifactKind::Adapter { format: AdapterFormat::GgufLora });
 }
 
 #[test]
@@ -107,7 +108,7 @@ fn import_copies_hashes_and_writes_the_record() {
     let mut ticks = Vec::new();
     let got = import(models.path(), &item, &spec("tuned"), &mut |d, t| ticks.push((d, t))).unwrap();
     assert!(!got.already);
-    assert_eq!(got.file, models.path().join("uploads/tuned/tuned-Q4_K_M.gguf"));
+    assert_eq!(got.file, models.path().join("tuned/tuned-Q4_K_M.gguf"));
     assert_eq!(std::fs::read(&got.file).unwrap(), bytes);
     assert_eq!(ticks.last(), Some(&(bytes.len() as u64, bytes.len() as u64)));
     let sha = hex::encode(Sha256::digest(&bytes));
@@ -115,17 +116,24 @@ fn import_copies_hashes_and_writes_the_record() {
     assert_eq!(p, got.provenance);
     assert_eq!(
         (p.format.as_str(), p.kind, p.origin.as_str(), p.license.as_deref()),
-        (PROVENANCE_FORMAT, RecordKind::Model, "upload", Some("apache-2.0"))
+        (PROVENANCE_FORMAT, ProvenanceKind::Model, "upload", Some("apache-2.0"))
     );
     assert_eq!(p.files, vec![ArtifactFile { path: "tuned-Q4_K_M.gguf".into(), size: bytes.len() as u64, sha256: sha.clone() }]);
-    assert_eq!(p.revision, revision_of(&p.files));
+    assert_eq!(p.revision, weirdnet_model::artifact::revision(&p.files));
     assert!(p.revision.starts_with("sha256:") && p.revision.len() == 7 + 16);
-    assert_eq!(p.architecture.as_deref(), Some("qwen3"));
-    // No temporary files are left, and weirdnet-model's store lists the upload as a model.
+    assert_eq!(p.extra.get("architecture").and_then(|v| v.as_str()), Some("qwen3"));
+    assert_eq!(p.uploaded_ms, Some(1));
+    // No temporary files are left (in the entry, the store or the staging area), and
+    // weirdnet-model's store lists the upload as a model with its record.
     let names: Vec<String> = std::fs::read_dir(&got.dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
+    let top: Vec<String> = std::fs::read_dir(models.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(top, ["tuned"], "{top:?}");
+    assert!(!models.path().with_file_name(format!("{}.importing", models.path().file_name().unwrap().to_string_lossy())).exists());
     let listed = weirdnet_model::ModelStore::new(models.path()).list();
-    assert!(listed.iter().any(|m| m.id == "tuned-Q4_K_M" && m.files == ["uploads/tuned/tuned-Q4_K_M.gguf"]), "{listed:?}");
+    assert!(listed.iter().any(|m| m.files == ["tuned/tuned-Q4_K_M.gguf"] && m.provenance.is_some()), "{listed:?}");
+    // The source is left alone.
+    assert_eq!(std::fs::read(&item.path).unwrap(), bytes);
 }
 
 #[test]
@@ -134,7 +142,10 @@ fn an_adapter_lands_where_the_store_finds_adapters() {
     let models = tempfile::tempdir().unwrap();
     let item = inspect(&write(src.path(), "support.gguf", &lora("qwen3"))).unwrap();
     let mut s = spec("qwen3-8b+support");
-    s.base = Some(BaseRecord { id: Some("qwen3-8b".into()), revision: Some("r1".into()), ..Default::default() });
+    let mut base = ProvenanceBase::default();
+    base.id = Some("qwen3-8b".into());
+    base.revision = Some("r1".into());
+    s.base = Some(base);
     let got = import(models.path(), &item, &s, &mut |_, _| {}).unwrap();
     assert_eq!(got.file, models.path().join("adapters/qwen3-8b+support/support.gguf"));
     assert_eq!(got.provenance.base.as_ref().and_then(|b| b.revision.as_deref()), Some("r1"));
@@ -144,7 +155,7 @@ fn an_adapter_lands_where_the_store_finds_adapters() {
     assert_eq!(adapters[0].format, AdapterFormat::GgufLora);
     assert_eq!(adapters[0].path, got.file);
     assert!(got.dir.join("adapter.json").is_file());
-    assert_eq!(got.provenance.adapter_format, Some(AdapterFormat::GgufLora));
+    assert_eq!(got.provenance.kind, ProvenanceKind::Adapter);
     assert!(weirdnet_model::ModelStore::new(models.path()).list().is_empty(), "an adapter is not a model");
 }
 
@@ -173,7 +184,7 @@ fn not_enough_space_copies_nothing() {
     // A 1000 GiB disk keeps 100 GiB free: 100 GiB free plus a little is not enough for this file.
     s.disk = Some(((100 << 30) + 10, 1000 << 30));
     assert!(import(models.path(), &item, &s, &mut |_, _| {}).unwrap_err().to_string().contains("must stay free"));
-    assert!(!models.path().join("uploads/m").exists());
+    assert!(!models.path().join("m").exists());
     s.disk = Some(((100 << 30) + (1 << 20), 1000 << 30));
     import(models.path(), &item, &s, &mut |_, _| {}).unwrap();
 }
@@ -191,8 +202,19 @@ fn adapters_must_match_their_base() {
 }
 
 #[test]
-fn the_revision_does_not_depend_on_file_order() {
-    let f = |p: &str, s: &str| ArtifactFile { path: p.into(), size: 1, sha256: s.into() };
-    assert_eq!(revision_of(&[f("a", "1"), f("b", "2")]), revision_of(&[f("b", "2"), f("a", "1")]));
-    assert_ne!(revision_of(&[f("a", "1")]), revision_of(&[f("a", "2")]));
+fn a_model_uploaded_before_the_move_is_still_already_there() {
+    let src = tempfile::tempdir().unwrap();
+    let models = tempfile::tempdir().unwrap();
+    let path = write(src.path(), "m.gguf", &model("llama"));
+    let item = inspect(&path).unwrap();
+    // As U1 left it: models_dir/uploads/m/ with a ymir-provenance/1 record.
+    let old = models.path().join("uploads/m");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::copy(&path, old.join("m.gguf")).unwrap();
+    let rec = serde_json::json!({"format": "ymir-provenance/1", "kind": "model", "id": "m", "origin": "upload", "uploaded_ms": 5,
+        "revision": item.artifact.revision, "files": item.artifact.files, "architecture": "llama"});
+    std::fs::write(old.join(PROVENANCE_FILE), serde_json::to_vec(&rec).unwrap()).unwrap();
+    let again = import(models.path(), &item, &spec("m"), &mut |_, _| {}).unwrap();
+    assert!(again.already && again.dir == old);
+    assert_eq!((again.provenance.format.as_str(), again.provenance.uploaded_ms), ("ymir-provenance/1", Some(5)));
 }

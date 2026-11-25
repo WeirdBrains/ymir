@@ -37,7 +37,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::control::{self, ControlRequest};
-use crate::upload::{self, ArtifactKind, BaseRecord, ImportSpec};
+use crate::upload::{self, ArtifactKind, ImportSpec, ProvenanceBase, ProvenanceDataset, ProvenanceTrainer};
 use crate::{NodeConfig, Paths};
 
 /// The trainer interface version Ymir speaks.
@@ -579,31 +579,42 @@ pub enum Update {
 /// its own adapter with these, and `ymirctl models upload --from-run` sends a copied run's adapter
 /// with the same record (docs/design/model-upload.md, slice U5).
 pub fn import_spec(record: &RunRecord, adapter: &AdapterRecord, uploaded_ms: i64) -> ImportSpec {
+    let mut base = ProvenanceBase::default();
+    base.id = Some(record.base.clone());
+    base.revision = adapter.base_revision.clone();
+    base.quant = adapter.base_quant.clone();
+    let d = &record.dataset;
+    let mut dataset = ProvenanceDataset::default();
+    dataset.format = Some(d.format.clone());
+    dataset.sha256 = Some(d.sha256.clone());
+    dataset.rows = Some(d.rows_used as u64);
+    dataset.counts = BTreeMap::from([("rows_in".to_string(), d.rows_in as u64), ("rows_used".to_string(), d.rows_used as u64)]);
+    dataset.licenses = vec![d.license.clone()];
+    let mut trainer = ProvenanceTrainer::default();
+    trainer.name = Some(record.trainer.engine.clone());
+    trainer.build = Some(record.trainer.build.clone());
+    trainer.run = Some(record.id.clone());
+    // The rest of the run record, as Ymir's own field (kept by readers that don't know it).
+    let run = serde_json::json!({
+        "dataset": d.name,
+        "teacher": d.teacher,
+        "interface": record.trainer.interface,
+        "node": record.node,
+        "trained_from": record.trained_from,
+        "hyper": record.hyper,
+        "steps": record.steps,
+        "final_loss": record.final_loss,
+    });
     ImportSpec {
         id: adapter.id.clone(),
         license: None,
-        base: Some(BaseRecord {
-            id: Some(record.base.clone()),
-            hub: None,
-            revision: adapter.base_revision.clone(),
-            quant: adapter.base_quant.clone(),
-            sha256: None,
-        }),
-        origin: "train".into(),
-        uploaded_ms,
+        base: Some(base),
+        origin: upload::ORIGIN_TRAIN.into(),
+        uploaded_ms: uploaded_ms.max(0) as u64,
         disk: None,
-        dataset: serde_json::to_value(&record.dataset).ok(),
-        trainer: Some(serde_json::json!({
-            "name": record.trainer.engine,
-            "build": record.trainer.build,
-            "interface": record.trainer.interface,
-            "run": record.id,
-            "node": record.node,
-            "trained_from": record.trained_from,
-            "hyper": record.hyper,
-            "steps": record.steps,
-            "final_loss": record.final_loss,
-        })),
+        dataset: Some(dataset),
+        trainer: Some(trainer),
+        extra: BTreeMap::from([("ymir_train".to_string(), run)]),
     }
 }
 
@@ -760,8 +771,8 @@ pub async fn run(
 /// run's copy and fills in `made`'s file, hash, size and revision.
 fn install(models_dir: &Path, adapter: &Path, record: &RunRecord, mut made: AdapterRecord) -> Result<AdapterRecord> {
     let mut item = upload::inspect(adapter).context("checking the trainer's adapter")?;
-    if !item.kind.is_adapter() {
-        bail!("the trainer's extract-lora step wrote a {}, not a LoRA adapter", item.kind.name());
+    if !item.kind().is_adapter() {
+        bail!("the trainer's extract-lora step wrote a {}, not a LoRA adapter", upload::kind_name(item.kind()));
     }
     item.file_name = format!("{}.gguf", file_safe(&made.id));
     let imported = upload::import(models_dir, &item, &import_spec(record, &made, now_ms()), &mut |_, _| {})?;

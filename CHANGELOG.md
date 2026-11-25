@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4. `ymirctl models upload` and `train run` now use `weirdnet-model`'s artifact inspection, `Provenance` (`weirdnet-provenance/1`) and `ModelStore::import`; an uploaded model goes to `models_dir/ID/` (was `models_dir/uploads/ID/`, where earlier uploads stay). Behaviour is otherwise the same.
+
 ## [0.10.0] - 2026-11-24
 
 ### Added

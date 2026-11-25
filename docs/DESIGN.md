@@ -772,12 +772,13 @@ and a per-device owner role.
 
 Slice U1 of [docs/design/model-upload.md](design/model-upload.md), local only. `ymirctl models upload FILE [--name ID]
 [--adapter-for BASE] [--license L] [--role R] [--no-register]` takes one GGUF model or GGUF LoRA adapter on this
-machine (`ymir_core::upload`, interim until `weirdnet-model` 0.5.3's `artifact::inspect` / `ModelStore::import`):
+machine (`ymir_core::upload` on `weirdnet-model` 0.5.3's `artifact::inspect`, `Provenance` and `ModelStore::import`):
 the header must read as a model or a LoRA (projectors, split shards, symlinks and other files are refused), an
 adapter's base must be a llama.cpp `[[model.local]]` here with the same architecture, and at least 10 percent of the
-disk or 20 GiB (whichever is more) must stay free. The file is copied in while it is hashed and linked into place
-without replacing anything: models to `models_dir/uploads/ID/`, adapters to `models_dir/adapters/ID/` (with
-`adapter.json`, so `ModelStore::adapters` lists them). `provenance.json` (`ymir-provenance/1`) beside it records
+disk or 20 GiB (whichever is more) must stay free. The file is copied into a staging directory outside the store
+while it is hashed, then placed whole: models to `models_dir/ID/`, adapters to `models_dir/adapters/ID/` (with
+`adapter.json`, so `ModelStore::adapters` lists them); models uploaded before 2026-11-24 stay in
+`models_dir/uploads/ID/`. `provenance.json` (`weirdnet-provenance/1`) beside it records
 the files and SHA-256, the revision (`sha256:` and 16 hex digits over the files), the license when given (not
 required), the architecture and, for adapters, the base's id, revision and quantisation. The entry is added to
 node.toml by default with that revision (adapters with `base_revision` and `base_quant`), so the answer cache and

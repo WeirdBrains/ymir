@@ -1,150 +1,86 @@
-//! Uploading a model trained elsewhere (docs/design/model-upload.md, slice U1): check a local GGUF
-//! model or GGUF LoRA adapter, hash it, import it into the models directory atomically, and write a
+//! Uploading a model trained elsewhere (docs/design/model-upload.md): check a local GGUF model or
+//! GGUF LoRA adapter, hash it, place it in the models directory atomically, with a
 //! `provenance.json` beside it saying where it came from.
 //!
-//! Interim: the artifact inspection and the [`Provenance`] record are generic and are to move to
-//! `weirdnet-model` (request A to the Weirdnet lead, 2026-11-24: `artifact::inspect`,
-//! `Provenance`, `ModelStore::import`). The record is shaped like the one requested so Ymir can
-//! switch to it without changing what is on disk. Keep this module free of other Ymir types.
+//! On `weirdnet-model` 0.5.3 since 2026-11-24: [`weirdnet_model::artifact::inspect`] reads and
+//! hashes the file, [`Provenance`] is the record, and [`ModelStore::import`] places it. This module
+//! keeps Ymir's own rules on top: the file kinds this slice takes (one GGUF file, a model or a LoRA
+//! adapter), the ids and licenses it accepts, the free-space floor for local imports, the
+//! "same bytes again" answer, and how a training run's record maps onto [`Provenance`].
 //!
-//! Layout: a model goes to `models_dir/uploads/<id>/<file>.gguf` (which `ModelStore::list` finds);
-//! an adapter to `models_dir/adapters/<id>/<file>.gguf` (which `ModelStore::adapters` finds). The
-//! record is `provenance.json` in the same directory. Nothing is ever executed, and only GGUF files
-//! are taken in this slice: split GGUFs, projectors, safetensors, MLX and PEFT come later (U7).
+//! Layout ([`ModelStore::import`]): a model goes to `models_dir/<id>/<file>.gguf`, an adapter to
+//! `models_dir/adapters/<id>/<file>.gguf` with `adapter.json`, each with `provenance.json`. Models
+//! uploaded before the move (in `models_dir/uploads/<id>/`, U1) stay where they are. The file is
+//! first copied into a staging directory next to the models directory (outside it), as an upload
+//! over Weirdnet stages its parts, so the user's file is never moved. Nothing is ever executed.
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
+use weirdnet_backends::models::KeepFree;
+use weirdnet_model::artifact::{self, Artifact};
 use weirdnet_model::gguf::{GgufHeader, GgufKind, read_header};
-use weirdnet_model::hf::AdapterFormat;
+use weirdnet_model::{ModelLayout, ModelStore};
 
-/// The record's format name.
-pub const PROVENANCE_FORMAT: &str = "ymir-provenance/1";
-/// The record's file name, beside the weights.
-pub const PROVENANCE_FILE: &str = "provenance.json";
-/// Where uploaded models go under the models directory.
-pub const UPLOADS_DIR: &str = "uploads";
-/// Where adapters go under the models directory (as `weirdnet-model`'s store).
-pub const ADAPTERS_DIR: &str = "adapters";
+pub use weirdnet_model::AdapterFormat;
+pub use weirdnet_model::artifact::{
+    ArtifactFile, ArtifactKind, ORIGIN_TRAIN, ORIGIN_UPLOAD, PROVENANCE_FILE, PROVENANCE_FORMAT, Provenance, ProvenanceBase, ProvenanceDataset,
+    ProvenanceKind, ProvenanceTrainer,
+};
 
-/// What an uploaded file is, shaped like the `weirdnet-model` `ArtifactKind` the Weirdnet lead
-/// accepted (request A, model 0.5.3): projectors are their own kind (`GgufKind::Projector` there;
-/// here, a model header whose architecture is `clip`). U1 takes models and GGUF LoRA adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtifactKind {
-    Model,
-    Adapter { format: AdapterFormat },
-    Projector,
-}
+/// Where models uploaded before `weirdnet-model` 0.5.3 went (U1), still looked at for "already
+/// there".
+pub const LEGACY_UPLOADS_DIR: &str = "uploads";
+/// Where adapters go under the models directory.
+pub const ADAPTERS_DIR: &str = weirdnet_model::store::ADAPTERS_DIR;
 
-impl ArtifactKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            ArtifactKind::Model => "model",
-            ArtifactKind::Adapter { .. } => "LoRA adapter",
-            ArtifactKind::Projector => "vision projector",
-        }
-    }
-
-    /// The kind as the record writes it.
-    pub fn record(self) -> RecordKind {
-        match self {
-            ArtifactKind::Model => RecordKind::Model,
-            ArtifactKind::Adapter { .. } => RecordKind::Adapter,
-            ArtifactKind::Projector => RecordKind::Projector,
-        }
-    }
-
-    pub fn is_adapter(self) -> bool {
-        matches!(self, ArtifactKind::Adapter { .. })
+/// A name for what an upload is, for messages.
+pub fn kind_name(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Model => "model",
+        ArtifactKind::Adapter { .. } => "LoRA adapter",
+        ArtifactKind::Projector => "vision projector",
+        _ => "artifact",
     }
 }
 
-/// `kind` in `provenance.json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RecordKind {
-    Model,
-    Adapter,
-    Projector,
-}
-
-/// One file of an artifact, relative to its directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactFile {
-    pub path: String,
-    pub size: u64,
-    pub sha256: String,
-}
-
-/// The base model an adapter (or a fine-tune) was made from.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BaseRecord {
-    /// The base's model id in this pool, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// The base as a Hub id (`owner/name`), from the GGUF header when it has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hub: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quant: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-}
-
-/// Where an upload came from: what the uploader said, checked against the bytes where it can be.
-/// Metadata for people and rollouts, not a trust anchor.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Provenance {
-    pub format: String,
-    pub kind: RecordKind,
-    /// For an adapter: `gguf_lora` or `peft`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adapter_format: Option<AdapterFormat>,
-    pub id: String,
-    pub files: Vec<ArtifactFile>,
-    /// `sha256:` and 16 hex digits over the files ([`revision_of`]); the entry's `revision`.
-    pub revision: String,
-    /// `upload`, `train` or `hub`.
-    pub origin: String,
-    /// An SPDX id or a license name, when the uploader gave one (not required: m3talsmith,
-    /// 2026-11-24).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub license: Option<String>,
-    /// `general.architecture` from the header.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub architecture: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<BaseRecord>,
-    /// A dataset manifest's summary (format, hash, counts, licenses), when given (later slices).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dataset: Option<serde_json::Value>,
-    /// The trainer (name, build, run), when known (later slices).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trainer: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uploaded_by: Option<String>,
-    pub uploaded_ms: i64,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, serde_json::Value>,
-}
-
-/// A local GGUF checked for upload, before anything is copied.
+/// A local GGUF checked (and hashed) for upload, before anything is copied.
 #[derive(Debug, Clone)]
 pub struct Inspected {
     pub path: PathBuf,
-    /// The file name it keeps in the store.
+    /// The file name it keeps in the store (a training run sets its adapter's own).
     pub file_name: String,
-    pub kind: ArtifactKind,
+    /// What `weirdnet-model` read: kind, format, architecture, the file's SHA-256, the revision.
+    pub artifact: Artifact,
     pub header: GgufHeader,
-    pub size: u64,
+}
+
+impl Inspected {
+    pub fn kind(&self) -> ArtifactKind {
+        self.artifact.kind
+    }
+
+    pub fn size(&self) -> u64 {
+        self.artifact.size()
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.artifact.files[0].sha256
+    }
+
+    /// The artifact as it is stored: under [`Inspected::file_name`], with its revision for that.
+    pub fn stored(&self) -> Artifact {
+        let mut a = self.artifact.clone();
+        if a.files[0].path != self.file_name {
+            a.files[0].path = self.file_name.clone();
+            a.revision = artifact::revision(&a.files);
+        }
+        a
+    }
 }
 
 /// Checks a license when one is given: an id made of letters, digits and `.+-_ ()`. None (or
@@ -170,15 +106,21 @@ pub fn check_id(id: &str) -> Result<()> {
 /// Whether a file name is a shard of a split GGUF (`-00001-of-00003.gguf`).
 fn is_split(name: &str) -> bool {
     let stem = name.to_ascii_lowercase();
-    let Some(stem) = stem.strip_suffix(".gguf") else { return false };
+    let stem = stem.trim_end_matches(".gguf");
     let mut parts = stem.rsplitn(4, '-');
     let (Some(of), Some(word), Some(part)) = (parts.next(), parts.next(), parts.next()) else { return false };
     word == "of" && !of.is_empty() && of.chars().all(|c| c.is_ascii_digit()) && !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Reads and checks a local file for upload: a regular file (not a symlink) named `*.gguf`, not a
-/// split shard, whose header is a model or a LoRA adapter. Projectors (`clip`) are refused for now.
+/// Reads, checks and hashes a local file for upload: a regular file (not a symlink) named
+/// `*.gguf`, not a split shard, whose header is a model or a LoRA adapter. Projectors are refused
+/// for now (U7).
 pub fn inspect(path: &Path) -> Result<Inspected> {
+    inspect_with(path, &mut |_, _| {})
+}
+
+/// [`inspect`], calling `progress(done, total)` while it hashes.
+pub fn inspect_with(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<Inspected> {
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
     if meta.file_type().is_symlink() {
         bail!("{} is a symlink; give the real file", path.display());
@@ -199,41 +141,42 @@ pub fn inspect(path: &Path) -> Result<Inspected> {
         );
     }
     let header = read_header(std::io::BufReader::new(File::open(path)?)).with_context(|| format!("{file_name} is not a readable GGUF file"))?;
-    let kind = match &header.kind {
+    match &header.kind {
+        GgufKind::Projector => bail!("{file_name} is a vision projector (mmproj); projectors are not taken yet"),
         GgufKind::Model if header.architecture.eq_ignore_ascii_case("clip") || header.architecture.eq_ignore_ascii_case("mmproj") => {
             bail!("{file_name} is a vision projector (mmproj); projectors are not taken yet")
         }
-        GgufKind::Model => ArtifactKind::Model,
-        k if k.is_lora() => ArtifactKind::Adapter { format: AdapterFormat::GgufLora },
+        GgufKind::Model => {}
+        k if k.is_lora() => {}
         GgufKind::Adapter { adapter_type, .. } => bail!("{file_name} is a `{adapter_type}` adapter; only LoRA adapters are served"),
         _ => bail!("{file_name} is a kind of GGUF this version does not take"),
-    };
-    Ok(Inspected { path: path.to_path_buf(), file_name, kind, header, size: meta.len() })
-}
-
-/// The revision of a set of files: `sha256:` and the first 16 hex digits of the SHA-256 of their
-/// sorted `path:sha256` lines.
-pub fn revision_of(files: &[ArtifactFile]) -> String {
-    let mut lines: Vec<String> = files.iter().map(|f| format!("{}:{}\n", f.path, f.sha256)).collect();
-    lines.sort();
-    let digest = Sha256::digest(lines.concat().as_bytes());
-    format!("sha256:{}", &hex::encode(digest)[..16])
+    }
+    let found = artifact::inspect_with(&[path.to_path_buf()], &mut |p| {
+        progress(p.done, p.total);
+        true
+    })
+    .map_err(|e| anyhow!("{file_name}: {e}"))?;
+    match found.kind {
+        ArtifactKind::Model | ArtifactKind::Adapter { format: AdapterFormat::GgufLora } => {}
+        other => bail!("{file_name} reads as a {}, which this slice does not take", kind_name(other)),
+    }
+    Ok(Inspected { path: path.to_path_buf(), file_name, artifact: found, header })
 }
 
 /// The directory an upload of `kind` with `id` goes to under `models_dir`.
 pub fn target_dir(models_dir: &Path, kind: ArtifactKind, id: &str) -> Result<PathBuf> {
     check_id(id)?;
-    let sub = match kind {
-        ArtifactKind::Model => UPLOADS_DIR,
-        ArtifactKind::Adapter { .. } => ADAPTERS_DIR,
-        ArtifactKind::Projector => bail!("projectors are not taken yet"),
-    };
-    Ok(models_dir.join(sub).join(id))
+    let store = ModelStore::new(models_dir);
+    match kind {
+        ArtifactKind::Model => Ok(store.model_dir(ModelLayout::Gguf, id)?),
+        ArtifactKind::Adapter { .. } => Ok(store.adapter_dir(id)?),
+        _ => bail!("projectors are not taken yet"),
+    }
 }
 
 /// Reads an existing record, if there is one.
 pub fn read_provenance(dir: &Path) -> Option<Provenance> {
-    serde_json::from_slice(&std::fs::read(dir.join(PROVENANCE_FILE)).ok()?).ok()
+    Provenance::read(dir)
 }
 
 /// What [`import`] did.
@@ -251,178 +194,157 @@ pub struct Imported {
 pub const KEEP_FREE_MIN: u64 = 20 << 30;
 
 /// What must stay free on a disk of `total` bytes after an upload: 10 percent of it or 20 GiB,
-/// whichever is more (m3talsmith, 2026-11-24: no size caps or quotas, but always this much free).
+/// whichever is more (m3talsmith, 2026-11-24: no size caps or quotas, but always this much free;
+/// `weirdnet-backends`' default `KeepFree`, which a node applies to uploads over Weirdnet too).
 pub fn keep_free(total: u64) -> u64 {
-    (total / 10).max(KEEP_FREE_MIN)
+    KeepFree::default().of(total)
 }
 
-/// Copies `src` into `dir` (created) as `name`, hashing on the way: into a hidden temporary file in
-/// the same directory, synced, then moved into place without replacing anything. Returns the
-/// SHA-256 and size. The temporary file is removed on any failure.
-fn copy_hashed(src: &Path, dir: &Path, name: &str, progress: &mut dyn FnMut(u64, u64)) -> Result<(String, u64)> {
-    let total = std::fs::metadata(src)?.len();
-    let tmp = dir.join(format!(".{name}.upload-{}", std::process::id()));
-    let result = (|| -> Result<(String, u64)> {
-        let mut input = File::open(src).with_context(|| format!("opening {}", src.display()))?;
-        let mut output =
-            std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 1 << 20];
-        let mut done = 0u64;
-        loop {
-            let n = input.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            output.write_all(&buf[..n])?;
-            done += n as u64;
-            progress(done, total);
-        }
-        output.sync_all()?;
-        if done != total {
-            bail!("{} changed size while it was copied ({total} then {done} bytes); try again when nothing is writing it", src.display());
-        }
-        let dest = dir.join(name);
-        // A hard link never replaces an existing file, so two imports can't clobber each other.
-        if let Err(e) = std::fs::hard_link(&tmp, &dest) {
-            if dest.exists() {
-                bail!("{} already exists", dest.display());
-            }
-            // Filesystems without hard links: rename (checked above that nothing is there).
-            std::fs::rename(&tmp, &dest).with_context(|| format!("moving into place ({e})"))?;
-        }
-        Ok((hex::encode(hasher.finalize()), done))
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    result
-}
-
-/// The options for one import.
+/// The options for one import or upload.
 #[derive(Debug, Clone, Default)]
 pub struct ImportSpec {
     pub id: String,
     pub license: Option<String>,
-    pub base: Option<BaseRecord>,
+    pub base: Option<ProvenanceBase>,
     pub origin: String,
-    pub uploaded_ms: i64,
-    /// Free and total bytes on the models disk, when known: the import is refused unless
+    pub uploaded_ms: u64,
+    /// Free and total bytes on the models disk, when known: a local import is refused unless
     /// [`keep_free`] of the disk stays free after it.
     pub disk: Option<(u64, u64)>,
-    /// The dataset's summary for the record, when known (a training run's dataset record).
-    pub dataset: Option<serde_json::Value>,
-    /// The trainer for the record, when known (name, build, run, ...).
-    pub trainer: Option<serde_json::Value>,
+    /// The dataset's summary, when known (a training run's dataset record).
+    pub dataset: Option<ProvenanceDataset>,
+    /// The trainer, when known (name, build, run).
+    pub trainer: Option<ProvenanceTrainer>,
+    /// Ymir's own fields in the record (`architecture`, a run's settings, ...).
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
-/// Imports a checked file into `models_dir`: into its target directory, atomically, then writes the
-/// record (through a temporary file). The same bytes already there under the same id are reported
-/// as `already` and not copied again; anything else under that id is refused.
-pub fn import(models_dir: &Path, item: &Inspected, spec: &ImportSpec, progress: &mut dyn FnMut(u64, u64)) -> Result<Imported> {
-    let dir = target_dir(models_dir, item.kind, &spec.id)?;
-    let dest = dir.join(&item.file_name);
-    if dir.exists() {
-        if let Some(old) = read_provenance(&dir)
+/// The record for `item` stored as `spec.id`: files, kind and revision from the bytes, the rest
+/// from `spec`. The same record goes with an upload to another node.
+pub fn provenance(item: &Inspected, spec: &ImportSpec) -> Provenance {
+    let mut p = Provenance::for_artifact(&item.stored(), spec.id.clone(), spec.origin.clone());
+    p.license = spec.license.clone();
+    if let Some(b) = &spec.base {
+        let mut base = b.clone();
+        if base.hub.is_none() {
+            base.hub = p.base.as_ref().and_then(|h| h.hub.clone());
+        }
+        p.base = Some(base);
+    }
+    p.dataset = spec.dataset.clone();
+    p.trainer = spec.trainer.clone();
+    p.uploaded_ms = Some(spec.uploaded_ms);
+    p.extra = spec.extra.clone();
+    p.extra.insert("architecture".into(), serde_json::Value::String(item.header.architecture.clone()));
+    p
+}
+
+/// Where a local import stages its copy: a directory next to the models directory (on the same
+/// disk, outside the store), else the system's temporary directory.
+fn staging_dir(models_dir: &Path) -> Result<PathBuf> {
+    let name = models_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "models".into());
+    let unique = format!(
+        "local-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    );
+    let beside = models_dir.with_file_name(format!("{name}.importing")).join(&unique);
+    if std::fs::create_dir_all(&beside).is_ok() {
+        return Ok(beside);
+    }
+    let tmp = std::env::temp_dir().join(format!("ymir-import-{unique}"));
+    std::fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    Ok(tmp)
+}
+
+/// Copies `src` to `dest` (a new file), hashing on the way and syncing. Returns the SHA-256.
+fn copy_hashed(src: &Path, dest: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<String> {
+    let total = std::fs::metadata(src)?.len();
+    let mut input = File::open(src).with_context(|| format!("opening {}", src.display()))?;
+    let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut done = 0u64;
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        output.write_all(&buf[..n])?;
+        done += n as u64;
+        progress(done, total);
+    }
+    output.sync_all()?;
+    if done != total {
+        bail!("{} changed size while it was copied ({total} then {done} bytes); try again when nothing is writing it", src.display());
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// The record already under `id` (in its directory, or where U1 put models), if it is for the
+/// same bytes; an error if something else is there.
+fn already(models_dir: &Path, item: &Inspected, stored: &Artifact, id: &str, dir: &Path) -> Result<Option<Imported>> {
+    let mut places = vec![dir.to_path_buf()];
+    if item.kind() == ArtifactKind::Model {
+        places.push(models_dir.join(LEGACY_UPLOADS_DIR).join(id));
+    }
+    for d in places {
+        if !d.exists() {
+            continue;
+        }
+        if let Some(old) = Provenance::read(&d)
             && old.files.len() == 1
             && old.files[0].path == item.file_name
-            && dest.is_file()
-            && std::fs::metadata(&dest).is_ok_and(|m| m.len() == item.size)
+            && old.files[0].sha256.eq_ignore_ascii_case(&stored.files[0].sha256)
+            && std::fs::metadata(d.join(&item.file_name)).is_ok_and(|m| m.len() == stored.files[0].size)
         {
-            let (sha, _) = sha256_file(&item.path)?;
-            if old.files[0].sha256 == sha {
-                return Ok(Imported { dir, file: dest, provenance: old, already: true });
-            }
+            return Ok(Some(Imported { file: d.join(&item.file_name), dir: d, provenance: old, already: true }));
         }
-        bail!("{} already exists with other contents; choose another id with --name, or remove it first", dir.display());
+        bail!("{} already exists with other contents; choose another id with --name, or remove it first", d.display());
+    }
+    Ok(None)
+}
+
+/// Imports a checked file into `models_dir` with [`ModelStore::import`]: copied (and hashed) into
+/// a staging directory outside the store, checked again there and moved into place whole, with
+/// its record. The same bytes already there under the same id are reported as `already` and not
+/// copied again; anything else under that id is refused.
+pub fn import(models_dir: &Path, item: &Inspected, spec: &ImportSpec, progress: &mut dyn FnMut(u64, u64)) -> Result<Imported> {
+    check_id(&spec.id)?;
+    let stored = item.stored();
+    let dir = target_dir(models_dir, item.kind(), &spec.id)?;
+    if let Some(done) = already(models_dir, item, &stored, &spec.id, &dir)? {
+        return Ok(done);
     }
     if let Some((free, total)) = spec.disk {
         let keep = keep_free(total);
-        if free < item.size.saturating_add(keep) {
+        if free < item.size().saturating_add(keep) {
             bail!(
                 "not enough free space for {}: {} bytes free, {} needed, and {} must stay free (10 percent of the disk or 20 GiB, whichever is more)",
                 item.file_name,
                 free,
-                item.size,
+                item.size(),
                 keep
             );
         }
     }
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let copied = copy_hashed(&item.path, &dir, &item.file_name, progress);
-    let (sha256, size) = match copied {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_dir(&dir);
-            return Err(e);
+    let staging = staging_dir(models_dir)?;
+    let result = (|| -> Result<Imported> {
+        let sha = copy_hashed(&item.path, &staging.join(&item.file_name), progress)?;
+        if !sha.eq_ignore_ascii_case(item.sha256()) {
+            bail!("{} changed while it was being read; try again when nothing is writing it", item.path.display());
         }
-    };
-    let files = vec![ArtifactFile { path: item.file_name.clone(), size, sha256 }];
-    let provenance = Provenance {
-        format: PROVENANCE_FORMAT.to_string(),
-        kind: item.kind.record(),
-        adapter_format: match item.kind {
-            ArtifactKind::Adapter { format } => Some(format),
-            _ => None,
-        },
-        id: spec.id.clone(),
-        revision: revision_of(&files),
-        files,
-        origin: spec.origin.clone(),
-        license: spec.license.clone(),
-        architecture: Some(item.header.architecture.clone()),
-        base: spec.base.clone(),
-        dataset: spec.dataset.clone(),
-        trainer: spec.trainer.clone(),
-        uploaded_by: None,
-        uploaded_ms: spec.uploaded_ms,
-        extra: BTreeMap::new(),
-    };
-    let tmp = dir.join(format!(".{PROVENANCE_FILE}.tmp"));
-    let written = serde_json::to_vec_pretty(&provenance)
-        .map_err(anyhow::Error::from)
-        .and_then(|b| std::fs::write(&tmp, b).map_err(anyhow::Error::from))
-        .and_then(|()| std::fs::rename(&tmp, dir.join(PROVENANCE_FILE)).map_err(anyhow::Error::from));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        let _ = std::fs::remove_file(&dest);
-        let _ = std::fs::remove_dir(&dir);
-        return Err(e.context("writing provenance.json"));
+        let record = provenance(item, spec);
+        let placed = ModelStore::new(models_dir).import(&staging, &stored, &record, &spec.id).map_err(|e| anyhow!("placing {}: {e}", spec.id))?;
+        let provenance = placed.provenance().cloned().unwrap_or(record);
+        Ok(Imported { file: dir.join(&item.file_name), dir: dir.clone(), provenance, already: false })
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Some(parent) = staging.parent() {
+        let _ = std::fs::remove_dir(parent);
     }
-    if let ArtifactKind::Adapter { format } = item.kind
-        && let Err(e) = write_adapter_info(&dir, &item.file_name, format, &item.header, spec.base.as_ref())
-    {
-        let _ = std::fs::remove_file(dir.join(PROVENANCE_FILE));
-        let _ = std::fs::remove_file(&dest);
-        let _ = std::fs::remove_dir(&dir);
-        return Err(e.context("writing adapter.json"));
-    }
-    Ok(Imported { dir, file: dest, provenance, already: false })
-}
-
-/// `adapter.json`, in the shape `weirdnet-model`'s store writes for downloaded adapters and reads
-/// back in `ModelStore::adapters` (id, format, file name, base model, architecture, repo, rank,
-/// alpha), so an uploaded adapter lists like a pulled one. `ModelStore::import` writes it itself
-/// once request A ships.
-fn write_adapter_info(dir: &Path, file: &str, format: AdapterFormat, header: &GgufHeader, base: Option<&BaseRecord>) -> Result<()> {
-    let alpha = match &header.kind {
-        GgufKind::Adapter { alpha, .. } => *alpha,
-        _ => None,
-    };
-    let id = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let info = serde_json::json!({
-        "id": id,
-        "format": format,
-        "file": file,
-        "base_model": header.base_model.clone().or_else(|| base.and_then(|b| b.hub.clone())),
-        "architecture": header.architecture,
-        "repo": header.repo,
-        "rank": serde_json::Value::Null,
-        "alpha": alpha,
-    });
-    let tmp = dir.join(".adapter.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&info)?)?;
-    std::fs::rename(&tmp, dir.join(weirdnet_model::store::ADAPTER_INFO))?;
-    Ok(())
+    result
 }
 
 /// The SHA-256 and size of a file.
