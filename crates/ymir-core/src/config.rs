@@ -26,6 +26,9 @@ pub struct NodeConfig {
     /// Fine-tuning on this node (training plan P3a): the trainer and the build it is pinned to.
     #[serde(default, skip_serializing_if = "crate::train::TrainSection::is_default")]
     pub train: crate::train::TrainSection,
+    /// Hands-off self-update (`ymir_core::autoupdate`): on by default where an update root is pinned.
+    #[serde(default, skip_serializing_if = "crate::autoupdate::UpdateSection::is_default")]
+    pub update: crate::autoupdate::UpdateSection,
 }
 
 /// `[network]`. Weirdnet runs once this node has an identity (`ymirctl pool init`, or a link

@@ -2854,8 +2854,23 @@ sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP se
     org root is `packaging/updates/root.env`.
   - A node takes one with: download the `.update.tar.gz`, unpack it, `ymirctl update stage DIR`, restart the service
     (the trial start and rollback do the rest). GitHub release assets can't hold the bundle's `llama.cpp/` paths, so
-    `update fetch https://...` needs an HTTPS host serving the unpacked directory. Not built: that host, announcements,
-    a `weirdnet:` content source, and a watcher inside `ymird`.
+    `update fetch https://...` needs an HTTPS host serving the unpacked directory. Not built: that host, announcements
+    and a `weirdnet:` content source.
+  - Hands-off updates (0.15.3, `ymir_core::autoupdate`): `ymird` checks `[update] feed` (default
+    `github:WeirdBrains/ymir`, GitHub's latest release; any `https://` URL with the same JSON works) two to five
+    minutes after it starts and then every `[update] interval` (default `6h`, at least `5m`). A release newer than
+    the running one, not rolled back here before, with an asset `ymir[-cuda]-VERSION-OS-ARCH.update.tar.gz` for this
+    machine (`[update] variant`: `auto` keeps the build that runs, by its `llama.cpp/engine.toml`; or `plain`,
+    `cuda`), is downloaded whole (up to the announced size), unpacked into `updates/incoming/` (only plain files and
+    directories under one top directory) and staged with the usual checks; the feed itself is not trusted. Under a
+    service manager (systemd's `INVOCATION_ID`, launchd, or `YMIR_SERVICE=1`) and when started through `update boot`
+    (the `YMIR_UPDATE_BOOT` it now sets, or a `ymird` inside `updates/releases/`), it shuts down cleanly and exits 75;
+    the service restarts it (the shipped units use `Restart=on-failure`) and `update boot` runs the release on trial.
+    A trial that isn't serving in 15 minutes exits 1, and the second failed start rolls back to the last good release
+    and marks the update bad. Elsewhere it only stages. Settings: `[update] auto = true`, `channel = "stable"`,
+    `interval = "6h"`, `feed`, `variant = "auto"`, `restart = true`; nothing happens without a pinned root.
+    `ymirctl update check` does one check by hand. The restart doesn't wait for idle: requests in flight see the node
+    go and resume elsewhere, as at any restart.
 - **Updating `ymirctl` and the engines with `ymird`:** the release directory may hold `ymirctl`, but only `ymird` is started from
   it; the service still calls the installed `ymirctl`.
 - **Self-update on a real machine** was not exercised: the tests run on one box with fake binaries and test keys.

@@ -8,6 +8,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- Hands-off self-update: `ymird` checks the release feed on a schedule (`[update]` in node.toml: on by default, `interval = "6h"`, `channel`, `feed`, `variant`, `restart`), downloads this machine's signed `.update.tar.gz`, verifies and stages it against the pinned root, and restarts into it under its service; a release that doesn't come up healthy is rolled back to the last good one. `ymirctl update check` does one check by hand. Nothing happens without a pinned update root.
 - The pool catalog says where each model came from (`hub`, `upload`, `train`) and its license, when its node knows
   (model upload U8): model nodes put both in their capability record from provenance records and node.toml, and on
   every upload, peer copy and Hub pull; catalog/1, `/v1/models` (`weirdnet.origin`, `weirdnet.license`),
