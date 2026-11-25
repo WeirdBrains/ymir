@@ -14,7 +14,7 @@ Slice U3 of [docs/design/model-upload.md](docs/design/model-upload.md), on P4b's
 - Tests: `models_upload.rs` now reads the uploaded revision back from the pool (closes the U2 gap) and runs three `--rollout support` uploads (first `--canary 100` with no incumbent; `--canary 50` refused, stays at 0; `--canary 5` passes; `rollout list` shows provenance; no `--node` refused). Unit tests for next version, incumbent, ids and the provenance line.
 - Docs: plan "U3 as built", [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), the site's ymirctl page.
 
-**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` (see the merge).
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` 327 passed, 0 failed, 7 ignored; `site/tool/check_links.py`, `gen_roadmap.py --check`.
 
 **Not tested**: `--eval` end to end (no testkit model answers; the gate itself has P4b's tests); the adapter "waits at weight 0" note; `rollout list` provenance for trained adapters (base and dataset: unit test only).
 
