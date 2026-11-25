@@ -315,8 +315,8 @@ Weirdnet, by that node&rsquo;s rules (<code>--eval FILE</code> sends the scored 
 there at once and is saved in its <code>node.toml</code>; <code>--no-persist</code> changes only its live rollouts. Any of
 your linked devices may, unless that node narrows them with <code>[inference] rollout_callers</code> (peer ids);
 <code>[inference] remote_rollouts = false</code> turns it off.</p>
-<pre><code>ymirctl models rollout add support@4 --model qwen3-8b+support-r4 --inference gpu-box
-ymirctl models rollout rollback support --inference gpu-box</code></pre>
+<pre><code>ymirctl models rollout add support@4 --model qwen3-8b+support-r4 --inference NODE
+ymirctl models rollout rollback support --inference NODE</code></pre>
 
 <h2 id="pool">Pool and devices</h2>
 <p>These commands manage this node's place in your Weirdnet: the identity shared by your linked devices. They need
