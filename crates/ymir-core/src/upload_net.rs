@@ -171,6 +171,7 @@ impl UploadsService {
         }
         let quant = prov.base.as_ref().and_then(|b| b.quant.clone()).filter(|_| entry.adapter.is_some());
         self.node.set_model_info(&req.id, Some(req.revision.clone()), quant);
+        self.node.set_model_origin(&req.id, Some(prov.origin.clone()).filter(|o| !o.is_empty()), prov.license.clone());
         let mut out = Registered { id: req.id.clone(), revision: req.revision.clone(), ..Default::default() };
         if !req.persist {
             return Ok(out);

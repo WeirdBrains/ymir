@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 15:00 EST: v0.15.2 released with signed update bundles
+
+**Release:** https://github.com/WeirdBrains/ymir/releases/tag/v0.15.2 (Release run 45681998536, all green). The assets check passes, including the six `.update.tar.gz` bundles (plain and CUDA Linux x86_64/aarch64, macOS x86_64/aarch64, update id `com.weirdbrains.ymir-stable-15002`) and `ymir-0.15.2-updates.sha256`. The Arch packages are gpg-signed. The leak scan of dist found nothing. Arch recipes are on this branch; TAUR follows.
+
 ## 2026-11-25 14:05 EST: signed update bundles in the release flow (branch `feature/update-bundles`)
 
 **What changed:** `ymirctl update sign-bundle` (`ymir_core::update_publish`) signs a bundle directory with a release key. It refuses a key the root doesn't delegate for `com.weirdbrains.ymir`/`stable` or a root with the wrong pin, and verifies the result as a node would before writing `manifest.env` and `roots/1.env`. It never prints the key. Helpers 0.4.0 is vendored; it adds `weirdnet_release.py updates VERSION [--upload]`, configured in `release.toml [updates]`, which builds the plain and CUDA Linux bundles and the macOS bundles from the release archives. The org root is `packaging/updates/root.env`. The release workflow only checks the plan (the key is not a CI secret). DESIGN and CHANGELOG are updated.

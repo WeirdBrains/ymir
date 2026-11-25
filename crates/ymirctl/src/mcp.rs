@@ -282,7 +282,7 @@ const READ_TOOLS: &[ToolSpec] = &[
     ),
     spec(
         "ymir_models",
-        "The pool's models: purpose (chat, embedding), state (warm, busy, loading, loadable), how many replicas serve it, what it takes (images, audio) and where this node sees it placed.",
+        "The pool's models: purpose (chat, embedding), state (warm, busy, loading, loadable), how many replicas serve it, where it came from (hub, upload, train) and its license when known, what it takes (images, audio) and where this node sees it placed.",
         NO_PARAMS,
         true,
         false,
@@ -644,6 +644,8 @@ impl YmirTools {
                             "state": w["state"].as_str().unwrap_or("on disk"),
                             "replicas": w["replicas"],
                             "context": w["context"],
+                            "origin": w["origin"],
+                            "license": w["license"],
                             "takes": takes(id),
                             "placements": placements(id),
                         })

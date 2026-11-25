@@ -4582,7 +4582,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5272,9 +5272,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.5.2"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24bd8f1d320657607ec709c0467ff3d6444c7417e31f56ee9a8258b353975143"
+checksum = "a9f38de8e702d0ece02c1c9cecc0be3dbc9c15841e9d8ec92d5873d8c2bcdf43"
 dependencies = [
  "async-trait",
  "cbor4ii",
@@ -5313,9 +5313,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afa0412e31605ee4e06a5895a8aea27d53a298aa25a0eb2d2f74f212b20d66af"
+checksum = "0ae2c4fcb33e6735563a768c824d329e89374b3f8714478ebf14ad6dddf9472f"
 dependencies = [
  "async-trait",
  "axum",
@@ -5445,9 +5445,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-openai"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a2772e7e9fbe7f6c3bec96f79d45af0bc089e3257450f7d8501cf190657fb82"
+checksum = "dcad7590d440c52f524c45f6bfd52c5cf41d9ddc2c1d533030509d7485e812de"
 dependencies = [
  "axum",
  "futures",

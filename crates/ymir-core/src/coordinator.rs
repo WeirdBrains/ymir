@@ -70,6 +70,10 @@ pub struct CatalogRow {
     pub inputs: Modalities,
     /// For a LoRA adapter: the base model it runs on (as the first node that has it says).
     pub base: Option<String>,
+    /// Where it came from (`hub`, `upload`, `train`) and its license, as the first node that
+    /// knows says (U8).
+    pub origin: Option<String>,
+    pub license: Option<String>,
 }
 
 impl CatalogRow {
@@ -315,7 +319,12 @@ impl Coordinator {
                     embedding: crate::model_node::embeds(&s),
                     inputs: Modalities::TEXT,
                     base: s.base.clone(),
+                    origin: None,
+                    license: None,
                 });
+                if row.origin.is_none() && row.license.is_none() {
+                    (row.origin, row.license) = node.origin(&s.id);
+                }
                 row.inputs = row.inputs.union(crate::model_node::inputs_of(&s));
                 row.nodes.push((node.name().to_string(), s.state.clone()));
                 if node.draining() {
@@ -437,6 +446,7 @@ impl Coordinator {
                 if let Some(base) = &m.base {
                     c = c.with_base(base);
                 }
+                (c.origin, c.license) = (m.origin.clone(), m.license.clone());
                 if !m.embedding {
                     c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
                 }
