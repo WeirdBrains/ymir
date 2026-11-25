@@ -92,7 +92,7 @@ fn check_base(ctx: &Ctx, base: &str, item: &upload::Inspected) -> Result<Provena
     };
     let launch = cfg.launches().into_iter().find(|l| l.id == base).with_context(|| format!("`{base}` has no launch on this node"))?;
     if launch.engine != EngineKind::Llamacpp {
-        bail!("`{base}` runs on {}: a GGUF LoRA serves on llama.cpp only (PEFT adapters for vLLM come in a later slice)", launch.engine.name());
+        bail!("`{base}` runs on {}: a GGUF LoRA serves on llama.cpp only (send a PEFT adapter directory for it with --node)", launch.engine.name());
     }
     if !Path::new(&launch.source).is_file() {
         bail!("{base}'s model file {} is not on this machine, so the adapter can't be checked against it", launch.source);

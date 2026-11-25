@@ -6,6 +6,11 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- More upload formats (model-upload plan, U7): `ymirctl models upload DIR --node NAME` sends a directory of safetensors weights to a vLLM node, or MLX weights to an MLX node, and a PEFT LoRA adapter directory with `--adapter-for` a vLLM model; `ymirctl models upload mmproj.gguf --node NAME --projector-for MODEL` sends a vision projector for a llama.cpp model. The directory is checked and hashed here (pickles, code and symlinks are refused) and again on the node, which places it, serves it and saves it in its `node.toml`: a `backend = "vllm"` or `"mlx"` entry, a LoRA on the base, or the model's `mmproj`. On the machine itself an upload is still a GGUF model or GGUF LoRA.
+- `[model] upload_engine` (`llamacpp`, `vllm` or `mlx`): the engine an uploaded full model must suit on that node. Unset, it is llama.cpp, unless `llamacpp = "off"`; then vLLM, then MLX. Before, every node took GGUF only.
+
 ## [0.14.0] - 2026-11-25
 
 ### Added

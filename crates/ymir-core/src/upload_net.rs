@@ -391,6 +391,30 @@ mod tests {
     }
 
     #[test]
+    fn the_upload_engine_follows_the_config() {
+        use weirdnet_backends::EngineKind;
+        let mut cfg = NodeConfig::default();
+        assert_eq!(cfg.model.upload_engine(), EngineKind::Llamacpp);
+        cfg.model.llamacpp = "off".into();
+        assert_eq!(cfg.model.upload_engine(), EngineKind::Vllm);
+        cfg.model.vllm = "off".into();
+        assert_eq!(cfg.model.upload_engine(), EngineKind::Mlx);
+        cfg.model.upload_engine = Some("vllm".into());
+        assert_eq!(cfg.model.upload_engine(), EngineKind::Vllm);
+        cfg.model.upload_engine = Some("tpu".into());
+        assert!(cfg.validate().unwrap_err().to_string().contains("upload_engine"));
+    }
+
+    #[test]
+    fn a_projector_is_saved_as_its_models_mmproj() {
+        let text = "[model]\n[[model.local]]\nid = \"base\"\nfile = \"base.gguf\"\n";
+        let new = config_edit::set_mmproj(text, "base", "projectors/mm/mmproj.gguf").unwrap();
+        let cfg: NodeConfig = toml::from_str(&new).unwrap();
+        assert_eq!(cfg.model.local[0].mmproj.as_deref(), Some("projectors/mm/mmproj.gguf"));
+        assert!(config_edit::set_mmproj(text, "nope", "x.gguf").is_err());
+    }
+
+    #[test]
     fn requests_round_trip_as_json() {
         let r =
             Register { cert: None, id: "m".into(), revision: "sha256:ab".into(), adapter_for: None, projector_for: None, persist: true, role: None };
