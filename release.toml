@@ -37,11 +37,18 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision) need this release
+[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), and U8's origins (set_model_origin, placement hooks)
 crate = "weirdnet-backends"
-version = "0.4.4"
+version = "0.4.5"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
+
+[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D)
+crate = "weirdnet-agent"
+version = "0.5.4"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
 
 [[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads
 crate = "weirdnet-model"
