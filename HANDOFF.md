@@ -3,6 +3,19 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 15:20 EST: hands-off self-update (branch `feature/auto-update`)
+
+**What changed:** `ymir_core::autoupdate`, `[update]` in node.toml (`auto = true`, `channel = "stable"`, `interval = "6h"`, `feed = "github:WeirdBrains/ymir"`, `variant = "auto"`, `restart = true`).
+- `ymird` checks the feed two to five minutes after it starts, then every interval. When it finds a newer release it downloads this machine's `.update.tar.gz` (plain or CUDA, matching the running engine) and unpacks it safely into `updates/incoming/`.
+- It stages the bundle through `Updater::stage`, which does all the signature checks. Then, under a service manager and when started through `update boot`, it shuts down and exits 75 so the service restarts it into the trial.
+- A trial that isn't serving within 15 minutes exits 1, and the second failed start rolls back.
+- `ymirctl update boot` now sets `YMIR_UPDATE_BOOT`. `ymirctl update check` runs one check by hand.
+- DESIGN and CHANGELOG are updated.
+
+**Checks:** 7 new `autoupdate` tests: settings, feed URLs, asset names, CUDA detection, unsafe archives, a local feed staging a signed bundle end to end, and a foreign-signed bundle refused. CI is green on all three OSes (run 45684801350, before merging main).
+
+**Left:** release it, then confirm on a real node that a later release is taken without a hand.
+
 ## 2026-11-25 15:00 EST: v0.15.2 released with signed update bundles
 
 **Release:** https://github.com/WeirdBrains/ymir/releases/tag/v0.15.2 (Release run 45681998536, all green). The assets check passes, including the six `.update.tar.gz` bundles (plain and CUDA Linux x86_64/aarch64, macOS x86_64/aarch64, update id `com.weirdbrains.ymir-stable-15002`) and `ymir-0.15.2-updates.sha256`. The Arch packages are gpg-signed. The leak scan of dist found nothing. Arch recipes are on this branch; TAUR follows.
