@@ -45,6 +45,10 @@ pub struct UploadOp {
     /// A model's role in that entry (default: `main` when the node has no main model, else `chat`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// With several targets (U6): the node that takes the upload, the others copying from it
+    /// (default: the target with the most room).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 /// The request on [`UPLOADS_PROTOCOL`] (JSON), after an upload of `id` placed `revision`.
@@ -99,6 +103,12 @@ pub struct UploadReport {
     /// Why the revision was not recorded (or node.toml not changed) after the upload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub register_error: Option<String>,
+    /// A pool upload (U6): the node this one copied the files from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from: Option<String>,
+    /// A pool upload (U6): why this node got the files from this device instead of a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_instead: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------------

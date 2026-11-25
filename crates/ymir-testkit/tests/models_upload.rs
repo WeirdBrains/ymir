@@ -193,11 +193,11 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     std::fs::write(&model, gguf(300_000, "llama"))?;
     let model_s = model.display().to_string();
 
-    // Not to this device, and to one node only.
+    // Not to this device, and not to `auto`.
     let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "lap"]).await.unwrap_err());
     assert!(err.contains("is this device"), "{err}");
-    let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "all"]).await.unwrap_err());
-    assert!(err.contains("an upload goes to one node"), "{err}");
+    let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "auto"]).await.unwrap_err());
+    assert!(err.contains("an upload goes to named nodes"), "{err}");
 
     // A model: sent, placed with its provenance, saved in gpu's node.toml.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu", "--license", "mit"]).await?;
@@ -252,7 +252,7 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     let item = upload::inspect(&big)?;
     let spec = ImportSpec { id: "big-q8_0".into(), origin: upload::ORIGIN_UPLOAD.into(), ..Default::default() };
     let up = weirdnet_backends::models::Upload::new("big-q8_0", &item.artifact, upload::provenance(&item, &spec)).serving();
-    let op = UploadOp { upload: up, local: vec![cut.join("Big-Q8_0.gguf")], persist: true, role: None };
+    let op = UploadOp { upload: up, local: vec![cut.join("Big-Q8_0.gguf")], persist: true, role: None, stage: None };
     let done = control::request_models(&lap_h.paths.socket(), "gpu", ModelsOp::Upload(Box::new(op)), |_| {}).await?;
     assert!(matches!(&done.nodes[0].outcome, Outcome::Failed { .. }), "{done:?}");
     let staging = root.join("gpu-models.uploads");

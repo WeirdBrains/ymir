@@ -282,9 +282,17 @@ impl Daemon {
                     // uploader says `--no-persist`, saved in node.toml (/ymir/uploads/1).
                     let store = crate::models::store(cfg.models_dir(), &paths.state());
                     let policy = weirdnet_backends::models::WritePolicy::default().with_keep_free(cfg.model.keep_free());
-                    let (server, svc) =
-                        remote::serve_models(&net.node, sup.clone(), &net.membership, store, budget, weirdnet_backends::EngineKind::Llamacpp, policy)
-                            .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
+                    let (server, svc) = remote::serve_models(
+                        &net.node,
+                        &net.hints,
+                        sup.clone(),
+                        &net.membership,
+                        store,
+                        budget,
+                        weirdnet_backends::EngineKind::Llamacpp,
+                        policy,
+                    )
+                    .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
                     serving.push(Box::new(server));
                     let uploads = crate::upload_net::UploadsService::new(config.clone(), cfg.models_dir(), svc.clone(), node_service, accelerated);
                     let server =

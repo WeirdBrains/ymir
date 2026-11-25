@@ -507,6 +507,7 @@ fn upload_args(file: &std::path::Path) -> upload::UploadArgs {
         no_register: false,
         dir: DirArgs { dir: None },
         node: None,
+        stage: None,
         rollout: Default::default(),
     }
 }

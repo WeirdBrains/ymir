@@ -34,9 +34,10 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
 
 /// `ymirctl models upload FILE --node X`: checked and hashed here, sent by this machine's ymird.
 async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::upload::UploadArgs) -> Result<()> {
-    if matches!(node, "all" | "auto") {
-        bail!("an upload goes to one node: name it with --node (copying it on to the others comes later)");
+    if node == "auto" {
+        bail!("an upload goes to named nodes: --node NAME, --node A,B or --node all");
     }
+    let pool = node == "all" || node.contains(',');
     let mut op = super::upload::remote_op(out, a)?;
     let version = match &a.rollout.rollout {
         Some(name) => {
@@ -52,7 +53,15 @@ async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::uploa
     };
     let (id, adapter) = (op.upload.id.clone(), op.upload.adapter_for.is_some());
     let persist = op.persist;
-    writeln!(out, "Sending it to {node} (Ctrl-C stops; sending it again resumes)...")?;
+    if pool {
+        writeln!(
+            out,
+            "Sending it once, to {}, and the others copy it from there (Ctrl-C stops; sending it again resumes)...",
+            a.stage.as_deref().unwrap_or("the node with the most room")
+        )?;
+    } else {
+        writeln!(out, "Sending it to {node} (Ctrl-C stops; sending it again resumes)...")?;
+    }
     let done = ask(paths, out, node, ModelsOp::Upload(Box::new(op))).await?;
     let mut failed = 0;
     for NodeResult { node, outcome } in &done.nodes {
@@ -86,8 +95,20 @@ async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::uploa
 
 /// Prints what happened to an upload on `label`; `false` when it was not recorded there.
 fn uploaded(out: &mut dyn Write, label: &str, r: &ymir_core::upload_net::UploadReport, persist: bool) -> Result<bool> {
+    if let Some(why) = &r.sent_instead {
+        writeln!(out, "{why}.")?;
+    }
     match &r.pulled {
         None => writeln!(out, "{label}: already has `{}` with the same contents; nothing was sent.", r.id)?,
+        Some(p) if r.copied_from.is_some() => {
+            let from = r.copied_from.as_deref().unwrap_or_default();
+            writeln!(out, "{label}: copied `{}` from {from}, node to node ({}, revision {}).", r.id, gib(p.size), r.revision)?;
+            match &p.adapter_for {
+                Some(base) => adapter_uploaded(out, label, base, p)?,
+                None if p.served => writeln!(out, "{label}: its ymird serves `{}`; it loads on the first request for it.", r.id)?,
+                None => writeln!(out, "{label}: stored but not served: its format does not match that node's engine.")?,
+            }
+        }
         Some(p) => {
             if r.resumed > 0 {
                 writeln!(out, "{label}: resumed an earlier upload ({} of {} was already there).", gib(r.resumed), gib(r.total))?;

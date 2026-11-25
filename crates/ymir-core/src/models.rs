@@ -10,6 +10,7 @@
 //!
 //! The Hugging Face token never leaves the node that downloads. Nothing in these messages carries one.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::{BoxFuture, join_all};
@@ -164,9 +165,14 @@ impl ModelsHub {
     pub async fn run(&self, spec: &str, op: ModelsOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsDone, String> {
         if let ModelsOp::Upload(up) = op {
             let t = match spec {
-                "all" | "auto" => return Err("an upload goes to one node: name it with --node".into()),
+                "auto" => return Err("an upload goes to named nodes: --node NAME, --node A,B or --node all".into()),
+                "all" => return self.upload_pool(None, *up, tx).await,
+                list if list.contains(',') => return self.upload_pool(Some(list), *up, tx).await,
                 name => self.resolve(name)?,
             };
+            if up.stage.is_some() {
+                return Err("--stage goes with several targets (--node A,B or --node all)".into());
+            }
             if t.local {
                 return Err(format!("`{}` is this device: run `ymirctl models upload FILE` without --node", t.label));
             }
@@ -291,13 +297,7 @@ impl ModelsHub {
                 Some(p)
             }
             Err(e) if refusal_reason(&e) == Some(refusal::EXISTS) => {
-                let same = self
-                    .client
-                    .list(peer)
-                    .await
-                    .ok()
-                    .is_some_and(|l| l.iter().any(|x| x.id() == id && x.provenance().is_some_and(|p| p.revision == revision)));
-                if !same {
+                if !self.has(peer, &id, &revision).await {
                     return Outcome::Failed { message: explain_upload(t, &e) };
                 }
                 None
@@ -312,7 +312,145 @@ impl ModelsHub {
             total,
             registered: None,
             register_error: None,
+            copied_from: None,
+            sent_instead: None,
         };
+        self.register(t, &op, &mut report).await;
+        Outcome::Uploaded { report: Box::new(report) }
+    }
+
+    /// U6: sends the files once, to the stage, and has the other targets copy them from it node to
+    /// node ([`ModelsClient::replicate`]). `list` is `A,B,...` (`None`: every model node but this
+    /// one). A target without room after what it keeps free is left out before anything is sent; a
+    /// target that can't copy from a peer gets the files from this device instead.
+    async fn upload_pool(&self, list: Option<&str>, op: UploadOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsDone, String> {
+        let targets = match list {
+            None => {
+                let t: Vec<Target> = self.model_nodes().await.into_iter().filter(|t| !t.local).collect();
+                if t.is_empty() {
+                    return Err("no other model nodes found among your devices (is ymird running on them, with the model role on?)".into());
+                }
+                t
+            }
+            Some(list) => {
+                let mut t: Vec<Target> = Vec::new();
+                for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    let x = self.resolve(name)?;
+                    if x.local {
+                        return Err(format!("`{}` is this device: upload to it with `ymirctl models upload FILE` (without --node)", x.label));
+                    }
+                    if !t.iter().any(|o| o.peer == x.peer) {
+                        t.push(x);
+                    }
+                }
+                t
+            }
+        };
+        let stage_ask = match &op.stage {
+            Some(name) => {
+                let s = self.resolve(name)?;
+                if !targets.iter().any(|t| t.peer == s.peer) {
+                    return Err(format!("--stage {name} is not one of the targets"));
+                }
+                Some(s.peer)
+            }
+            None => None,
+        };
+        if let ([one], None) = (targets.as_slice(), &stage_ask) {
+            let outcome = self.upload(one, op, tx).await;
+            return Ok(ModelsDone { nodes: vec![NodeResult { node: one.clone(), outcome }], chosen: None });
+        }
+        let total: u64 = op.upload.files.iter().map(|f| f.size).sum();
+        let disks = join_all(targets.iter().map(|t| self.client.disk(&t.peer))).await;
+        let mut results = Vec::new();
+        let mut room: Vec<(Target, u64)> = Vec::new();
+        for (t, d) in targets.iter().zip(disks) {
+            match d {
+                Ok(d) if d.free.saturating_sub(d.keep_free) < total => {
+                    results.push(NodeResult { node: t.clone(), outcome: Outcome::Failed { message: no_room(t, &d, total) } })
+                }
+                Ok(d) => room.push((t.clone(), d.free.saturating_sub(d.keep_free))),
+                // It answers for itself when it writes.
+                Err(_) => room.push((t.clone(), 0)),
+            }
+        }
+        let stage = match &stage_ask {
+            Some(peer) => match room.iter().find(|(t, _)| &t.peer == peer) {
+                Some((t, _)) => t.clone(),
+                None => return Ok(ModelsDone { nodes: results, chosen: None }),
+            },
+            None => match room.iter().max_by_key(|(_, r)| *r) {
+                Some((t, _)) => t.clone(),
+                None => return Ok(ModelsDone { nodes: results, chosen: None }),
+            },
+        };
+        let staged = self.upload(&stage, op.clone(), tx).await;
+        let ok = matches!(&staged, Outcome::Uploaded { .. });
+        results.push(NodeResult { node: stage.clone(), outcome: staged });
+        let others: Vec<Target> = room.into_iter().map(|(t, _)| t).filter(|t| t.peer != stage.peer).collect();
+        if !ok {
+            for t in others {
+                let message = format!("{}: not copied, because the upload to {} did not finish", t.label, stage.label);
+                results.push(NodeResult { node: t, outcome: Outcome::Failed { message } });
+            }
+            return Ok(ModelsDone { nodes: results, chosen: None });
+        }
+        let labels: HashMap<String, String> = others.iter().map(|t| (t.peer.clone(), t.label.clone())).collect();
+        let peers: Vec<String> = others.iter().map(|t| t.peer.clone()).collect();
+        let ptx = tx.clone();
+        let copies = self
+            .client
+            .replicate(&stage.peer, &peers, &op.upload, |peer, p| {
+                let node = labels.get(peer).cloned().unwrap_or_else(|| peer.to_string());
+                let _ = ptx.send(ModelsLine::Progress { node, done: p.done, total: p.total });
+            })
+            .await;
+        let revision = weirdnet_model::artifact::revision(&op.upload.files);
+        for (t, (_, got)) in others.iter().zip(copies) {
+            let pulled = match got {
+                Ok(p) => Some(p),
+                Err(e) if refusal_reason(&e) == Some(refusal::EXISTS) && self.has(&t.peer, &op.upload.id, &revision).await => None,
+                Err(e @ (RemoteError::Refused { .. } | RemoteError::Cancelled)) => {
+                    results.push(NodeResult { node: t.clone(), outcome: Outcome::Failed { message: explain_upload(t, &e) } });
+                    continue;
+                }
+                Err(e) => {
+                    // It can't copy from the stage (an older Ymir, or it can't reach it): send it from here.
+                    let why = format!("{} could not copy it from {} ({e}), so it was sent from this device", t.label, stage.label);
+                    let mut outcome = self.upload(t, op.clone(), tx).await;
+                    if let Outcome::Uploaded { report } = &mut outcome {
+                        report.sent_instead = Some(why);
+                    }
+                    results.push(NodeResult { node: t.clone(), outcome });
+                    continue;
+                }
+            };
+            let revision = pulled.as_ref().and_then(|p| p.revision.clone()).unwrap_or_else(|| revision.clone());
+            let mut report = UploadReport {
+                id: op.upload.id.clone(),
+                revision,
+                pulled,
+                resumed: 0,
+                total,
+                registered: None,
+                register_error: None,
+                copied_from: Some(stage.label.clone()),
+                sent_instead: None,
+            };
+            self.register(t, &op, &mut report).await;
+            results.push(NodeResult { node: t.clone(), outcome: Outcome::Uploaded { report: Box::new(report) } });
+        }
+        Ok(ModelsDone { nodes: results, chosen: None })
+    }
+
+    /// Whether node `peer` already holds `id` at `revision`.
+    async fn has(&self, peer: &str, id: &str, revision: &str) -> bool {
+        self.client.list(peer).await.ok().is_some_and(|l| l.iter().any(|x| x.id() == id && x.provenance().is_some_and(|p| p.revision == revision)))
+    }
+
+    /// Records an upload (or a copy) of `op`'s files with node `t` and saves it there.
+    async fn register(&self, t: &Target, op: &UploadOp, report: &mut UploadReport) {
+        let (peer, id, revision) = (t.peer.as_str(), report.id.clone(), report.revision.clone());
         match &self.uploads {
             Some(c) => {
                 let req =
@@ -324,7 +462,6 @@ impl ModelsHub {
             }
             None => report.register_error = Some("this ymird can't record uploads on the node".into()),
         }
-        Outcome::Uploaded { report: Box::new(report) }
     }
 
     async fn call(&self, t: &Target, op: ModelsOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsReply, RemoteError> {
@@ -431,6 +568,18 @@ pub fn resolve(devices: &[Target], name: &str) -> Result<Target, String> {
         )),
         many => Err(format!("`{name}` matches {} devices; use the peer id", many.len())),
     }
+}
+
+/// Why `t` is left out of a pool upload of `total` bytes: what it has free and keeps free.
+fn no_room(t: &Target, d: &weirdnet_backends::models::DiskReport, total: u64) -> String {
+    let gib = |b: u64| format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64);
+    format!(
+        "{} is left out (no-space): {} free, it keeps {} free ([model] upload_keep_free, by default the larger of 10% and 20 GiB), and this needs {}",
+        t.label,
+        gib(d.free),
+        gib(d.keep_free),
+        gib(total)
+    )
 }
 
 /// What went wrong with an upload to `t`.

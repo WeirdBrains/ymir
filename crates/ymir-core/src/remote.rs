@@ -169,10 +169,11 @@ pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec
 /// [`roster_auth`]) searches the Hugging Face Hub, sees what fits this node, pulls models into
 /// `store` (and serves them through `supervisor` without a restart when the request says so),
 /// lists and removes what is on disk, and takes uploads under `policy` (any linked device; the
-/// free space to keep). Nothing here edits `node.toml` (an upload's entry is saved by
+/// free space to keep), and copies uploads from the owner's other nodes. Nothing here edits `node.toml` (an upload's entry is saved by
 /// `/ymir/uploads/1`, [`serve_uploads`]). Dropping the server stops it.
 pub fn serve_models(
     node: &Arc<SyncNode>,
+    hints: &Hints,
     supervisor: Supervisor,
     m: &Membership,
     store: weirdnet_model::ModelStore,
@@ -180,7 +181,14 @@ pub fn serve_models(
     engine: EngineKind,
     policy: weirdnet_backends::models::WritePolicy,
 ) -> Result<(ModelsServer, Arc<ModelsService>), RemoteError> {
-    let service = Arc::new(ModelsService::new(store, supervisor, roster_auth(m)).with_budget(budget).with_engine(engine).with_write_policy(policy));
+    // The peer dialer lets this node copy an upload from another of the owner's nodes (U6).
+    let service = Arc::new(
+        ModelsService::new(store, supervisor, roster_auth(m))
+            .with_budget(budget)
+            .with_engine(engine)
+            .with_write_policy(policy)
+            .with_peer_dialer(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert()))),
+    );
     let server = ModelsServer::start(node, service.clone())?;
     Ok((server, service))
 }
