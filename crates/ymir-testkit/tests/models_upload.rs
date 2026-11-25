@@ -296,7 +296,7 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     assert!(err.is_err() && out.contains("gpu refused the upload (wrong-arch)"), "{out}");
 
     // --rollout (U3): each upload becomes the next version of `support` on this inference node,
-    // as `support-rN`; its first --canary needs no eval, later ones over the canary share do.
+    // as `support-rN`; --canary PCT gives it exactly that share, uncapped, the others the rest.
     let sup = |v: u32| -> Result<String> {
         let d = files.join(format!("v{v}"));
         std::fs::create_dir_all(&d)?;
@@ -315,15 +315,14 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     };
     assert_eq!(rollout_of(&lap_h)?, vec![(1, "support-r1".to_string(), 100)]);
     let s2 = sup(2)?;
-    let mut out = Vec::new();
-    let err = ctl_with(&lap_h.home, &["models", "upload", &s2, "--node", "gpu", "--rollout", "support", "--canary", "50"], &mut out, "").await;
-    let (out, err) = (String::from_utf8(out)?, format!("{:#}", err.unwrap_err()));
-    assert!(out.contains("support@2") && err.contains("canary share") && err.contains("support@2 stays at weight 0"), "{out}\n{err}");
-    assert_eq!(rollout_of(&lap_h)?[1], (2, "support-r2".to_string(), 0));
+    let out = ctl(&lap_h.home, &["models", "upload", &s2, "--node", "gpu", "--rollout", "support", "--canary", "50"]).await?;
+    assert!(out.contains("support@2 now gets 50.0% of new conversations; support@1 50.0%"), "{out}");
+    assert_eq!(rollout_of(&lap_h)?[1], (2, "support-r2".to_string(), 50));
     let s3 = sup(3)?;
     let out = ctl(&lap_h.home, &["models", "upload", &s3, "--node", "gpu", "--rollout", "support", "--canary", "5"]).await?;
     assert!(out.contains("support@3"), "{out}");
-    assert_eq!(rollout_of(&lap_h)?[2], (3, "support-r3".to_string(), 5));
+    let after: Vec<u32> = rollout_of(&lap_h)?.iter().map(|v| v.2).collect();
+    assert_eq!(after, vec![48, 47, 5], "the rest split by the old weights, adding up to 100");
     let mut list = String::new();
     eventually(40, "rollout list shows provenance", async || {
         list = ctl(&lap_h.home, &["models", "rollout", "list"]).await?;

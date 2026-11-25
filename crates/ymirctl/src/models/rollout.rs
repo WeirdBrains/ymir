@@ -34,16 +34,27 @@ pub enum RolloutCmd {
         #[arg(long)]
         model: String,
         /// Its traffic weight (default 0: pinnable as NAME@N, no traffic yet).
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, conflicts_with = "canary")]
         weight: u32,
+        /// Give it exactly this percentage (0 to 100) of new conversations; the other versions
+        /// share the rest. Not capped at the canary share; --eval, when given, must pass.
+        #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u32).range(0..=100))]
+        canary: Option<u32>,
         #[command(flatten)]
         gate: Gate,
     },
-    /// Set a version's traffic weight.
+    /// Set a version's traffic weight (`weight support@3 20`), or its share in percent
+    /// (`weight support@3 --canary 20`).
     Weight {
         /// NAME@N
         version: String,
-        weight: u32,
+        /// The relative weight (above the canary share only with --eval or --force).
+        #[arg(required_unless_present = "canary", conflicts_with = "canary")]
+        weight: Option<u32>,
+        /// Give it exactly this percentage (0 to 100) of new conversations; the other versions
+        /// share the rest. Not capped at the canary share; --eval, when given, must pass.
+        #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u32).range(0..=100))]
+        canary: Option<u32>,
         #[command(flatten)]
         gate: Gate,
     },
@@ -166,62 +177,80 @@ fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>, prov: &Ha
     Ok(())
 }
 
-/// `cmd` as a change and its gate (`None`: a list).
-fn to_change(cmd: &RolloutCmd) -> Result<Option<(Change, CoreGate)>> {
-    let (change, gate) = match cmd {
-        RolloutCmd::List => return Ok(None),
-        RolloutCmd::Add { version, model, weight, gate } => {
+/// `cmd` as changes, in order, and their gate (empty: a list). `add --canary PCT` is an add at
+/// weight 0, then the share.
+fn to_changes(cmd: &RolloutCmd) -> Result<Vec<(Change, CoreGate)>> {
+    let share = |name: &str, n: u32, percent: u32| Change::Share { name: name.into(), version: n, percent };
+    let changes = match cmd {
+        RolloutCmd::List => return Ok(Vec::new()),
+        RolloutCmd::Add { version, model, weight, canary, gate } => {
             let (name, n) = parse_version(version)?;
-            (Change::Add { name: name.into(), version: n, model: model.clone(), weight: *weight }, gate)
+            let add = Change::Add { name: name.into(), version: n, model: model.clone(), weight: if canary.is_some() { 0 } else { *weight } };
+            match canary {
+                Some(p) => vec![(add, CoreGate::default()), (share(name, n, *p), gate.rows()?)],
+                None => vec![(add, gate.rows()?)],
+            }
         }
-        RolloutCmd::Weight { version, weight, gate } => {
+        RolloutCmd::Weight { version, weight, canary, gate } => {
             let (name, n) = parse_version(version)?;
-            (Change::Weight { name: name.into(), version: n, weight: *weight }, gate)
+            match (canary, weight) {
+                (Some(p), _) => vec![(share(name, n, *p), gate.rows()?)],
+                (None, Some(w)) => vec![(Change::Weight { name: name.into(), version: n, weight: *w }, gate.rows()?)],
+                (None, None) => bail!("give the weight, or --canary PCT"),
+            }
         }
-        RolloutCmd::Rollback { name } => (Change::Rollback { name: name.clone() }, &Gate::default()),
+        RolloutCmd::Rollback { name } => vec![(Change::Rollback { name: name.clone() }, CoreGate::default())],
         RolloutCmd::Retire { version, force } => {
             let (name, n) = parse_version(version)?;
-            (Change::Retire { name: name.into(), version: n, force: *force }, &Gate::default())
+            vec![(Change::Retire { name: name.into(), version: n, force: *force }, CoreGate::default())]
         }
     };
-    Ok(Some((change, gate.rows()?)))
+    Ok(changes)
 }
 
 /// Applies a change to `rollouts`; returns what to say (the rules are in
 /// [`ymir_core::rollout_edit`], shared with `/ymir/rollouts/1`).
 pub fn apply(rollouts: &mut Vec<Rollout>, cmd: &RolloutCmd) -> Result<String> {
-    match to_change(cmd)? {
-        None => Ok(String::new()),
-        Some((change, gate)) => ymir_core::rollout_edit::apply(rollouts, &change, &gate),
+    let mut said = Vec::new();
+    for (change, gate) in to_changes(cmd)? {
+        said.push(ymir_core::rollout_edit::apply(rollouts, &change, &gate)?);
     }
+    Ok(said.join("\n"))
 }
 
 /// `ymirctl models rollout ... --inference NODE`: the same on another inference node, through
 /// this machine's ymird and `/ymir/rollouts/1`. `persist`: that node saves it in its node.toml.
 pub async fn run_remote(paths: &Paths, out: &mut dyn Write, node: &str, cmd: RolloutCmd, persist: bool) -> Result<()> {
-    let mut request = match to_change(&cmd)? {
-        None => ymir_core::rollouts_net::Request::list(),
-        Some((change, gate)) => ymir_core::rollouts_net::Request { gate, ..ymir_core::rollouts_net::Request::change(change) },
+    let changes = to_changes(&cmd)?;
+    let requests: Vec<ymir_core::rollouts_net::Request> = if changes.is_empty() {
+        vec![ymir_core::rollouts_net::Request::list()]
+    } else {
+        changes
+            .into_iter()
+            .map(|(change, gate)| ymir_core::rollouts_net::Request { gate, ..ymir_core::rollouts_net::Request::change(change) })
+            .collect()
     };
-    request.persist = persist;
-    let listing = request.change.is_none();
-    let req = ControlRequest::RemoteRollouts { node: node.to_string(), request };
-    let r = control::request(&paths.socket(), &req).await.context("asking this machine's ymird (is it running? `ymirctl service start`)")?;
-    if !r.ok {
-        bail!("{}", r.message.unwrap_or_default());
-    }
-    let label = r.message.unwrap_or_else(|| node.to_string());
-    let got = r.remote_rollouts.context("ymird answered without the rollouts")?;
-    if listing {
-        let prov = if got.rollouts.is_empty() { Default::default() } else { provenance(paths).await };
-        let note = format!("on {label}, live");
-        return list(out, &got.rollouts, Some(note.as_str()), &prov);
-    }
-    writeln!(out, "{}", got.said.unwrap_or_default())?;
-    match (got.saved, got.note) {
-        (true, _) => writeln!(out, "Applied on {label} and saved in its node.toml: new conversations follow now.")?,
-        (false, Some(n)) => writeln!(out, "Applied on {label} (live only): {n}")?,
-        (false, None) => writeln!(out, "Applied on {label}, live only (--no-persist): gone when its ymird restarts.")?,
+    for mut request in requests {
+        request.persist = persist;
+        let listing = request.change.is_none();
+        let req = ControlRequest::RemoteRollouts { node: node.to_string(), request };
+        let r = control::request(&paths.socket(), &req).await.context("asking this machine's ymird (is it running? `ymirctl service start`)")?;
+        if !r.ok {
+            bail!("{}", r.message.unwrap_or_default());
+        }
+        let label = r.message.unwrap_or_else(|| node.to_string());
+        let got = r.remote_rollouts.context("ymird answered without the rollouts")?;
+        if listing {
+            let prov = if got.rollouts.is_empty() { Default::default() } else { provenance(paths).await };
+            let note = format!("on {label}, live");
+            return list(out, &got.rollouts, Some(note.as_str()), &prov);
+        }
+        writeln!(out, "{}", got.said.unwrap_or_default())?;
+        match (got.saved, got.note) {
+            (true, _) => writeln!(out, "Applied on {label} and saved in its node.toml: new conversations follow now.")?,
+            (false, Some(n)) => writeln!(out, "Applied on {label} (live only): {n}")?,
+            (false, None) => writeln!(out, "Applied on {label}, live only (--no-persist): gone when its ymird restarts.")?,
+        }
     }
     Ok(())
 }
@@ -261,16 +290,41 @@ mod tests {
     }
 
     fn add(v: &str, m: &str, w: u32, gate: Gate) -> RolloutCmd {
-        RolloutCmd::Add { version: v.into(), model: m.into(), weight: w, gate }
+        RolloutCmd::Add { version: v.into(), model: m.into(), weight: w, canary: None, gate }
+    }
+
+    #[test]
+    fn add_and_weight_take_a_named_percentage() {
+        let mut r = ro();
+        let cmd = RolloutCmd::Add { version: "support@3".into(), model: "s3".into(), weight: 0, canary: Some(20), gate: Gate::default() };
+        let said = apply(&mut r, &cmd).unwrap();
+        assert!(said.contains("Added support@3") && said.contains("support@3 now gets 20.0%"), "{said}");
+        let w: Vec<u32> = r[0].versions.iter().map(|v| v.weight).collect();
+        assert_eq!(w, vec![80, 20]);
+        apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: None, canary: Some(50), gate: Gate::default() }).unwrap();
+        let w: Vec<u32> = r[0].versions.iter().map(|v| v.weight).collect();
+        assert_eq!(w, vec![50, 50]);
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: RolloutCmd,
+        }
+        assert!(T::try_parse_from(["t", "weight", "support@3", "--canary", "101"]).is_err());
+        assert!(T::try_parse_from(["t", "weight", "support@3", "5", "--canary", "20"]).is_err());
+        assert!(T::try_parse_from(["t", "weight", "support@3"]).is_err());
+        assert!(T::try_parse_from(["t", "add", "support@4", "--model", "m", "--canary", "100"]).is_ok());
     }
 
     #[test]
     fn a_canary_is_free_more_needs_an_eval_and_rollback_moves_traffic_back() {
         let mut r = ro();
         apply(&mut r, &add("support@3", "s3", 5, Gate::default())).unwrap();
-        let e = apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: 100, gate: Gate::default() }).unwrap_err();
+        let e =
+            apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: Some(100), canary: None, gate: Gate::default() }).unwrap_err();
         assert!(e.to_string().contains("canary share"), "{e}");
-        apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: 100, gate: Gate { eval: None, force: true } }).unwrap();
+        apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: Some(100), canary: None, gate: Gate { eval: None, force: true } })
+            .unwrap();
         assert_eq!(r[0].version(3).unwrap().weight, 100);
         apply(&mut r, &RolloutCmd::Rollback { name: "support".into() }).unwrap();
         assert_eq!((r[0].version(2).unwrap().weight, r[0].version(3).unwrap().weight), (200, 0));
@@ -297,7 +351,11 @@ mod tests {
         assert!(eval_gate(&f, "s9", "s2").is_err());
         let mut r = ro();
         apply(&mut r, &add("support@3", "s3", 0, Gate::default())).unwrap();
-        apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: 100, gate: Gate { eval: Some(f), force: false } }).unwrap();
+        apply(
+            &mut r,
+            &RolloutCmd::Weight { version: "support@3".into(), weight: Some(100), canary: None, gate: Gate { eval: Some(f), force: false } },
+        )
+        .unwrap();
     }
 
     #[test]

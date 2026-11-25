@@ -1,8 +1,10 @@
 //! `ymirctl models upload FILE --node X --rollout NAME` (docs/design/model-upload.md, slice U3):
 //! after the upload, the model becomes the next version of rollout NAME on this machine's
-//! inference role (P4b's `[[inference.rollout]]`), at weight 0. `--canary W` then gives it W:
-//! up to the canary share freely, more only when `--eval ROWS` (run here on the new version's
-//! model and the one with the most traffic, on the same rows) passes P4b's gate, or `--force`.
+//! inference role (P4b's `[[inference.rollout]]`), at weight 0. `--canary PCT` then gives it
+//! exactly PCT percent (0 to 100) of new conversations, the other versions sharing the rest; with
+//! `--eval ROWS` (run here on the new version's model and the one with the most traffic, on the
+//! same rows) only when it passes P4b's gate. A named percentage is not capped (m3talsmith,
+//! 2026-11-25).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -21,18 +23,18 @@ pub struct RolloutArgs {
     /// weight 0 (pinnable as NAME@N). With --node only. Without --name the id is `ID-rN`.
     #[arg(long, value_name = "NAME")]
     pub rollout: Option<String>,
-    /// Give the new version this traffic weight once it is added (above the canary share only
-    /// with an eval that passes, or --force).
-    #[arg(long, value_name = "W", requires = "rollout")]
+    /// Give the new version exactly this percentage (0 to 100) of new conversations once it is
+    /// added, such as 20 or 50; the other versions share the rest.
+    #[arg(long, value_name = "PCT", requires = "rollout", value_parser = clap::value_parser!(u32).range(0..=100))]
     pub canary: Option<u32>,
     /// Eval rows (`ymirctl eval` format) to score the new version against the version with the
-    /// most traffic before --canary.
+    /// most traffic before --canary; the share is set only if it does at least as well.
     #[arg(long, value_name = "ROWS.jsonl", requires = "canary")]
     pub eval: Option<PathBuf>,
     /// A model that grades the eval's rubric rows.
     #[arg(long, requires = "eval")]
     pub judge: Option<String>,
-    /// Skip the eval gate for --canary.
+    /// Set the --canary share even if the --eval check fails.
     #[arg(long, requires = "canary")]
     pub force: bool,
 }
@@ -65,12 +67,13 @@ pub fn versioned_id(id: &str, n: u32) -> String {
 pub async fn join(paths: &Paths, out: &mut dyn Write, a: &RolloutArgs, n: u32, model: &str, adapter_waits: bool) -> Result<()> {
     let Some(name) = &a.rollout else { return Ok(()) };
     let version = format!("{name}@{n}");
-    rollout::run(paths, out, RolloutCmd::Add { version: version.clone(), model: model.to_string(), weight: 0, gate: Gate::default() }).await?;
+    rollout::run(paths, out, RolloutCmd::Add { version: version.clone(), model: model.to_string(), weight: 0, canary: None, gate: Gate::default() })
+        .await?;
     if adapter_waits {
         writeln!(out, "{version} waits at weight 0 until `{model}` answers (its base loads it on its next start).")?;
     }
     let Some(w) = a.canary else {
-        writeln!(out, "Give it traffic with `ymirctl models rollout weight {version} W` (above 10% with --eval).")?;
+        writeln!(out, "Give it traffic with `ymirctl models rollout weight {version} --canary PCT` (a percentage, such as 20).")?;
         return Ok(());
     };
     let mut gate = Gate { eval: None, force: a.force };
@@ -80,7 +83,7 @@ pub async fn join(paths: &Paths, out: &mut dyn Write, a: &RolloutArgs, n: u32, m
             Some(incumbent) => gate.eval = Some(evaluate(paths, out, a, rows, &version, model, &incumbent).await?),
         }
     }
-    let set = rollout::run(paths, out, RolloutCmd::Weight { version: version.clone(), weight: w, gate: gate.clone() }).await;
+    let set = rollout::run(paths, out, RolloutCmd::Weight { version: version.clone(), weight: None, canary: Some(w), gate: gate.clone() }).await;
     if let Some(f) = &gate.eval {
         let _ = std::fs::remove_file(f);
     }

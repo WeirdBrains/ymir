@@ -187,6 +187,12 @@ async fn another_inference_nodes_rollouts_change_by_its_rules() -> Result<()> {
     assert_eq!(weight(&live(&inf_h).await?, "support", 2), Some(0), "a refused change changes nothing");
     run(&lap_h, &["weight", "support@2", "5"]).await?;
     assert_eq!(weight(&live(&inf_h).await?, "support", 2), Some(5));
+    // A percentage named outright is set as asked, above the canary share and without an eval.
+    let out = run(&lap_h, &["weight", "support@2", "--canary", "20"]).await?;
+    assert!(out.contains("support@2 now gets 20.0%") && out.contains("support@1 80.0%"), "{out}");
+    assert_eq!((weight(&live(&inf_h).await?, "support", 1), weight(&live(&inf_h).await?, "support", 2)), (Some(80), Some(20)));
+    let err = format!("{:#}", run(&lap_h, &["weight", "support@2", "--canary", "120"]).await.unwrap_err());
+    assert!(err.contains("120"), "{err}");
 
     // --no-persist: live only.
     let argv = [ro(&["weight", "support@2", "8"]), vec!["--no-persist".into()]].concat();
@@ -194,7 +200,7 @@ async fn another_inference_nodes_rollouts_change_by_its_rules() -> Result<()> {
     let out = ctl(&lap_h.home, &refs).await?;
     assert!(out.contains("live only"), "{out}");
     assert_eq!(weight(&live(&inf_h).await?, "support", 2), Some(8));
-    assert_eq!(weight(&NodeConfig::load(&inf_h.paths.config())?.inference.rollout, "support", 2), Some(5));
+    assert_eq!(weight(&NodeConfig::load(&inf_h.paths.config())?.inference.rollout, "support", 2), Some(20));
 
     // The list shows inf's live rollouts.
     let out = run(&lap_h, &["list"]).await?;
