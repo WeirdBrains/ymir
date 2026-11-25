@@ -1306,19 +1306,22 @@ weight = 5
 The coordinator resolves `support` to one version per conversation (weighted, from a hash of the conversation's
 synced id or its opening messages) and `support@3` to version 3. The catalog lists `support` and every `support@N`,
 `Accepted` names what was asked for, and answers are cached under the version's model id. `ymirctl models rollout`
-changes the weights live and in node.toml. Above a 10 percent share a version needs an eval at least as good as the
-current main version's (`--eval`), or `--force`. Rollback moves the traffic back, and the old version stays loaded
+changes the weights live and in node.toml. A raw weight that would give a version more than a 10 percent share
+needs an eval at least as good as the current main version's (`--eval`), or `--force`. A share named outright,
+`--canary PCT` (any whole percentage from 0 to 100), is set exactly and is not capped: the version's weight becomes
+PCT and the other versions share the rest in their present proportions; `--eval`, when given, must pass first
+(decision of 2026-11-25). Rollback moves the traffic back, and the old version stays loaded
 until retired and unloaded.
 
 `ymirctl models upload FILE --node NODE --rollout NAME` (model-upload slice U3) feeds a rollout from an upload: the
 upload is named `<id>-r<N>` for the next version N, added as `NAME@N` at weight 0 on this machine once the node
-serves it, and `--canary W` (with `--eval ROWS [--judge MODEL]`, which runs `ymirctl eval` on it and the version with
-the most traffic) goes through the same gate. `models rollout list` shows each version's origin, license, base and
+serves it, and `--canary PCT` gives it exactly that share (with `--eval ROWS [--judge MODEL]`, which runs `ymirctl
+eval` on it and the version with the most traffic, only if it does at least as well). `models rollout list` shows each version's origin, license, base and
 dataset hash from its provenance.
 
 Another inference node's rollouts are read and changed over Weirdnet with `/ymir/rollouts/1` (`ymirctl models
 rollout ... --inference NODE`, and Bragi): the same rules (`ymir_core::rollout_edit`, shared with the local command:
-above the canary share the request carries the scored eval rows or `force`), applied live and saved in that node's
+a raw weight above the canary share carries the scored eval rows or `force`; `Change::Share` sets a percentage), applied live and saved in that node's
 node.toml unless `--no-persist`. Any of the owner's linked devices may, narrowed by `[inference] rollout_callers`
 (peer ids); `[inference] remote_rollouts = false` turns it off. See
 [docs/design/model-upload.md](design/model-upload.md#rollouts-over-weirdnet-ymirrollouts1-planned-2026-11-25-follow-up-to-u4).
