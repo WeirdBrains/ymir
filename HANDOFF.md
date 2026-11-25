@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 04:07 EST: v0.13.0 released, signed and on TAUR
+
+**v0.13.0** (release commit 2ef42b8, tag v0.13.0, cut with `weirdnet_release.py cut --minor` on main 33764a5 after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 331 passed, 0 failed): rollouts over Weirdnet (`/ymir/rollouts/1`, `ymirctl models rollout ... --inference NODE [--no-persist]`). CI, macOS, Pages and the Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` is the `SHA256SUMS` artifact's; each platform artifact carries a partial one), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.13.0) has 35 files (`assets 0.13.0` ok, marked latest): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.13.0 --yes` published `ymir-bin` 0.13.0-1 and `ymir-cuda-bin` 0.13.0-1. The Arch recipes carry the v0.13.0 tarball hashes (this branch). Bragi 0.8.0's desktop upload dialog uses the new protocol (noted in the plan's "as built").
+
 ## 2026-11-25 03:03 EST: rollouts over Weirdnet, `/ymir/rollouts/1` (branch `feature/rollouts-net`)
 
 The follow-up to model-upload U4, so Bragi and `ymirctl` on another device can put an upload into an inference node's rollout. Decisions of 2026-11-25 2:51 AM ET (made by llm dev from Michael's upload answers; he can override them) are in [docs/design/model-upload.md](docs/design/model-upload.md): any linked device, narrowed by `[inference] rollout_callers`; above the canary share the request carries eval rows or `force`; every operation remotely, rollback included; saved in node.toml by default, with an opt-out. Details in the plan's "`/ymir/rollouts/1` as built".
