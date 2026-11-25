@@ -6,9 +6,12 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-25
+
 ### Added
 
 - Rollouts over Weirdnet (`/ymir/rollouts/1`, the follow-up to model-upload U4): `ymirctl models rollout list|add|weight|rollback|retire ... --inference NODE` reads and changes another inference node's rollouts by that node's rules (above the 10 percent canary share the request carries the eval rows from `--eval FILE`, or `--force`). A change applies at once and is saved in that node's node.toml; `--no-persist` changes only its live rollouts. Any of the owner's linked devices may, narrowed by `[inference] rollout_callers` (peer ids); `[inference] remote_rollouts = false` turns it off.
+- Rollouts over Weirdnet: /ymir/rollouts/1 and ymirctl models rollout --inference
 
 ### Changed
 
