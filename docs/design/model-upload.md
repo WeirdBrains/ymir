@@ -213,7 +213,7 @@ On the node itself, `ymirctl models upload` (U1) works today.
   `rollout add NAME@N --model ID --weight 0`. Weight 0 means it is pinnable as `NAME@N` and takes no traffic.
   `--eval ROWS.jsonl [--judge MODEL]` then runs `ymirctl eval` on `NAME@N` and on the version with the most traffic,
   and `--canary W` sets the weight: up to 10 percent freely, more only with the eval passing the existing P4b gate
-  (or `--force`). Rollback and retire stay `models rollout rollback | retire`. Weights shared by several inference
+  (or `--force`). Changed 2026-11-25 (decision 8): `--canary PCT` is a percentage, set exactly and uncapped. Rollback and retire stay `models rollout rollback | retire`. Weights shared by several inference
   nodes are still per node (a P4b gap), so `--rollout` applies on every inference node the user names
   (`--inference all`) and reports each.
 - **Provenance in the rollout.** `models rollout list` shows each version's origin, license, base and dataset hash
@@ -698,3 +698,19 @@ origin and license in their capability record, and Bragi shows them as a tag on 
    `--no-persist` (remote) or `--no-register` (local) opts out.
 6. **Bragi:** desktop first.
 7. **Stopgap:** a private Hugging Face repo plus `ymirctl models pull` is fine until U2 (see "Stopgap until U2").
+
+## Decision 8: canary percentages (m3talsmith, 2026-11-25 7:24 AM ET)
+
+"Put an option in to set the canary percentage. I want to be able to choose a percentage like 20, or 50 % etc."
+
+- `--canary PCT` on `ymirctl models rollout add` and `weight` (also with `--inference NODE`, over
+  `/ymir/rollouts/1` as `Change::Share`) and on `models upload --rollout`: any whole percentage from 0 to 100. The
+  version's weight becomes PCT and the other versions with traffic share the rest in their present proportions,
+  so the weights add up to 100 and `rollout list` shows the share asked for.
+- A percentage named outright drops the 10 percent cap and the eval-or-force requirement. An `--eval` given with it
+  is still checked (the share is set only if the version does at least as well), and `--force` skips that check.
+- Promotion through a raw weight is unchanged: more than the canary share needs `--eval` or `--force`.
+- Bragi's upload dialog replaces its 0/1/5/10 weight choice with a percentage (presets 0, 1, 5, 10, 20, 50 and
+  100, or typed), added at weight 0 and then given its share.
+- An older inference node (before Ymir 0.15.0) does not know `Change::Share` and says so; the version stays at
+  weight 0 there.

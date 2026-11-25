@@ -155,8 +155,9 @@ restart (<code>--load</code> loads it too). That is in memory only: <code>node.t
 is cut off, must leave <code>[model] upload_keep_free</code> free (by default the larger of 10% and 20 GiB), and is served
 and saved in that node's <code>node.toml</code> unless you pass <code>--no-persist</code>. A llama.cpp adapter is used from its
 base's next start. With <code>--rollout NAME</code> it becomes the next version of that rollout here, named
-<code>ID-rN</code>, at weight 0; <code>--canary W</code> gives it traffic (more than 10% needs <code>--eval ROWS</code>,
-which compares it with the version that has the most, or <code>--force</code>).</li>
+<code>ID-rN</code>, at weight 0; <code>--canary PCT</code> gives it exactly that percentage of new conversations, any of
+0 to 100 (such as 20 or 50), the other versions sharing the rest. With <code>--eval ROWS</code> the share is set only if it
+does at least as well as the version that has the most traffic.</li>
 <li><code>upload FILE --node all</code> (every model node but this one) or <code>--node A,B</code>: the file is sent once, to
 the node with the most free space (or <code>--stage NODE</code>), and the others copy it from that node, node to node. A node
 without room after what it keeps free is left out before anything is sent; one that can't copy from the other node
@@ -175,7 +176,8 @@ ymirctl models list --node gpu-box
 ymirctl models remove qwen3-8b-q4_k_m --node gpu-box --yes
 ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --license apache-2.0
 ymirctl models upload ./my-tune-Q4_K_M.gguf --node all
-ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --canary 25 --eval support-rows.jsonl</code></pre>
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --canary 20
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --canary 50 --eval support-rows.jsonl</code></pre>
 <h3 id="load"><code>ymirctl load MODEL [--node NODE]</code></h3>
 <p>Loads a model on a model node. <code>--node</code> picks the node by name (see <code>ymirctl nodes</code>).</p>
 <pre><code>ymirctl load gemma4-e4b
@@ -304,13 +306,15 @@ ymirctl train run --base qwen3-8b --dataset data.jsonl --id qwen3-8b+support --e
 <p>A rollout is one name your apps ask for, with versions behind it, each a model in the pool with a traffic weight.
 It lives in this inference node's <code>node.toml</code> (<code>[[inference.rollout]]</code>). Each conversation stays
 on one version; <code>NAME@N</code> asks for a version whatever its weight. Changes apply to the running
-<code>ymird</code> at once. A version may take up to 10% of new conversations; more needs <code>--eval FILE</code>
-(an <code>ymirctl eval --out</code> file where it does at least as well as the version with the most traffic on the
-same rows) or <code>--force</code>.</p>
+<code>ymird</code> at once. <code>--canary PCT</code> on <code>add</code> or <code>weight</code> gives a version exactly
+that percentage of new conversations (any of 0 to 100), the others sharing the rest. A raw weight that gives it more
+than 10% needs <code>--eval FILE</code> (an <code>ymirctl eval --out</code> file where it does at least as well as the
+version with the most traffic on the same rows) or <code>--force</code>.</p>
 <table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
 <tr><td><code>models rollout list</code></td><td>Rollouts, versions, weights and shares (live when <code>ymird</code> runs).</td></tr>
-<tr><td><code>models rollout add NAME@N --model ID [--weight W]</code></td><td>Add a version (weight 0 by default: pinnable, no traffic yet).</td></tr>
+<tr><td><code>models rollout add NAME@N --model ID [--weight W | --canary PCT]</code></td><td>Add a version (weight 0 by default: pinnable, no traffic yet; <code>--canary 20</code>: 20% of new conversations).</td></tr>
 <tr><td><code>models rollout weight NAME@N W [--eval FILE] [--force]</code></td><td>Change a version's weight.</td></tr>
+<tr><td><code>models rollout weight NAME@N --canary PCT</code></td><td>Give it exactly PCT percent of new conversations (0 to 100); the other versions share the rest.</td></tr>
 <tr><td><code>models rollout rollback NAME</code></td><td>Move the newest version's traffic back to the version before it.</td></tr>
 <tr><td><code>models rollout retire NAME@N [--force]</code></td><td>Drop a version with no traffic; its model stays loaded until you unload it.</td></tr>
 </tbody></table>

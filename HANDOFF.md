@@ -3,6 +3,19 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 07:31 EST: canary percentages (branch `feature/canary-percent`); the 0.15.0 cut was stopped for it
+
+Michael asked at 7:24 AM ET for a canary percentage such as 20 or 50 (decision 8 in [docs/design/model-upload.md](docs/design/model-upload.md)). The 0.15.0 cut that was running then was stopped before it committed, tagged or pushed anything (its version edits were reverted), so the release includes this.
+
+**What changed**
+- [crates/ymir-core/src/rollout_edit.rs](crates/ymir-core/src/rollout_edit.rs): `Change::Share { name, version, percent }`: the version gets exactly `percent` (0 to 100), the other versions with traffic the rest by their present weights (largest remainder, adding up to 100). Not capped at `CANARY_MAX`; an eval in the gate, when given, must pass (`force` skips it). Raw weights keep the gate.
+- ymirctl: `models rollout add ... --canary PCT` (an add at weight 0, then the share) and `models rollout weight NAME@N --canary PCT`, both also with `--inference NODE` (one `/ymir/rollouts/1` request per change); `models upload ... --rollout NAME --canary PCT` is a percentage now.
+- Docs: decision 8, DESIGN, training plan, CHANGELOG (Added and Changed), the site's ymirctl page.
+
+**Checks:** `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 339 passed, 0 failed, 7 ignored (new: `rollout_edit` share tests, ymirctl `add_and_weight_take_a_named_percentage`; testkit `models_upload` and `rollouts_net` use `--canary 20`/`50` and check the split).
+
+**Next:** full checks, merge, CI on main, then cut 0.15.0 (with U7 and this) and Bragi 0.10.0 (percentage field), sign, TAUR.
+
 ## 2026-11-25 05:55 EST: model upload U7, more formats (branch `feature/upload-formats`); U8 blocked on Weirdnet request D
 
 Slice U7 of [docs/design/model-upload.md](docs/design/model-upload.md): over `--node`, an upload also takes a safetensors directory (for vLLM), an MLX directory, a PEFT LoRA directory (on a vLLM base) and a GGUF vision projector (`--projector-for MODEL`). Weirdnet already reads, places and serves these (weirdnet-model 0.5.3, weirdnet-backends 0.4.4, locked); no Weirdnet crate edited. Details in the plan's "U7 as built".

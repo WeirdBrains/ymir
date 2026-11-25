@@ -9,7 +9,12 @@ All notable changes to Ymir are listed here. The format follows
 ### Added
 
 - More upload formats (model-upload plan, U7): `ymirctl models upload DIR --node NAME` sends a directory of safetensors weights to a vLLM node, or MLX weights to an MLX node, and a PEFT LoRA adapter directory with `--adapter-for` a vLLM model; `ymirctl models upload mmproj.gguf --node NAME --projector-for MODEL` sends a vision projector for a llama.cpp model. The directory is checked and hashed here (pickles, code and symlinks are refused) and again on the node, which places it, serves it and saves it in its `node.toml`: a `backend = "vllm"` or `"mlx"` entry, a LoRA on the base, or the model's `mmproj`. On the machine itself an upload is still a GGUF model or GGUF LoRA.
+- Canary percentages (decision 8 in the model-upload plan): `ymirctl models rollout add NAME@N --model ID --canary PCT`, `ymirctl models rollout weight NAME@N --canary PCT` (also with `--inference NODE`, as `/ymir/rollouts/1`'s new `share` change) and `ymirctl models upload ... --rollout NAME --canary PCT` give a version exactly PCT percent of new conversations, any of 0 to 100 (such as 20 or 50); the other versions share the rest in their present proportions. A percentage named this way is not capped at the 10% canary share and needs no eval; an `--eval` given with it must pass.
 - `[model] upload_engine` (`llamacpp`, `vllm` or `mlx`): the engine an uploaded full model must suit on that node. Unset, it is llama.cpp, unless `llamacpp = "off"`; then vLLM, then MLX. Before, every node took GGUF only.
+
+### Changed
+
+- `ymirctl models upload ... --rollout NAME --canary` takes a percentage now (it was a raw weight, gated above 10%), and `--force` there only skips a failing `--eval`. Raising a version with a raw weight, `ymirctl models rollout weight NAME@N W`, keeps the canary share and the eval gate.
 
 ## [0.14.0] - 2026-11-25
 

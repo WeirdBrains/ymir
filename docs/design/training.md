@@ -286,7 +286,8 @@ the same, and raising a canary only moves the conversations it gains. `name@N` p
 the name is refused. The catalog lists the name and each `name@N`. `Accepted` names what the app asked for, so
 a version isn't reported as a stand-in, and answers are cached under the version's model id. `ymirctl models
 rollout list | add | weight | rollback | retire` edits node.toml and applies it to the running ymird at once
-(`ControlRequest::Rollouts`). A version may take up to 10 percent of new conversations freely. More than that needs
+(`ControlRequest::Rollouts`). `--canary PCT` names a share outright (0 to 100), set exactly and uncapped (m3talsmith,
+2026-11-25). Through a raw weight a version may take up to 10 percent of new conversations freely. More than that needs
 `--eval FILE`, a `ymirctl eval --out` file in which its model passes at least the share of the checks (and of the
 judge, when both were judged) that the version with the most traffic passes on the same rows, or `--force`.
 `rollback` moves the newest version's traffic back to the one before it. `retire` drops a version without traffic,
