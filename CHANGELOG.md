@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-25
+
 ### Added
 
 - `ymirctl update status` shows whether self-update is on, its interval and feed, and the last check's result (kept in `updates/autoupdate.json`).
@@ -23,6 +25,10 @@ All notable changes to Ymir are listed here. The format follows
 - weirdnet-agent 0.5.4, weirdnet-backends 0.4.5 and weirdnet-openai 0.2.3 (Weirdnet request D).
 - A model placed in a node's store but not served (for example a projector for an embedding model) is logged as a
   warning on that node.
+
+### Fixed
+
+- Hands-off self-update in ymird ([update]); model origin and license in the pool catalog (U8).
 
 ## [0.15.2] - 2026-11-25
 
