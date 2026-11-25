@@ -197,8 +197,7 @@ pub fn sign_bundle(dir: &Path, key: &SigningKey, root_env: &[u8], pin: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Paths;
-    use crate::update::{Updater, this_target};
+    use crate::update::this_target;
     use weirdnet_update::Delegation;
 
     fn key(n: u8) -> SigningKey {
@@ -257,6 +256,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn signed_bundle_stages_on_a_node() {
+        use crate::Paths;
+        use crate::update::Updater;
         let t = tempfile::tempdir().unwrap();
         let rel = key(10);
         let (root_env, pin) = root(&rel);
