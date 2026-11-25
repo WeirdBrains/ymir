@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 05:36 EST: v0.14.0 released, signed and on TAUR
+
+**v0.14.0** (release commit 560283b, tag v0.14.0, cut with `weirdnet_release.py cut --minor` on main 42707ce after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 332 passed, 0 failed): uploads to a pool (U6: `ymirctl models upload FILE --node all|A,B [--stage NODE]`, sent once and copied node to node). The Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` from its own artifact), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.14.0) has 35 files (`assets 0.14.0` ok, marked latest): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.14.0 --yes` published `ymir-bin` 0.14.0-1 and `ymir-cuda-bin` 0.14.0-1. The Arch recipes carry the v0.14.0 tarball hashes (this branch). Bragi 0.9.0's desktop upload dialog copies uploads on to other nodes with the same Weirdnet call.
+
 ## 2026-11-25 04:33 EST: model upload U6, pools (branch `feature/upload-pools`)
 
 Slice U6 of [docs/design/model-upload.md](docs/design/model-upload.md): upload once, the other nodes copy it from that node, on Weirdnet's `ModelsClient::replicate` and `Pull::from_peer` (weirdnet-backends 0.4.4, already locked); no Weirdnet crate edited. Details in the plan's "U6 as built".
