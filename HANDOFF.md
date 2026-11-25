@@ -4,6 +4,27 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 
 
+## 2026-11-24 23:05 EST: model upload U2, `ymirctl models upload FILE --node X` (branch `feature/model-upload-remote`)
+
+Slice U2 of [docs/design/model-upload.md](docs/design/model-upload.md) on `weirdnet-backends` 0.4.4's models/1 upload; no Weirdnet crate edited. Details in the plan's "U2 as built".
+
+**What changed**
+- [crates/ymirctl/src/models/upload.rs](crates/ymirctl/src/models/upload.rs) `remote_op`: with `--node`, checks and hashes the file (or a run's adapter, `--from-run`, found in RUN_DIR when FILE is left out), builds its `Provenance` and an `Upload` that serves. `--no-persist` is an alias of `--no-register`. Output in [remote.rs](crates/ymirctl/src/models/remote.rs) (`upload`, `uploaded`, `adapter_uploaded`: a llama.cpp adapter is used from its base's next start; never "live").
+- [crates/ymir-core/src/models.rs](crates/ymir-core/src/models.rs): `ModelsOp::Upload`, `Outcome::Uploaded`, `ModelsHub::upload` (one named remote node; resumes; progress never goes back; `exists` with the same revision counts as already there; then registers). `ModelsHub::with_uploads`.
+- [crates/ymir-core/src/upload_net.rs](crates/ymir-core/src/upload_net.rs) (new): `/ymir/uploads/1`. `UploadsService` (on model nodes with `remote_manage`, any linked device) checks the stored entry's revision, calls `NodeService::set_model_info(id, Some(revision), quant)` and saves the entry in node.toml unless `--no-persist`; `UploadsClient`; refusal wording.
+- [crates/ymir-core/src/config_edit.rs](crates/ymir-core/src/config_edit.rs) (new): node.toml edits moved from `ymirctl` (`stanza`, `local_model`, `append_model`, `add_adapter`, `save`); `ymirctl` calls them.
+- `[model] upload_keep_free` (default: the larger of 10% and 20 GiB) feeds the node's `WritePolicy`; `serve_models` takes the policy. `Daemon::start_at(cfg, paths, config)` so a saved upload edits the file ymird was started with (`ymird --config`).
+- Tests: [crates/ymir-testkit/tests/models_upload.rs](crates/ymir-testkit/tests/models_upload.rs) (three real daemons on 127.0.0.1: laptop and two model nodes) covers a model sent, stored with provenance (`uploaded_by` the laptop) and saved with its revision; the same files again; other files under a taken id (`exists`); a cut-off upload resumed; an adapter with `--no-persist` (node.toml byte-identical) and saved (`base_revision` from the base); a wrong-architecture adapter; `no-space`; `--node` naming this device or `all`. Unit tests: `remote_op` with `--from-run`, `upload_keep_free`, refusal wording, JSON round trips.
+- Docs: plan "U2 as built", [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), the site's ymirctl page.
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` 325 passed, 0 failed, 7 ignored; `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps --locked`; `site/tool/check_links.py`, `gen_roadmap.py --check`.
+
+**Not tested**: the pool seeing the recorded revision (`set_model_info` is called; no test reads the capability record back); multi-GB uploads and real links; Ctrl-C from a terminal (the test cuts the stream by sending a short local file); a duplicate upload at the same time (`Busy`); a node with an older ymird (no `/ymir/uploads/1`); `--from-run --node` end to end (unit test only); a vLLM node (uploads are GGUF only).
+
+**For Weirdnet (requests through m3talsmith)**: an "upload placed" hook on `ModelsService` (or `Upload { set_info, persist }` handled in the crate) would let apps drop their own register protocol.
+
+**Next**: U3 (`--rollout`), U4 (Bragi dialog), U6 (pools, now unblocked by `replicate`).
+
 ## 2026-11-24 22:37 EST: weirdnet-model 0.5.3 / weirdnet-backends 0.4.4; upload code on weirdnet-model (branch `feature/weirdnet-model-0.5.3`)
 
 The Weirdnet lead released `weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4 (crates.io) with the model upload pieces Ymir asked for. This moves U1/U5's interim code onto them; behaviour is kept.

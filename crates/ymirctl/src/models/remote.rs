@@ -28,8 +28,88 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
         }
         ModelsCmd::Adapter { cmd } => adapter(paths, out, node, cmd).await,
         ModelsCmd::Rollout { .. } => bail!("rollouts are this inference node's pool policy; run `ymirctl models rollout` on it (without --node)"),
-        ModelsCmd::Upload(_) => bail!("uploading over Weirdnet is not built yet; run `ymirctl models upload` on the node itself"),
+        ModelsCmd::Upload(a) => upload(paths, out, node, &a).await,
     }
+}
+
+/// `ymirctl models upload FILE --node X`: checked and hashed here, sent by this machine's ymird.
+async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::upload::UploadArgs) -> Result<()> {
+    if matches!(node, "all" | "auto") {
+        bail!("an upload goes to one node: name it with --node (copying it on to the others comes later)");
+    }
+    let op = super::upload::remote_op(out, a)?;
+    let persist = op.persist;
+    writeln!(out, "Sending it to {node} (Ctrl-C stops; sending it again resumes)...")?;
+    let done = ask(paths, out, node, ModelsOp::Upload(Box::new(op))).await?;
+    let mut failed = 0;
+    for NodeResult { node, outcome } in &done.nodes {
+        let label = node.label.as_str();
+        match outcome {
+            Outcome::Uploaded { report } => {
+                if !uploaded(out, label, report, persist)? {
+                    failed += 1;
+                }
+            }
+            Outcome::Failed { message } => {
+                failed += 1;
+                writeln!(out, "{message}")?;
+            }
+            Outcome::Ok { .. } => {
+                failed += 1;
+                writeln!(out, "{label}: unexpected answer to an upload")?;
+            }
+        }
+    }
+    finish(failed, done.nodes.len())
+}
+
+/// Prints what happened to an upload on `label`; `false` when it was not recorded there.
+fn uploaded(out: &mut dyn Write, label: &str, r: &ymir_core::upload_net::UploadReport, persist: bool) -> Result<bool> {
+    match &r.pulled {
+        None => writeln!(out, "{label}: already has `{}` with the same contents; nothing was sent.", r.id)?,
+        Some(p) => {
+            if r.resumed > 0 {
+                writeln!(out, "{label}: resumed an earlier upload ({} of {} was already there).", gib(r.resumed), gib(r.total))?;
+            }
+            writeln!(out, "{label}: stored `{}` ({}, revision {}).", r.id, gib(p.size), r.revision)?;
+            match &p.adapter_for {
+                Some(base) => adapter_uploaded(out, label, base, p)?,
+                None if p.served => writeln!(out, "{label}: its ymird serves `{}`; it loads on the first request for it.", r.id)?,
+                None => writeln!(out, "{label}: stored but not served: its format does not match that node's engine.")?,
+            }
+        }
+    }
+    if let Some(e) = &r.register_error {
+        writeln!(out, "{e}")?;
+        return Ok(false);
+    }
+    let Some(reg) = &r.registered else { return Ok(false) };
+    match (&reg.saved, persist) {
+        (Some(entry), _) => {
+            writeln!(out, "{label}: saved in its node.toml, so it stays after a restart (the old file is node.toml.bak there):\n{entry}")?
+        }
+        (None, false) => writeln!(out, "{label}: its node.toml was not changed (--no-persist): it is gone from the pool when that ymird restarts.")?,
+        (None, true) => {}
+    }
+    if let Some(n) = &reg.note {
+        writeln!(out, "{label}: {n}")?;
+    }
+    Ok(true)
+}
+
+/// llama.cpp loads adapter files when its base starts: say when an uploaded one serves.
+fn adapter_uploaded(out: &mut dyn Write, label: &str, base: &str, p: &weirdnet_backends::models::Pulled) -> Result<()> {
+    use weirdnet_backends::AdapterChange;
+    match (p.served, p.change) {
+        (true, Some(AdapterChange::NextLoad)) => writeln!(
+            out,
+            "{label}: `{}` is added to `{base}`, which is running without it: llama.cpp loads adapter files only when the base starts, so the first request for `{}` restarts `{base}` with it",
+            p.id, p.id
+        )?,
+        (true, _) => writeln!(out, "{label}: `{}` is added to `{base}`; `{base}` starts with it on the next request for either", p.id)?,
+        _ => writeln!(out, "{label}: stored but not served on `{base}`")?,
+    }
+    Ok(())
 }
 
 /// Prints a pull's progress lines: every 10% when piped, in place on a terminal.
@@ -83,6 +163,10 @@ fn answers<'a>(out: &mut dyn Write, done: &'a ModelsDone) -> Result<(Vec<(&'a st
     for NodeResult { node, outcome } in &done.nodes {
         match outcome {
             Outcome::Ok { reply } => ok.push((node.label.as_str(), &**reply)),
+            Outcome::Uploaded { .. } => {
+                failed += 1;
+                writeln!(out, "{}: unexpected upload result", node.label)?;
+            }
             Outcome::Failed { message } => {
                 failed += 1;
                 writeln!(out, "{}: {message}", node.label)?;
@@ -165,6 +249,7 @@ async fn search(paths: &Paths, out: &mut dyn Write, node: &str, a: &SearchArgs) 
                     ModelsReply::Fits(f) => writeln!(out, "    {}: {}", r.node.label, verdict_line(f))?,
                     _ => writeln!(out, "    {}: unexpected answer", r.node.label)?,
                 },
+                Outcome::Uploaded { .. } => writeln!(out, "{}: unexpected answer", r.node.label)?,
                 Outcome::Failed { message } => writeln!(out, "    {}", message)?,
             }
         }
@@ -199,6 +284,7 @@ async fn list(paths: &Paths, out: &mut dyn Write, node: &str) -> Result<()> {
                     writeln!(out, "  {:<40} {:>10}{shards}  {state}", e.id(), gib(e.size()))?;
                 }
             }
+            Outcome::Uploaded { .. } => writeln!(out, "{}: unexpected answer", r.node.label)?,
             Outcome::Failed { message } => {
                 failed += 1;
                 writeln!(out, "{}: {message}", r.node.label)?;
@@ -236,6 +322,7 @@ async fn remove(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, nod
                     writeln!(out, "{}: deleted {id} ({} freed)", r.node.label, gib(*freed))?;
                 }
             }
+            Outcome::Uploaded { .. } => writeln!(out, "{}: unexpected answer", r.node.label)?,
             Outcome::Failed { message } => {
                 failed += 1;
                 writeln!(out, "{}: {message}", r.node.label)?;
@@ -359,6 +446,7 @@ async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> R
                         writeln!(out, "{}: {}", r.node.label, verdict_line(f))?;
                     }
                 }
+                Outcome::Uploaded { .. } => writeln!(out, "{}: unexpected answer", r.node.label)?,
                 Outcome::Failed { message } => writeln!(out, "{message}")?,
             }
         }
@@ -400,6 +488,7 @@ async fn pull(paths: &Paths, out: &mut dyn Write, node: &str, a: &PullArgs) -> R
                     writeln!(out, "{}: serving without a restart is in memory only; node.toml was not changed.", r.node.label)?;
                 }
             }
+            Outcome::Uploaded { .. } => writeln!(out, "{}: unexpected answer", r.node.label)?,
             Outcome::Failed { message } => {
                 failed += 1;
                 writeln!(out, "{}: {message}", r.node.label)?;

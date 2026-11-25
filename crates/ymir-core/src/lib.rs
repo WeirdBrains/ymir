@@ -11,6 +11,7 @@ pub mod balance;
 pub mod batch;
 pub mod client;
 pub mod config;
+pub mod config_edit;
 pub mod context;
 pub mod control;
 pub mod convexport;
@@ -40,6 +41,7 @@ pub mod train;
 pub mod train_net;
 pub mod update;
 pub mod upload;
+pub mod upload_net;
 pub mod vision;
 pub mod vllm;
 

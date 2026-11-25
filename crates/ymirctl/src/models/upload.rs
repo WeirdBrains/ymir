@@ -3,7 +3,8 @@
 //! header, hashes the file while copying it in atomically, writes `provenance.json` beside it
 //! (`ymir_core::upload`), and adds it to node.toml so it survives a restart (`--no-register` only
 //! prints the entry). `--from-run RUN_DIR` takes a `ymirctl train run` output with its run record
-//! as the provenance (origin `train`, slice U5). Over Weirdnet (`--node`) is slice U2.
+//! as the provenance (origin `train`, slice U5). With `--node X` it goes to another of the owner's
+//! model nodes over Weirdnet instead (slice U2, [`remote_op`]; `ymir_core::upload_net`).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,12 +45,16 @@ pub struct UploadArgs {
     /// when node.toml has no main model, else `chat`).
     #[arg(long)]
     pub role: Option<String>,
-    /// Don't add it to node.toml; only print the entry. By default it is added (a copy is kept as
-    /// node.toml.bak) so it survives a restart.
-    #[arg(long)]
+    /// Don't add it to node.toml (with --node: the node's); only print the entry. By default it
+    /// is added (a copy is kept as node.toml.bak) so it survives a restart.
+    #[arg(long, visible_alias = "no-persist")]
     pub no_register: bool,
     #[command(flatten)]
     pub dir: DirArgs,
+    /// Send it to this model node over Weirdnet (a device name or peer id) instead of this
+    /// machine. Needs a running ymird here, linked to your devices; an interrupted upload resumes.
+    #[arg(long)]
+    pub node: Option<String>,
 }
 
 fn now_ms() -> i64 {
@@ -82,6 +87,83 @@ fn check_base(ctx: &Ctx, base: &str, item: &upload::Inspected) -> Result<Provena
     b.revision = m.revision.clone();
     b.quant = m.quant.clone();
     Ok(b)
+}
+
+/// What `ymirctl models upload FILE --node X` asks this machine's ymird to do: the file checked and
+/// hashed here, with its provenance. The node checks it again (and an adapter against its base)
+/// as the bytes arrive.
+pub fn remote_op(out: &mut dyn Write, a: &UploadArgs) -> Result<ymir_core::upload_net::UploadOp> {
+    let license = upload::check_license(a.license.as_deref())?;
+    let run = a.from_run.as_deref().map(read_run).transpose()?;
+    let file = match (&a.file, &run, &a.from_run) {
+        (Some(f), _, _) => f.clone(),
+        (None, Some((r, ad)), Some(dir)) => {
+            let name = Path::new(&ad.file).file_name().map(PathBuf::from).unwrap_or_default();
+            let f = dir.join(&name);
+            if !f.is_file() {
+                bail!("run {}'s adapter is not in {}; give its file: ymirctl models upload FILE --from-run RUN_DIR --node NODE", r.id, dir.display());
+            }
+            f
+        }
+        _ => bail!("give the GGUF file, or --from-run RUN_DIR"),
+    };
+    let file = std::fs::canonicalize(&file).with_context(|| format!("reading {}", file.display()))?;
+    let item = upload::inspect(&file)?;
+    let adapter_for = a.adapter_for.clone().or_else(|| run.as_ref().map(|(r, _)| r.base.clone()));
+    if let Some((r, ad)) = &run {
+        if !item.kind().is_adapter() {
+            bail!("{} is a full model; run {} made a LoRA adapter", item.file_name, r.id);
+        }
+        if item.sha256().trim_start_matches("sha256:") != ad.sha256.trim_start_matches("sha256:") {
+            bail!("{} is not the adapter run {} made: its SHA-256 differs from the run record's", file.display(), r.id);
+        }
+    }
+    let base = match (item.kind(), &adapter_for) {
+        (ArtifactKind::Adapter { .. }, None) => {
+            bail!("{} is a LoRA adapter: say which model on the node it goes on with --adapter-for BASE", item.file_name)
+        }
+        (ArtifactKind::Model, Some(_)) => bail!("{} is a full model, not an adapter; leave out --adapter-for", item.file_name),
+        (ArtifactKind::Adapter { .. }, Some(b)) => {
+            // The run's base (the revision and quant it trained on); the node checks the rest.
+            let mut base = run.as_ref().and_then(|(r, ad)| train::import_spec(r, ad, 0).base).unwrap_or_default();
+            base.id = Some(b.clone());
+            base.hub = item.header.base_model.clone().or(base.hub);
+            Some(base)
+        }
+        _ => None,
+    };
+    let id = match (&a.name, &adapter_for) {
+        (Some(n), _) => n.clone(),
+        (None, Some(_)) if run.is_some() => run.as_ref().map(|(_, ad)| ad.id.clone()).unwrap_or_default(),
+        (None, Some(b)) => adapters::default_id(b, &item.file_name),
+        (None, None) => id_for_file(&item.file_name),
+    };
+    upload::check_id(&id)?;
+    let spec = match &run {
+        Some((r, ad)) => ImportSpec { id: id.clone(), license, base, ..train::import_spec(r, ad, now_ms()) },
+        None => ImportSpec {
+            id: id.clone(),
+            license,
+            base,
+            origin: upload::ORIGIN_UPLOAD.into(),
+            uploaded_ms: now_ms().max(0) as u64,
+            ..Default::default()
+        },
+    };
+    writeln!(
+        out,
+        "{}: {} ({}), {}{}, as `{id}`",
+        item.file_name,
+        upload::kind_name(item.kind()),
+        item.header.architecture,
+        gib(item.size()),
+        adapter_for.as_deref().map(|b| format!(", for `{b}`")).unwrap_or_default()
+    )?;
+    let mut up = weirdnet_backends::models::Upload::new(id, &item.artifact, upload::provenance(&item, &spec)).serving();
+    if let Some(b) = adapter_for {
+        up = up.with_adapter_for(b);
+    }
+    Ok(ymir_core::upload_net::UploadOp { upload: up, local: vec![file], persist: !a.no_register, role: a.role.clone() })
 }
 
 /// A finished run's record and its adapter, from `RUN_DIR/run.json`.

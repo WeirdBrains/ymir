@@ -16,9 +16,11 @@ use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use weirdnet_agent::remote::RemoteError;
-use weirdnet_backends::models::{ModelsClient, ModelsReply, ModelsService, Pull, RepoFits};
+use weirdnet_backends::models::{ModelsClient, ModelsReply, ModelsService, Pull, RepoFits, refusal, refusal_reason};
 use weirdnet_model::hf::RepoModel;
 use weirdnet_model::{HfToken, ModelStore};
+
+use crate::upload_net::{Register, UploadOp, UploadReport, UploadsClient};
 
 /// A device that may manage models: `label` is the roster label (`ymirctl pool list`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +64,9 @@ pub enum ModelsOp {
         id: String,
         scale: Option<f32>,
     },
+    /// Send files on this device to the node (`ymirctl models upload --node`), then have it record
+    /// and save them ([`crate::upload_net`]).
+    Upload(Box<crate::upload_net::UploadOp>),
 }
 
 /// One line of the answer on the control socket: progress while a pull runs, then `Done` or `Failed`.
@@ -99,8 +104,16 @@ pub struct NodeResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Outcome {
-    Ok { reply: Box<ModelsReply> },
-    Failed { message: String },
+    Ok {
+        reply: Box<ModelsReply>,
+    },
+    /// An upload's result ([`ModelsOp::Upload`]).
+    Uploaded {
+        report: Box<crate::upload_net::UploadReport>,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 /// Who is on the roster and which of them serve models/1.
@@ -116,15 +129,33 @@ pub struct ModelsHub {
     local: Option<(Target, Arc<ModelsService>)>,
     directory: Arc<dyn Directory>,
     client: Arc<ModelsClient>,
+    uploads: Option<Arc<UploadsClient>>,
 }
 
 impl ModelsHub {
     pub fn new(local: Option<(Target, Arc<ModelsService>)>, directory: Arc<dyn Directory>, client: ModelsClient) -> Self {
-        Self { local, directory, client: Arc::new(client) }
+        Self { local, directory, client: Arc::new(client), uploads: None }
+    }
+
+    /// What records an upload on the node after its files are placed ([`crate::upload_net`]).
+    pub fn with_uploads(mut self, uploads: UploadsClient) -> Self {
+        self.uploads = Some(Arc::new(uploads));
+        self
     }
 
     /// Runs `op` on the nodes `spec` names, sending a pull's progress to `tx` as it goes.
     pub async fn run(&self, spec: &str, op: ModelsOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsDone, String> {
+        if let ModelsOp::Upload(up) = op {
+            let t = match spec {
+                "all" | "auto" => return Err("an upload goes to one node: name it with --node".into()),
+                name => self.resolve(name)?,
+            };
+            if t.local {
+                return Err(format!("`{}` is this device: run `ymirctl models upload FILE` without --node", t.label));
+            }
+            let outcome = self.upload(&t, *up, tx).await;
+            return Ok(ModelsDone { nodes: vec![NodeResult { node: t, outcome }], chosen: None });
+        }
         let mut chosen = None;
         let targets = match spec {
             "all" => {
@@ -214,6 +245,71 @@ impl ModelsHub {
         }
     }
 
+    /// Sends the files (resuming parts the node holds), then has it record and save them. An `exists`
+    /// refusal for the very same files counts as already there.
+    async fn upload(&self, t: &Target, op: UploadOp, tx: &UnboundedSender<ModelsLine>) -> Outcome {
+        let peer = t.peer.as_str();
+        let id = op.upload.id.clone();
+        let mut revision = weirdnet_model::artifact::revision(&op.upload.files);
+        let total: u64 = op.upload.files.iter().map(|f| f.size).sum();
+        let mut first: Option<u64> = None;
+        let mut shown = 0;
+        let (ptx, node) = (tx.clone(), t.label.clone());
+        let sent = self
+            .client
+            .upload(peer, op.upload.clone(), &op.local, |p| {
+                first.get_or_insert(p.done);
+                // The node's own counts (and its check of the bytes at the end) never move it back.
+                if p.done >= shown {
+                    shown = p.done;
+                    let _ = ptx.send(ModelsLine::Progress { node: node.clone(), done: p.done, total: p.total });
+                }
+            })
+            .await;
+        let pulled = match sent {
+            Ok(p) => {
+                if let Some(r) = &p.revision {
+                    revision = r.clone();
+                }
+                Some(p)
+            }
+            Err(e) if refusal_reason(&e) == Some(refusal::EXISTS) => {
+                let same = self
+                    .client
+                    .list(peer)
+                    .await
+                    .ok()
+                    .is_some_and(|l| l.iter().any(|x| x.id() == id && x.provenance().is_some_and(|p| p.revision == revision)));
+                if !same {
+                    return Outcome::Failed { message: explain_upload(t, &e) };
+                }
+                None
+            }
+            Err(e) => return Outcome::Failed { message: explain_upload(t, &e) },
+        };
+        let mut report = UploadReport {
+            id: id.clone(),
+            revision: revision.clone(),
+            pulled,
+            resumed: first.unwrap_or(0).min(total),
+            total,
+            registered: None,
+            register_error: None,
+        };
+        match &self.uploads {
+            Some(c) => {
+                let req =
+                    Register { cert: None, id, revision, adapter_for: op.upload.adapter_for.clone(), persist: op.persist, role: op.role.clone() };
+                match c.register(peer, req).await {
+                    Ok(r) => report.registered = Some(r),
+                    Err(e) => report.register_error = Some(e.explain(&t.label)),
+                }
+            }
+            None => report.register_error = Some("this ymird can't record uploads on the node".into()),
+        }
+        Outcome::Uploaded { report: Box::new(report) }
+    }
+
     async fn call(&self, t: &Target, op: ModelsOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsReply, RemoteError> {
         let progress = |tx: &UnboundedSender<ModelsLine>, node: &str, done: u64, total: u64| {
             let _ = tx.send(ModelsLine::Progress { node: node.to_string(), done, total });
@@ -250,6 +346,7 @@ impl ModelsHub {
                     svc.set_adapter_scale(&id, scale)?;
                     ModelsReply::AdapterScaled { id, scale }
                 }
+                ModelsOp::Upload(_) => return Err(RemoteError::BadRequest { message: "upload to this device without --node".into() }),
             });
         }
         let peer = t.peer.as_str();
@@ -277,6 +374,7 @@ impl ModelsHub {
                 self.client.set_adapter_scale(peer, &id, scale).await?;
                 ModelsReply::AdapterScaled { id, scale }
             }
+            ModelsOp::Upload(_) => return Err(RemoteError::BadRequest { message: "an upload runs through ModelsHub::upload".into() }),
         })
     }
 }
@@ -315,6 +413,17 @@ pub fn resolve(devices: &[Target], name: &str) -> Result<Target, String> {
             devices.iter().map(|t| t.label.as_str()).collect::<Vec<_>>().join(", ")
         )),
         many => Err(format!("`{name}` matches {} devices; use the peer id", many.len())),
+    }
+}
+
+/// What went wrong with an upload to `t`.
+fn explain_upload(t: &Target, e: &RemoteError) -> String {
+    match e {
+        RemoteError::Busy => {
+            format!("{} is already taking an upload of these files (another ymirctl still running?); try again when it ends", t.label)
+        }
+        RemoteError::BadRequest { message } => format!("{}: {message}", t.label),
+        e => crate::upload_net::explain_refusal(&t.label, e).unwrap_or_else(|| explain(t, e)),
     }
 }
 

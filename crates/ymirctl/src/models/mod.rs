@@ -48,7 +48,8 @@ pub enum ModelsCmd {
     /// Delete a downloaded model's files (never edits `node.toml`).
     Remove(RemoveArgs),
     /// Put a model or LoRA adapter trained elsewhere (a GGUF file) into this node's model
-    /// directory, with a provenance record, and print its node.toml entry. Local only for now.
+    /// directory (or another model node's, with --node), with a provenance record, and add it to
+    /// node.toml there.
     Upload(upload::UploadArgs),
     /// Show the context each model runs with on this node and why, or put models back on the
     /// automatic context (their full trained length, cut only where the KV cache would not fit).
@@ -229,7 +230,8 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
         ModelsCmd::Adapter { cmd } => cmd.node(),
-        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } | ModelsCmd::Upload(_) => None,
+        ModelsCmd::Upload(a) => a.node.clone(),
+        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } => None,
     };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;

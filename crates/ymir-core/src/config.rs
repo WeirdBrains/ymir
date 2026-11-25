@@ -203,11 +203,16 @@ pub struct ModelSection {
     /// linked device, an app included; set it to the inference nodes' peer ids so apps must go through them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
-    /// Let the owner's linked devices search, pull, list and remove models on this node over Weirdnet
-    /// (`ymirctl models --node`, `/weirdnet-backends/models/1`). Pulled models are served in memory
-    /// only (`node.toml` is never edited remotely). `false` turns the protocol off.
+    /// Let the owner's linked devices search, pull, upload, list and remove models on this node over
+    /// Weirdnet (`ymirctl models --node`, `/weirdnet-backends/models/1`). Pulled models are served in
+    /// memory only; an upload is also saved here unless the uploader passes `--no-persist`
+    /// (`/ymir/uploads/1`). `false` turns both protocols off.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub remote_manage: bool,
+    /// Free space an upload must leave on the models directory's filesystem, such as `50GiB`.
+    /// Unset: the larger of 10% of the filesystem and 20 GiB. Set: exactly this much.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_keep_free: Option<String>,
     /// `managed` | `system:/path/to/llama-server` | `off`.
     #[serde(default = "managed")]
     pub llamacpp: String,
@@ -259,6 +264,7 @@ impl Default for ModelSection {
             private_link: None,
             callers: Vec::new(),
             remote_manage: true,
+            upload_keep_free: None,
             llamacpp: managed(),
             rpc_server: managed(),
             rpc_args: Vec::new(),
@@ -361,6 +367,16 @@ pub struct LocalAdapter {
     /// `base_revision` against the base's `quant`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_quant: Option<String>,
+}
+
+impl ModelSection {
+    /// What an upload must leave free on the models directory's filesystem ([`Self::upload_keep_free`]).
+    pub fn keep_free(&self) -> weirdnet_backends::models::KeepFree {
+        match self.upload_keep_free.as_deref().and_then(weirdnet_model::hw::parse_size) {
+            Some(bytes) => weirdnet_backends::models::KeepFree::new(0, bytes),
+            None => weirdnet_backends::models::KeepFree::default(),
+        }
+    }
 }
 
 impl LocalModel {
@@ -579,6 +595,11 @@ impl NodeConfig {
                      are no longer accepted; list the device's peer id instead (replace the label with the peer id of that linked device, as the pool's device list shows it)"
                 );
             }
+        }
+        if let Some(k) = &self.model.upload_keep_free
+            && weirdnet_model::hw::parse_size(k).is_none()
+        {
+            bail!("[model] upload_keep_free: `{k}` is not a size (such as `50GiB`)");
         }
         let mut seen = std::collections::HashSet::new();
         for m in &self.model.local {

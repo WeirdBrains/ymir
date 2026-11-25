@@ -176,20 +176,7 @@ pub fn remove(store: &ModelStore, e: &Entry) -> Result<()> {
 /// Appends `stanza` to `node.toml` (after saving `node.toml.bak`), keeping every other byte of
 /// the file. Refuses a duplicate id, and writes nothing if the result would not load.
 pub fn register(config: &Path, id: &str, stanza: &str) -> Result<()> {
-    let text = std::fs::read_to_string(config).with_context(|| format!("reading {} (run `ymirctl setup` first)", config.display()))?;
-    let cfg: NodeConfig = toml::from_str(&text).with_context(|| format!("parsing {}", config.display()))?;
-    if cfg.model.local.iter().any(|m| m.id == id) {
-        bail!("{} already has a model with id `{id}`; pass --id to pick another", config.display());
-    }
-    let sep = if text.ends_with('\n') { "\n" } else { "\n\n" };
-    let new = format!("{text}{sep}# Added by `ymirctl models pull --register`.\n{stanza}");
-    let check: NodeConfig = toml::from_str(&new).context("the new entry does not parse")?;
-    check.validate()?;
-    std::fs::write(config.with_extension("toml.bak"), &text)?;
-    let tmp = config.with_extension("toml.tmp");
-    std::fs::write(&tmp, new)?;
-    std::fs::rename(&tmp, config)?;
-    Ok(())
+    ymir_core::config_edit::append_model(config, id, stanza, "# Added by `ymirctl models pull --register`.")
 }
 
 #[cfg(test)]

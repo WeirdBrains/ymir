@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+use toml_edit::{DocumentMut, Item, value};
 use ymir_core::NodeConfig;
 use ymir_core::config::LocalAdapter;
 
@@ -261,40 +261,7 @@ fn list(out: &mut dyn Write, cfg: &NodeConfig) -> Result<()> {
 
 /// `text` with `adapter` added under the `[[model.local]]` whose id is `base`.
 pub fn add(text: &str, base: &str, adapter: &LocalAdapter) -> Result<String> {
-    let mut doc: DocumentMut = text.parse().context("parsing node.toml")?;
-    let Some(locals) = doc.get_mut("model").and_then(|m| m.get_mut("local")).and_then(Item::as_array_of_tables_mut) else {
-        bail!("node.toml has no [[model.local]] entries");
-    };
-    let Some(t) = locals.iter_mut().find(|t| t.get("id").and_then(Item::as_str) == Some(base)) else {
-        bail!("node.toml has no [[model.local]] with id `{base}`");
-    };
-    let mut row = Table::new();
-    row["id"] = value(adapter.id.as_str());
-    row["file"] = value(adapter.file.as_str());
-    if let Some(s) = adapter.scale {
-        row["scale"] = value(f64::from(s));
-    }
-    if let Some(r) = &adapter.revision {
-        row["revision"] = value(r.as_str());
-    }
-    if let Some(r) = &adapter.base_revision {
-        row["base_revision"] = value(r.as_str());
-    }
-    if let Some(q) = &adapter.base_quant {
-        row["base_quant"] = value(q.as_str());
-    }
-    match t.get_mut("lora").and_then(Item::as_array_of_tables_mut) {
-        Some(list) => list.push(row),
-        None => {
-            if t.contains_key("lora") {
-                bail!("`{base}` has a `lora` key that is not a list of [[model.local.lora]] tables");
-            }
-            let mut list = ArrayOfTables::new();
-            list.push(row);
-            t.insert("lora", Item::ArrayOfTables(list));
-        }
-    }
-    Ok(doc.to_string())
+    ymir_core::config_edit::add_adapter(text, base, adapter)
 }
 
 /// `text` with `lora_slots` set (or removed, for `None`) on the `[[model.local]]` whose id is `base`.
@@ -360,11 +327,7 @@ pub(super) fn validated(new: &str, base: &str, id: &str, ctx: &Ctx) -> Result<No
 }
 
 pub(crate) fn save(config: &Path, old: &str, new: &str) -> Result<()> {
-    std::fs::write(config.with_extension("toml.bak"), old)?;
-    let tmp = config.with_extension("toml.tmp");
-    std::fs::write(&tmp, new)?;
-    std::fs::rename(&tmp, config)?;
-    Ok(())
+    ymir_core::config_edit::save(config, old, new)
 }
 
 #[cfg(test)]

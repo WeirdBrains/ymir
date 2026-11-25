@@ -506,6 +506,7 @@ fn upload_args(file: &std::path::Path) -> upload::UploadArgs {
         role: None,
         no_register: false,
         dir: DirArgs { dir: None },
+        node: None,
     }
 }
 
@@ -726,4 +727,39 @@ fn upload_from_a_run_refuses_other_bytes_another_base_revision_and_unfinished_ru
     let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&fx.dir.path().join("nope"), Some(&copied))).unwrap_err();
     assert!(err.to_string().contains("train run"), "{err:#}");
     assert!(!ctx.dir().join("adapters").exists(), "nothing copied before the checks pass");
+}
+
+// ---- `models upload --node` (docs/design/model-upload.md, U2): what is sent ----
+
+#[test]
+fn an_upload_to_another_node_carries_the_files_and_the_run_record() {
+    let fx = Fixture::new();
+    let bytes = lora_bytes("llama");
+    let run = finished_run(&fx, &bytes, "adapters/base+kad/base+kad.gguf", "r1");
+    // The adapter is found in the run directory when FILE is left out.
+    std::fs::write(run.join("base+kad.gguf"), &bytes).unwrap();
+    let a = upload::UploadArgs { node: Some("gpu".into()), ..from_run_args(&run, None) };
+    let mut out = Vec::new();
+    let op = upload::remote_op(&mut out, &a).unwrap();
+    assert!(text(out).contains("LoRA adapter (llama)") && op.persist && op.role.is_none());
+    let up = &op.upload;
+    assert_eq!((up.id.as_str(), up.adapter_for.as_deref(), up.serve), ("base+kad", Some("base"), true));
+    assert_eq!(up.files.len(), 1);
+    assert_eq!(
+        (up.files[0].path.as_str(), up.files[0].sha256.trim_start_matches("sha256:")),
+        ("base+kad.gguf", sha(&bytes).trim_start_matches("sha256:"))
+    );
+    assert_eq!(op.local, vec![std::fs::canonicalize(run.join("base+kad.gguf")).unwrap()]);
+    let p = &up.provenance;
+    assert_eq!(p.origin, "train");
+    let base = p.base.clone().unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("base"), Some("r1"), Some("Q4_K_M")));
+    assert_eq!(p.trainer.as_ref().and_then(|t| t.run.as_deref()), Some("20261124-150000-abcd"));
+    // --no-persist; a model with --adapter-for and an adapter without a base are refused here.
+    let op = upload::remote_op(&mut Vec::new(), &upload::UploadArgs { no_register: true, ..a }).unwrap();
+    assert!(!op.persist);
+    let lone = fx.dir.path().join("lone.gguf");
+    std::fs::write(&lone, &bytes).unwrap();
+    let err = upload::remote_op(&mut Vec::new(), &upload::UploadArgs { node: Some("gpu".into()), ..upload_args(&lone) }).unwrap_err();
+    assert!(err.to_string().contains("--adapter-for BASE"), "{err}");
 }

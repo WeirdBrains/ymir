@@ -275,7 +275,7 @@ ymirctl models upload <FILE|DIR>...
 ## Requests for the Weirdnet lead
 
 A, B and C were sent to the Weirdnet lead on 2026-11-24; D is held. The lead accepted A to C the same day as
-`weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4 (not built yet), with these changes to the shapes below:
+`weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4 (released 2026-11-24), with these changes to the shapes below:
 
 - `ArtifactKind::Adapter { format: AdapterFormat }`, and `ArtifactFormat::{Gguf { parts }, Safetensors, Mlx}` with no
   `Peft` variant (PEFT is an adapter format). Projectors are `GgufKind::Projector`.
@@ -406,7 +406,7 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   an adapter's base must be a llama.cpp `[[model.local]]` whose file is on this machine with the same
   architecture; its `base_revision` and `base_quant` are recorded. Entries are added to node.toml by default
   (`local::register` for models, `models adapter add`'s validated edit for adapters); the adapter message says it
-  serves after a restart or the base's next load. `--node` is refused until U2.
+  serves after a restart or the base's next load. `--node` came with U2 (below).
 - **Switched to Weirdnet (2026-11-24, `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4):** `inspect` hashes with
   `artifact::inspect`, `import` stages a copy outside the store (`<models_dir>.importing/`) and places it with
   `ModelStore::import` (which writes `adapter.json` itself), the record is `weirdnet-model`'s `Provenance`
@@ -435,6 +435,45 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
 - **Left for U3:** `train run --add --rollout NAME` joining a rollout goes through U3's rollout step.
 - **Nothing here needs Weirdnet 0.5.3 / 0.4.4.** At the switch-over, `train::import_spec` maps onto
   `weirdnet-model`'s `Provenance` the same way U1's record does.
+
+## U2 as built (2026-11-24)
+
+- **`ymirctl models upload FILE --node NAME`** (also `--from-run RUN_DIR`, `--name`, `--adapter-for`, `--license`,
+  `--role`, `--no-persist`, an alias of `--no-register`). `ymirctl` checks and hashes the file as U1 does and builds
+  its `Provenance` (`ymirctl::models::upload::remote_op`); FILE with `--from-run` defaults to the run's adapter in
+  RUN_DIR. Its `ymird` sends it with `ModelsClient::upload` (48 KiB chunks over models/1, progress streamed back, no
+  more than 100% shown). It always asks the node to serve it (`Upload::serving`): a model is added to that node's
+  supervisor and loads on its first request; a llama.cpp adapter is added to its base and the message says when it
+  is used (on the base's next start, and if the base is running the first request for the adapter restarts it). It
+  never says "live".
+- **Resume.** Ctrl-C or a dropped link leaves the parts staged on the node (`<models_dir>.uploads/`, swept after 7
+  days); sending the same files again resumes and says how much was already there.
+- **Already there.** An `exists` refusal for the same id whose stored revision is the files' revision counts as
+  "already has it; nothing was sent", and the next step still runs. Other files under a taken id are refused.
+- **Saved on the node (decision 5), `/ymir/uploads/1`.** `weirdnet-backends` has no hook when an upload completes,
+  so Ymir adds its own small protocol (`ymir_core::upload_net`), served next to models/1 when `[model]
+  remote_manage` is on, to any linked device (`roster_auth`). After the upload the uploader's `ymird` sends `Register
+  { id, revision, adapter_for, persist, role }`. The node checks that the stored entry's provenance has that
+  revision, calls `NodeService::set_model_info(id, Some(revision), quant)` (as the lead asked; an adapter's quant is
+  its base's), and unless `--no-persist` saves it in the node.toml `ymird` was started with (`Daemon::start_at`):
+  a model as `[[model.local]]` (role `main` when there is no main model, else `chat`; GPU layers when the node has a
+  GPU; its `revision`), an adapter as `[[model.local.lora]]` under its base with `revision`, `base_revision` and
+  `base_quant` from the base's entry. The edit keeps comments (`ymir_core::config_edit`, moved from `ymirctl`), is
+  validated before it is written, keeps `node.toml.bak`, and is serialised per node. It is skipped, with the reason,
+  when node.toml already has that id (the same revision says so), the base is not in node.toml, or the adapter was
+  trained on another revision of the base. `--no-persist` leaves node.toml alone and says the entry is gone after a
+  restart. A node with an older `ymird` stores the upload but cannot record it, and the message says so.
+- **Free space (decision 4).** The node's `WritePolicy` keeps `[model] upload_keep_free` free, by default
+  `KeepFree::default()` (the larger of 10% and 20 GiB); refusals read as `NODE refused the upload (REASON): ...` with
+  what to do (`exists`, `no-space`, `too-big`, `quota`, `wrong-arch`, `no-base`, `not-adapter`, `wrong-engine`,
+  `checksum`, `not-allowed`). A duplicate upload in progress answers `Busy`.
+- **One node.** `--node all` and `auto` are refused for uploads (pools are U6); `--node` naming this device says to
+  run it without `--node`.
+- **Not built from the plan:** `--node auto`, `--serve` as a flag (it always serves) and `[model] upload = false`.
+- **Tests:** `crates/ymir-testkit/tests/models_upload.rs` runs three real daemons on 127.0.0.1 (a laptop and two
+  model nodes, one keeping more space free than it has): a model sent, placed with provenance (`uploaded_by` the
+  laptop) and saved; the same files again; other files under the id; a cut-off upload resumed; an adapter with and
+  without `--no-persist`; a wrong-architecture adapter; `no-space`.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 

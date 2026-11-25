@@ -3,11 +3,9 @@
 //! functions; no network and no disk. File grouping, quant tags and split GGUFs are
 //! `weirdnet_model::hf`'s.
 
-use serde::Serialize;
 use weirdnet_model::fit::{self, Fit, FitOptions};
 use weirdnet_model::hf::{RepoModel, split_part};
 use weirdnet_model::hw::{Accel, Budget, Hardware, budget};
-use ymir_core::config::LocalModel;
 
 pub use weirdnet_model::fit::KvSource;
 
@@ -176,36 +174,7 @@ pub fn id_for_file(file: &str) -> String {
     split_part(name).map_or_else(|| stem.to_ascii_lowercase(), |(b, _, _)| b.to_ascii_lowercase())
 }
 
-#[derive(Serialize)]
-struct Stanza<'a> {
-    model: StanzaModel<'a>,
-}
-
-#[derive(Serialize)]
-struct StanzaModel<'a> {
-    local: [&'a LocalModel; 1],
-}
-
-/// A `[[model.local]]` entry, in the shape Ymir's own `setup` writes.
-pub fn stanza(m: &LocalModel) -> String {
-    toml::to_string(&Stanza { model: StanzaModel { local: [m] } }).unwrap_or_default()
-}
-
-/// `context`: a fixed context the operator asked for; `None` leaves it to ymird.
-pub fn local_model(id: &str, backend: &str, role: &str, file: &str, context: Option<u64>, accelerated: bool) -> LocalModel {
-    let llama = backend == "llamacpp";
-    LocalModel {
-        id: id.to_string(),
-        backend: Some(backend.to_string()),
-        role: Some(role.to_string()),
-        file: Some(file.to_string()),
-        context: context.map(|c| c.min(u64::from(u32::MAX)) as u32),
-        gpu_layers: (llama && accelerated).then_some(99),
-        idle_ttl: Some("1800s".into()),
-        args: if llama { ["-fa", "on", "--jinja"].map(String::from).to_vec() } else { Vec::new() },
-        ..Default::default()
-    }
-}
+pub use ymir_core::config_edit::{local_model, stanza};
 
 /// A projector GGUF (`mmproj-*.gguf`), which is not a chat quant.
 pub fn is_mmproj_name(file: &str) -> bool {
