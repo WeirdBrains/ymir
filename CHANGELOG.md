@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ymirctl models upload FILE --node NAME` (model-upload slice U2): send a GGUF model or LoRA adapter (or a training run's adapter, `--from-run`) from this device to another of your model nodes over Weirdnet. It goes in 48 KiB chunks checked on the node, resumes after Ctrl-C or a dropped link, keeps `[model] upload_keep_free` free on the node (default: the larger of 10% and 20 GiB), is served by the node's `ymird`, gets its revision recorded for the pool, and is saved in that node's node.toml unless `--no-persist` (Ymir's `/ymir/uploads/1`). Any linked device may upload. Refusals say why (`exists`, `no-space`, `wrong-arch`, ...). A llama.cpp adapter is used from its base's next start, and the message says so.
+
 ### Changed
 
 - `weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4. `ymirctl models upload` and `train run` now use `weirdnet-model`'s artifact inspection, `Provenance` (`weirdnet-provenance/1`) and `ModelStore::import`; an uploaded model goes to `models_dir/ID/` (was `models_dir/uploads/ID/`, where earlier uploads stay). Behaviour is otherwise the same.

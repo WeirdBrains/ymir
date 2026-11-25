@@ -783,7 +783,14 @@ the files and SHA-256, the revision (`sha256:` and 16 hex digits over the files)
 required), the architecture and, for adapters, the base's id, revision and quantisation. The entry is added to
 node.toml by default with that revision (adapters with `base_revision` and `base_quant`), so the answer cache and
 the base-revision check use it; `--no-register` only prints it. A llama.cpp adapter serves after ymird restarts or
-the base next loads. Uploads to other nodes over Weirdnet are slice U2.
+the base next loads.
+
+With `--node NAME` (slice U2) the file goes to another of your model nodes instead: this machine's `ymird` sends it
+over models/1 (`ModelsClient::upload`: 48 KiB chunks, checked on the node, resumable after Ctrl-C or a dropped link,
+at least `[model] upload_keep_free` left free there, by default the same 10 percent or 20 GiB), the node serves it,
+and over Ymir's `/ymir/uploads/1` (`ymir_core::upload_net`) it records the revision for the pool
+(`NodeService::set_model_info`) and adds the entry to its own node.toml, unless `--no-persist`. Any linked device may
+upload; refusals name their reason (`exists`, `no-space`, `wrong-arch` and so on).
 
 Training outputs take the same path (slice U5): `ymirctl train run` imports its adapter with
 `ymir_core::upload::import` into `models_dir/adapters/ID/ID.gguf` with `provenance.json` (origin `train`: base,

@@ -159,6 +159,7 @@ fn failed(done: &ModelsDone, label: &str) -> String {
     match &done.nodes.iter().find(|n| n.node.label == label).expect("node answered").outcome {
         Outcome::Failed { message } => message.clone(),
         Outcome::Ok { reply } => panic!("{label} answered: {reply:?}"),
+        Outcome::Uploaded { report } => panic!("{label} answered: {report:?}"),
     }
 }
 
@@ -166,6 +167,7 @@ fn reply<'a>(done: &'a ModelsDone, label: &str) -> &'a ModelsReply {
     match &done.nodes.iter().find(|n| n.node.label == label).expect("node answered").outcome {
         Outcome::Ok { reply } => reply,
         Outcome::Failed { message } => panic!("{label}: {message}"),
+        Outcome::Uploaded { report } => panic!("{label} answered: {report:?}"),
     }
 }
 

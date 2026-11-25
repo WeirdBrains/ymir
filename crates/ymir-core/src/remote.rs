@@ -168,7 +168,9 @@ pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec
 /// Serves `/weirdnet-backends/models/1` on `node`: the owner (the user's linked, unrevoked devices;
 /// [`roster_auth`]) searches the Hugging Face Hub, sees what fits this node, pulls models into
 /// `store` (and serves them through `supervisor` without a restart when the request says so),
-/// lists and removes what is on disk. Nothing here edits `node.toml`. Dropping the server stops it.
+/// lists and removes what is on disk, and takes uploads under `policy` (any linked device; the
+/// free space to keep). Nothing here edits `node.toml` (an upload's entry is saved by
+/// `/ymir/uploads/1`, [`serve_uploads`]). Dropping the server stops it.
 pub fn serve_models(
     node: &Arc<SyncNode>,
     supervisor: Supervisor,
@@ -176,8 +178,9 @@ pub fn serve_models(
     store: weirdnet_model::ModelStore,
     budget: weirdnet_model::hw::Budget,
     engine: EngineKind,
+    policy: weirdnet_backends::models::WritePolicy,
 ) -> Result<(ModelsServer, Arc<ModelsService>), RemoteError> {
-    let service = Arc::new(ModelsService::new(store, supervisor, roster_auth(m)).with_budget(budget).with_engine(engine));
+    let service = Arc::new(ModelsService::new(store, supervisor, roster_auth(m)).with_budget(budget).with_engine(engine).with_write_policy(policy));
     let server = ModelsServer::start(node, service.clone())?;
     Ok((server, service))
 }
@@ -238,7 +241,8 @@ pub fn models_hub(
     let client = ModelsClient::new(Arc::new(dialer(node, hints))).with_cert(Some(encode_cert(&m.our_cert())));
     let dir = Arc::new(NetDirectory::new(node.clone(), m.clone(), hints.clone(), opts.find_wait, name));
     let me = Target { peer: node.peer_id().to_string(), label: name.to_string(), local: true };
-    ModelsHub::new(local.map(|s| (me, s)), dir, client)
+    let uploads = crate::upload_net::UploadsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())));
+    ModelsHub::new(local.map(|s| (me, s)), dir, client).with_uploads(uploads)
 }
 
 /// The `ymird` side of `ymirctl train run --node`: runs on the user's other model nodes over
@@ -259,6 +263,17 @@ pub fn serve_train(
     let auth = role_auth(m, &cfg.train.callers);
     let service = Arc::new(crate::train_net::TrainService::new(paths, cfg, auth));
     crate::train_net::TrainServer::start(node, service)
+}
+
+/// Serves `/ymir/uploads/1` on `node` next to models/1: after an upload, the uploader's `ymird`
+/// has this node record the entry's revision and (unless `--no-persist`) save it in node.toml.
+/// Any linked device, like models/1.
+pub fn serve_uploads(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    service: crate::upload_net::UploadsService,
+) -> Result<crate::upload_net::UploadsServer, RemoteError> {
+    crate::upload_net::UploadsServer::start(node, Arc::new(service.with_auth(roster_auth(m))))
 }
 
 /// When a model node's stream counts as stalled: no frame for 5 s, or 3x the recent gap between

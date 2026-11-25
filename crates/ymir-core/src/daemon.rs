@@ -92,6 +92,13 @@ impl Daemon {
     /// Starts the enabled roles. Returns once the control socket and the bridge are listening;
     /// models load on first use or on `ymirctl load`.
     pub async fn start(cfg: NodeConfig, paths: Paths) -> Result<Self> {
+        let config = paths.config();
+        Self::start_at(cfg, paths, config).await
+    }
+
+    /// [`Daemon::start`] with `cfg` read from `config` (`ymird --config`): an upload saved into
+    /// this node's config (`/ymir/uploads/1`) edits that file.
+    pub async fn start_at(cfg: NodeConfig, paths: Paths, config: std::path::PathBuf) -> Result<Self> {
         cfg.validate()?;
         paths.ensure_state().with_context(|| format!("creating {}", paths.state().display()))?;
         let name = cfg.name();
@@ -238,6 +245,7 @@ impl Daemon {
                     );
                     (hw, budget)
                 });
+                let accelerated = hw.gpus.iter().any(|g| g.accel != weirdnet_model::hw::Accel::Cpu);
                 let (server, service) = remote::serve_model(
                     &net.node,
                     sup.clone(),
@@ -259,15 +267,22 @@ impl Daemon {
                 for (id, rev, quant) in cfg.revisions() {
                     service.set_model_info(&id, Some(rev), quant);
                 }
+                let node_service = service.clone();
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));
                 if cfg.model.remote_manage {
                     // The owner's devices manage this node's model files (models/1); a pulled model is
-                    // added to the supervisor in memory. node.toml is never touched from here.
+                    // added to the supervisor in memory. An upload is also recorded and, unless the
+                    // uploader says `--no-persist`, saved in node.toml (/ymir/uploads/1).
                     let store = crate::models::store(cfg.models_dir(), &paths.state());
+                    let policy = weirdnet_backends::models::WritePolicy::default().with_keep_free(cfg.model.keep_free());
                     let (server, svc) =
-                        remote::serve_models(&net.node, sup.clone(), &net.membership, store, budget, weirdnet_backends::EngineKind::Llamacpp)
+                        remote::serve_models(&net.node, sup.clone(), &net.membership, store, budget, weirdnet_backends::EngineKind::Llamacpp, policy)
                             .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                    let uploads = crate::upload_net::UploadsService::new(config.clone(), cfg.models_dir(), svc.clone(), node_service, accelerated);
+                    let server =
+                        remote::serve_uploads(&net.node, &net.membership, uploads).map_err(|e| anyhow!("serving uploads on Weirdnet: {e}"))?;
                     serving.push(Box::new(server));
                     models_service = Some(svc);
                 }
