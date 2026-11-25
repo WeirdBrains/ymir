@@ -100,6 +100,9 @@ pub enum UpdateCmd {
         #[arg(long, default_value_t = 90)]
         valid_days: u64,
     },
+    /// Check the `[update]` feed once and stage a newer release for this machine (what `ymird`
+    /// does on its own every `[update] interval`). The running ymird takes it at its next start.
+    Check,
     /// What is pinned, the good release, a trial under way, and releases marked bad.
     Status,
     /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
@@ -489,6 +492,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             let o = update_fetch::watch::Options { relay, fetch, once, wait: std::time::Duration::from_secs(wait_secs) };
             update_fetch::watch::run(&paths, out, o).await
         }
+        Cmd::Update { cmd: UpdateCmd::Check } => update_check(&paths, out).await,
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
         Cmd::Nodes => nodes(&paths, out).await,
@@ -1233,6 +1237,29 @@ async fn chat(
     Ok(())
 }
 
+async fn update_check(paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    use ymir_core::autoupdate::{self as au, Outcome};
+    let cfg = NodeConfig::load(&paths.config()).map(|c| c.update).unwrap_or_default();
+    cfg.validate()?;
+    let http = reqwest_client()?;
+    // The version and build of the ymird that runs here decide what is newer and which bundle.
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let exe = std::env::current_exe().unwrap_or_default();
+    match au::check_once(paths, &cfg, &running, &exe, &http).await? {
+        Outcome::UpToDate { latest } => writeln!(out, "up to date: the feed's latest is {latest}")?,
+        Outcome::Skipped(why) => writeln!(out, "nothing taken: {why}")?,
+        Outcome::Staged { update_id, version } => writeln!(out, "staged {update_id} {version}; it runs on trial at the next start")?,
+    }
+    Ok(())
+}
+
+fn reqwest_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("ymirctl/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
 fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> {
     use ymir_core::update::{Boot, Updater};
     let now = weirdnet_update::Timestamp::now();
@@ -1293,6 +1320,7 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
         }
         UpdateCmd::SignBundle { .. } => unreachable!("handled before the updater opens"),
         UpdateCmd::Watch { .. } => bail!("`update watch` runs in the async dispatcher"),
+        UpdateCmd::Check => bail!("`update check` runs in the async dispatcher"),
         UpdateCmd::Status => {
             let s = u.status();
             writeln!(out, "root: {}", if s.trusted { "pinned" } else { "not pinned" })?;
@@ -1317,7 +1345,7 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                let e = std::process::Command::new(&path).args(&args).exec();
+                let e = std::process::Command::new(&path).args(&args).env(ymir_core::autoupdate::BOOT_ENV, "1").exec();
                 bail!("starting {}: {e}", path.display());
             }
             #[cfg(not(unix))]

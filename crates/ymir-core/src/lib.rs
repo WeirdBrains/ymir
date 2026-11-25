@@ -7,6 +7,7 @@
 //! ([`remote`]).
 
 pub mod adapters;
+pub mod autoupdate;
 pub mod balance;
 pub mod batch;
 pub mod client;

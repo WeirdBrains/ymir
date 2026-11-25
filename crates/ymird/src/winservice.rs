@@ -68,7 +68,7 @@ fn serve() -> Result<()> {
         }
     };
     let result = rt.block_on(async {
-        let daemon = crate::start(&args).await?;
+        let (daemon, _, _) = crate::start(&args).await?;
         status(&handle, ServiceState::Running, 0, Duration::ZERO);
         tracing::info!("running as the Windows service {NAME}");
         tokio::select! {
