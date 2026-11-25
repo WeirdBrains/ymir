@@ -3,6 +3,23 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 04:33 EST: model upload U6, pools (branch `feature/upload-pools`)
+
+Slice U6 of [docs/design/model-upload.md](docs/design/model-upload.md): upload once, the other nodes copy it from that node, on Weirdnet's `ModelsClient::replicate` and `Pull::from_peer` (weirdnet-backends 0.4.4, already locked); no Weirdnet crate edited. Details in the plan's "U6 as built".
+
+**What changed**
+- [crates/ymir-core/src/models.rs](crates/ymir-core/src/models.rs): `ModelsHub::upload_pool` (targets, the space check first, the stage, `replicate`, each copy recorded, the fallback upload from this device); `register` and `has` split out of `upload`.
+- [crates/ymir-core/src/upload_net.rs](crates/ymir-core/src/upload_net.rs): `UploadOp.stage`, `UploadReport.copied_from` and `sent_instead` (serde defaults).
+- [crates/ymir-core/src/remote.rs](crates/ymir-core/src/remote.rs): `serve_models` takes the `Network` and sets the peer dialer.
+- ymirctl: `models upload --node all|A,B [--stage NODE]` and its output.
+- Docs: the plan (U6 section and as built), DESIGN, CHANGELOG, the site's ymirctl page.
+
+**Checks:** `cargo fmt`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 332 passed, 0 failed, 7 ignored (new: `models_upload_pool`, also run 4 more times on its own, all passed).
+
+**Not tested:** against real nodes on different machines; a stage on an older Ymir (the fallback is tested with a node that can't reach the stage).
+
+**Next:** merge, release 0.14.0; a pool target in Bragi if small.
+
 ## 2026-11-25 04:02 EST: v0.13.0 released, signed and on TAUR
 
 **v0.13.0** (release commit 2ef42b8, tag v0.13.0, cut with `weirdnet_release.py cut --minor` on main 33764a5 after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 331 passed, 0 failed): rollouts over Weirdnet (`/ymir/rollouts/1`, `ymirctl models rollout ... --inference NODE [--no-persist]`). CI, macOS, Pages and the Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` is the `SHA256SUMS` artifact's; each platform artifact carries a partial one), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.13.0) has 35 files (`assets 0.13.0` ok, marked latest): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.13.0 --yes` published `ymir-bin` 0.13.0-1 and `ymir-cuda-bin` 0.13.0-1. The Arch recipes carry the v0.13.0 tarball hashes (this branch). Bragi 0.8.0's desktop upload dialog uses the new protocol (noted in the plan's "as built").

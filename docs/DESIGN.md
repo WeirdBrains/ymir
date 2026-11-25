@@ -792,6 +792,12 @@ and over Ymir's `/ymir/uploads/1` (`ymir_core::upload_net`) it records the revis
 (`NodeService::set_model_info`) and adds the entry to its own node.toml, unless `--no-persist`. Any linked device may
 upload; refusals name their reason (`exists`, `no-space`, `wrong-arch` and so on).
 
+With `--node all` or `--node A,B` (slice U6) it goes to a pool: each target's free space is read first (a node
+without room after `upload_keep_free` is left out), the file is sent once, to the node with the most room or
+`--stage NODE`, and the others copy it from that node over models/1 `Fetch` (`ModelsClient::replicate`,
+`PullSource::Peer`; every model node's models/1 service has a peer dialer and its certificate for this). Each copy is
+recorded and saved like an upload. A node that can't copy from the stage gets the file from this device instead.
+
 Training outputs take the same path (slice U5): `ymirctl train run` imports its adapter with
 `ymir_core::upload::import` into `models_dir/adapters/ID/ID.gguf` with `provenance.json` (origin `train`: base,
 dataset record, trainer, run) and registers it with its content revision, and `ymirctl models upload [FILE]

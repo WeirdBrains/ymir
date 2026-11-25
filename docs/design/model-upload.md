@@ -621,6 +621,25 @@ do the copy, checked against the same hashes and resumable like an upload.
   the full node is left out before sending; `--stage` picks the stage; again is "already there"; `--node auto`
   and a `--stage` outside the targets are refused.
 
+### U6 as built (2026-11-25)
+
+- `ymir_core::models::ModelsHub::upload_pool` (from `run` for an upload to `all` or a comma list): resolves the
+  targets (this device refused, duplicates dropped), reads each `Disk` report and leaves out a node whose free space
+  less `keep_free` is smaller than the files (`no-space`, with both numbers), picks the stage (`UploadOp.stage`, else
+  the most room), uploads there as in U2, then `ModelsClient::replicate` to the rest and records each copy with
+  `/ymir/uploads/1` (`UploadReport.copied_from`). A copy refused by the node (for example `no-space` on its own
+  check) is reported as is; any other failure (unreachable stage, no peer dialer, an older node) falls back to a
+  U2 upload from this device (`UploadReport.sent_instead`). A failed upload to the stage leaves the others "not
+  copied".
+- `remote::serve_models` gives models/1 a peer dialer and this node's certificate (`with_peer_dialer`).
+- `ymirctl models upload FILE --node all|A,B [--stage NODE]`; `--node auto` and `--stage` with one node are refused.
+- Tests: `crates/ymir-testkit/tests/models_upload_pool.rs` (five daemons: a laptop; `a` and `b`, which reach each
+  other; `full`, which keeps more free than it has; `c`, which can't reach the others): `--node all` sends once
+  and the other of `a`/`b` copies (same bytes, saved in node.toml, origin `upload`); `full` is left out before
+  sending; `c` gets it from the laptop instead; the same files again are already there; `--stage b --no-persist`
+  is sent to `b` and copied by `a`, node.toml unchanged; `auto` and a stage outside the targets are refused.
+- Not built: a pool target in Bragi; "auto" for uploads; copying a Hub pull node to node.
+
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
 1. **Who may upload:** every linked device. No `ymir.models.write` grant.

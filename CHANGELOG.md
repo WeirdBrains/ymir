@@ -6,6 +6,11 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Upload to a pool (model-upload plan, U6): `ymirctl models upload FILE --node all` (every model node but this one) or `--node A,B` sends the file once, to the node with the most free space (or `--stage NODE`), and the other nodes copy it from that node, node to node (Weirdnet's `ModelsClient::replicate`), so this machine's uplink carries it once. Each node's free space is read first: a node without room after what it keeps free (`[model] upload_keep_free`, by default the larger of 10% and 20 GiB) is left out before anything is sent. Each copy is recorded and saved in that node's `node.toml` unless `--no-persist`. A node that can't copy from the other (it can't reach it, or runs an older Ymir) gets the file from this machine instead, and the output says so.
+- Every model node's models/1 service can copy uploads from the owner's other nodes (a peer dialer with the node's certificate), and answers their copies of its own uploads.
+
 ## [0.13.0] - 2026-11-25
 
 ### Added
