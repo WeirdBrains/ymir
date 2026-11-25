@@ -562,6 +562,16 @@ running on. Rollouts stay per inference node, as in U3.
   an `add` over the network lands in the inference node's node.toml and in its live rollouts; a weight
   above the canary share without an eval is refused; an unlinked caller is refused.
 
+**Decisions (2026-11-25 2:51 AM ET, made by llm dev from Michael's upload answers; Michael can override them):**
+
+1. Any linked device may change rollouts on an inference node, as for uploads; `[inference]
+   rollout_callers` (peer ids, like `[train] callers`) narrows the list.
+2. A remote change above the 10 percent canary share carries the scored eval rows or `force`. Bragi
+   offers 0 to 10 percent only, for now.
+3. Every operation works remotely, rollback and retire included: rollback is the safety valve.
+4. A remote change is written to the node's node.toml by default, as uploads are; a request with
+   `persist: false` changes only the live rollouts (until ymird restarts).
+
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
 1. **Who may upload:** every linked device. No `ymir.models.write` grant.
