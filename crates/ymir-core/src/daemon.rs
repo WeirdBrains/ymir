@@ -162,6 +162,9 @@ impl Daemon {
             let node = Arc::new(LocalModelNode::new(&name, sup, &launches));
             node.set_planner(planner);
             node.set_revisions(cfg.revisions().into_iter().map(|(id, rev, _)| (id, rev)));
+            for (id, origin, license) in cfg.origins() {
+                node.set_origin(&id, origin, license);
+            }
             let workers: Arc<RpcWorkers> = Arc::new(RpcWorkers::new(cfg.worker_config(&paths, key)));
             node.set_group_workers(workers.clone());
             group_workers = Some(workers);
@@ -273,6 +276,9 @@ impl Daemon {
                 for (id, rev, quant) in cfg.revisions() {
                     service.set_model_info(&id, Some(rev), quant);
                 }
+                for (id, origin, license) in cfg.origins() {
+                    service.set_model_origin(&id, origin, license);
+                }
                 let node_service = service.clone();
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));
@@ -282,8 +288,16 @@ impl Daemon {
                     // uploader says `--no-persist`, saved in node.toml (/ymir/uploads/1).
                     let store = crate::models::store(cfg.models_dir(), &paths.state());
                     let policy = weirdnet_backends::models::WritePolicy::default().with_keep_free(cfg.model.keep_free());
-                    let (server, svc) = remote::serve_models(net, sup.clone(), store, budget, cfg.model.upload_engine(), policy)
-                        .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
+                    let (server, svc) = remote::serve_models(
+                        net,
+                        sup.clone(),
+                        store,
+                        budget,
+                        cfg.model.upload_engine(),
+                        policy,
+                        remote::PlacedInfo { record: node_service.clone(), local: model_node.clone() },
+                    )
+                    .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
                     serving.push(Box::new(server));
                     let uploads = crate::upload_net::UploadsService::new(config.clone(), cfg.models_dir(), svc.clone(), node_service, accelerated);
                     let server =

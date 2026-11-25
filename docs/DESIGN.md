@@ -241,7 +241,8 @@ with no protocol change.
 ### Inference node
 
 - Builds the **pool catalog** from model nodes' capability records and answers
-  `/weirdnet-agent/catalog/1`.
+  `/weirdnet-agent/catalog/1`. Each entry carries the model's origin (`hub`, `upload`, `train`) and license
+  when the first node that knows says them (U8; `ModelEntry::origin`/`license`, weirdnet-backends 0.4.5).
 - For each prompt: checks the semantic cache, assembles the prompt from the synced context, picks a
   model node by load and capability, streams tokens back to the app, writes the answer into the
   context, and resumes on another model node if one dies.
@@ -789,7 +790,7 @@ With `--node NAME` (slice U2) the file goes to another of your model nodes inste
 over models/1 (`ModelsClient::upload`: 48 KiB chunks, checked on the node, resumable after Ctrl-C or a dropped link,
 at least `[model] upload_keep_free` left free there, by default the same 10 percent or 20 GiB), the node serves it,
 and over Ymir's `/ymir/uploads/1` (`ymir_core::upload_net`) it records the revision for the pool
-(`NodeService::set_model_info`) and adds the entry to its own node.toml, unless `--no-persist`. Any linked device may
+(`NodeService::set_model_info`, and its origin and license with `set_model_origin`) and adds the entry to its own node.toml, unless `--no-persist`. Any linked device may
 upload; refusals name their reason (`exists`, `no-space`, `wrong-arch` and so on).
 
 With `--node all` or `--node A,B` (slice U6) it goes to a pool: each target's free space is read first (a node

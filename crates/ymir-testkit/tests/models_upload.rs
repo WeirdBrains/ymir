@@ -229,6 +229,20 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e}: last seen {seen:?}"))?;
+    // U8: the pool catalog says where it came from and its license, from gpu's record; gpu's
+    // configured `base` (a file in its models directory with no record) is from the Hub.
+    let of = |id: &str| {
+        let cat = lap.coordinator.as_ref().unwrap().agent_catalog();
+        cat.iter().find(|m| m.id == id).map(|m| (m.origin.clone(), m.license.clone()))
+    };
+    let mut got = None;
+    eventually(40, "the catalog says the upload's origin", async || {
+        got = of("my-model-q4_0");
+        Ok(got == Some((Some("upload".into()), Some("mit".into()))))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}: last seen {got:?}"))?;
+    assert_eq!(of("base"), Some((Some("hub".into()), None)));
 
     // The same files again: nothing is sent, nothing is added twice.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu"]).await?;

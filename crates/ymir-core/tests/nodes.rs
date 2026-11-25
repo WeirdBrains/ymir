@@ -40,6 +40,9 @@ enum Mode {
 /// What the `Words` modes say, whichever node says it.
 const SENTENCE: &str = "one two three four five six seven eight ";
 
+/// A model, its origin and its license, as a scripted node reports them.
+type KnownOrigin = (&'static str, Option<&'static str>, Option<&'static str>);
+
 struct Scripted {
     name: String,
     models: Vec<(&'static str, bool, ModelState)>,
@@ -56,6 +59,8 @@ struct Scripted {
     media: AtomicBool,
     /// The weights revision it reports for every model.
     revision: Mutex<Option<String>>,
+    /// Origins and licenses by model.
+    origins: Mutex<Vec<KnownOrigin>>,
 }
 
 impl Scripted {
@@ -72,6 +77,7 @@ impl Scripted {
             delay_ms: AtomicUsize::new(0),
             media: AtomicBool::new(false),
             revision: Mutex::new(None),
+            origins: Mutex::new(Vec::new()),
         })
     }
     fn set(&self, m: Mode) {
@@ -172,6 +178,10 @@ impl ModelNode for Scripted {
     fn revision(&self, _model: &str) -> Option<String> {
         self.revision.lock().unwrap().clone()
     }
+    fn origin(&self, model: &str) -> (Option<String>, Option<String>) {
+        let o = self.origins.lock().unwrap();
+        o.iter().find(|(m, ..)| *m == model).map(|(_, o, l)| (o.map(str::to_string), l.map(str::to_string))).unwrap_or_default()
+    }
     fn drain<'a>(&'a self, on: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
             self.draining.store(on, Ordering::SeqCst);
@@ -214,6 +224,21 @@ fn coordinator(nodes: &[&Arc<Scripted>]) -> Coordinator {
 }
 
 const READY: ModelState = ModelState::Ready;
+
+#[tokio::test]
+async fn the_catalog_says_where_each_model_came_from() {
+    let a = Scripted::new("a", &[("alpha", false, READY), ("tuned", false, READY)]);
+    let b = Scripted::new("b", &[("alpha", false, READY), ("beta", false, READY)]);
+    // a knows nothing of alpha (an older node); b does. tuned was uploaded with a license.
+    *a.origins.lock().unwrap() = vec![("tuned", Some("upload"), Some("MIT"))];
+    *b.origins.lock().unwrap() = vec![("alpha", Some("hub"), None)];
+    let c = coordinator(&[&a, &b]);
+    let cat = c.agent_catalog();
+    let of = |id: &str| cat.iter().find(|m| m.id == id).map(|m| (m.origin.clone(), m.license.clone())).unwrap();
+    assert_eq!(of("alpha"), (Some("hub".into()), None), "the first node that knows says");
+    assert_eq!(of("tuned"), (Some("upload".into()), Some("MIT".into())));
+    assert_eq!(of("beta"), (None, None));
+}
 
 #[tokio::test]
 async fn the_catalog_merges_nodes_with_different_models() {

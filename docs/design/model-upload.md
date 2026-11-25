@@ -388,7 +388,8 @@ should not be open to every linked device, and the 2026-11-20 rule says to autho
    Weirdnet B's peer pull; Ymir does not stub a peer copy of its own (lead, 2026-11-24).
 7. **U7: more formats.** safetensors for vLLM, MLX directories, PEFT adapters, mmproj projectors. Built
    2026-11-25 over `--node` (see "U7 as built").
-8. **U8 (optional): catalog origin** in Bragi's model list once D exists. Blocked on D (see "U8").
+8. **U8 (optional): catalog origin** in Bragi's model list once D exists. Built 2026-11-25 on weirdnet-agent
+   0.5.4 and weirdnet-backends 0.4.5 (see "U8 as built").
 
 Tests for each slice use temp `YMIR_HOME`s, tiny synthetic GGUF and safetensors files written by the test, mock
 engines and the in-memory or loopback Weirdnet transport (two daemons for U2, U3 and U6), including: a hash
@@ -678,14 +679,36 @@ is Ymir's side only, over `--node` (U2 and U6):
 - Not built: local uploads of directories and projectors; an MLX upload is not tested end to end (MLX nodes run on
   macOS; the entry is written the same way as vLLM's); several engines for full models on one node (models/1 has one).
 
-## U8: catalog origin in Bragi (blocked on request D, 2026-11-25)
+## U8: catalog origin in Bragi (request D, built 2026-11-25)
 
 U8 labels pool models in Bragi's model list by origin (`hub`, `upload`, `train`) and license without a models/1 call
-to each node. It needs request D: `CatalogModel::origin` and `license` in `weirdnet-agent` catalog/1, filled from the
-capability record. `weirdnet-agent` 0.5.2 (the newest on crates.io) has neither: its `CatalogModel` has id, purpose,
-state, replicas, tokens_per_sec, context, revision, standin, inputs and base. Ymir makes no Weirdnet edits, so U8
-waits; the request was drafted for Michael to send. Once D ships, Ymir's model nodes put each model's provenance
-origin and license in their capability record, and Bragi shows them as a tag on the Models screen.
+to each node. It needed request D, which the Weirdnet lead released on 2026-11-25: `CatalogModel::origin` and
+`license` in `weirdnet-agent` 0.5.4 catalog/1, `ModelEntry::origin`/`license` and `NodeService::set_model_origin`
+in `weirdnet-backends` 0.4.5, placement hooks (`ModelsService::on_placed`, `with_node_info`), and
+`weirdnet.origin`/`weirdnet.license` in `weirdnet-openai` 0.2.3's `/v1/models`.
+
+### U8 as built
+
+- **Model nodes** put each model's origin and license in their capability record:
+  - at start, from node.toml (`NodeConfig::origins`): a `provenance.json` beside the weights (an upload, or a
+    trained adapter, origin `train`) gives both; weights under `models_dir` without one (`ymirctl models pull`, a
+    catalog model) and a Hub id (vLLM, MLX) are `hub` with no license; a file elsewhere without a record and a
+    `wrap`ped server say nothing;
+  - on each upload, peer copy and Hub pull, through `ModelsService::with_node_info` (revision, quantization,
+    origin and license), plus a hook that sets the same on this machine's own model node; `/ymir/uploads/1`
+    also sets them when it records the revision. `/ymir/uploads/1` stays: Bragi 0.10 and older `ymirctl` use it.
+  - A placement whose files were stored but could not be served (a projector for an embedding or wrapped model)
+    is logged as a warning on the node; the uploader gets the error from models/1, and the files stay.
+- **Inference nodes** copy them into catalog/1 (`CatalogRow::origin`/`license`, `ModelNode::origin`), from the
+  first node that knows; a rollout's entries take their model's.
+- **`ymirctl models`** shows them after the state (`upload, MIT`); the MCP `ymir_models` tool adds `origin` and
+  `license`.
+- **Bragi** shows them as a tag on the Models screen (Bragi's own notes).
+- Older nodes send neither, and the entry shows nothing; older apps ignore the fields.
+- Tests: `NodeConfig::origins` (an upload, a trained adapter, a pulled file, a Hub id, a file elsewhere, a wrapped
+  server); the merged catalog across two nodes, one of which knows; end to end, an upload to another node shows
+  `upload`/its license in the inference node's catalog and the node's configured file shows `hub`;
+  `ymirctl models` lines.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
