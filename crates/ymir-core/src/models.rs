@@ -453,8 +453,15 @@ impl ModelsHub {
         let (peer, id, revision) = (t.peer.as_str(), report.id.clone(), report.revision.clone());
         match &self.uploads {
             Some(c) => {
-                let req =
-                    Register { cert: None, id, revision, adapter_for: op.upload.adapter_for.clone(), persist: op.persist, role: op.role.clone() };
+                let req = Register {
+                    cert: None,
+                    id,
+                    revision,
+                    adapter_for: op.upload.adapter_for.clone(),
+                    projector_for: op.upload.projector_for.clone(),
+                    persist: op.persist,
+                    role: op.role.clone(),
+                };
                 match c.register(peer, req).await {
                     Ok(r) => report.registered = Some(r),
                     Err(e) => report.register_error = Some(e.explain(&t.label)),

@@ -96,6 +96,19 @@ pub fn add_adapter(text: &str, base: &str, adapter: &LocalAdapter) -> Result<Str
     Ok(doc.to_string())
 }
 
+/// `text` with the `[[model.local]]` whose id is `base` given `mmproj = path` (a vision projector).
+pub fn set_mmproj(text: &str, base: &str, path: &str) -> Result<String> {
+    let mut doc: DocumentMut = text.parse().context("parsing node.toml")?;
+    let Some(locals) = doc.get_mut("model").and_then(|m| m.get_mut("local")).and_then(Item::as_array_of_tables_mut) else {
+        bail!("node.toml has no [[model.local]] entries");
+    };
+    let Some(t) = locals.iter_mut().find(|t| t.get("id").and_then(Item::as_str) == Some(base)) else {
+        bail!("node.toml has no [[model.local]] with id `{base}`");
+    };
+    t["mmproj"] = value(path);
+    Ok(doc.to_string())
+}
+
 /// Writes `new` over `config`, keeping `old` as `node.toml.bak`.
 pub fn save(config: &Path, old: &str, new: &str) -> Result<()> {
     std::fs::write(config.with_extension("toml.bak"), old)?;

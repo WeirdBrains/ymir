@@ -25,6 +25,7 @@ use weirdnet_agent::remote::{Authorize, Caller, Channel, Dialer, RemoteError};
 use weirdnet_agent::serve::{channel, stream_limits};
 use weirdnet_backends::models::{ModelsService, Pulled, StoredEntry, Upload};
 use weirdnet_backends::node::NodeService;
+use weirdnet_model::ModelLayout;
 use weirdnet_net::node::{Message, Node};
 
 use crate::NodeConfig;
@@ -61,6 +62,9 @@ pub struct Register {
     pub revision: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_for: Option<String>,
+    /// For a vision projector: the model it goes with (U7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projector_for: Option<String>,
     pub persist: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -193,16 +197,38 @@ impl UploadsService {
             return Ok(if same(&a.revision) { Saved::Already } else { Saved::Not(format!("it already has an adapter `{id}`")) });
         }
         if let Some(m) = &entry.model {
-            let Some(file) = m.files.first() else { bail!("`{id}` has no files") };
+            let store = weirdnet_model::ModelStore::new(&self.models_dir);
+            let (backend, file) = match m.layout {
+                // vLLM takes a path as given (a relative one reads as a Hub id), so it is absolute.
+                ModelLayout::Safetensors => ("vllm", store.model_dir(m.layout, &m.id)?.to_string_lossy().into_owned()),
+                ModelLayout::Mlx => ("mlx", self.relative(&store.model_dir(m.layout, &m.id)?)),
+                _ => ("llamacpp", m.files.first().with_context(|| format!("`{id}` has no files"))?.clone()),
+            };
             let role = req.role.clone().unwrap_or_else(|| if cfg.main_model().is_some() { "chat".into() } else { "main".into() });
-            let mut local = config_edit::local_model(id, "llamacpp", &role, file, None, self.accelerated);
+            let mut local = config_edit::local_model(id, backend, &role, &file, None, self.accelerated);
             local.revision = Some(req.revision.clone());
             let stanza = config_edit::stanza(&local);
             config_edit::append_model(&self.config, id, &stanza, "# Uploaded over Weirdnet (`ymirctl models upload --node`).")?;
             return Ok(Saved::Entry(stanza));
         }
+        if let Some(p) = &entry.projector {
+            let model = req.projector_for.clone().or(p.for_model.clone()).or(entry.base.clone()).context("the projector's model is not known")?;
+            let Some(b) = cfg.model.local.iter().find(|m| m.id == model) else {
+                return Ok(Saved::Not(format!("it has no [[model.local]] `{model}` to give the projector to")));
+            };
+            let file = self.relative(&p.path);
+            if b.mmproj.as_deref() == Some(file.as_str()) {
+                return Ok(Saved::Already);
+            }
+            let new = config_edit::set_mmproj(&text, &model, &file)?;
+            let check: NodeConfig = toml::from_str(&new).context("the new entry does not parse")?;
+            check.validate()?;
+            config_edit::save(&self.config, &text, &new)?;
+            let was = b.mmproj.as_deref().map(|m| format!(" (it was `{m}`)")).unwrap_or_default();
+            return Ok(Saved::Entry(format!("mmproj = \"{file}\" on `{model}`{was}")));
+        }
         let Some(a) = &entry.adapter else {
-            return Ok(Saved::Not("only models and LoRA adapters are saved there".into()));
+            return Ok(Saved::Not("only models, LoRA adapters and projectors are saved there".into()));
         };
         let base = req.adapter_for.clone().or(entry.base.clone()).context("the adapter's base is not known")?;
         let Some(b) = cfg.model.local.iter().find(|m| m.id == base) else {
@@ -366,7 +392,8 @@ mod tests {
 
     #[test]
     fn requests_round_trip_as_json() {
-        let r = Register { cert: None, id: "m".into(), revision: "sha256:ab".into(), adapter_for: None, persist: true, role: None };
+        let r =
+            Register { cert: None, id: "m".into(), revision: "sha256:ab".into(), adapter_for: None, projector_for: None, persist: true, role: None };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Register>(&s).unwrap(), r);
         let reply = RegisterReply::Registered(Registered { id: "m".into(), revision: "sha256:ab".into(), saved: Some("x".into()), note: None });
