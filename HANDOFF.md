@@ -3,6 +3,15 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 21:45 EST: v0.9.0 signatures and TAUR; first real P3a run blocked
+
+**v0.9.0, finished:** the four Arch packages are signed with the WeirdBrains Muninn packages key (detached `.sig`, verified "Good signature") and uploaded to the [v0.9.0 release](https://github.com/WeirdBrains/ymir/releases/tag/v0.9.0) next to their packages (now 35 files); `weirdnet_release.py taur 0.9.0` published `ymir-bin` 0.9.0-1 and `ymir-cuda-bin` 0.9.0-1. This closes the "Left" items of the v0.9.0 entry below.
+
+**First real P3a run (approved once by m3talsmith, 2026-11-24): not run, blocked.**
+- `ymirctl train run` runs on the node it is called on; there is no `--node` for it yet (only `train reserve` takes one). The only machine the agent can reach is an app-only node: no model or inference role, no `[train]` in node.toml, so `train check` says "no trainer is set", and `ymirctl nodes` there lists no model nodes. Its own GPU (12 GB) isn't a Ymir model node.
+- The agent may not edit node.toml. A run needs either shell access to one GPU model node, or that node's owner to add `[train]` (`trainer` = `scripts/trainer.py` from v0.9.0 in a venv with `scripts/trainer-requirements.txt`, `build = "b12628"`) and build the patched trainer there (`python3 scripts/engine.py build --trainer --out DIR`, then `YMIR_LLAMA_FINETUNE` under `[train.env]`), and an F32 GGUF of a small base on that node (`--from`). Then: `ymirctl train check`, `ymirctl train run --base ID --dataset crates/ymir-testkit/tests/fixtures/decentralized-networks.jsonl --epochs 1 --context 256` (the fixture's manifest must sit next to it), and `ymirctl nodes` plus a chat to confirm serving came back.
+- Alternative for later: `train run --node X`, so a run can be started from any linked device (training plan "Next").
+
 ## 2026-11-24 16:45 EST: v0.9.0 released
 
 `release: v0.9.0` (`94c1c29`, tag [`v0.9.0`](https://github.com/WeirdBrains/ymir/releases/tag/v0.9.0)) under "Just release", cut with `scripts/weirdnet_release.py` on main `536f4ec` after CI was green there (Linux, macOS, Windows; Windows needed a second attempt in the MSI step) and the release checks passed locally (fmt, clippy `-D warnings`, `cargo test --workspace` 314 passed, 0 failed). It carries the trainer's parse-special patch and build-number fix (`0b4cf61`), model upload U1 and U5, the M9 bundle fetcher and the Windows bench sandbox. The tag's CI, macOS and Release workflows passed ([Release run 45483965006](https://github.com/WeirdBrains/ymir/actions/runs/45483965006)). The GitHub release has 31 files with `SHA256SUMS`; `weirdnet_release.py assets 0.9.0` is ok. Artifacts scanned (Linux, macOS and Windows archives): only CI runner paths, no host names or home paths.
