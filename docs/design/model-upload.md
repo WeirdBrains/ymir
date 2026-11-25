@@ -589,6 +589,9 @@ running on. Rollouts stay per inference node, as in U3.
   `crates/ymir-testkit/tests/rollouts_net.rs` (three daemons: add with all the traffic, saved and live; the canary
   gate refusing 50 and taking 5; `--no-persist` live only; list; rollback; retire; a linked device outside
   `rollout_callers` refused; `--inference` at this device refused).
+- Released in Ymir 0.13.0. Bragi 0.8.0's desktop upload dialog uses it: an optional rollout name, the inference
+  node and a weight of 0, 1, 5 or 10 percent; the upload is added as the rollout's next version, kept in that
+  node's node.toml, and a refusal or an older Ymir shows the `ymirctl ... --inference NODE` command instead.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
