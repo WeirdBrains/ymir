@@ -3,6 +3,25 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 05:55 EST: model upload U7, more formats (branch `feature/upload-formats`); U8 blocked on Weirdnet request D
+
+Slice U7 of [docs/design/model-upload.md](docs/design/model-upload.md): over `--node`, an upload also takes a safetensors directory (for vLLM), an MLX directory, a PEFT LoRA directory (on a vLLM base) and a GGUF vision projector (`--projector-for MODEL`). Weirdnet already reads, places and serves these (weirdnet-model 0.5.3, weirdnet-backends 0.4.4, locked); no Weirdnet crate edited. Details in the plan's "U7 as built".
+
+**What changed**
+- [crates/ymir-core/src/upload.rs](crates/ymir-core/src/upload.rs): `inspect_outgoing` and `Outgoing`; `provenance_for`; local refusals now point at `--node`.
+- [crates/ymir-core/src/config.rs](crates/ymir-core/src/config.rs): `[model] upload_engine` (validated), used by [daemon.rs](crates/ymir-core/src/daemon.rs) for models/1's engine.
+- [crates/ymir-core/src/upload_net.rs](crates/ymir-core/src/upload_net.rs): `Register.projector_for` (optional); `UploadsService` saves `backend = "vllm"` (absolute path) and `"mlx"` entries, PEFT adapters on the base, and a projector as the model's `mmproj` ([config_edit.rs](crates/ymir-core/src/config_edit.rs) `set_mmproj`).
+- ymirctl: `models upload PATH --node X [--projector-for MODEL]`, the checks before sending, the format in the first line (`GGUF model (llama)`).
+- Docs: the plan (U7 section and as built, U8 blocked), DESIGN, CHANGELOG, the site's ymirctl page.
+
+**Checks:** `cargo fmt`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 336 passed, 0 failed, 7 ignored (new: testkit `models_upload_formats`, unit tests for `inspect_outgoing`, `upload_engine`, `set_mmproj`).
+
+**Not tested:** real vLLM, MLX or llama.cpp with the uploaded files (mock engine); MLX end to end (MLX nodes are macOS); local uploads of directories and projectors (not built).
+
+**U8:** blocked. It needs request D (`CatalogModel::origin` and `license` in weirdnet-agent catalog/1), which weirdnet-agent 0.5.2 does not have. The request is drafted for Michael to send; nothing changed for U8.
+
+**Next:** merge, release 0.15.0; Bragi's copy fallback (branch `feature/upload-copy-fallback`) and Bragi 0.10.0.
+
 ## 2026-11-25 05:36 EST: v0.14.0 released, signed and on TAUR
 
 **v0.14.0** (release commit 560283b, tag v0.14.0, cut with `weirdnet_release.py cut --minor` on main 42707ce after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 332 passed, 0 failed): uploads to a pool (U6: `ymirctl models upload FILE --node all|A,B [--stage NODE]`, sent once and copied node to node). The Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` from its own artifact), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.14.0) has 35 files (`assets 0.14.0` ok, marked latest): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.14.0 --yes` published `ymir-bin` 0.14.0-1 and `ymir-cuda-bin` 0.14.0-1. The Arch recipes carry the v0.14.0 tarball hashes (this branch). Bragi 0.9.0's desktop upload dialog copies uploads on to other nodes with the same Weirdnet call.

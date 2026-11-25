@@ -201,7 +201,7 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
 
     // A model: sent, placed with its provenance, saved in gpu's node.toml.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu", "--license", "mit"]).await?;
-    assert!(out.contains("My-Model-Q4_0.gguf: model (llama)") && out.contains("as `my-model-q4_0`"), "{out}");
+    assert!(out.contains("My-Model-Q4_0.gguf: GGUF model (llama)") && out.contains("as `my-model-q4_0`"), "{out}");
     assert!(out.contains("gpu: 100%"), "{out}");
     assert!(out.contains("gpu: stored `my-model-q4_0`"), "{out}");
     assert!(out.contains("gpu: saved in its node.toml"), "{out}");

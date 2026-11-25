@@ -502,6 +502,7 @@ fn upload_args(file: &std::path::Path) -> upload::UploadArgs {
         from_run: None,
         name: None,
         adapter_for: None,
+        projector_for: None,
         license: Some("apache-2.0".into()),
         role: None,
         no_register: false,

@@ -798,6 +798,15 @@ without room after `upload_keep_free` is left out), the file is sent once, to th
 `PullSource::Peer`; every model node's models/1 service has a peer dialer and its certificate for this). Each copy is
 recorded and saved like an upload. A node that can't copy from the stage gets the file from this device instead.
 
+With `--node` an upload also takes the other formats `weirdnet-model` reads (slice U7): a directory of safetensors
+(for vLLM) or MLX weights, a PEFT LoRA adapter directory (`--adapter-for` a vLLM base) and a GGUF vision projector
+(`--projector-for MODEL`, a llama.cpp model). `ymir_core::upload::inspect_outgoing` checks and hashes it here
+(pickles, code and symlinks are refused); the node's models/1 checks the engine (a full model must suit its
+`[model] upload_engine`: llama.cpp, unless `llamacpp` is `off`, then vLLM, then MLX), places it under
+`safetensors/`, `mlx/`, `adapters/` or `projectors/`, and `/ymir/uploads/1` saves a `backend = "vllm"` or `"mlx"`
+entry, a `[[model.local.lora]]` on the base, or the base's `mmproj`. On the machine itself an upload stays GGUF
+models and GGUF LoRA.
+
 Training outputs take the same path (slice U5): `ymirctl train run` imports its adapter with
 `ymir_core::upload::import` into `models_dir/adapters/ID/ID.gguf` with `provenance.json` (origin `train`: base,
 dataset record, trainer, run) and registers it with its content revision, and `ymirctl models upload [FILE]

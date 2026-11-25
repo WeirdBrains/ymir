@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use weirdnet_backends::models::KeepFree;
-use weirdnet_model::artifact::{self, Artifact};
+use weirdnet_model::artifact::{self, Artifact, ArtifactFormat};
 use weirdnet_model::gguf::{GgufHeader, GgufKind, read_header};
 use weirdnet_model::{ModelLayout, ModelStore};
 
@@ -126,11 +126,13 @@ pub fn inspect_with(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<I
         bail!("{} is a symlink; give the real file", path.display());
     }
     if !meta.is_file() {
-        bail!("{} is not a file (this slice takes one GGUF file)", path.display());
+        bail!("{} is not a file: a directory (safetensors, MLX weights or a PEFT adapter) is sent to a node with --node", path.display());
     }
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).context("the path has no file name")?;
     if !file_name.to_ascii_lowercase().ends_with(".gguf") {
-        bail!("{file_name} is not a .gguf file: this slice takes GGUF models and GGUF LoRA adapters (safetensors, MLX and PEFT come later)");
+        bail!(
+            "{file_name} is not a .gguf file: this machine takes GGUF models and GGUF LoRA adapters (send safetensors, MLX weights and PEFT adapters, as a directory, to a node with --node)"
+        );
     }
     if file_name.starts_with('.') || file_name.contains(['/', '\\', ':']) {
         bail!("{file_name:?} is not a usable file name");
@@ -142,9 +144,9 @@ pub fn inspect_with(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<I
     }
     let header = read_header(std::io::BufReader::new(File::open(path)?)).with_context(|| format!("{file_name} is not a readable GGUF file"))?;
     match &header.kind {
-        GgufKind::Projector => bail!("{file_name} is a vision projector (mmproj); projectors are not taken yet"),
+        GgufKind::Projector => bail!("{file_name} is a vision projector (mmproj): send it to a node with --node and --projector-for MODEL"),
         GgufKind::Model if header.architecture.eq_ignore_ascii_case("clip") || header.architecture.eq_ignore_ascii_case("mmproj") => {
-            bail!("{file_name} is a vision projector (mmproj); projectors are not taken yet")
+            bail!("{file_name} is a vision projector (mmproj): send it to a node with --node and --projector-for MODEL")
         }
         GgufKind::Model => {}
         k if k.is_lora() => {}
@@ -161,6 +163,86 @@ pub fn inspect_with(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<I
         other => bail!("{file_name} reads as a {}, which this slice does not take", kind_name(other)),
     }
     Ok(Inspected { path: path.to_path_buf(), file_name, artifact: found, header })
+}
+
+/// What `ymirctl models upload --node` sends (U7): a GGUF model, GGUF LoRA or GGUF projector
+/// file, or a directory of safetensors, MLX weights or a PEFT adapter.
+#[derive(Debug, Clone)]
+pub struct Outgoing {
+    /// The file or directory, as given to [`artifact::inspect`].
+    pub path: PathBuf,
+    /// Its file or directory name.
+    pub name: String,
+    pub artifact: Artifact,
+}
+
+impl Outgoing {
+    pub fn kind(&self) -> ArtifactKind {
+        self.artifact.kind
+    }
+
+    pub fn size(&self) -> u64 {
+        self.artifact.size()
+    }
+
+    /// The architecture it says, or `?` (a PEFT adapter does not say).
+    pub fn architecture(&self) -> &str {
+        self.artifact.architecture.as_deref().unwrap_or("?")
+    }
+
+    /// The format in words, for messages.
+    pub fn format_name(&self) -> &'static str {
+        match (&self.artifact.format, self.artifact.kind) {
+            (_, ArtifactKind::Adapter { format: AdapterFormat::Peft }) => "PEFT",
+            (ArtifactFormat::Safetensors, _) => "safetensors",
+            (ArtifactFormat::Mlx, _) => "MLX",
+            _ => "GGUF",
+        }
+    }
+}
+
+/// Reads, checks and hashes what an upload to a node sends: a GGUF file as [`inspect`] takes it, a
+/// GGUF vision projector, or a directory (not a symlink) that `weirdnet-model` reads as safetensors
+/// or MLX weights, or as a PEFT LoRA adapter. It refuses pickles, code and symlinks inside.
+pub fn inspect_outgoing(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<Outgoing> {
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!("{} is a symlink; give the real file or directory", path.display());
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).context("the path has no name")?;
+    if meta.is_dir() {
+        let found = artifact::inspect_with(&[path.to_path_buf()], &mut |p| {
+            progress(p.done, p.total);
+            true
+        })
+        .map_err(|e| anyhow!("{name}: {e}"))?;
+        return match (found.kind, &found.format) {
+            (ArtifactKind::Model, ArtifactFormat::Safetensors | ArtifactFormat::Mlx) | (ArtifactKind::Adapter { format: AdapterFormat::Peft }, _) => {
+                Ok(Outgoing { path: path.to_path_buf(), name, artifact: found })
+            }
+            (k, _) => bail!("{name} reads as a {}, which is not sent as a directory", kind_name(k)),
+        };
+    }
+    let header = read_header(std::io::BufReader::new(File::open(path)?)).ok();
+    let projector = header.as_ref().is_some_and(|h| {
+        matches!(h.kind, GgufKind::Projector) || h.architecture.eq_ignore_ascii_case("clip") || h.architecture.eq_ignore_ascii_case("mmproj")
+    });
+    if !projector {
+        let item = inspect_with(path, progress)?;
+        return Ok(Outgoing { path: path.to_path_buf(), name: item.file_name, artifact: item.artifact });
+    }
+    if is_split(&name) {
+        bail!("{name} is one shard of a split GGUF; give one projector file");
+    }
+    let found = artifact::inspect_with(&[path.to_path_buf()], &mut |p| {
+        progress(p.done, p.total);
+        true
+    })
+    .map_err(|e| anyhow!("{name}: {e}"))?;
+    if found.kind != ArtifactKind::Projector {
+        bail!("{name} reads as a {}, not a vision projector", kind_name(found.kind));
+    }
+    Ok(Outgoing { path: path.to_path_buf(), name, artifact: found })
 }
 
 /// The directory an upload of `kind` with `id` goes to under `models_dir`.
@@ -222,7 +304,14 @@ pub struct ImportSpec {
 /// The record for `item` stored as `spec.id`: files, kind and revision from the bytes, the rest
 /// from `spec`. The same record goes with an upload to another node.
 pub fn provenance(item: &Inspected, spec: &ImportSpec) -> Provenance {
-    let mut p = Provenance::for_artifact(&item.stored(), spec.id.clone(), spec.origin.clone());
+    let mut p = provenance_for(&item.stored(), spec);
+    p.extra.insert("architecture".into(), serde_json::Value::String(item.header.architecture.clone()));
+    p
+}
+
+/// The provenance of `artifact` (as stored) under `spec`.
+pub fn provenance_for(artifact: &Artifact, spec: &ImportSpec) -> Provenance {
+    let mut p = Provenance::for_artifact(artifact, spec.id.clone(), spec.origin.clone());
     p.license = spec.license.clone();
     if let Some(b) = &spec.base {
         let mut base = b.clone();
@@ -235,7 +324,9 @@ pub fn provenance(item: &Inspected, spec: &ImportSpec) -> Provenance {
     p.trainer = spec.trainer.clone();
     p.uploaded_ms = Some(spec.uploaded_ms);
     p.extra = spec.extra.clone();
-    p.extra.insert("architecture".into(), serde_json::Value::String(item.header.architecture.clone()));
+    if let Some(a) = &artifact.architecture {
+        p.extra.insert("architecture".into(), serde_json::Value::String(a.clone()));
+    }
     p
 }
 

@@ -213,6 +213,11 @@ pub struct ModelSection {
     /// Unset: the larger of 10% of the filesystem and 20 GiB. Set: exactly this much.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_keep_free: Option<String>,
+    /// The engine an uploaded full model must suit: `llamacpp` (GGUF), `vllm` (safetensors) or
+    /// `mlx` (MLX weights). Unset: llama.cpp, unless `llamacpp` is `off`; then vLLM, unless that is
+    /// `off` too; then MLX. Adapters and projectors follow their base model's engine instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_engine: Option<String>,
     /// `managed` | `system:/path/to/llama-server` | `off`.
     #[serde(default = "managed")]
     pub llamacpp: String,
@@ -265,6 +270,7 @@ impl Default for ModelSection {
             callers: Vec::new(),
             remote_manage: true,
             upload_keep_free: None,
+            upload_engine: None,
             llamacpp: managed(),
             rpc_server: managed(),
             rpc_args: Vec::new(),
@@ -375,6 +381,19 @@ impl ModelSection {
         match self.upload_keep_free.as_deref().and_then(weirdnet_model::hw::parse_size) {
             Some(bytes) => weirdnet_backends::models::KeepFree::new(0, bytes),
             None => weirdnet_backends::models::KeepFree::default(),
+        }
+    }
+
+    /// The engine an uploaded full model must suit ([`Self::upload_engine`]).
+    pub fn upload_engine(&self) -> EngineKind {
+        match self.upload_engine.as_deref() {
+            Some("vllm") => EngineKind::Vllm,
+            Some("mlx") => EngineKind::Mlx,
+            Some(_) => EngineKind::Llamacpp,
+            None if self.llamacpp != "off" => EngineKind::Llamacpp,
+            None if self.vllm != "off" => EngineKind::Vllm,
+            None if self.mlx != "off" => EngineKind::Mlx,
+            None => EngineKind::Llamacpp,
         }
     }
 }
@@ -617,6 +636,11 @@ impl NodeConfig {
             && weirdnet_model::hw::parse_size(k).is_none()
         {
             bail!("[model] upload_keep_free: `{k}` is not a size (such as `50GiB`)");
+        }
+        if let Some(e) = &self.model.upload_engine
+            && !matches!(e.as_str(), "llamacpp" | "vllm" | "mlx")
+        {
+            bail!("[model] upload_engine: `{e}` is not `llamacpp`, `vllm` or `mlx`");
         }
         let mut seen = std::collections::HashSet::new();
         for m in &self.model.local {

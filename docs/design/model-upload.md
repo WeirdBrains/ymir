@@ -386,8 +386,9 @@ should not be open to every linked device, and the 2026-11-20 rule says to autho
    and "add to rollout". Built without "add to rollout" in Bragi 0.7.0 (see "U4 as built").
 6. **U6: pools.** `--pool` / `--node all` with staging and node-to-node `Fetch`; push-to-each fallback. Waits on
    Weirdnet B's peer pull; Ymir does not stub a peer copy of its own (lead, 2026-11-24).
-7. **U7: more formats.** safetensors for vLLM, MLX directories, PEFT adapters, mmproj projectors.
-8. **U8 (optional): catalog origin** in Bragi's model list once D exists.
+7. **U7: more formats.** safetensors for vLLM, MLX directories, PEFT adapters, mmproj projectors. Built
+   2026-11-25 over `--node` (see "U7 as built").
+8. **U8 (optional): catalog origin** in Bragi's model list once D exists. Blocked on D (see "U8").
 
 Tests for each slice use temp `YMIR_HOME`s, tiny synthetic GGUF and safetensors files written by the test, mock
 engines and the in-memory or loopback Weirdnet transport (two daemons for U2, U3 and U6), including: a hash
@@ -639,6 +640,52 @@ do the copy, checked against the same hashes and resumable like an upload.
   sending; `c` gets it from the laptop instead; the same files again are already there; `--stage b --no-persist`
   is sent to `b` and copied by `a`, node.toml unchanged; `auto` and a stage outside the targets are refused.
 - Not built: a pool target in Bragi; "auto" for uploads; copying a Hub pull node to node.
+
+## U7: more formats (planned 2026-11-25)
+
+Weirdnet already reads, checks, places and serves these (`weirdnet-model` 0.5.3 `artifact::inspect` and the
+store layouts, `weirdnet-backends` 0.4.4 models/1 with `Upload::with_projector_for` and its engine check), so U7
+is Ymir's side only, over `--node` (U2 and U6):
+
+- Inspect here: a GGUF file as before, a GGUF vision projector, or a directory that reads as safetensors or MLX
+  weights or a PEFT LoRA adapter. Pickles, code and symlinks are refused (by `weirdnet-model`).
+- `--projector-for MODEL` names the llama.cpp model a projector goes with; `--adapter-for` takes a vLLM base for a
+  PEFT adapter.
+- The node takes full models for one engine (models/1 has one `engine`): `[model] upload_engine`, by default
+  llama.cpp unless `llamacpp = "off"`, then vLLM, then MLX. Adapters and projectors follow their base's engine.
+- `/ymir/uploads/1` saves what suits each: a `backend = "vllm"` entry with the directory's absolute path (vLLM
+  reads a relative path as a Hub id), a `backend = "mlx"` entry relative to `models_dir`, a `[[model.local.lora]]`
+  on the base for a PEFT adapter, or `mmproj` on the model for a projector.
+- Local uploads (no `--node`) stay GGUF model and GGUF LoRA; a directory or a projector says to use `--node`.
+
+### U7 as built (2026-11-25)
+
+- `ymir_core::upload::inspect_outgoing` and `Outgoing` (name, artifact, format and architecture for messages);
+  `upload::provenance_for` builds the provenance from any artifact.
+- `ymirctl models upload PATH --node X [--adapter-for BASE | --projector-for MODEL]`: a projector without
+  `--projector-for`, `--projector-for` on anything else, and `--adapter-for` on a model or projector are refused
+  before sending. U6 pools take the same paths; name the nodes for that engine (`--node A,B`), since a node for
+  another engine refuses the files.
+- `[model] upload_engine` (`ModelSection::upload_engine`, validated) sets models/1's engine in `ymird`.
+- `Register.projector_for` (optional, so older uploaders still work); `UploadsService` saves the entries above and
+  `config_edit::set_mmproj` sets a model's projector.
+- Tests: `crates/ymir-testkit/tests/models_upload_formats.rs` (three daemons: a laptop, a llama.cpp node and a vLLM
+  node with a vLLM base): a safetensors directory is refused by the llama.cpp node and placed and saved
+  (`backend = "vllm"`, its revision, the absolute path) by the vLLM one; a PEFT adapter needs `--adapter-for` and
+  goes on the vLLM base; a projector needs `--projector-for`, is refused for a directory, and is saved as the
+  model's `mmproj` with the same bytes; a directory without `--node` is refused. Unit tests for `inspect_outgoing`
+  (safetensors, MLX, PEFT, projector, a pickle, an empty directory), `upload_engine` and `set_mmproj`.
+- Not built: local uploads of directories and projectors; an MLX upload is not tested end to end (MLX nodes run on
+  macOS; the entry is written the same way as vLLM's); several engines for full models on one node (models/1 has one).
+
+## U8: catalog origin in Bragi (blocked on request D, 2026-11-25)
+
+U8 labels pool models in Bragi's model list by origin (`hub`, `upload`, `train`) and license without a models/1 call
+to each node. It needs request D: `CatalogModel::origin` and `license` in `weirdnet-agent` catalog/1, filled from the
+capability record. `weirdnet-agent` 0.5.2 (the newest on crates.io) has neither: its `CatalogModel` has id, purpose,
+state, replicas, tokens_per_sec, context, revision, standin, inputs and base. Ymir makes no Weirdnet edits, so U8
+waits; the request was drafted for Michael to send. Once D ships, Ymir's model nodes put each model's provenance
+origin and license in their capability record, and Bragi shows them as a tag on the Models screen.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 

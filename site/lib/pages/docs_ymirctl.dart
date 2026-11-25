@@ -161,6 +161,10 @@ which compares it with the version that has the most, or <code>--force</code>).<
 the node with the most free space (or <code>--stage NODE</code>), and the others copy it from that node, node to node. A node
 without room after what it keeps free is left out before anything is sent; one that can't copy from the other node
 gets the file from this machine instead. Each one saves it in its own <code>node.toml</code> unless <code>--no-persist</code>.</li>
+<li><code>upload DIR --node NAME</code> also sends a directory of safetensors (to a vLLM node) or MLX weights, or a PEFT LoRA
+adapter directory with <code>--adapter-for</code> a vLLM model. <code>upload mmproj.gguf --node NAME --projector-for MODEL</code>
+sends a vision projector for a llama.cpp model, saved as its <code>mmproj</code>. Pickles and code are refused. A node takes full
+models for one engine, <code>[model] upload_engine</code> (by default llama.cpp, or vLLM when <code>llamacpp = "off"</code>).</li>
 <li><code>search --node all</code> shows each node's own fit verdict for every repo.</li>
 </ul>
 <p>A node running an older <code>ymird</code> answers that it does not take model management: upgrade it, or run the command on

@@ -4,7 +4,9 @@
 //! (`ymir_core::upload`), and adds it to node.toml so it survives a restart (`--no-register` only
 //! prints the entry). `--from-run RUN_DIR` takes a `ymirctl train run` output with its run record
 //! as the provenance (origin `train`, slice U5). With `--node X` it goes to another of the owner's
-//! model nodes over Weirdnet instead (slice U2, [`remote_op`]; `ymir_core::upload_net`).
+//! model nodes over Weirdnet instead (slice U2, [`remote_op`]; `ymir_core::upload_net`), which
+//! also takes a directory of safetensors (for vLLM) or MLX weights, a PEFT adapter directory (for
+//! a vLLM base) and a GGUF vision projector (`--projector-for`, slice U7).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,8 +24,10 @@ use super::{Ctx, DirArgs, Meter, adapters, gib, hub, local};
 
 #[derive(Args, Debug)]
 pub struct UploadArgs {
-    /// The GGUF file: a model, or a LoRA adapter (with --adapter-for). With --from-run it may be
-    /// left out when the run's adapter is in this node's models directory.
+    /// The GGUF file: a model, or a LoRA adapter (with --adapter-for). With --node also a
+    /// directory of safetensors or MLX weights, a PEFT adapter directory (with --adapter-for), or a
+    /// GGUF vision projector (with --projector-for). With --from-run it may be left out when the
+    /// run's adapter is in this node's models directory.
     #[arg(required_unless_present = "from_run")]
     pub file: Option<PathBuf>,
     /// A `ymirctl train run` directory (with its run.json): the adapter it made, with the run's
@@ -34,9 +38,14 @@ pub struct UploadArgs {
     /// The id it serves as (default: the file name in lower case; for an adapter `BASE+NAME`).
     #[arg(long)]
     pub name: Option<String>,
-    /// It is a LoRA adapter for this model (a `[[model.local]]` in node.toml, served by llama.cpp).
+    /// It is a LoRA adapter for this model (a `[[model.local]]` in node.toml: llama.cpp for a GGUF
+    /// LoRA, vLLM for a PEFT adapter).
     #[arg(long, value_name = "BASE")]
     pub adapter_for: Option<String>,
+    /// With --node: it is a vision projector (mmproj GGUF) for this model, which the node serves
+    /// on llama.cpp; it is saved as that model's `mmproj`.
+    #[arg(long, value_name = "MODEL", requires = "node", conflicts_with = "adapter_for")]
+    pub projector_for: Option<String>,
     /// The license the weights are under (an SPDX id such as apache-2.0, or the license's name),
     /// recorded in provenance.json. Optional.
     #[arg(long)]
@@ -83,7 +92,7 @@ fn check_base(ctx: &Ctx, base: &str, item: &upload::Inspected) -> Result<Provena
     };
     let launch = cfg.launches().into_iter().find(|l| l.id == base).with_context(|| format!("`{base}` has no launch on this node"))?;
     if launch.engine != EngineKind::Llamacpp {
-        bail!("`{base}` runs on {}: a GGUF LoRA serves on llama.cpp only (PEFT adapters for vLLM come in a later slice)", launch.engine.name());
+        bail!("`{base}` runs on {}: a GGUF LoRA serves on llama.cpp only (send a PEFT adapter directory for it with --node)", launch.engine.name());
     }
     if !Path::new(&launch.source).is_file() {
         bail!("{base}'s model file {} is not on this machine, so the adapter can't be checked against it", launch.source);
@@ -116,26 +125,37 @@ pub fn remote_op(out: &mut dyn Write, a: &UploadArgs) -> Result<ymir_core::uploa
         _ => bail!("give the GGUF file, or --from-run RUN_DIR"),
     };
     let file = std::fs::canonicalize(&file).with_context(|| format!("reading {}", file.display()))?;
-    let item = upload::inspect(&file)?;
+    let item = upload::inspect_outgoing(&file, &mut |_, _| {})?;
     let adapter_for = a.adapter_for.clone().or_else(|| run.as_ref().map(|(r, _)| r.base.clone()));
     if let Some((r, ad)) = &run {
         if !item.kind().is_adapter() {
-            bail!("{} is a full model; run {} made a LoRA adapter", item.file_name, r.id);
+            bail!("{} is a full model; run {} made a LoRA adapter", item.name, r.id);
         }
-        if item.sha256().trim_start_matches("sha256:") != ad.sha256.trim_start_matches("sha256:") {
+        let sha = item.artifact.files.first().map(|f| f.sha256.as_str()).unwrap_or_default();
+        if sha.trim_start_matches("sha256:") != ad.sha256.trim_start_matches("sha256:") {
             bail!("{} is not the adapter run {} made: its SHA-256 differs from the run record's", file.display(), r.id);
         }
     }
+    match (item.kind(), &a.projector_for) {
+        (ArtifactKind::Projector, None) => {
+            bail!("{} is a vision projector: say which model on the node it goes with with --projector-for MODEL", item.name)
+        }
+        (ArtifactKind::Projector, Some(_)) => {}
+        (k, Some(_)) => bail!("{} is a {}, not a vision projector; leave out --projector-for", item.name, upload::kind_name(k)),
+        _ => {}
+    }
     let base = match (item.kind(), &adapter_for) {
         (ArtifactKind::Adapter { .. }, None) => {
-            bail!("{} is a LoRA adapter: say which model on the node it goes on with --adapter-for BASE", item.file_name)
+            bail!("{} is a LoRA adapter: say which model on the node it goes on with --adapter-for BASE", item.name)
         }
-        (ArtifactKind::Model, Some(_)) => bail!("{} is a full model, not an adapter; leave out --adapter-for", item.file_name),
+        (ArtifactKind::Model | ArtifactKind::Projector, Some(_)) => {
+            bail!("{} is a {}, not an adapter; leave out --adapter-for", item.name, upload::kind_name(item.kind()))
+        }
         (ArtifactKind::Adapter { .. }, Some(b)) => {
             // The run's base (the revision and quant it trained on); the node checks the rest.
             let mut base = run.as_ref().and_then(|(r, ad)| train::import_spec(r, ad, 0).base).unwrap_or_default();
             base.id = Some(b.clone());
-            base.hub = item.header.base_model.clone().or(base.hub);
+            base.hub = item.artifact.base_model.clone().or(base.hub);
             Some(base)
         }
         _ => None,
@@ -143,8 +163,8 @@ pub fn remote_op(out: &mut dyn Write, a: &UploadArgs) -> Result<ymir_core::uploa
     let id = match (&a.name, &adapter_for) {
         (Some(n), _) => n.clone(),
         (None, Some(_)) if run.is_some() => run.as_ref().map(|(_, ad)| ad.id.clone()).unwrap_or_default(),
-        (None, Some(b)) => adapters::default_id(b, &item.file_name),
-        (None, None) => id_for_file(&item.file_name),
+        (None, Some(b)) => adapters::default_id(b, &item.name),
+        (None, None) => id_for_file(&item.name),
     };
     upload::check_id(&id)?;
     let spec = match &run {
@@ -158,18 +178,22 @@ pub fn remote_op(out: &mut dyn Write, a: &UploadArgs) -> Result<ymir_core::uploa
             ..Default::default()
         },
     };
+    let goes = adapter_for.as_deref().or(a.projector_for.as_deref()).map(|b| format!(", for `{b}`")).unwrap_or_default();
     writeln!(
         out,
-        "{}: {} ({}), {}{}, as `{id}`",
-        item.file_name,
+        "{}: {} {} ({}), {}{goes}, as `{id}`",
+        item.name,
+        item.format_name(),
         upload::kind_name(item.kind()),
-        item.header.architecture,
+        item.architecture(),
         gib(item.size()),
-        adapter_for.as_deref().map(|b| format!(", for `{b}`")).unwrap_or_default()
     )?;
-    let mut up = weirdnet_backends::models::Upload::new(id, &item.artifact, upload::provenance(&item, &spec)).serving();
+    let mut up = weirdnet_backends::models::Upload::new(id, &item.artifact, upload::provenance_for(&item.artifact, &spec)).serving();
     if let Some(b) = adapter_for {
         up = up.with_adapter_for(b);
+    }
+    if let Some(m) = &a.projector_for {
+        up = up.with_projector_for(m.clone());
     }
     Ok(ymir_core::upload_net::UploadOp { upload: up, local: vec![file], persist: !a.no_register, role: a.role.clone(), stage: a.stage.clone() })
 }
