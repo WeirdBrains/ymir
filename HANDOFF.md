@@ -3,6 +3,14 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 14:05 EST: signed update bundles in the release flow (branch `feature/update-bundles`)
+
+**What changed:** `ymirctl update sign-bundle` (`ymir_core::update_publish`) signs a bundle directory with a release key. It refuses a key the root doesn't delegate for `com.weirdbrains.ymir`/`stable` or a root with the wrong pin, and verifies the result as a node would before writing `manifest.env` and `roots/1.env`. It never prints the key. Helpers 0.4.0 is vendored; it adds `weirdnet_release.py updates VERSION [--upload]`, configured in `release.toml [updates]`, which builds the plain and CUDA Linux bundles and the macOS bundles from the release archives. The org root is `packaging/updates/root.env`. The release workflow only checks the plan (the key is not a CI secret). DESIGN and CHANGELOG are updated.
+
+**Release flow addition:** after `github VERSION`, on the release machine: `WEIRDNET_UPDATE_KEY=<release key file> python3 scripts/weirdnet_release.py updates VERSION --dist dist --upload`, then `assets VERSION`. The signer is the release's own x86_64 `ymirctl`. A node takes a bundle with: download, unpack, `ymirctl update stage DIR`, restart the service.
+
+**Checks:** `ymir-core` update tests (14, 4 new) and clippy pass on Linux. An end-to-end run with the real key signed 0.15.1 archives (seq 15001), `update trust` + `update stage` accepted it in a scratch home, and the old 0.1.0 `ymirctl update boot` picked the staged release. Helpers: 50 tests.
+
 ## 2026-11-25 12:00 EST: v0.15.1 released, signed and on TAUR
 
 **v0.15.1** (release commit c0b5f6b, tag v0.15.1, cut with `weirdnet_release.py cut --patch` on main cc9f216 after CI was green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 340 passed, 0 failed, 7 ignored): the trainer refuses a dataset too short for llama-finetune, `build --trainer` adds llama-tokenize, the larger synthetic fixture, and the fast `extract-lora` (randomized SVD, CUDA through torch, a thread pool). The Release workflow passed on the tag; its artifacts were checked against `SHA256SUMS` (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.1) has 35 files (`assets 0.15.1` ok, latest), with detached `.sig` files for the four Arch packages (WeirdBrains Muninn packages key, each "Good signature"). `weirdnet_release.py taur 0.15.1 --yes` published `ymir-bin` and `ymir-cuda-bin` 0.15.1-1. The Arch recipes carry the v0.15.1 tarball hashes (branch `chore/release-0.15.1`).
