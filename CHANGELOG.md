@@ -6,6 +6,19 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The pool catalog says where each model came from (`hub`, `upload`, `train`) and its license, when its node knows
+  (model upload U8): model nodes put both in their capability record from provenance records and node.toml, and on
+  every upload, peer copy and Hub pull; catalog/1, `/v1/models` (`weirdnet.origin`, `weirdnet.license`),
+  `ymirctl models` and the MCP `ymir_models` tool show them.
+
+### Changed
+
+- weirdnet-agent 0.5.4, weirdnet-backends 0.4.5 and weirdnet-openai 0.2.3 (Weirdnet request D).
+- A model placed in a node's store but not served (for example a projector for an embedding model) is logged as a
+  warning on that node.
+
 ## [0.15.2] - 2026-11-25
 
 ### Added

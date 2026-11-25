@@ -171,6 +171,13 @@ pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec
 /// lists and removes what is on disk, and takes uploads under `policy` (any linked device; the
 /// free space to keep), and copies uploads from the owner's other nodes. Nothing here edits `node.toml` (an upload's entry is saved by
 /// `/ymir/uploads/1`, [`serve_uploads`]). Dropping the server stops it.
+/// Where [`serve_models`] records what it places: the node's capability record, and this
+/// machine's own model node when it has one (U8).
+pub struct PlacedInfo {
+    pub record: Arc<weirdnet_backends::node::NodeService>,
+    pub local: Option<Arc<crate::model_node::LocalModelNode>>,
+}
+
 pub fn serve_models(
     net: &crate::daemon::Network,
     supervisor: Supervisor,
@@ -178,7 +185,9 @@ pub fn serve_models(
     budget: weirdnet_model::hw::Budget,
     engine: EngineKind,
     policy: weirdnet_backends::models::WritePolicy,
+    info: PlacedInfo,
 ) -> Result<(ModelsServer, Arc<ModelsService>), RemoteError> {
+    let PlacedInfo { record, local } = info;
     // The peer dialer lets this node copy an upload from another of the owner's nodes (U6).
     let (node, m) = (&net.node, &net.membership);
     let service = Arc::new(
@@ -186,7 +195,21 @@ pub fn serve_models(
             .with_budget(budget)
             .with_engine(engine)
             .with_write_policy(policy)
-            .with_peer_dialer(Arc::new(dialer(node, &net.hints)), Some(encode_cert(&m.our_cert()))),
+            .with_peer_dialer(Arc::new(dialer(node, &net.hints)), Some(encode_cert(&m.our_cert())))
+            // Each upload, peer copy and Hub pull puts its revision, origin and license in the
+            // capability record (U8), and the origin on this machine's own model node.
+            .with_node_info(record)
+            .on_placed(move |p| {
+                // The client gets the serving error too; the files stay in the store (for example
+                // a projector for an embedding or wrapped model), so the operator hears of it here.
+                if let Some(e) = &p.serve_error {
+                    tracing::warn!(id = %p.id(), via = ?p.via, "placed in the model store but not served: {e}");
+                }
+                if let Some(n) = &local {
+                    let (origin, license) = p.origin_and_license();
+                    n.set_origin(p.served_as().unwrap_or(p.id()), origin, license);
+                }
+            }),
     );
     let server = ModelsServer::start(node, service.clone())?;
     Ok((server, service))
@@ -410,6 +433,10 @@ impl ModelNode for RemoteModelNode {
 
     fn revision(&self, model: &str) -> Option<String> {
         self.record()?.models.into_iter().find(|m| m.status.id == model)?.revision
+    }
+
+    fn origin(&self, model: &str) -> crate::model_node::Origin {
+        self.record().and_then(|c| c.models.into_iter().find(|m| m.status.id == model)).map(|m| (m.origin, m.license)).unwrap_or_default()
     }
 
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {

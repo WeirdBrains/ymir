@@ -73,8 +73,9 @@ ymirctl status --json | jq .models</code></pre>
 
 <h2 id="models">Manage models</h2>
 <h3 id="models-cmd"><code>ymirctl models</code></h3>
-<p>Lists the pool's models (the merged catalog of every model node): id, purpose, and whether it is ready, busy, loading or
-only on disk. Use these ids with every other command and in apps like Jan.</p>
+<p>Lists the pool's models (the merged catalog of every model node): id, purpose, whether it is ready, busy, loading or
+only on disk, and, when the node knows, where it came from (<code>hub</code>, <code>upload</code> or <code>train</code>)
+and its license. Use these ids with every other command and in apps like Jan.</p>
 <pre><code>ymirctl models</code></pre>
 <h3 id="models-search"><code>ymirctl models search QUERY...</code></h3>
 <p>Searches the Hugging Face Hub for GGUF models, plus MLX models on Apple Silicon and safetensors/vLLM
