@@ -3,6 +3,18 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 02:40 EST: model upload U4 in Bragi 0.7.0 (docs, branch `docs/u4-bragi-upload`)
+
+Correction: the entry below headed 01:43 EST was written at 01:37 EST.
+
+CI and Pages are green on main 377ccb3 (the `fix/no-wixpdb` merge). The Linux CI job first failed in `ymir-testkit --test ctxplan` (`a_load_from_elsewhere_is_followed...`, unchanged since it last passed); a rerun of the failed job passed, and the test passed six times in a row on the box, so it is recorded as a flake, not fixed.
+
+Slice U4 of [docs/design/model-upload.md](docs/design/model-upload.md) is built in Bragi 0.7.0: an upload dialog on the desktop Models screen over models/1, with Ymir 0.12.0's `/ymir/uploads/1` record. Details in the plan's "U4 as built"; the B7 line and status in [docs/DESIGN.md](docs/DESIGN.md) are updated. Rollouts are not set from Bragi yet: the result shows the `ymirctl ... --rollout` commands.
+
+**Not tested:** Bragi against a real Ymir node over the network.
+
+**Next:** `/ymir/rollouts/1` so Bragi can add an upload to a rollout; then a rollout section in Bragi's dialog.
+
 ## 2026-11-25 01:43 EST: v0.12.0 released, signed and on TAUR
 
 **v0.12.0** (release commit d5db03d, tag v0.12.0, cut with `weirdnet_release.py cut --minor` on main ba00557 after CI, macOS and Pages were green there; the cut's own checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 327 passed, 0 failed): model uploads join rollouts (U3). CI, macOS and the Release workflow passed on the tag. Artifacts were downloaded into `dist/`, checked against the workflow's sums and scanned (Linux, CUDA Linux, macOS, Windows: no host names or home paths). The Windows installer job also produced `YmirSetup-0.12.0.wixpdb` (a WiX debug database), which was left out; `fix/no-wixpdb` stops the workflow producing it. The first `github 0.12.0` upload timed out (HTTP 408) and was re-run with `--clobber`. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.12.0) has 35 files (`assets 0.12.0` ok): the 31 release files with `SHA256SUMS`, plus detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; the packages' SHA-256s match the workflow's). `weirdnet_release.py taur 0.12.0 --yes` published `ymir-bin` 0.12.0-1 and `ymir-cuda-bin` 0.12.0-1. The Arch recipes carry the v0.12.0 tarball hashes (this branch).
