@@ -614,10 +614,12 @@ mod tests {
             assert!(matches!(Updater::open(&paths, Timestamp::now()).unwrap().status().health, HealthState::Idle));
         }
 
+        type Tb<'a> = tar::Builder<&'a mut flate2::write::GzEncoder<Vec<u8>>>;
+
         #[test]
         fn unsafe_archives_are_refused() {
             let t = tempfile::tempdir().unwrap();
-            let mk = |entries: &dyn Fn(&mut tar::Builder<&mut flate2::write::GzEncoder<Vec<u8>>>)| {
+            let mk = |entries: &dyn Fn(&mut Tb)| {
                 let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
                 {
                     let mut b = tar::Builder::new(&mut gz);
