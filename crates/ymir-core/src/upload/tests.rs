@@ -218,3 +218,56 @@ fn a_model_uploaded_before_the_move_is_still_already_there() {
     assert!(again.already && again.dir == old);
     assert_eq!((again.provenance.format.as_str(), again.provenance.uploaded_ms), ("ymir-provenance/1", Some(5)));
 }
+
+/// A safetensors file with `n` F32 weights and these header metadata.
+fn safetensors(n: u64, metadata: Option<serde_json::Value>) -> Vec<u8> {
+    let mut header = serde_json::json!({"w": {"dtype": "F32", "shape": [n], "data_offsets": [0, n * 4]}});
+    if let Some(m) = metadata {
+        header["__metadata__"] = m;
+    }
+    let h = serde_json::to_vec(&header).unwrap();
+    let mut out = (h.len() as u64).to_le_bytes().to_vec();
+    out.extend(h);
+    out.extend(vec![7u8; (n * 4) as usize]);
+    out
+}
+
+#[test]
+fn inspect_outgoing_takes_directories_and_projectors() {
+    let d = tempfile::tempdir().unwrap();
+    let out = |p: &Path| inspect_outgoing(p, &mut |_, _| {});
+    let st = d.path().join("Tune-8B");
+    std::fs::create_dir(&st).unwrap();
+    write(&st, "config.json", br#"{"architectures":["Qwen3ForCausalLM"],"_name_or_path":"Qwen/Qwen3-8B"}"#);
+    write(&st, "model.safetensors", &safetensors(4, None));
+    let o = out(&st).unwrap();
+    assert_eq!((o.kind(), o.format_name(), o.architecture(), o.name.as_str()), (ArtifactKind::Model, "safetensors", "Qwen3ForCausalLM", "Tune-8B"));
+
+    let mlx = d.path().join("tune-mlx");
+    std::fs::create_dir(&mlx).unwrap();
+    write(&mlx, "config.json", br#"{"architectures":["LlamaForCausalLM"],"quantization":{"bits":4,"group_size":64}}"#);
+    write(&mlx, "model.safetensors", &safetensors(2, None));
+    assert_eq!(out(&mlx).unwrap().format_name(), "MLX");
+
+    let peft = d.path().join("lora");
+    std::fs::create_dir(&peft).unwrap();
+    write(&peft, "adapter_config.json", br#"{"peft_type":"LORA","r":8,"lora_alpha":16,"base_model_name_or_path":"Qwen/Qwen3-8B"}"#);
+    write(&peft, "adapter_model.safetensors", &safetensors(3, None));
+    let o = out(&peft).unwrap();
+    assert_eq!((o.kind(), o.format_name(), o.architecture()), (ArtifactKind::Adapter { format: AdapterFormat::Peft }, "PEFT", "?"));
+    assert_eq!(o.artifact.base_model.as_deref(), Some("Qwen/Qwen3-8B"));
+
+    let mm = write(d.path(), "mmproj-F16.gguf", &gguf(&[("general.architecture", "clip"), ("general.type", "mmproj")], 256));
+    assert_eq!(out(&mm).unwrap().kind(), ArtifactKind::Projector);
+    assert!(inspect(&mm).unwrap_err().to_string().contains("--projector-for"));
+    let m = write(d.path(), "m.gguf", &model("qwen3"));
+    assert_eq!(out(&m).unwrap().kind(), ArtifactKind::Model);
+
+    // Pickles and code are refused, and so is a directory on this machine's own path.
+    write(&st, "pytorch_model.bin", b"pickle");
+    assert!(out(&st).is_err());
+    assert!(inspect(&mlx).unwrap_err().to_string().contains("--node"));
+    let empty = d.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    assert!(out(&empty).is_err());
+}
