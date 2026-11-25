@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 18:40 EST: v0.15.4 released; first hands-off self-update confirmed
+
+**Release:** https://github.com/WeirdBrains/ymir/releases/tag/v0.15.4 (Release run 45711728332, green). `ymirctl update status` now shows the self-update settings and the last feed check. The assets check passes, including the six signed update bundles (`com.weirdbrains.ymir-stable-15004`) and the gpg-signed Arch packages. The leak scan of dist found nothing.
+
+**Self-update test:** a node on 0.15.3 with `[update] interval = "10m"` found 0.15.4 on the GitHub feed about 7 minutes after the bundles were uploaded. It staged the bundle, exited for the update, started 0.15.4 on trial and committed it 5 seconds later, with no manual steps. The test interval was then removed, so the node is back on the 6h default. Arch recipes are on this branch; TAUR follows.
+
 ## 2026-11-25 18:00 EST: v0.15.3 released (self-updating ymird)
 
 **Release:** https://github.com/WeirdBrains/ymir/releases/tag/v0.15.3 (Release run 45700519266, green). The assets check passes, including the six signed `.update.tar.gz` bundles (update id `com.weirdbrains.ymir-stable-15003`) and the gpg-signed Arch packages. The leak scan of dist found nothing. ymird now checks its feed (default `github:WeirdBrains/ymir`, every 6h) and stages and restarts onto a newer signed release by itself; see `[update]` in DESIGN. Arch recipes are on this branch; TAUR follows.
