@@ -53,8 +53,14 @@ pub struct UploadArgs {
     pub dir: DirArgs,
     /// Send it to this model node over Weirdnet (a device name or peer id) instead of this
     /// machine. Needs a running ymird here, linked to your devices; an interrupted upload resumes.
+    /// Several nodes: `--node A,B` or `--node all` (every model node but this one) sends the files
+    /// once and the others copy them from that node.
     #[arg(long)]
     pub node: Option<String>,
+    /// With several nodes: the one the files are sent to, the others copying from it (default:
+    /// the one with the most free space).
+    #[arg(long, value_name = "NODE", requires = "node")]
+    pub stage: Option<String>,
     #[command(flatten)]
     pub rollout: super::upload_rollout::RolloutArgs,
 }
@@ -165,7 +171,7 @@ pub fn remote_op(out: &mut dyn Write, a: &UploadArgs) -> Result<ymir_core::uploa
     if let Some(b) = adapter_for {
         up = up.with_adapter_for(b);
     }
-    Ok(ymir_core::upload_net::UploadOp { upload: up, local: vec![file], persist: !a.no_register, role: a.role.clone() })
+    Ok(ymir_core::upload_net::UploadOp { upload: up, local: vec![file], persist: !a.no_register, role: a.role.clone(), stage: a.stage.clone() })
 }
 
 /// A finished run's record and its adapter, from `RUN_DIR/run.json`.
