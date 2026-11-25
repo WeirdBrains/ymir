@@ -218,6 +218,16 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     assert_eq!(m.file.as_deref(), Some("my-model-q4_0/My-Model-Q4_0.gguf"));
     assert!(gpu_h.paths.config().with_extension("toml.bak").is_file());
     assert!(ctl(&gpu_h.home, &["status"]).await?.contains("my-model-q4_0"), "served by gpu's running ymird");
+    // The pool sees the upload's revision: gpu's capability record, as this inference node reads it.
+    let want = prov.revision.clone();
+    let mut seen = None;
+    eventually(40, "the pool reports the uploaded revision", async || {
+        let st = control::request(&lap_h.paths.socket(), &ControlRequest::Status).await?.status.unwrap();
+        seen = st.models.iter().find(|m| m.id == "my-model-q4_0" && m.node == "gpu").map(|m| m.revision.clone());
+        Ok(seen.as_ref().is_some_and(|r| r.as_deref() == Some(want.as_str())))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}: last seen {seen:?}"))?;
 
     // The same files again: nothing is sent, nothing is added twice.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu"]).await?;
