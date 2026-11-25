@@ -6,9 +6,15 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-25
+
 ### Added
 
 - Signed self-update bundles with every release: `ymirctl update sign-bundle` signs a bundle directory with a release key (checked against the org root and verified as a node would before anything is written), and the release flow (`scripts/weirdnet_release.py updates VERSION --upload`, weirdnet-project-helpers 0.4.0) publishes `ymir-VERSION-linux-{x86_64,aarch64}.update.tar.gz`, the CUDA ones and the macOS ones. A node takes one with `ymirctl update stage` and a restart.
+
+### Fixed
+
+- Signed self-update bundles with every release (ymirctl update sign-bundle; weirdnet_release.py updates).
 
 ## [0.15.1] - 2026-11-25
 
