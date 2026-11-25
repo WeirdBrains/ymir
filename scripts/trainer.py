@@ -441,7 +441,8 @@ def cmd_train(a):
 # directions from a sketch of rank + OVERSAMPLE columns, sharpened by POWER_ITERS power iterations,
 # in float32. It costs O(m n (rank + OVERSAMPLE)) per matrix instead of a full SVD's O(m n min(m, n)),
 # and matches the exact top singular values to within 0.5% (the change kept to 0.1%) on fine-tune differences
-# (test_trainer.py checks it). Matrices too small for a sketch to pay take the exact SVD.
+# (test_trainer.py checks it). A matrix whose smaller side is at most 4 sketches wide (such as 128 x 896
+# key and value projections) takes the exact SVD: it is cheap there, and a sketch gains little.
 OVERSAMPLE = 16
 POWER_ITERS = 5
 SVD_CHOICES = ("auto", "cuda", "cpu", "exact")
@@ -487,7 +488,7 @@ def top_svd(delta, rank, device=("cpu", None), seed=0):
     small = min(m, n)
     energy = float(np.einsum("ij,ij->", delta, delta, dtype=np.float64))
     cols = min(rank + OVERSAMPLE, small)
-    if kind == "exact" or cols * 2 >= small:
+    if kind == "exact" or small <= 4 * cols:
         U, S, Vt = np.linalg.svd(delta.astype(np.float64), full_matrices=False)
         r = min(rank, S.shape[0])
         us, vt, s = (U[:, :r] * S[:r]).astype(np.float32), Vt[:r].astype(np.float32), S[:r]

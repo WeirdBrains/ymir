@@ -9,6 +9,27 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **Next:** U8, once Weirdnet request D lands.
 
+## 2026-11-25 10:20 EST: fast LoRA extraction (branch `feature/fast-lora-extract`)
+
+The first real run's `extract-lora` (Qwen2.5-0.5B, rank 16, 168 matrices) took 79 minutes on a machine at load ~40. Measured there: a 4864 x 896 float64 SVD took 29.7 s with OpenBLAS's default 16 threads under that load, 4.8 s with 8, 0.86 s with 4 and 1.0 s with 1, so most of the time was BLAS threads spinning, not the SVD.
+
+**What changed** ([scripts/trainer.py](scripts/trainer.py))
+- `top_svd`: a randomized, truncated SVD (sketch of rank + 16, 5 power iterations, float32; seeded per matrix, so runs repeat); exact for matrices whose smaller side is at most 4 sketches wide. On CUDA through PyTorch when the venv has a CUDA build (`svd_device`, `YMIR_TRAINER_SVD` = auto, cuda, cpu, exact).
+- `lora_tensors` runs `YMIR_TRAINER_THREADS` matrices at a time (default min(4, CPUs)) with one BLAS thread each (`single_threaded_blas`, set before numpy loads), in the base's order, a bounded window in memory.
+- The final log line gives the extraction time; [trainer-requirements.txt](scripts/trainer-requirements.txt) names torch as optional.
+- Docs: training plan (trainer section), CHANGELOG (Unreleased, Changed).
+
+**Timings** (the run's full model was not kept, so a stand-in: the f32 base plus the run's adapter plus full-rank noise of the same size, the real shapes; load ~30 from other jobs on the machine; rank 16):
+- before, exact float64 SVD, 16 BLAS threads: BEFORE_TIME
+- after, exact SVD on 4 threads: 45.2 s
+- after, CPU (randomized, 4 threads): 8.2 s (17.4 s wall with loading and writing)
+- after, GPU (torch 2.11 cu128, RTX 3060): 4.4 s (21.5 s wall)
+- quality: the kept share 53.0% in every mode; the randomized adapter's residual is within 0.03% of the exact one's on the worst matrices.
+
+**Checks:** `python3 scripts/test_trainer.py` 26 passed, 1 skipped (the CUDA comparison, run with `YMIR_TEST_CUDA=1` on a GPU machine: 4 passed on the test machine's RTX 3060 with torch 2.11 cu128); new tests: randomized vs exact at the model's shapes, exact on low rank and repeatable, device choice and refusals, modes agree through the CLI, threaded order.
+
+**Next:** merge after CI; a patch release.
+
 ## 2026-11-25 08:20 EST: the trainer refuses a too-short dataset; a larger fixture (branch `feature/trainer-short-corpus`)
 
 The first real `train run` (context 256, then 64) crashed in upstream `llama-finetune` with `GGML_ASSERT(INT64_MAX / ne[i] > current_nelements)` in `ggml_opt_dataset_init`: the small fixture renders to 256 tokens, and upstream needs 2n + 1 for one step, n being the context rounded up to a multiple of 256 (`common_opt_dataset_init` computes `(tokens - n - 1) / (n/2)` in size_t, which underflows on less).
