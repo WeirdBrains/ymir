@@ -138,8 +138,24 @@ that node, checkpoints synced, and resume on another capable node if the first g
 (`ymir-mock-trainer`, [`crates/ymir-testkit/tests/p3a.rs`](../../crates/ymir-testkit/tests/p3a.rs)), with no real
 node or model. The llama.cpp trainer that speaks the interface below is
 [`scripts/trainer.py`](../../scripts/trainer.py) (see "The llama.cpp trainer"), tested against a fake
-`llama-finetune`. Left: a real run on a node the lead clears, and `train run --node` for a remote node (today a run
-trains on the node `ymirctl` runs on; `train reserve --node` holds a remote one by hand).
+`llama-finetune`. `train run --node X` (option C, 2026-11-24) starts a run on another of the owner's model nodes
+from any linked device, app-only ones included, over Ymir's own Weirdnet protocol `/ymir/train/1`
+([`crates/ymir-core/src/train_net.rs`](../../crates/ymir-core/src/train_net.rs),
+[`crates/ymir-testkit/tests/p3a_remote.rs`](../../crates/ymir-testkit/tests/p3a_remote.rs)); see "Runs on another
+node" below. Left: a real run on a node the lead clears.
+
+**Runs on another node (P3a, option C).** Built only on published crates (`weirdnet-net` 0.8.2's
+`accept_streams`/`open_stream`, `weirdnet-agent` 0.5.2's channels and `RosterAuth`); no `weirdnet-backends` node/1
+command was added, since it has none for jobs. `ymirctl` asks its own `ymird`, which finds the node on the roster
+(a label or peer id) and sends the dataset and its manifest inline (up to 24 MiB) with the run's settings,
+presenting this device's certificate. The node's `ymird` serves `/ymir/train/1` only with `[train] remote = true`
+(off by default), to the owner's linked, unrevoked devices, narrowed by `[train] callers` (peer ids). It runs the
+same `train::run` in process, so the run reserves the node through that `ymird` like a local run, and streams the
+run's lines back. Closing the stream (Ctrl-C) cancels the run and frees the GPU. node.toml is never edited over the
+network: `--add` is refused with `--node`, `--from` names a GGUF inside the node's models directory, and the
+adapter is served with `ymirctl models adapter serve ID --base BASE --node X`. One run per node at a time (the run's
+lock). The run lives as long as the caller's stream: a job record synced across devices, so a run outlives the
+caller and resumes on another node, is P3b and waits for `weirdnet-agent`'s synced job record (not published).
 
 What a run does: checks the trainer's interface and its build against `[train] build`, and refuses any other. It
 takes only a dataset with its manifest (P1's `ymir-dataset/1`, whose teacher license must be known unless

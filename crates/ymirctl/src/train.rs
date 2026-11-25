@@ -82,6 +82,12 @@ pub struct RunArgs {
     /// Add the adapter to node.toml (`[[model.local.lora]]`) when the run succeeds.
     #[arg(long)]
     pub add: bool,
+    /// Run on this model node instead (a roster label or peer id), over Weirdnet through this
+    /// device's ymird. The node needs `[train] remote = true`; the dataset is sent with the run
+    /// (up to 24 MiB), --from names a GGUF in the node's models directory, and node.toml there is
+    /// never edited (serve the adapter with `ymirctl models adapter serve --node`).
+    #[arg(long)]
+    pub node: Option<String>,
 }
 
 pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()> {
@@ -161,7 +167,87 @@ fn done(out: &mut dyn Write, r: control::ControlResponse) -> Result<()> {
     Ok(())
 }
 
-async fn run_cmd(paths: &Paths, out: &mut dyn Write, a: RunArgs) -> Result<()> {
+/// A progress line for `u`, at most one per percent of a step (or per step on short runs).
+fn show(shown: &mut Option<(Stage, u64)>, stage: Stage, event: &Event) -> Option<String> {
+    match event {
+        Event::Progress { step, steps, loss } => {
+            let pct = (step * 100).checked_div(*steps).unwrap_or(0);
+            (*shown != Some((stage, pct))).then(|| {
+                *shown = Some((stage, pct));
+                let loss = loss.map(|l| format!("  loss {l:.4}")).unwrap_or_default();
+                format!("{stage}: {step}/{steps}{loss}")
+            })
+        }
+        Event::Log { message } => Some(format!("{stage}: {message}")),
+        Event::Error { message } => Some(format!("{stage}: error: {message}")),
+        Event::Done => None,
+    }
+}
+
+async fn run_on_node(paths: &Paths, out: &mut dyn Write, node: &str, a: RunArgs) -> Result<()> {
+    use ymir_core::train_net::{TrainLine, TrainOp};
+    if a.add {
+        bail!(
+            "--add edits node.toml, which is never done over the network; serve the adapter with `ymirctl models adapter serve ID --base BASE --node {node}`"
+        );
+    }
+    let from = match a.from {
+        Some(p) => Some(p.to_str().context("--from is not UTF-8")?.to_string()),
+        None => None,
+    };
+    let op = TrainOp {
+        base: a.base.clone(),
+        dataset: std::path::absolute(&a.dataset).unwrap_or(a.dataset),
+        id: a.id,
+        from,
+        hyper: Hyper { epochs: a.epochs, learning_rate: a.learning_rate, context: a.context, batch: a.batch, seed: a.seed, rank: a.rank },
+        allow_unknown_license: a.allow_unknown_license,
+        keep_full: a.keep_full,
+        force: a.force,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut shown: Option<(Stage, u64)> = None;
+    let on = |l: &TrainLine| {
+        let line = match l {
+            TrainLine::Started { node, run, adapter } => Some(format!("Run {run} for `{adapter}` on {node}")),
+            TrainLine::Reserved { in_ymird: true } => Some("Reserved the node in its ymird: its models are unloaded until the run ends.".into()),
+            TrainLine::Reserved { in_ymird: false } => Some("The run holds the node's GPU.".into()),
+            TrainLine::Step { stage, event } => show(&mut shown, *stage, event),
+            TrainLine::Done { .. } | TrainLine::Failed { .. } => None,
+        };
+        if let Some(l) = line {
+            let _ = tx.send(l);
+        }
+    };
+    let result = {
+        let socket = paths.socket();
+        let run = control::request_train(&socket, node, op, on);
+        tokio::pin!(run);
+        let cancel = tokio::signal::ctrl_c();
+        tokio::pin!(cancel);
+        loop {
+            tokio::select! {
+                Some(l) = rx.recv() => writeln!(out, "{l}")?,
+                r = &mut run => break r,
+                _ = &mut cancel => break Err(anyhow::anyhow!("cancelled: the run on {node} stops")),
+            }
+        }
+    };
+    while let Ok(l) = rx.try_recv() {
+        writeln!(out, "{l}")?;
+    }
+    let record = result?;
+    let adapter = record.adapter.clone().context("the run produced no adapter")?;
+    let loss = record.final_loss.map(|l| format!(", final loss {l:.4}")).unwrap_or_default();
+    writeln!(out, "Done on {}: {} steps{loss}. Adapter `{}` is {} in its models directory.", record.node, record.steps, adapter.id, adapter.file)?;
+    writeln!(out, "To serve it: ymirctl models adapter serve {} --base {} --node {node}", adapter.id, record.base)?;
+    Ok(())
+}
+
+async fn run_cmd(paths: &Paths, out: &mut dyn Write, mut a: RunArgs) -> Result<()> {
+    if let Some(node) = a.node.take() {
+        return run_on_node(paths, out, &node, a).await;
+    }
     let config = paths.config();
     let text = std::fs::read_to_string(&config).with_context(|| format!("reading {} (run `ymirctl setup` first)", config.display()))?;
     let cfg: NodeConfig = toml::from_str(&text).with_context(|| format!("parsing {}", config.display()))?;
@@ -185,18 +271,7 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, a: RunArgs) -> Result<()> {
             Update::Started { run, dir, adapter } => Some(format!("Run {run} for `{adapter}` (work in {})", dir.display())),
             Update::Reserved { in_ymird: true } => Some("Reserved this node in ymird: its models are unloaded until the run ends.".into()),
             Update::Reserved { in_ymird: false } => Some("ymird isn't running; the run holds the GPU (ymird loads nothing if it starts).".into()),
-            Update::Event(stage, Event::Progress { step, steps, loss }) => {
-                // One line per percent (or per step on short runs).
-                let pct = (step * 100).checked_div(steps).unwrap_or(0);
-                (shown != Some((stage, pct))).then(|| {
-                    shown = Some((stage, pct));
-                    let loss = loss.map(|l| format!("  loss {l:.4}")).unwrap_or_default();
-                    format!("{stage}: {step}/{steps}{loss}")
-                })
-            }
-            Update::Event(stage, Event::Log { message }) => Some(format!("{stage}: {message}")),
-            Update::Event(stage, Event::Error { message }) => Some(format!("{stage}: error: {message}")),
-            Update::Event(_, Event::Done) => None,
+            Update::Event(stage, event) => show(&mut shown, stage, &event),
         };
         if let Some(l) = line {
             let _ = tx.send(l);

@@ -241,6 +241,26 @@ pub fn models_hub(
     ModelsHub::new(local.map(|s| (me, s)), dir, client)
 }
 
+/// The `ymird` side of `ymirctl train run --node`: runs on the user's other model nodes over
+/// `/ymir/train/1`, presenting this device's certificate.
+pub fn train_hub(node: &Arc<SyncNode>, m: &Arc<Membership>, hints: &Hints, opts: &RemoteOptions, name: &str) -> crate::train_net::TrainHub {
+    let dir = Arc::new(NetDirectory::new(node.clone(), m.clone(), hints.clone(), opts.find_wait, name));
+    crate::train_net::TrainHub::new(dir, Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())))
+}
+
+/// Serves `/ymir/train/1` on `node` (`[train] remote = true`): runs for the user's linked devices,
+/// narrowed to `[train] callers`.
+pub fn serve_train(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    paths: crate::Paths,
+    cfg: crate::NodeConfig,
+) -> Result<crate::train_net::TrainServer, RemoteError> {
+    let auth = role_auth(m, &cfg.train.callers);
+    let service = Arc::new(crate::train_net::TrainService::new(paths, cfg, auth));
+    crate::train_net::TrainServer::start(node, service)
+}
+
 /// When a model node's stream counts as stalled: no frame for 5 s, or 3x the recent gap between
 /// frames, up to 12 s; before the first frame, `first` (the prompt's processing time, from
 /// [`crate::coordinator::prefill_allowance`]) when longer.

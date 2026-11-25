@@ -9,6 +9,7 @@ All notable changes to Ymir are listed here. The format follows
 ### Added
 
 - A trainable dataset fixture, `crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl` with its `ymir-dataset/1` manifest (synthetic, CC0-1.0), which `ymirctl train run --dataset` accepts; a test checks the manifest's hashes and counts against the fixtures.
+- `ymirctl train run --node NAME`: start a training run on another of your model nodes from any linked device, app-only ones included, over Weirdnet (`/ymir/train/1`). The node takes runs only with `[train] remote = true` (off by default), from your linked devices (`[train] callers` narrows them); the dataset and its manifest go with the run (up to 24 MiB), the node reserves itself for the run as a local run does, progress streams back, and Ctrl-C cancels it there. `--add` is refused with `--node` (node.toml is never edited over the network), and `--from` names a GGUF in the node's models directory.
 
 ## [0.9.0] - 2026-11-24
 

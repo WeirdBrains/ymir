@@ -37,6 +37,7 @@ pub mod setup;
 pub mod tasks;
 pub mod token;
 pub mod train;
+pub mod train_net;
 pub mod update;
 pub mod upload;
 pub mod vision;

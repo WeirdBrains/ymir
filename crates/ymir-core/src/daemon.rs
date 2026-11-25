@@ -271,6 +271,17 @@ impl Daemon {
                     serving.push(Box::new(server));
                     models_service = Some(svc);
                 }
+                if cfg.train.remote {
+                    // The owner's devices start runs here (`ymirctl train run --node`); node.toml is
+                    // never touched from here.
+                    let server = remote::serve_train(&net.node, &net.membership, paths.clone(), cfg.clone())
+                        .map_err(|e| anyhow!("serving training runs on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                    if cfg.train.callers.is_empty() {
+                        tracing::warn!("training: any linked device may start a run on this node; set [train] callers to narrow it");
+                    }
+                    tracing::info!("training: taking runs from the user's devices on Weirdnet ({})", crate::train_net::TRAIN_PROTOCOL);
+                }
                 tracing::info!(
                     "model role: serving the user's inference nodes on Weirdnet{}",
                     if coordinator.is_some() { " (alongside the inference role)" } else { "" }
@@ -361,6 +372,7 @@ impl Daemon {
             alerter,
             network: network.as_ref().map(|n| (n.membership.clone(), n.node.clone())),
             models: network.as_ref().map(|n| Arc::new(remote::models_hub(&n.node, &n.membership, &n.hints, &ropts, &name, models_service))),
+            train: network.as_ref().map(|n| Arc::new(remote::train_hub(&n.node, &n.membership, &n.hints, &ropts, &name))),
             context,
             pool: app_pool,
             exit: exit.clone(),
