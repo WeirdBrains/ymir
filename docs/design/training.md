@@ -199,6 +199,14 @@ build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.to
   `convert_lora_to_gguf.py` writes, with `adapter.lora.alpha = rank` so llama.cpp applies it at scale 1. Matrices
   smaller than the rank are zero-padded; unchanged ones are left out; norms, embeddings and the output head stay
   the base's. It logs how much of the change the rank keeps.
+- The SVD is randomized and truncated (2026-11-25): a sketch of `rank + 16` columns with 5 power iterations, in
+  float32, so each matrix costs O(m·n·(rank + 16)) rather than a full SVD's O(m·n·min(m, n)); matrices whose
+  smaller side is at most four sketches wide take the exact SVD. With PyTorch (a CUDA build) in the trainer's venv it
+  runs on the GPU, else on the CPU, `YMIR_TRAINER_THREADS` matrices at a time (default min(4, CPUs)) with one BLAS
+  thread each: OpenBLAS's own 16 threads spun on a busy machine, which was most of the first real run's 79 minutes.
+  `YMIR_TRAINER_SVD` = `auto` (default), `cuda`, `cpu` or `exact` (the old full float64 SVD). On Qwen2.5-0.5B
+  (168 matrices, rank 16, RTX 3060, a machine at load 30) extraction took 8 s on the CPU and 4 s on the GPU, the
+  kept share the same as the exact SVD's to 0.1%.
 - Upstream's release archives don't carry `llama-finetune`: `scripts/engine.py build --trainer` builds it at the
   pin. The Python side needs numpy, gguf 0.19.0 (llama.cpp's gguf-py at the pin) and jinja2
   ([`scripts/trainer-requirements.txt`](../../scripts/trainer-requirements.txt)), in a venv named by

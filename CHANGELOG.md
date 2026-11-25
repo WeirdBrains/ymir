@@ -11,6 +11,10 @@ All notable changes to Ymir are listed here. The format follows
 - A larger synthetic training fixture, `crates/ymir-testkit/tests/fixtures/decentralized-networks-large.dataset.jsonl` with its `ymir-dataset/1` manifest (16 conversations, 1297 tokens with Qwen2.5's chat template), long enough for a real `llama-finetune` step at context 256; the small fixture renders to 256 tokens.
 - `scripts/engine.py build --trainer` also builds `llama-tokenize`, which the trainer uses to count the training text.
 
+### Changed
+
+- `scripts/trainer.py extract-lora` is fast: a randomized, truncated SVD, on the GPU through PyTorch when the trainer's venv has a CUDA build of it, else on the CPU several matrices at a time with one BLAS thread each. A rank 16 adapter for Qwen2.5-0.5B took 79 minutes on a busy machine before (28 minutes on a less busy one), and now 8 s on the CPU or 4 s on the GPU. `YMIR_TRAINER_SVD` (`auto`, `cuda`, `cpu`, `exact`) and `YMIR_TRAINER_THREADS` choose where and how wide.
+
 ### Fixed
 
 - `scripts/trainer.py train` refuses a dataset too short to train on, with its token count and how many it needs, instead of letting `llama-finetune` crash (`GGML_ASSERT ... ggml_opt_dataset_init`). Upstream needs at least 2 x context + 1 tokens, with the context rounded up to a multiple of 256 as llama.cpp does, so at least 513. Without `llama-tokenize` next to `llama-finetune` (an older trainer build), the crash is turned into the same refusal.
