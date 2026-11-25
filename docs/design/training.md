@@ -188,6 +188,12 @@ build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.to
   `-ub` are all `context` (`n_ctx % n_batch == 0`), so `batch` is not used. GPU layers: `YMIR_TRAINER_NGL`
   (default all), flash attention off (it has no backward pass). Upstream's progress bars become `progress` events
   over all epochs, and the last validation loss a `log`.
+- Before training, `llama-tokenize` from the same build counts the rendered text as `llama-finetune` will tokenize
+  it (2026-11-25). Upstream cuts it into windows of the trained context n (`-c` rounded up to a multiple of 256,
+  as llama.cpp pads it) every n/2 tokens, `(tokens - n - 1) / (n/2)` of them, and keeps 5% back for validation,
+  so one training step needs `2n + 1` tokens: 513 at context 256 or less. A shorter text is refused with its
+  count and the shortfall; with less, upstream's size_t arithmetic underflows and `ggml_opt_dataset_init`
+  asserts. Without `llama-tokenize` (an older `build --trainer`), that crash becomes the same refusal.
 - `extract-lora` takes every `blk.*` matrix's difference between the tuned model and the base and keeps its top
   `rank` singular directions (truncated SVD): `lora_b = U·S` [out, rank], `lora_a = Vᵀ` [rank, in], the layout
   `convert_lora_to_gguf.py` writes, with `adapter.lora.alpha = rank` so llama.cpp applies it at scale 1. Matrices
@@ -346,7 +352,7 @@ serve it as an adapter, and score it against the base through the pool.
 2. **Non-goal:** reworded in [DESIGN.md](../DESIGN.md#non-goals) to "Ymir feeds, schedules and serves a
    separate trainer".
 3. **First dataset and eval topic:** "Decentralized networks: how they work". Datasets stay configurable and none
-   is built in; the tests use a small synthetic fixture on this topic (`crates/ymir-testkit/tests/fixtures/decentralized-networks.jsonl` as batch input, and `decentralized-networks.dataset.jsonl` with its manifest as a dataset `train run` takes). Sources for the real dataset can be fetched
+   is built in; the tests use a small synthetic fixture on this topic (`crates/ymir-testkit/tests/fixtures/decentralized-networks.jsonl` as batch input, and `decentralized-networks.dataset.jsonl` with its manifest as a dataset `train run` takes). That one renders to 256 tokens, too few for a real `llama-finetune` step; `decentralized-networks-large.dataset.jsonl` (16 conversations, 1297 tokens with Qwen2.5's template) is the one for a first real run. Sources for the real dataset can be fetched
    by m3talsmith when needed.
 4. **Conversation training flag (P2):** the Bragi toggle comes after Bragi v1; the Ymir side of P2 can be built
    before it, but nothing is exported until a conversation can be flagged.

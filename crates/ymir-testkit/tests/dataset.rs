@@ -254,3 +254,32 @@ fn the_fixture_dataset_is_accepted_for_training() -> Result<()> {
     assert_eq!((m.rows_in_input, m.rows_usable, m.cache_hits), (5, 4, 1));
     Ok(())
 }
+
+const LARGE_INPUT_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks-large.jsonl");
+const LARGE_DATASET_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks-large.dataset.jsonl");
+
+/// The larger synthetic dataset: the small one renders to about 256 tokens, under the 513
+/// (2 x 256 + 1) llama-finetune needs for one step at its smallest context, so a real first run
+/// takes this one (1297 tokens with Qwen2.5's chat template, counted by llama-tokenize).
+#[test]
+fn the_large_fixture_dataset_is_accepted_for_training() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let out = dir.path().join("DATA.jsonl");
+    let rec = ymir_core::train::prepare_dataset(Path::new(LARGE_DATASET_FIXTURE), false, &out)?;
+    assert_eq!((rec.rows_in, rec.rows_used), (16, 16));
+    assert_eq!(rec.license, "CC0-1.0");
+    let train: Vec<Value> = rows(&out);
+    let chars: usize =
+        train.iter().flat_map(|r| r["messages"].as_array().expect("messages").iter()).map(|t| t["content"].as_str().expect("content").len()).sum();
+    assert!(chars > 3 * 1295, "well over the small fixture's text ({chars} characters)");
+    assert!(train.iter().any(|r| r["messages"][0]["role"] == "system"));
+
+    let m: ymir_core::dataset::Manifest =
+        serde_json::from_str(&std::fs::read_to_string(ymir_core::dataset::manifest_path(Path::new(LARGE_DATASET_FIXTURE)))?)?;
+    let sha =
+        |p: &str| -> Result<String> { Ok(<sha2::Sha256 as sha2::Digest>::digest(std::fs::read(p)?).iter().map(|b| format!("{b:02x}")).collect()) };
+    assert_eq!(m.input_sha256, sha(LARGE_INPUT_FIXTURE)?, "the large prompt fixture changed: update input_sha256 in its manifest");
+    assert_eq!(m.sources.as_ref().expect("sources").sha256, sha(SOURCES_FIXTURE)?, "the sources fixture changed: update the large manifest");
+    assert_eq!((m.rows_in_input, m.rows_usable, m.cache_hits), (16, 16, 0));
+    Ok(())
+}

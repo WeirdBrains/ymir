@@ -1,0 +1,17 @@
+// A larger synthetic fixture for tests only, on the first dataset topic, "Decentralized networks: how they work": enough text for one llama-finetune step at context 256 (over 513 tokens rendered).
+{"id": "dnl-1", "prompt": "What is a distributed hash table, in plain words?"}
+{"id": "dnl-2", "prompt": "Why do DHT lookups take only a few hops?"}
+{"id": "dnl-3", "prompt": "What happens to the data on a peer that goes offline?"}
+{"id": "dnl-4", "messages": [{"role": "system", "content": "You explain networking to beginners."}, {"role": "user", "content": "What is a peer id?"}]}
+{"id": "dnl-5", "prompt": "How does a new peer join a decentralized network?"}
+{"id": "dnl-6", "prompt": "What is a Sybil attack?"}
+{"id": "dnl-7", "prompt": "Why can't two home computers always connect directly?"}
+{"id": "dnl-8", "messages": [{"role": "system", "content": "You explain networking to beginners."}, {"role": "user", "content": "What is hole punching?"}]}
+{"id": "dnl-9", "prompt": "When does hole punching fail?"}
+{"id": "dnl-10", "prompt": "How do peers learn their own public address?"}
+{"id": "dnl-11", "prompt": "Is traffic through a relay private?"}
+{"id": "dnl-12", "prompt": "What is content addressing?"}
+{"id": "dnl-13", "prompt": "How does gossip spread a message through a network?"}
+{"id": "dnl-14", "prompt": "Why does a decentralized network still need some well-known peers?"}
+{"id": "dnl-15", "messages": [{"role": "system", "content": "You explain networking to beginners."}, {"role": "user", "content": "What is the main benefit of a decentralized network?"}]}
+{"id": "dnl-16", "prompt": "Name two costs of running a decentralized network."}

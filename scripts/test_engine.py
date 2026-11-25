@@ -41,11 +41,18 @@ class TrainerBuildTest(unittest.TestCase):
         self.assertIn("-DLLAMA_BUILD_EXAMPLES=ON", configure)
         self.assertIn(f"-DLLAMA_BUILD_NUMBER={engine.load_pin()['build'][1:]}", configure, "the programs report the pinned build, not a shallow clone's 1")
         self.assertIn("llama-finetune", build)
+        self.assertIn("llama-tokenize", build, "scripts/trainer.py counts the training text with it")
 
     def test_serving_build_is_unpatched(self):
         steps = engine.build_plan(args(False), Path("/src"), Path("/build"))
         self.assertEqual([k for k, _ in steps], ["run", "run"])
         self.assertNotIn("llama-finetune", steps[-1][1])
+        self.assertNotIn("llama-tokenize", steps[-1][1])
+
+    def test_trainer_keeps_llama_tokenize(self):
+        self.assertEqual(engine.keep("llama-tokenize", trainer=True), "llama-tokenize")
+        self.assertEqual(engine.keep("llama-tokenize.exe", trainer=True), "llama-tokenize.exe")
+        self.assertIsNone(engine.keep("llama-tokenize"))
 
     def test_patches_touch_only_llama_finetune(self):
         for p in engine.trainer_patches():

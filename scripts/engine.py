@@ -20,7 +20,8 @@ and GPU backends, LICENSE files and engine.toml. Release files put DIR at lib/ym
 `build` compiles the same set from source at the pinned build, for targets upstream doesn't publish
 binaries for (FreeBSD, OpenBSD and other BSDs, or distribution builds that must build from source).
 `--trainer` adds `llama-finetune` at the same build, for scripts/trainer.py (fine-tuning, training
-plan P3a); upstream's release archives don't carry it. Only that build applies the patches in
+plan P3a; upstream's release archives don't carry it), and `llama-tokenize`, which the trainer uses to
+check the training text is long enough. Only that build applies the patches in
 packaging/engines/patches/ (TRAINER_PATCHES), and they touch only llama-finetune's source, so
 llama-server and rpc-server stay upstream's.
 """
@@ -69,7 +70,7 @@ LAYOUT = {
 
 PROGRAMS = {"llama-server": "llama-server", "ggml-rpc-server": "rpc-server", "rpc-server": "rpc-server"}
 # With `build --trainer`.
-TRAINER_PROGRAMS = {"llama-finetune": "llama-finetune"}
+TRAINER_PROGRAMS = {"llama-finetune": "llama-finetune", "llama-tokenize": "llama-tokenize"}
 LIB_PREFIXES = ("ggml", "llama", "mtmd", "cudart", "cublas")
 CUDA_NOTICE = """The CUDA runtime libraries in this directory (cudart, cuBLAS, cuBLASLt) are NVIDIA CUDA
 Toolkit redistributables, shipped unmodified under the NVIDIA CUDA Toolkit End User License
@@ -165,7 +166,7 @@ def keep(name, trainer=False):
     if not stem.startswith(LIB_PREFIXES):
         return None
     # Each llama.cpp tool has an -impl library; only the server's is needed.
-    if stem.endswith("-impl") and not stem.startswith("llama-server-impl") and not (trainer and stem.startswith("llama-finetune-impl")):
+    if stem.endswith("-impl") and not stem.startswith("llama-server-impl") and not (trainer and stem.startswith(("llama-finetune-impl", "llama-tokenize-impl"))):
         return None
     return name
 
@@ -185,7 +186,7 @@ def select(src, out, trainer=False):
             os.symlink(os.readlink(p), dest)
         else:
             shutil.copy2(p, dest)
-            if name.removesuffix(".exe") in ("llama-server", "rpc-server", "llama-finetune") or ".so" in name or name.endswith(".dylib"):
+            if name.removesuffix(".exe") in ("llama-server", "rpc-server", "llama-finetune", "llama-tokenize") or ".so" in name or name.endswith(".dylib"):
                 dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         kept.append(name)
     # Drop symlinks whose target was not kept.
@@ -195,8 +196,9 @@ def select(src, out, trainer=False):
             kept.remove(p.name)
     if not any(k.startswith("llama-server") for k in kept):
         sys.exit(f"no llama-server in {src}")
-    if trainer and not any(k.startswith("llama-finetune") for k in kept):
-        sys.exit(f"no llama-finetune in {src}")
+    for prog in TRAINER_PROGRAMS if trainer else ():
+        if not any(k.startswith(prog) for k in kept):
+            sys.exit(f"no {prog} in {src}")
     return kept
 
 
@@ -244,7 +246,7 @@ def build_plan(a, src, build):
         defs.append({"vulkan": "-DGGML_VULKAN=ON", "cuda": "-DGGML_CUDA=ON", "metal": "-DGGML_METAL=ON", "rocm": "-DGGML_HIP=ON"}[b])
     steps = [("patch", p) for p in trainer_patches()] if a.trainer else []
     steps.append(("run", ["cmake", "-S", str(src), "-B", str(build), "-G", "Ninja" if shutil.which("ninja") else "Unix Makefiles", *defs]))
-    steps.append(("run", ["cmake", "--build", str(build), "--config", "Release", "-j", str(a.jobs), "--target", "llama-server", "ggml-rpc-server", *(["llama-finetune"] if a.trainer else [])]))
+    steps.append(("run", ["cmake", "--build", str(build), "--config", "Release", "-j", str(a.jobs), "--target", "llama-server", "ggml-rpc-server", *(["llama-finetune", "llama-tokenize"] if a.trainer else [])]))
     return steps
 
 
@@ -384,7 +386,7 @@ def main():
     p.add_argument("--variant", default="default")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     p.add_argument("--work", help="source and build directory (default: a temp dir)")
-    p.add_argument("--trainer", action="store_true", help="also build llama-finetune, for scripts/trainer.py")
+    p.add_argument("--trainer", action="store_true", help="also build llama-finetune and llama-tokenize, for scripts/trainer.py")
     p.add_argument("--no-cpu-variants", action="store_true", help="one CPU backend instead of one per CPU generation")
     p.add_argument("--check", action="store_true")
     p = sub.add_parser("pin")

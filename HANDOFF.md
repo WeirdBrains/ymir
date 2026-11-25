@@ -3,6 +3,22 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 08:20 EST: the trainer refuses a too-short dataset; a larger fixture (branch `feature/trainer-short-corpus`)
+
+The first real `train run` (context 256, then 64) crashed in upstream `llama-finetune` with `GGML_ASSERT(INT64_MAX / ne[i] > current_nelements)` in `ggml_opt_dataset_init`: the small fixture renders to 256 tokens, and upstream needs 2n + 1 for one step, n being the context rounded up to a multiple of 256 (`common_opt_dataset_init` computes `(tokens - n - 1) / (n/2)` in size_t, which underflows on less).
+
+**What changed**
+- [scripts/trainer.py](scripts/trainer.py): `trained_context`, `min_tokens`, `count_tokens` (llama-tokenize `--stdin --ids` on the base's vocabulary, the trailing newline dropped as llama-finetune's `-f` does) and `short_text`; `train` counts before starting llama-finetune and refuses with the count and the shortfall. Without `llama-tokenize` next to llama-finetune (or `$YMIR_LLAMA_TOKENIZE`) it logs that and turns upstream's crash into the same refusal.
+- [scripts/engine.py](scripts/engine.py): `build --trainer` also builds and keeps `llama-tokenize`.
+- New fixture: [decentralized-networks-large.jsonl](crates/ymir-testkit/tests/fixtures/decentralized-networks-large.jsonl) (batch input), [decentralized-networks-large.dataset.jsonl](crates/ymir-testkit/tests/fixtures/decentralized-networks-large.dataset.jsonl) and its manifest: 16 hand-written conversations, CC0-1.0, the same sources file. With Qwen2.5-0.5B-Instruct's chat template it is 1297 tokens (the small one 255), counted with a real `llama-tokenize` at b12628 and the new `count_tokens`.
+- Docs: training plan (trainer section, the fixtures in decision 3), CHANGELOG (Unreleased).
+
+**Checks:** `python3 scripts/test_trainer.py` 20 passed (new: `test_min_tokens`, `test_short_text_is_refused_before_training`, `test_enough_text_trains`, `test_context_is_rounded_up_to_256`, `test_tokenize_failure_is_refused`, `test_short_text_crash_without_tokenize`; new fake `scripts/testdata/fake_llama_tokenize.py`); `python3 scripts/test_engine.py` 6 passed; `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 340 passed, 0 failed, 7 ignored (new: testkit `the_large_fixture_dataset_is_accepted_for_training`). `p3a_llamacpp` with the trainer venv is left to CI.
+
+**Not tested:** a training run with the large fixture (not rerun yet, waiting for Michael's OK).
+
+**Next:** merge after CI; then a first real run on the large fixture once approved.
+
 ## 2026-11-25 07:31 EST: canary percentages (branch `feature/canary-percent`); the 0.15.0 cut was stopped for it
 
 Michael asked at 7:24 AM ET for a canary percentage such as 20 or 50 (decision 8 in [docs/design/model-upload.md](docs/design/model-upload.md)). The 0.15.0 cut that was running then was stopped before it committed, tagged or pushed anything (its version edits were reverted), so the release includes this.
