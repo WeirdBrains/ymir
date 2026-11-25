@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 08:35 EST: v0.15.0 released, signed and on TAUR
+
+**v0.15.0** (release commit 6b042db, tag v0.15.0, cut with `weirdnet_release.py cut --minor` on main 9010783 after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 339 passed, 0 failed, 7 ignored): canary percentages (`ymirctl models rollout add --canary PCT`, `rollout weight NAME@N --canary PCT`, `models upload --rollout --canary PCT`, any 0 to 100, not capped, decision 8) and U7 (more upload formats). The Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` from its own artifact), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.0) has 35 files (`assets 0.15.0` ok): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.15.0 --yes` published `ymir-bin` 0.15.0-1 and `ymir-cuda-bin` 0.15.0-1. The Arch recipes carry the v0.15.0 tarball hashes (this branch, `chore/release-0.15.0`). Bragi 0.10.0 has the matching percentage field in its upload dialog.
+
+**Next:** U8, once Weirdnet request D lands.
+
 ## 2026-11-25 08:20 EST: the trainer refuses a too-short dataset; a larger fixture (branch `feature/trainer-short-corpus`)
 
 The first real `train run` (context 256, then 64) crashed in upstream `llama-finetune` with `GGML_ASSERT(INT64_MAX / ne[i] > current_nelements)` in `ggml_opt_dataset_init`: the small fixture renders to 256 tokens, and upstream needs 2n + 1 for one step, n being the context rounded up to a multiple of 256 (`common_opt_dataset_init` computes `(tokens - n - 1) / (n/2)` in size_t, which underflows on less).
