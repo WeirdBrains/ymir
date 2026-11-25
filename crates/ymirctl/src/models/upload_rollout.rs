@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ymir_core::Paths;
 use ymir_core::config::NodeConfig;
 use ymir_core::rollout::Rollout;
@@ -75,15 +75,36 @@ pub async fn join(paths: &Paths, out: &mut dyn Write, a: &RolloutArgs, n: u32, m
     };
     let mut gate = Gate { eval: None, force: a.force };
     if let Some(rows) = &a.eval {
-        let incumbent = incumbent(paths, name, n).await?;
-        let Some(incumbent) = incumbent else {
-            bail!("{version} was added at weight 0, but `{name}` has no version with traffic to compare it with");
-        };
+        match incumbent(paths, name, n).await? {
+            None => writeln!(out, "No other version of `{name}` has traffic, so there is nothing to compare with; the eval is skipped.")?,
+            Some(incumbent) => gate.eval = Some(evaluate(paths, out, a, rows, &version, model, &incumbent).await?),
+        }
+    }
+    let set = rollout::run(paths, out, RolloutCmd::Weight { version: version.clone(), weight: w, gate: gate.clone() }).await;
+    if let Some(f) = &gate.eval {
+        let _ = std::fs::remove_file(f);
+    }
+    set.with_context(|| format!("{version} stays at weight 0"))
+}
+
+/// Runs `ymirctl eval` on `rows` for the new version's model and the incumbent's; returns the
+/// `--out` file the gate reads.
+async fn evaluate(
+    paths: &Paths,
+    out: &mut dyn Write,
+    a: &RolloutArgs,
+    rows: &std::path::Path,
+    version: &str,
+    model: &str,
+    incumbent: &str,
+) -> Result<PathBuf> {
+    let (name, n) = version.split_once('@').unwrap_or((version, ""));
+    {
         let file = std::env::temp_dir().join(format!("ymir-eval-{name}-{n}-{}.jsonl", std::process::id()));
         writeln!(out, "Evaluating `{model}` against `{incumbent}` on {}...", rows.display())?;
         let args = crate::eval::EvalArgs {
-            file: rows.clone(),
-            model: vec![model.to_string(), incumbent],
+            file: rows.to_path_buf(),
+            model: vec![model.to_string(), incumbent.to_string()],
             judge: a.judge.clone(),
             out: Some(file.clone()),
             seed: 0,
@@ -93,13 +114,8 @@ pub async fn join(paths: &Paths, out: &mut dyn Write, a: &RolloutArgs, n: u32, m
             retries: None,
         };
         crate::eval::run(paths, args, out).await.with_context(|| format!("{version} was added at weight 0; the eval did not run"))?;
-        gate.eval = Some(file);
+        Ok(file)
     }
-    let set = rollout::run(paths, out, RolloutCmd::Weight { version: version.clone(), weight: w, gate: gate.clone() }).await;
-    if let Some(f) = &gate.eval {
-        let _ = std::fs::remove_file(f);
-    }
-    set.with_context(|| format!("{version} stays at weight 0"))
 }
 
 /// The model of the version with the most traffic, other than `n`.
@@ -110,4 +126,25 @@ async fn incumbent(paths: &Paths, name: &str, n: u32) -> Result<Option<String>> 
         .find(|r| r.name == name)
         .and_then(|r| r.versions.iter().filter(|v| v.version != n && v.weight > 0).max_by_key(|v| v.weight))
         .map(|v| v.model.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_next_version_follows_node_toml_and_ids_carry_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::create_dir_all(paths.config().parent().unwrap()).unwrap();
+        std::fs::write(paths.config(), "[node]\nname = \"n\"\n").unwrap();
+        assert_eq!(next_version(&paths, "support").await.unwrap(), 1, "a new rollout starts at 1");
+        let text = "[node]\nname = \"n\"\n\n[[inference.rollout]]\nname = \"support\"\n\n[[inference.rollout.version]]\nversion = 1\nmodel = \"a\"\nweight = 90\n\n[[inference.rollout.version]]\nversion = 4\nmodel = \"b\"\nweight = 10\n";
+        std::fs::write(paths.config(), text).unwrap();
+        assert_eq!(next_version(&paths, "support").await.unwrap(), 5, "after the highest, gaps kept");
+        assert_eq!(next_version(&paths, "other").await.unwrap(), 1);
+        assert_eq!(incumbent(&paths, "support", 5).await.unwrap().as_deref(), Some("a"));
+        assert_eq!(incumbent(&paths, "other", 1).await.unwrap(), None);
+        assert_eq!(versioned_id("llama-8b+support", 5), "llama-8b+support-r5");
+    }
 }

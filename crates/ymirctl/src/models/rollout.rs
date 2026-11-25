@@ -5,15 +5,20 @@
 //! --out FILE` with both models on the same rows) in which it does at least as well as the
 //! version with the most traffic, or `--force`. Lowering a weight (rollback) is never gated.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use toml_edit::DocumentMut;
+use weirdnet_backends::models::ModelsReply;
 use ymir_core::Paths;
 use ymir_core::config::NodeConfig;
 use ymir_core::control::{self, ControlRequest};
+use ymir_core::models::{ModelsOp, Outcome};
 use ymir_core::rollout::{Rollout, Version, split_versioned};
+use ymir_core::upload::Provenance;
 
 /// The largest share (percent) a version may get without an eval.
 pub const CANARY_MAX: f64 = 10.0;
@@ -82,7 +87,8 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: RolloutCmd) -> Result<
             Some(l) => (l, None),
             None => (rollouts, Some("ymird is not running here: shown from node.toml")),
         };
-        return list(out, &shown, note);
+        let prov = if shown.is_empty() { Default::default() } else { provenance(paths).await };
+        return list(out, &shown, note, &prov);
     }
     let said = apply(&mut rollouts, &cmd)?;
     ymir_core::rollout::validate(&rollouts)?;
@@ -103,7 +109,39 @@ async fn live(paths: &Paths) -> Option<Vec<Rollout>> {
     r.rollouts
 }
 
-fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>) -> Result<()> {
+/// Where each served model came from, as the pool's model nodes record it (best effort: empty
+/// when ymird is not running here or no node answers in time).
+async fn provenance(paths: &Paths) -> HashMap<String, Provenance> {
+    let socket = paths.socket();
+    let ask = control::request_models(&socket, "all", ModelsOp::List, |_| {});
+    let Ok(Ok(done)) = tokio::time::timeout(Duration::from_secs(10), ask).await else { return HashMap::new() };
+    let mut by_id = HashMap::new();
+    for r in done.nodes {
+        let Outcome::Ok { reply } = r.outcome else { continue };
+        let ModelsReply::List(entries) = *reply else { continue };
+        for e in entries {
+            if let Some(p) = e.provenance() {
+                by_id.entry(e.served_as.clone().unwrap_or_else(|| e.id().to_string())).or_insert_with(|| p.clone());
+            }
+        }
+    }
+    by_id
+}
+
+/// One line on a version's model: origin, license, base and dataset hash.
+pub fn provenance_line(p: &Provenance) -> String {
+    let mut parts = vec![format!("origin {}", p.origin)];
+    parts.push(format!("license {}", p.license.as_deref().unwrap_or("not given")));
+    if let Some(b) = p.base.as_ref().and_then(|b| b.hub.clone().or(b.id.clone())) {
+        parts.push(format!("base {b}"));
+    }
+    if let Some(d) = p.dataset.as_ref().and_then(|d| d.sha256.as_deref()) {
+        parts.push(format!("dataset {}", d.get(..19).unwrap_or(d)));
+    }
+    parts.join(", ")
+}
+
+fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>, prov: &HashMap<String, Provenance>) -> Result<()> {
     if rollouts.is_empty() {
         writeln!(out, "No rollouts. Add one with `ymirctl models rollout add NAME@1 --model ID --weight 100`.")?;
     }
@@ -115,6 +153,9 @@ fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>) -> Result
         for v in vs {
             let share = shares.iter().find(|(n, _)| *n == v.version).map_or(0.0, |s| s.1);
             writeln!(out, "  {}@{:<4} {:<40} weight {:<5} {:>5.1}%", r.name, v.version, v.model, v.weight, share)?;
+            if let Some(p) = prov.get(&v.model) {
+                writeln!(out, "        {}", provenance_line(p))?;
+            }
         }
         if r.total_weight() == 0 {
             writeln!(out, "  (no version has traffic: requests for `{}` are refused)", r.name)?;
@@ -368,6 +409,22 @@ mod tests {
         let mut r = ro();
         apply(&mut r, &add("support@3", "s3", 0, Gate::default())).unwrap();
         apply(&mut r, &RolloutCmd::Weight { version: "support@3".into(), weight: 100, gate: Gate { eval: Some(f), force: false } }).unwrap();
+    }
+
+    #[test]
+    fn provenance_lines_name_origin_license_base_and_dataset() {
+        let p: Provenance = serde_json::from_value(serde_json::json!({
+            "format": "weirdnet-provenance/1", "kind": "adapter", "id": "b+t-r2", "files": [], "revision": "sha256:00",
+            "origin": "train", "license": "apache-2.0", "base": {"id": "b", "hub": "org/base"},
+            "dataset": {"sha256": "sha256:0123456789abcdef0123456789"}
+        }))
+        .unwrap();
+        assert_eq!(provenance_line(&p), "origin train, license apache-2.0, base org/base, dataset sha256:0123456789ab");
+        let mut list_out = Vec::new();
+        let r = vec![Rollout { name: "support".into(), versions: vec![Version { version: 2, model: "b+t-r2".into(), weight: 0 }] }];
+        list(&mut list_out, &r, None, &HashMap::from([("b+t-r2".to_string(), p)])).unwrap();
+        let s = String::from_utf8(list_out).unwrap();
+        assert!(s.contains("support@2") && s.contains("origin train, license apache-2.0"), "{s}");
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 Status: plan, 2026-11-24. Approved by the project lead on 2026-11-24 with two changes (U5 moved up to follow U1;
 U6 waits on Weirdnet requests B and C, with no interim peer copy in Ymir). m3talsmith answered the open questions the
-same day (see "Decisions"). U1 (local upload) and U5 (trainer outputs on the same path) are built; see "U1 as built"
-and "U5 as built".
+same day (see "Decisions"). U1 (local upload), U5 (trainer outputs on the same path), U2 (upload to another node)
+and U3 (`--rollout`) are built; see "U1 as built", "U5 as built", "U2 as built" and "U3 as built".
 
 Ymir is designed by m3talsmith and published by [Weird Brains LLC](https://weirdbrains.com).
 
@@ -474,6 +474,34 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   model nodes, one keeping more space free than it has): a model sent, placed with provenance (`uploaded_by` the
   laptop) and saved; the same files again; other files under the id; a cut-off upload resumed; an adapter with and
   without `--no-persist`; a wrong-architecture adapter; `no-space`.
+
+## U3 as built (2026-11-25)
+
+- **`ymirctl models upload FILE --node NODE --rollout NAME [--canary W [--eval ROWS.jsonl [--judge MODEL]] [--force]]`**
+  (`ymirctl::models::upload_rollout`). The version number N is one more than the highest version of NAME on this
+  machine (ymird's live rollouts, else node.toml), 1 for a new rollout. Without `--name` the upload's id (and its
+  provenance id) becomes `<id>-r<N>`, and the output says `As ID, version NAME@N`.
+- **After the node stores and serves it**, ymirctl runs P4b's `models rollout add NAME@N --model ID --weight 0` on
+  this machine: node.toml's `[[inference.rollout]]` and, when ymird runs, `ControlRequest::Rollouts` at once. An
+  adapter the node will load on its base's next start (`AdapterChange::NextLoad`) gets the note that NAME@N waits at
+  weight 0 until it answers.
+- **`--canary W`** then runs `models rollout weight NAME@N W` through P4b's gate: up to the 10 percent canary share
+  freely; above it only with an eval that passes or `--force`. With `--eval ROWS`, ymirctl first runs `ymirctl eval`
+  (seed 0) on the new version's model and on the model of the version with the most traffic, writes the scored rows
+  to a temporary file, passes it as the gate's `--eval` and removes it after. When no other version has traffic
+  there is nothing to protect: the eval is skipped and the weight is set. A refusal leaves the version added at
+  weight 0 and says so (`NAME@N stays at weight 0`).
+- **`models rollout list`** prints each version's provenance under it (`origin`, `license` or `not given`, `base`,
+  dataset hash), best effort from `models list --node all` on the pool's model nodes (10 s), keyed by served id.
+- **`--replace`** was not built (U2 refuses other files under a taken id with `exists`), so the model a rollout
+  version names cannot be swapped under it: a new version always gets a new id.
+- **Not built:** `--inference NAME|all` (rollouts stay per inference node; `--rollout` applies on this machine's
+  inference role only, as agreed on 2026-11-25). `--rollout` without `--node` is refused.
+- **Tests:** `upload_rollout` unit tests (next version, incumbent, ids), `rollout` (provenance line and list), and in
+  `crates/ymir-testkit/tests/models_upload.rs` three uploads to `support` on a running inference node: the first
+  takes `--canary 100` with no eval, the second's `--canary 50` is refused and stays at weight 0, the third's
+  `--canary 5` passes; `rollout list` shows origin and license. The `--eval` path is covered by P4b's gate tests;
+  no testkit model can answer an eval.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
