@@ -6,6 +6,12 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ymirctl models upload FILE --node NAME --rollout ROLLOUT` (model-upload slice U3): the upload becomes the next version of a rollout on this machine, named `ID-rN`, at weight 0 once the node serves it. `--canary W` gives it traffic through the rollout gate (up to 10% freely; more with `--eval ROWS [--judge MODEL]`, which scores it against the version with the most traffic, or `--force`).
+- `ymirctl models rollout list` shows each version's origin, license, base and dataset hash.
+- `ymirctl status` rows carry the weights' revision each node reports.
+
 ## [0.11.0] - 2026-11-24
 
 ### Added

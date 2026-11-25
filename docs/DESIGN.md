@@ -1295,6 +1295,12 @@ changes the weights live and in node.toml. Above a 10 percent share a version ne
 current main version's (`--eval`), or `--force`. Rollback moves the traffic back, and the old version stays loaded
 until retired and unloaded.
 
+`ymirctl models upload FILE --node NODE --rollout NAME` (model-upload slice U3) feeds a rollout from an upload: the
+upload is named `<id>-r<N>` for the next version N, added as `NAME@N` at weight 0 on this machine once the node
+serves it, and `--canary W` (with `--eval ROWS [--judge MODEL]`, which runs `ymirctl eval` on it and the version with
+the most traffic) goes through the same gate. `models rollout list` shows each version's origin, license, base and
+dataset hash from its provenance.
+
 ### Shared semantic cache
 
 `weirdnet-semcache` (new) generalizes the RedisVL `rvl-cache`:

@@ -22,6 +22,7 @@ mod plan;
 mod remote;
 pub mod rollout;
 mod upload;
+mod upload_rollout;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;

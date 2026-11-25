@@ -216,6 +216,10 @@ pub struct NodeModel {
     /// The concurrent sequences it is set to run, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<u32>,
+    /// The weights' revision the node reports (node.toml's `revision`, or an upload's), which
+    /// keys the answer cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -523,6 +527,7 @@ impl ControlHandler {
                     .iter()
                     .flat_map(|n| {
                         n.status().into_iter().map(|s| NodeModel {
+                            revision: n.revision(&s.id),
                             purpose: if crate::model_node::embeds(&s) { "embedding".into() } else { "chat".into() },
                             node: n.name().to_string(),
                             id: s.id,

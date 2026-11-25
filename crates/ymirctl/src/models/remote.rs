@@ -37,7 +37,20 @@ async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::uploa
     if matches!(node, "all" | "auto") {
         bail!("an upload goes to one node: name it with --node (copying it on to the others comes later)");
     }
-    let op = super::upload::remote_op(out, a)?;
+    let mut op = super::upload::remote_op(out, a)?;
+    let version = match &a.rollout.rollout {
+        Some(name) => {
+            let n = super::upload_rollout::next_version(paths, name).await?;
+            if a.name.is_none() {
+                op.upload.id = super::upload_rollout::versioned_id(&op.upload.id, n);
+                op.upload.provenance.id = op.upload.id.clone();
+                writeln!(out, "As `{}`, version {name}@{n}.", op.upload.id)?;
+            }
+            Some(n)
+        }
+        None => None,
+    };
+    let (id, adapter) = (op.upload.id.clone(), op.upload.adapter_for.is_some());
     let persist = op.persist;
     writeln!(out, "Sending it to {node} (Ctrl-C stops; sending it again resumes)...")?;
     let done = ask(paths, out, node, ModelsOp::Upload(Box::new(op))).await?;
@@ -60,7 +73,15 @@ async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::uploa
             }
         }
     }
-    finish(failed, done.nodes.len())
+    finish(failed, done.nodes.len())?;
+    if let Some(n) = version {
+        let waits = adapter
+            && done.nodes.iter().any(|r| {
+                matches!(&r.outcome, Outcome::Uploaded { report } if report.pulled.as_ref().is_some_and(|p| p.change == Some(weirdnet_backends::AdapterChange::NextLoad)))
+            });
+        super::upload_rollout::join(paths, out, &a.rollout, n, &id, waits).await?;
+    }
+    Ok(())
 }
 
 /// Prints what happened to an upload on `label`; `false` when it was not recorded there.

@@ -218,6 +218,17 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     assert_eq!(m.file.as_deref(), Some("my-model-q4_0/My-Model-Q4_0.gguf"));
     assert!(gpu_h.paths.config().with_extension("toml.bak").is_file());
     assert!(ctl(&gpu_h.home, &["status"]).await?.contains("my-model-q4_0"), "served by gpu's running ymird");
+    // The pool sees the upload's revision: gpu's capability record, as this inference node reads it.
+    let want = prov.revision.clone();
+    let gpu_peer = peer_of(&gpu_h).await?;
+    let mut seen = None;
+    eventually(40, "the pool reports the uploaded revision", async || {
+        let st = control::request(&lap_h.paths.socket(), &ControlRequest::Status).await?.status.unwrap();
+        seen = st.models.iter().find(|m| m.id == "my-model-q4_0" && m.node == gpu_peer).map(|m| m.revision.clone());
+        Ok(seen.as_ref().is_some_and(|r| r.as_deref() == Some(want.as_str())))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}: last seen {seen:?}"))?;
 
     // The same files again: nothing is sent, nothing is added twice.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu"]).await?;
@@ -283,6 +294,47 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     let err = ctl_with(&lap_h.home, &["models", "upload", &qwen.display().to_string(), "--node", "gpu", "--adapter-for", "base"], &mut out, "").await;
     let out = String::from_utf8(out)?;
     assert!(err.is_err() && out.contains("gpu refused the upload (wrong-arch)"), "{out}");
+
+    // --rollout (U3): each upload becomes the next version of `support` on this inference node,
+    // as `support-rN`; its first --canary needs no eval, later ones over the canary share do.
+    let sup = |v: u32| -> Result<String> {
+        let d = files.join(format!("v{v}"));
+        std::fs::create_dir_all(&d)?;
+        let f = d.join("Support.gguf");
+        std::fs::write(&f, gguf(150_000 + v as usize * 1000, "llama"))?;
+        Ok(f.display().to_string())
+    };
+    let s1 = sup(1)?;
+    let out = ctl(&lap_h.home, &["models", "upload", &s1, "--node", "gpu", "--license", "mit", "--rollout", "support", "--canary", "100"]).await?;
+    assert!(out.contains("As `support-r1`, version support@1") && out.contains("gpu: stored `support-r1`"), "{out}");
+    assert!(out.contains("Applied to the running ymird"), "{out}");
+    let rollout_of = |h: &Home| -> Result<Vec<(u32, String, u32)>> {
+        let cfg = NodeConfig::load(&h.paths.config())?;
+        let r = cfg.inference.rollout.iter().find(|r| r.name == "support");
+        Ok(r.map(|r| r.versions.iter().map(|v| (v.version, v.model.clone(), v.weight)).collect()).unwrap_or_default())
+    };
+    assert_eq!(rollout_of(&lap_h)?, vec![(1, "support-r1".to_string(), 100)]);
+    let s2 = sup(2)?;
+    let mut out = Vec::new();
+    let err = ctl_with(&lap_h.home, &["models", "upload", &s2, "--node", "gpu", "--rollout", "support", "--canary", "50"], &mut out, "").await;
+    let (out, err) = (String::from_utf8(out)?, format!("{:#}", err.unwrap_err()));
+    assert!(out.contains("support@2") && err.contains("canary share") && err.contains("support@2 stays at weight 0"), "{out}\n{err}");
+    assert_eq!(rollout_of(&lap_h)?[1], (2, "support-r2".to_string(), 0));
+    let s3 = sup(3)?;
+    let out = ctl(&lap_h.home, &["models", "upload", &s3, "--node", "gpu", "--rollout", "support", "--canary", "5"]).await?;
+    assert!(out.contains("support@3"), "{out}");
+    assert_eq!(rollout_of(&lap_h)?[2], (3, "support-r3".to_string(), 5));
+    let mut list = String::new();
+    eventually(40, "rollout list shows provenance", async || {
+        list = ctl(&lap_h.home, &["models", "rollout", "list"]).await?;
+        Ok(list.contains("origin upload, license mit"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}: {list}"))?;
+    assert!(list.contains("support@1") && list.contains("support-r3") && list.contains("license not given"), "{list}");
+    // Without --node there is no rollout to join.
+    let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &s3, "--rollout", "support"]).await.unwrap_err());
+    assert!(err.contains("--rollout goes with --node"), "{err}");
 
     // A node that must keep more free space than it has refuses with no-space.
     eventually(40, "full answers models/1", async || Ok(ctl(&lap_h.home, &["models", "list", "--node", "full"]).await.is_ok())).await?;

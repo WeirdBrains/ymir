@@ -154,7 +154,9 @@ restart (<code>--load</code> loads it too). That is in memory only: <code>node.t
 <code>--from-run RUN_DIR</code> for a training run's adapter) to that node. It is checked there as it arrives, resumes if it
 is cut off, must leave <code>[model] upload_keep_free</code> free (by default the larger of 10% and 20 GiB), and is served
 and saved in that node's <code>node.toml</code> unless you pass <code>--no-persist</code>. A llama.cpp adapter is used from its
-base's next start.</li>
+base's next start. With <code>--rollout NAME</code> it becomes the next version of that rollout here, named
+<code>ID-rN</code>, at weight 0; <code>--canary W</code> gives it traffic (more than 10% needs <code>--eval ROWS</code>,
+which compares it with the version that has the most, or <code>--force</code>).</li>
 <li><code>search --node all</code> shows each node's own fit verdict for every repo.</li>
 </ul>
 <p>A node running an older <code>ymird</code> answers that it does not take model management: upgrade it, or run the command on
@@ -163,7 +165,8 @@ that machine. Set <code>[model] remote_manage = false</code> in a node's <code>n
 ymirctl models pull Qwen/Qwen3-8B-GGUF --node auto --serve
 ymirctl models list --node gpu-box
 ymirctl models remove qwen3-8b-q4_k_m --node gpu-box --yes
-ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --license apache-2.0</code></pre>
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --license apache-2.0
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --canary 25 --eval support-rows.jsonl</code></pre>
 <h3 id="load"><code>ymirctl load MODEL [--node NODE]</code></h3>
 <p>Loads a model on a model node. <code>--node</code> picks the node by name (see <code>ymirctl nodes</code>).</p>
 <pre><code>ymirctl load gemma4-e4b
