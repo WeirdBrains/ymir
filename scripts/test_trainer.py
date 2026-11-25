@@ -374,9 +374,9 @@ class TrainerTest(unittest.TestCase):
         self.train()
         tuned = self.tmp / "full.gguf"
         out = {}
-        for mode in ("exact", "cpu"):
+        for mode, threads in (("exact", "1"), ("cpu", "3")):
             adapter = self.tmp / f"adapter-{mode}.gguf"
-            r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(adapter), env={**self.env, "YMIR_TRAINER_SVD": mode})
+            r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(adapter), env={**self.env, "YMIR_TRAINER_SVD": mode, "YMIR_TRAINER_THREADS": threads})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("on the CPU", " ".join(e.get("message", "") for e in ev))
             out[mode] = {t.name: np.array(t.data) for t in GGUFReader(adapter).tensors}
@@ -385,6 +385,31 @@ class TrainerTest(unittest.TestCase):
         r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(self.tmp / "x.gguf"), env={**self.env, "YMIR_TRAINER_SVD": "bogus"})
         self.assertEqual(r.returncode, 1)
         self.assertIn("YMIR_TRAINER_SVD", ev[-1]["message"])
+        r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(self.tmp / "x.gguf"), env={**self.env, "YMIR_TRAINER_THREADS": "many"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("YMIR_TRAINER_THREADS", ev[-1]["message"])
+
+    def test_threaded_extract_keeps_order(self):
+        """Matrices finish out of order on the thread pool; the adapter's tensors come out in the base's."""
+        rng = np.random.default_rng(6)
+
+        class T:
+            def __init__(self, name, data):
+                self.name, self.data, self.shape, self.tensor_type = name, data, data.shape[::-1], gguf.GGMLQuantizationType.F32
+
+        class R:
+            def __init__(self, tensors):
+                self.tensors = tensors
+
+        names = [f"blk.{i}.ffn_up.weight" for i in range(12)]
+        base = [T(n, rng.standard_normal((40 + 7 * i, 30)).astype(np.float32)) for i, n in enumerate(names)]
+        tuned = [T(t.name, t.data + np.outer(rng.standard_normal(t.data.shape[0]), rng.standard_normal(30)).astype(np.float32)) for t in base]
+        serial = list(trainer.lora_tensors(R(base), R(tuned), 2, ("cpu", None), threads=1))
+        threaded = list(trainer.lora_tensors(R(base), R(tuned), 2, ("cpu", None), threads=4))
+        self.assertEqual([x[0] for x in threaded], names)
+        for a, b in zip(serial, threaded):
+            np.testing.assert_array_equal(a[1], b[1])
+            np.testing.assert_array_equal(a[2], b[2])
 
     def test_extract_refusals(self):
         r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(self.base), "--rank", "4", "--out", str(self.tmp / "a.gguf"))
