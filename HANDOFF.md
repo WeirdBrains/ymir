@@ -3,6 +3,18 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 03:03 EST: rollouts over Weirdnet, `/ymir/rollouts/1` (branch `feature/rollouts-net`)
+
+The follow-up to model-upload U4, so Bragi and `ymirctl` on another device can put an upload into an inference node's rollout. Decisions of 2026-11-25 2:51 AM ET (made by llm dev from Michael's upload answers; he can override them) are in [docs/design/model-upload.md](docs/design/model-upload.md): any linked device, narrowed by `[inference] rollout_callers`; above the canary share the request carries eval rows or `force`; every operation remotely, rollback included; saved in node.toml by default, with an opt-out. Details in the plan's "`/ymir/rollouts/1` as built".
+
+**Changed:** `ymir_core::rollout_edit` (the rules, moved from `ymirctl`, behaviour unchanged), `ymir_core::rollouts_net` (service, server, client), `[inference] remote_rollouts` and `rollout_callers`, `ControlRequest::RemoteRollouts`, `ymirctl models rollout ... --inference NODE [--no-persist]`. Docs: CHANGELOG, DESIGN, the plan, the site's ymirctl page.
+
+**Checks:** fmt; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 331 passed, 0 failed, 7 ignored, including the new testkit `rollouts_net` (three daemons over 127.0.0.1).
+
+**Not tested:** across real machines; `models upload --rollout` with `--inference` (not built: `--rollout` still applies on this machine).
+
+**Next:** the rollout section in Bragi's upload dialog; release Ymir 0.13.0 and Bragi.
+
 ## 2026-11-25 02:40 EST: model upload U4 in Bragi 0.7.0 (docs, branch `docs/u4-bragi-upload`)
 
 Correction: the entry below headed 01:43 EST was written at 01:37 EST.

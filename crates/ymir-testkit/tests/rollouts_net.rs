@@ -83,10 +83,6 @@ async fn addr(h: &Home) -> Result<String> {
     Ok(format!("{a}/p2p/{}", n.peer))
 }
 
-async fn peer_of(h: &Home) -> Result<String> {
-    Ok(control::request(&h.paths.socket(), &ControlRequest::Status).await?.status.unwrap().network.expect("on Weirdnet").peer)
-}
-
 /// A GGUF header (llama, one block, one KV head of size 1) padded to `len` bytes.
 fn gguf(len: usize, arch: &str) -> Vec<u8> {
     let mut out = b"GGUF".to_vec();
@@ -133,8 +129,6 @@ async fn eventually(secs: u64, what: &str, mut f: impl AsyncFnMut() -> Result<bo
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
-
-/// Bytes in files under `dir`, recursively (0 when it doesn't exist).
 
 async fn live(h: &Home) -> Result<Vec<ymir_core::rollout::Rollout>> {
     Ok(control::request(&h.paths.socket(), &ControlRequest::Rollouts { set: None }).await?.rollouts.unwrap_or_default())
