@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use weirdnet_backends::models::ModelsReply;
 use ymir_core::Paths;
 use ymir_core::config::NodeConfig;
@@ -166,11 +166,10 @@ fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>, prov: &Ha
     Ok(())
 }
 
-/// Applies a change to `rollouts`; returns what to say (the rules are in
-/// [`ymir_core::rollout_edit`], shared with `/ymir/rollouts/1`).
-pub fn apply(rollouts: &mut Vec<Rollout>, cmd: &RolloutCmd) -> Result<String> {
+/// `cmd` as a change and its gate (`None`: a list).
+fn to_change(cmd: &RolloutCmd) -> Result<Option<(Change, CoreGate)>> {
     let (change, gate) = match cmd {
-        RolloutCmd::List => return Ok(String::new()),
+        RolloutCmd::List => return Ok(None),
         RolloutCmd::Add { version, model, weight, gate } => {
             let (name, n) = parse_version(version)?;
             (Change::Add { name: name.into(), version: n, model: model.clone(), weight: *weight }, gate)
@@ -185,7 +184,46 @@ pub fn apply(rollouts: &mut Vec<Rollout>, cmd: &RolloutCmd) -> Result<String> {
             (Change::Retire { name: name.into(), version: n, force: *force }, &Gate::default())
         }
     };
-    ymir_core::rollout_edit::apply(rollouts, &change, &gate.rows()?)
+    Ok(Some((change, gate.rows()?)))
+}
+
+/// Applies a change to `rollouts`; returns what to say (the rules are in
+/// [`ymir_core::rollout_edit`], shared with `/ymir/rollouts/1`).
+pub fn apply(rollouts: &mut Vec<Rollout>, cmd: &RolloutCmd) -> Result<String> {
+    match to_change(cmd)? {
+        None => Ok(String::new()),
+        Some((change, gate)) => ymir_core::rollout_edit::apply(rollouts, &change, &gate),
+    }
+}
+
+/// `ymirctl models rollout ... --inference NODE`: the same on another inference node, through
+/// this machine's ymird and `/ymir/rollouts/1`. `persist`: that node saves it in its node.toml.
+pub async fn run_remote(paths: &Paths, out: &mut dyn Write, node: &str, cmd: RolloutCmd, persist: bool) -> Result<()> {
+    let mut request = match to_change(&cmd)? {
+        None => ymir_core::rollouts_net::Request::list(),
+        Some((change, gate)) => ymir_core::rollouts_net::Request { gate, ..ymir_core::rollouts_net::Request::change(change) },
+    };
+    request.persist = persist;
+    let listing = request.change.is_none();
+    let req = ControlRequest::RemoteRollouts { node: node.to_string(), request };
+    let r = control::request(&paths.socket(), &req).await.context("asking this machine's ymird (is it running? `ymirctl service start`)")?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    let label = r.message.unwrap_or_else(|| node.to_string());
+    let got = r.remote_rollouts.context("ymird answered without the rollouts")?;
+    if listing {
+        let prov = if got.rollouts.is_empty() { Default::default() } else { provenance(paths).await };
+        let note = format!("on {label}, live");
+        return list(out, &got.rollouts, Some(note.as_str()), &prov);
+    }
+    writeln!(out, "{}", got.said.unwrap_or_default())?;
+    match (got.saved, got.note) {
+        (true, _) => writeln!(out, "Applied on {label} and saved in its node.toml: new conversations follow now.")?,
+        (false, Some(n)) => writeln!(out, "Applied on {label} (live only): {n}")?,
+        (false, None) => writeln!(out, "Applied on {label}, live only (--no-persist): gone when its ymird restarts.")?,
+    }
+    Ok(())
 }
 
 impl Gate {

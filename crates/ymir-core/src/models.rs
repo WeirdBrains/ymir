@@ -130,17 +130,34 @@ pub struct ModelsHub {
     directory: Arc<dyn Directory>,
     client: Arc<ModelsClient>,
     uploads: Option<Arc<UploadsClient>>,
+    rollouts: Option<Arc<crate::rollouts_net::RolloutsClient>>,
 }
 
 impl ModelsHub {
     pub fn new(local: Option<(Target, Arc<ModelsService>)>, directory: Arc<dyn Directory>, client: ModelsClient) -> Self {
-        Self { local, directory, client: Arc::new(client), uploads: None }
+        Self { local, directory, client: Arc::new(client), uploads: None, rollouts: None }
     }
 
     /// What records an upload on the node after its files are placed ([`crate::upload_net`]).
     pub fn with_uploads(mut self, uploads: UploadsClient) -> Self {
         self.uploads = Some(Arc::new(uploads));
         self
+    }
+
+    /// What reads and changes other inference nodes' rollouts ([`crate::rollouts_net`]).
+    pub fn with_rollouts(mut self, rollouts: crate::rollouts_net::RolloutsClient) -> Self {
+        self.rollouts = Some(Arc::new(rollouts));
+        self
+    }
+
+    /// Sends `req` to the inference node `name` names; returns its label and answer.
+    pub async fn rollouts(&self, name: &str, req: crate::rollouts_net::Request) -> Result<(String, crate::rollouts_net::Rollouts), String> {
+        let t = self.resolve(name)?;
+        if t.local {
+            return Err(format!("`{}` is this device: run `ymirctl models rollout` without --inference", t.label));
+        }
+        let client = self.rollouts.as_ref().ok_or("this ymird can't reach other nodes' rollouts")?;
+        client.request(&t.peer, req).await.map(|r| (t.label.clone(), r)).map_err(|e| e.explain(&t.label))
     }
 
     /// Runs `op` on the nodes `spec` names, sending a pull's progress to `tx` as it goes.

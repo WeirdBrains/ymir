@@ -242,7 +242,8 @@ pub fn models_hub(
     let dir = Arc::new(NetDirectory::new(node.clone(), m.clone(), hints.clone(), opts.find_wait, name));
     let me = Target { peer: node.peer_id().to_string(), label: name.to_string(), local: true };
     let uploads = crate::upload_net::UploadsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())));
-    ModelsHub::new(local.map(|s| (me, s)), dir, client).with_uploads(uploads)
+    let rollouts = crate::rollouts_net::RolloutsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())));
+    ModelsHub::new(local.map(|s| (me, s)), dir, client).with_uploads(uploads).with_rollouts(rollouts)
 }
 
 /// The `ymird` side of `ymirctl train run --node`: runs on the user's other model nodes over

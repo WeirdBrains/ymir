@@ -65,6 +65,13 @@ pub enum ModelsCmd {
     Rollout {
         #[command(subcommand)]
         cmd: rollout::RolloutCmd,
+        /// Another inference node's rollouts, over Weirdnet (a roster label or peer id): read or
+        /// changed by that node's rules (`/ymir/rollouts/1`).
+        #[arg(long, global = true)]
+        inference: Option<String>,
+        /// With --inference: change only its live rollouts, not its node.toml (gone when its ymird restarts).
+        #[arg(long, global = true, requires = "inference")]
+        no_persist: bool,
     },
 }
 
@@ -222,8 +229,11 @@ impl Ctx {
 
 /// Runs a `models` command. With `--node` it goes to the model nodes through the local `ymird`.
 pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: ModelsCmd) -> Result<()> {
-    if let ModelsCmd::Rollout { cmd } = cmd {
-        return rollout::run(paths, out, cmd).await;
+    if let ModelsCmd::Rollout { cmd, inference, no_persist } = cmd {
+        return match inference {
+            Some(node) => rollout::run_remote(paths, out, &node, cmd, !no_persist).await,
+            None => rollout::run(paths, out, cmd).await,
+        };
     }
     let node = match &cmd {
         ModelsCmd::Search(a) => a.node.node.clone(),
