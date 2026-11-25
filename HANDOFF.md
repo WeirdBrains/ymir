@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 01:43 EST: v0.12.0 released, signed and on TAUR
+
+**v0.12.0** (release commit d5db03d, tag v0.12.0, cut with `weirdnet_release.py cut --minor` on main ba00557 after CI, macOS and Pages were green there; the cut's own checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 327 passed, 0 failed): model uploads join rollouts (U3). CI, macOS and the Release workflow passed on the tag. Artifacts were downloaded into `dist/`, checked against the workflow's sums and scanned (Linux, CUDA Linux, macOS, Windows: no host names or home paths). The Windows installer job also produced `YmirSetup-0.12.0.wixpdb` (a WiX debug database), which was left out; `fix/no-wixpdb` stops the workflow producing it. The first `github 0.12.0` upload timed out (HTTP 408) and was re-run with `--clobber`. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.12.0) has 35 files (`assets 0.12.0` ok): the 31 release files with `SHA256SUMS`, plus detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; the packages' SHA-256s match the workflow's). `weirdnet_release.py taur 0.12.0 --yes` published `ymir-bin` 0.12.0-1 and `ymir-cuda-bin` 0.12.0-1. The Arch recipes carry the v0.12.0 tarball hashes (this branch).
+
 ## 2026-11-25 00:21 EST: model upload U3, `ymirctl models upload ... --rollout NAME` (branch `feature/model-upload-rollout`)
 
 Slice U3 of [docs/design/model-upload.md](docs/design/model-upload.md), on P4b's rollouts; no Weirdnet crate edited. Details in the plan's "U3 as built".
