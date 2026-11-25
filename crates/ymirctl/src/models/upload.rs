@@ -55,6 +55,8 @@ pub struct UploadArgs {
     /// machine. Needs a running ymird here, linked to your devices; an interrupted upload resumes.
     #[arg(long)]
     pub node: Option<String>,
+    #[command(flatten)]
+    pub rollout: super::upload_rollout::RolloutArgs,
 }
 
 fn now_ms() -> i64 {
@@ -189,6 +191,9 @@ pub fn run(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs) -> Result<()> {
 
 /// [`run`] with the models disk's free and total bytes given (`None`: unknown, not checked).
 pub(super) fn run_with(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Option<(u64, u64)>) -> Result<()> {
+    if a.rollout.rollout.is_some() {
+        bail!("--rollout goes with --node: the upload joins the rollout on this machine's inference role after the node serves it");
+    }
     let license = upload::check_license(a.license.as_deref())?;
     // Registered by default when there is a node.toml to add it to (m3talsmith, 2026-11-24).
     let register = !a.no_register && ctx.cfg.is_some();
