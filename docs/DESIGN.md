@@ -1301,6 +1301,13 @@ serves it, and `--canary W` (with `--eval ROWS [--judge MODEL]`, which runs `ymi
 the most traffic) goes through the same gate. `models rollout list` shows each version's origin, license, base and
 dataset hash from its provenance.
 
+Another inference node's rollouts are read and changed over Weirdnet with `/ymir/rollouts/1` (`ymirctl models
+rollout ... --inference NODE`, and Bragi): the same rules (`ymir_core::rollout_edit`, shared with the local command:
+above the canary share the request carries the scored eval rows or `force`), applied live and saved in that node's
+node.toml unless `--no-persist`. Any of the owner's linked devices may, narrowed by `[inference] rollout_callers`
+(peer ids); `[inference] remote_rollouts = false` turns it off. See
+[docs/design/model-upload.md](design/model-upload.md#rollouts-over-weirdnet-ymirrollouts1-planned-2026-11-25-follow-up-to-u4).
+
 ### Shared semantic cache
 
 `weirdnet-semcache` (new) generalizes the RedisVL `rvl-cache`:

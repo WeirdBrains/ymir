@@ -572,6 +572,24 @@ running on. Rollouts stay per inference node, as in U3.
 4. A remote change is written to the node's node.toml by default, as uploads are; a request with
    `persist: false` changes only the live rollouts (until ymird restarts).
 
+### `/ymir/rollouts/1` as built (2026-11-25)
+
+- `ymir_core::rollout_edit`: `Change` (`add`, `weight`, `rollback`, `retire`), `Gate` (scored rows, their source,
+  `force`), `apply`, `eval_gate`, `write_rollouts`, `next_version`, and the eval's `Scored` row (re-exported by
+  `ymirctl::eval`). `ymirctl models rollout` converts its arguments to a `Change` and reads `--eval FILE` into rows.
+- `ymir_core::rollouts_net`: `Request {cert, change, gate, persist}` (no change: a read), `Reply::{Rollouts {rollouts,
+  said, saved, note}, Failed}`, `RolloutsService` (changes the coordinator's rollouts in force, one edit at a time,
+  then node.toml when `persist`; a node.toml that can't be written leaves the change live and says so),
+  `RolloutsServer`, `RolloutsClient`. `ymird` serves it with the inference role when `[inference] remote_rollouts`
+  (default on); callers are the roster narrowed by `[inference] rollout_callers` (validated as peer ids).
+- `ymirctl models rollout ... --inference NODE [--no-persist]` goes through this machine's `ymird`
+  (`ControlRequest::RemoteRollouts`, the `ModelsHub`'s `RolloutsClient`). `--inference` naming this device is
+  refused. `models upload --rollout` still applies on this machine only.
+- Tests: `rollout_edit` and `rollouts_net` unit tests; the moved logic's existing `ymirctl` tests unchanged;
+  `crates/ymir-testkit/tests/rollouts_net.rs` (three daemons: add with all the traffic, saved and live; the canary
+  gate refusing 50 and taking 5; `--no-persist` live only; list; rollback; retire; a linked device outside
+  `rollout_callers` refused; `--inference` at this device refused).
+
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
 1. **Who may upload:** every linked device. No `ymir.models.write` grant.
