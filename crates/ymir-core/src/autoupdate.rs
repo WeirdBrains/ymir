@@ -367,6 +367,46 @@ pub fn booted_by_updater(paths: &Paths, exe: &Path) -> bool {
 /// Set by `ymirctl update boot --exec` for the daemon it starts.
 pub const BOOT_ENV: &str = "YMIR_UPDATE_BOOT";
 
+/// What the last scheduled check found (`updates/autoupdate.json`), for `ymirctl update status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastCheck {
+    /// Unix seconds.
+    pub at: u64,
+    /// One line: "up to date (latest 0.15.3)", "staged ...", "skipped: ...", "failed: ...".
+    pub result: String,
+}
+
+fn last_check_path(paths: &Paths) -> PathBuf {
+    update::dir(paths).join("autoupdate.json")
+}
+
+/// Records a check's result; failures to write are ignored (the log has it too).
+pub fn record(paths: &Paths, result: &str) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(json) = serde_json::to_vec(&LastCheck { at, result: result.into() }) {
+        let p = last_check_path(paths);
+        let tmp = p.with_extension("tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+/// The last scheduled check, if any.
+pub fn last_check(paths: &Paths) -> Option<LastCheck> {
+    serde_json::from_slice(&std::fs::read(last_check_path(paths)).ok()?).ok()
+}
+
+/// One line for an outcome.
+pub fn describe(o: &Result<Outcome>) -> String {
+    match o {
+        Ok(Outcome::UpToDate { latest }) => format!("up to date (latest {latest})"),
+        Ok(Outcome::Skipped(why)) => format!("skipped: {why}"),
+        Ok(Outcome::Staged { update_id, version }) => format!("staged {update_id} ({version})"),
+        Err(e) => format!("failed: {e:#}"),
+    }
+}
+
 /// The schedule: the first check a few minutes after the start, then every `interval`. When an
 /// update is staged and the daemon can be restarted into it, `restart` is notified and the
 /// loop ends.
@@ -397,7 +437,9 @@ pub async fn run(paths: Paths, cfg: UpdateSection, running: Version, restart: Ar
     tracing::info!(feed = %cfg.feed, every = %cfg.interval, restart = can_restart, "self-update on");
     tokio::time::sleep(Duration::from_secs(120 + spread)).await;
     loop {
-        match check_once(&paths, &cfg, &running, &exe, &http).await {
+        let o = check_once(&paths, &cfg, &running, &exe, &http).await;
+        record(&paths, &describe(&o));
+        match o {
             Ok(Outcome::UpToDate { latest }) => tracing::debug!(%latest, "self-update: up to date"),
             Ok(Outcome::Skipped(why)) => tracing::info!("self-update: {why}"),
             Ok(Outcome::Staged { update_id, version }) => {
@@ -456,6 +498,18 @@ mod tests {
         }
         assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86_400));
         assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn the_last_check_is_kept() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = Paths::new(t.path().to_path_buf());
+        assert!(last_check(&paths).is_none());
+        std::fs::create_dir_all(update::dir(&paths)).unwrap();
+        record(&paths, &describe(&Ok(Outcome::UpToDate { latest: Version::new(0, 15, 4) })));
+        let c = last_check(&paths).unwrap();
+        assert_eq!(c.result, "up to date (latest 0.15.4)");
+        assert!(c.at > 0);
     }
 
     #[test]
