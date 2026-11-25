@@ -12,6 +12,7 @@ use clap::Parser as _;
 use weirdnet_net::{Keypair, WEIRDNET};
 use weirdnet_sync::Roster;
 
+use ymir_core::control::{self, ControlRequest};
 use ymir_core::membership::Membership;
 use ymir_core::upload;
 use ymir_core::{Daemon, NodeConfig, Paths};
@@ -108,6 +109,15 @@ fn gguf(len: usize, arch: &str) -> Vec<u8> {
     out
 }
 
+/// `/ip4/127.0.0.1/tcp/PORT/p2p/PEER` for a running daemon, from its control status.
+async fn addr(h: &Home) -> Result<String> {
+    let s = control::request(&h.paths.socket(), &ControlRequest::Status).await?.status.unwrap();
+    let n = s.network.expect("on Weirdnet");
+    let a = n.listening.iter().find(|a| a.starts_with("/ip4/127.0.0.1/tcp/")).expect("a loopback listener");
+    let a = a.split("/p2p/").next().unwrap();
+    Ok(format!("{a}/p2p/{}", n.peer))
+}
+
 /// A loopback TCP port free right now.
 fn free_port() -> Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
@@ -127,9 +137,10 @@ async fn eventually(secs: u64, what: &str, mut f: impl AsyncFnMut() -> Result<bo
     }
 }
 
-/// A laptop and three model nodes: `a` and `b` keep nothing free, `full` keeps more than it has.
-/// `--node all` sends once (to the node with the most room) and the other copies from it, both
-/// saved in node.toml; `full` is left out before anything is sent. `--stage` picks where it is sent;
+/// A laptop and four model nodes: `a` and `b` keep nothing free, `full` keeps more than it has, `c`
+/// can't reach the others. `--node all` sends once (to the node with the most room) and the other
+/// copies from it, both saved in node.toml; `full` is left out before anything is sent; `c` gets the
+/// files from the laptop instead. `--stage` picks where it is sent;
 /// the same files again are "already there"; `auto` and a stage outside the targets are refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pool_upload_is_sent_once_and_copied_node_to_node() -> Result<()> {
@@ -143,8 +154,12 @@ async fn a_pool_upload_is_sent_once_and_copied_node_to_node() -> Result<()> {
     let a_h = home(root, "a", "model", pa, &[], &[], keep0)?;
     let b_h = home(root, "b", "model", pb, &[], &[], keep0)?;
     let full_h = home(root, "full", "model", pf, &[], &[], "upload_keep_free = \"1000000TiB\"\n")?;
+    // c can't reach a or b (no addresses, no discovery), as behind a NAT; it keeps 1 GiB free, so it
+    // has the least room and is never the stage.
+    let c_h = home(root, "c", "model", 0, &[], &[], "upload_keep_free = \"1GiB\"\n")?;
     let at = |port: u16, m: &Membership| format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", m.peer_id());
     let (ma, mb, mf) = (prelink(&first, &a_h, "a"), prelink(&first, &b_h, "b"), prelink(&first, &full_h, "full"));
+    prelink(&first, &c_h, "c");
     let (aa, ab, af) = (at(pa, &ma), at(pb, &mb), at(pf, &mf));
     drop((first, ma, mb, mf));
     let a_h = home(root, "a", "model", pa, std::slice::from_ref(&ab), &[], keep0)?;
@@ -152,9 +167,11 @@ async fn a_pool_upload_is_sent_once_and_copied_node_to_node() -> Result<()> {
     let a = start(&a_h).await?;
     let b = start(&b_h).await?;
     let full = start(&full_h).await?;
-    let lap_h = home(root, "lap", "inference", 0, &[aa, ab, af], &[], "")?;
+    let c = start(&c_h).await?;
+    let ac = addr(&c_h).await?;
+    let lap_h = home(root, "lap", "inference", 0, &[aa, ab, af, ac], &[], "")?;
     let lap = start(&lap_h).await?;
-    for n in ["a", "b", "full"] {
+    for n in ["a", "b", "full", "c"] {
         eventually(40, &format!("{n} answers models/1"), async || Ok(ctl(&lap_h.home, &["models", "list", "--node", n]).await.is_ok())).await?;
     }
 
@@ -179,7 +196,11 @@ async fn a_pool_upload_is_sent_once_and_copied_node_to_node() -> Result<()> {
     let (sent, copied) = if out.contains("a: stored `pool-q4_0`") { ("a", "b") } else { ("b", "a") };
     assert!(out.contains(&format!("{sent}: stored `pool-q4_0`")), "{out}");
     assert!(out.contains(&format!("{copied}: copied `pool-q4_0` from {sent}, node to node")), "{out}");
-    assert!(!out.contains("sent from this device"), "{out}");
+    assert!(!out.contains(&format!("{copied} could not copy")), "{out}");
+    // c could not reach the stage, so it got the files from this device instead.
+    assert!(out.contains(&format!("c could not copy it from {sent}")) && out.contains("so it was sent from this device"), "{out}");
+    assert!(out.contains("c: stored `pool-q4_0`"), "{out}");
+    assert_eq!(std::fs::read(stored("c"))?, std::fs::read(&model)?);
     for n in ["a", "b"] {
         assert_eq!(std::fs::read(stored(n))?, std::fs::read(&model)?, "{n} has the same bytes");
         let h = if n == "a" { &a_h } else { &b_h };
@@ -203,6 +224,7 @@ async fn a_pool_upload_is_sent_once_and_copied_node_to_node() -> Result<()> {
     assert!(!NodeConfig::load(&a_h.paths.config())?.model.local.iter().any(|m| m.id == "second-q4_0"), "--no-persist on the copy too");
 
     lap.shutdown().await;
+    c.shutdown().await;
     full.shutdown().await;
     b.shutdown().await;
     a.shutdown().await;
