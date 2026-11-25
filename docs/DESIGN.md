@@ -790,6 +790,12 @@ dataset record, trainer, run) and registers it with its content revision, and `y
 --from-run RUN_DIR` uploads a run's adapter with its run record, checked against the record's SHA-256 and base
 revision.
 
+`ymirctl train run --node X` (P3a option C, 2026-11-24) runs on another model node over Ymir's own protocol
+`/ymir/train/1` (`ymir_core::train_net`, on `weirdnet-net`'s generic streams): the asking device's `ymird` resolves the
+node on the roster and sends the dataset, manifest and settings with its certificate; the node serves it only with
+`[train] remote = true`, to the owner's devices (`[train] callers` narrows them), runs `train::run` in process and
+streams its lines back. Closing the stream cancels the run; node.toml is never edited from the network.
+
 ### LoRA adapters on a loaded base (training plan P4a, 2026-11-23)
 
 An adapter is served as a model of its own, on its base's engine. The engine side is

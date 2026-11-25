@@ -3,6 +3,17 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 21:45 EST: `train run --node` (P3a option C) and a trainable dataset fixture
+
+**Dataset fixture (merged d871bc9):** `crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl` (5 synthetic rows: 4 usable, 1 cached duplicate marked unusable) with its `ymir-dataset/1` manifest (teacher `synthetic-fixture`, CC0-1.0, input and sources hashes of the existing fixtures). `tests/dataset.rs` checks that `train::prepare_dataset` takes it (4 rows trained) and that the manifest's hashes and counts match. The 21:45 entry's run command named the batch prompt input, which has no manifest; it now names this file.
+
+**`ymirctl train run --node X`:** a run on another of the owner's model nodes from any linked device (an app-only one in the test), on published crates only (`weirdnet-net` 0.8.2 generic streams, `weirdnet-agent` 0.5.2 channels and roster auth; no Weirdnet crate edited). Ymir's own protocol `/ymir/train/1` (`crates/ymir-core/src/train_net.rs`), served by the model role only with the new `[train] remote = true` (default off), to linked, unrevoked devices, narrowed by `[train] callers`. The asking `ymird` resolves the node on the roster and sends the dataset and manifest inline (24 MiB cap); the node runs `train::run` in process (so it reserves itself through its own `ymird`) and streams lines back over the new streamed control request `Train`. Closing the stream (Ctrl-C) cancels the run. `--add` is refused with `--node`; `--from` must be inside the node's models directory; the adapter is served with `models adapter serve --node`.
+- Tests: `tests/p3a_remote.rs` (three real daemons on 127.0.0.1 with the mock trainer: an opted-out node refuses, the opted-in one trains and reserves in its ymird, node.toml unchanged, the sent dataset removed, refusals for a reused id, `--add`, a bad `--from`, an unknown and the local device; dropping the caller cancels the run and frees the GPU), plus unit tests in `train_net` (refused caller, file names and `--from` paths).
+- Not tested: a real node and trainer; the cap near 24 MiB; a revoked device (covered by `RosterAuth`, as models/1).
+- Missing for the rest (P3b): the run lives only as long as the caller's stream. A run that outlives the caller, shows up on every device and resumes on another node needs `weirdnet-agent`'s synced job record, which is not published.
+
+**Left:** the first real P3a run still needs a GPU model node with `[train]` (and `remote = true` to start it from another device) and the patched trainer; the agent may not edit node.toml.
+
 ## 2026-11-24 21:45 EST: v0.9.0 signatures and TAUR; first real P3a run blocked
 
 **v0.9.0, finished:** the four Arch packages are signed with the WeirdBrains Muninn packages key (detached `.sig`, verified "Good signature") and uploaded to the [v0.9.0 release](https://github.com/WeirdBrains/ymir/releases/tag/v0.9.0) next to their packages (now 35 files); `weirdnet_release.py taur 0.9.0` published `ymir-bin` 0.9.0-1 and `ymir-cuda-bin` 0.9.0-1. This closes the "Left" items of the v0.9.0 entry below.

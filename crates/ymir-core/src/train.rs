@@ -66,6 +66,15 @@ pub struct TrainSection {
     /// Extra environment for the trainer (for example `CUDA_VISIBLE_DEVICES`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Take runs from the owner's other devices over Weirdnet (`ymirctl train run --node`,
+    /// `/ymir/train/1`, see [`crate::train_net`]). Off unless set; needs the model role and a
+    /// device identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote: bool,
+    /// With `remote`: only these devices (peer ids) may start runs. Empty: any of the owner's
+    /// linked, unrevoked devices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
 }
 
 impl TrainSection {

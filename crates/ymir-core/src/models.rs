@@ -166,23 +166,7 @@ impl ModelsHub {
 
     /// A roster label (any case), a peer id, or a peer id's start (at least 8 characters).
     fn resolve(&self, name: &str) -> Result<Target, String> {
-        let devices = self.directory.devices();
-        let by = |f: &dyn Fn(&Target) -> bool| -> Vec<&Target> { devices.iter().filter(|t| f(t)).collect() };
-        let mut hits = by(&|t| t.peer == name);
-        if hits.is_empty() {
-            hits = by(&|t| t.label.eq_ignore_ascii_case(name));
-        }
-        if hits.is_empty() && name.len() >= 8 {
-            hits = by(&|t| t.peer.starts_with(name));
-        }
-        match hits.as_slice() {
-            [one] => Ok((*one).clone()),
-            [] => Err(format!(
-                "no device named `{name}` on your roster (devices: {})",
-                devices.iter().map(|t| t.label.as_str()).collect::<Vec<_>>().join(", ")
-            )),
-            many => Err(format!("`{name}` matches {} devices; use the peer id", many.len())),
-        }
+        resolve(&self.directory.devices(), name)
     }
 
     /// Asks every model node how the repo fits it, and takes the node that can hold the biggest model
@@ -312,6 +296,26 @@ pub fn choose_node<'a>(want: Option<&str>, fits: impl IntoIterator<Item = (usize
         })
         .max_by(|a, b| (a.1, a.2).cmp(&(b.1, b.2)).then(b.0.cmp(&a.0)))
         .map(|(i, ..)| i)
+}
+
+/// A device by roster label (any case), peer id, or a peer id's start (at least 8 characters).
+pub fn resolve(devices: &[Target], name: &str) -> Result<Target, String> {
+    let by = |f: &dyn Fn(&Target) -> bool| -> Vec<&Target> { devices.iter().filter(|t| f(t)).collect() };
+    let mut hits = by(&|t| t.peer == name);
+    if hits.is_empty() {
+        hits = by(&|t| t.label.eq_ignore_ascii_case(name));
+    }
+    if hits.is_empty() && name.len() >= 8 {
+        hits = by(&|t| t.peer.starts_with(name));
+    }
+    match hits.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!(
+            "no device named `{name}` on your roster (devices: {})",
+            devices.iter().map(|t| t.label.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+        many => Err(format!("`{name}` matches {} devices; use the peer id", many.len())),
+    }
 }
 
 /// What went wrong on `t`, in words a person can act on.

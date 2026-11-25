@@ -142,6 +142,14 @@ pub enum ControlRequest {
         node: String,
         request: crate::models::ModelsOp,
     },
+    /// A training run on another of the user's model nodes over Weirdnet (`ymirctl train run
+    /// --node`). The answer is a stream of [`crate::train_net::TrainLine`]s ending with `done` or
+    /// `failed`; closing the connection cancels the run.
+    Train {
+        /// A roster label or a peer id.
+        node: String,
+        request: crate::train_net::TrainOp,
+    },
     /// The versioned rollouts in force (P4b), or, with `set`, replace them live (new
     /// conversations follow at once). `ymirctl models rollout` also writes them to node.toml.
     Rollouts {
@@ -349,6 +357,8 @@ pub struct ControlHandler {
     pub pool: Option<Arc<weirdnet_agent::pool::Pool>>,
     /// Model management over Weirdnet (needs a device identity).
     pub models: Option<Arc<crate::models::ModelsHub>>,
+    /// Training runs on other model nodes over Weirdnet (needs a device identity).
+    pub train: Option<Arc<crate::train_net::TrainHub>>,
     /// Woken by [`ControlRequest::Shutdown`]; `ymird` waits on it next to its signals.
     pub exit: Arc<tokio::sync::Notify>,
 }
@@ -444,10 +454,51 @@ impl ControlHandler {
         Ok(())
     }
 
+    /// Runs a training request on another node and writes its lines to `w`; `closed` resolving
+    /// (the asking `ymirctl` went away) cancels it.
+    async fn stream_train<W: AsyncWrite + Unpin>(
+        &self,
+        node: String,
+        op: crate::train_net::TrainOp,
+        w: &mut W,
+        closed: impl std::future::Future<Output = ()>,
+    ) -> Result<()> {
+        use crate::train_net::TrainLine;
+        let Some(hub) = self.train.clone() else {
+            let line = TrainLine::Failed { message: "training on another node needs a device identity on this one (see `ymirctl pool link`)".into() };
+            return write_line(w, &line).await;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let done = hub.run(&node, op, &tx).await;
+            let _ = tx.send(match done {
+                Ok(record) => TrainLine::Done { record: Box::new(record) },
+                Err(message) => TrainLine::Failed { message },
+            });
+        });
+        tokio::pin!(closed);
+        loop {
+            tokio::select! {
+                line = rx.recv() => match line {
+                    Some(line) => write_line(w, &line).await?,
+                    None => break,
+                },
+                _ = &mut closed => {
+                    // Dropping the stream to the node cancels the run there.
+                    task.abort();
+                    break;
+                }
+            }
+        }
+        let _ = task.await;
+        Ok(())
+    }
+
     pub async fn handle(&self, req: ControlRequest) -> ControlResponse {
         match req {
-            // Streamed by `stream_models`, which `connection` calls instead.
+            // Streamed by `stream_models` and `stream_train`, which `connection` calls instead.
             ControlRequest::Models { .. } => ControlResponse::err("models requests are streamed"),
+            ControlRequest::Train { .. } => ControlResponse::err("train requests are streamed"),
             ControlRequest::Rollouts { set } => {
                 let Some(c) = &self.coordinator else {
                     return ControlResponse::err("rollouts are routed by an inference node; this one has no inference role");
@@ -867,6 +918,12 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, handl
                 handler.stream_models(node, request, &mut w).await?;
                 continue;
             }
+            Ok(ControlRequest::Train { node, request }) => {
+                // The caller sends nothing more; its side closing ends the run.
+                let closed = async { while let Ok(Some(_)) = lines.next_line().await {} };
+                handler.stream_train(node, request, &mut w, closed).await?;
+                break;
+            }
             Ok(req) => handler.handle(req).await,
             Err(e) => ControlResponse::err(format!("bad request: {e}")),
         };
@@ -931,6 +988,33 @@ pub async fn request_models(
             // An older ymird answers an unknown request with one `ControlResponse` error.
             Err(_) => match serde_json::from_str::<ControlResponse>(&line) {
                 Ok(r) if !r.ok => bail!("this ymird does not manage models over Weirdnet (upgrade it): {}", r.message.unwrap_or_default()),
+                _ => bail!("ymird sent something this ymirctl does not understand (are they the same version?)"),
+            },
+        }
+    }
+    bail!("ymird closed the control connection")
+}
+
+/// Sends a training request for another node to the `ymird` at `socket` and calls `on_line` for
+/// each line until the run ends. Returns the run's record. Dropping the future cancels the run.
+pub async fn request_train(
+    socket: &Path,
+    node: &str,
+    op: crate::train_net::TrainOp,
+    mut on_line: impl FnMut(&crate::train_net::TrainLine),
+) -> Result<crate::train::RunRecord> {
+    use crate::train_net::TrainLine;
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    write_line(&mut w, &ControlRequest::Train { node: node.to_string(), request: op }).await?;
+    let mut lines = BufReader::new(r).lines();
+    while let Some(line) = lines.next_line().await? {
+        match serde_json::from_str::<TrainLine>(&line) {
+            Ok(TrainLine::Done { record }) => return Ok(*record),
+            Ok(TrainLine::Failed { message }) => bail!("{message}"),
+            Ok(l) => on_line(&l),
+            Err(_) => match serde_json::from_str::<ControlResponse>(&line) {
+                Ok(r) if !r.ok => bail!("this ymird does not start runs on other nodes (upgrade it): {}", r.message.unwrap_or_default()),
                 _ => bail!("ymird sent something this ymirctl does not understand (are they the same version?)"),
             },
         }
