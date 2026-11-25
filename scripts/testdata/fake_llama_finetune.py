@@ -9,7 +9,8 @@ training text is tokenized with the base's control tokens parsed as specials. FA
 
 FAKE_FINETUNE_BUILD (default 12628), FAKE_FINETUNE_RECORD (write the arguments, the training text
 and the special tokens it tokenized there as JSON), FAKE_FINETUNE_FAIL (exit 3 after the first
-batch), FAKE_FINETUNE_SLEEP (seconds per batch)."""
+batch), FAKE_FINETUNE_SLEEP (seconds per batch), FAKE_FINETUNE_SHORT (crash as upstream does on a
+text shorter than 2 x context + 1 tokens: the assert and backtrace, then abort)."""
 
 import json
 import os
@@ -76,6 +77,11 @@ if os.environ.get("FAKE_FINETUNE_RECORD"):
         special = specials_in(model, text, "parse-special" in patches)
         json.dump({"args": args, "text": text, "text_mode": oct(os.stat(text_file).st_mode & 0o777), "special_tokens": special}, f)
 print("llama_model_loader: loaded meta data", file=sys.stderr)
+if os.environ.get("FAKE_FINETUNE_SHORT"):
+    sys.stderr.write("ggml/src/ggml.c:1800: GGML_ASSERT(INT64_MAX / ne[i] > current_nelements) failed\n")
+    sys.stderr.write("#6  0x00007f0000000000 in ggml_opt_dataset_init () from libggml-base.so.1\n")
+    sys.stderr.flush()
+    os.abort()
 batches = 4
 for e in range(epochs):
     for i in range(1, batches + 1):

@@ -23,6 +23,7 @@ from gguf import GGUFReader
 HERE = Path(__file__).resolve().parent
 TRAINER = HERE / "trainer.py"
 FAKE = HERE / "testdata/fake_llama_finetune.py"
+FAKE_TOKENIZE = HERE / "testdata/fake_llama_tokenize.py"
 CHATML = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
 
 sys.path.insert(0, str(HERE))
@@ -186,6 +187,67 @@ class TrainerTest(unittest.TestCase):
         self.data.write_text("\n")
         r, ev = self.train()
         self.assertIn("no conversations", ev[-1]["message"])
+
+    def add_tokenize(self):
+        """Puts the fake llama-tokenize next to the fake llama-finetune, as build --trainer does."""
+        exe = self.tmp / "llama-tokenize"
+        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_TOKENIZE}" "$@"\n')
+        exe.chmod(0o755)
+        self.tok_record = self.tmp / "tokenize.json"
+        return {**self.env, "FAKE_TOKENIZE_RECORD": str(self.tok_record)}
+
+    def test_min_tokens(self):
+        self.assertEqual([trainer.trained_context(c) for c in (1, 64, 256, 257, 512, 4096)], [256, 256, 256, 512, 512, 4096])
+        self.assertEqual([trainer.min_tokens(c) for c in (64, 256, 257, 512)], [513, 513, 1025, 1025])
+
+    def test_short_text_is_refused_before_training(self):
+        env = self.add_tokenize()
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_COUNT": "512"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        msg = ev[-1]["message"]
+        self.assertEqual(ev[-1]["event"], "error")
+        for part in ("renders to 512 tokens", "at least 513 (2 x context + 1)", "about 1 more tokens"):
+            self.assertIn(part, msg)
+        self.assertNotIn("lower --context", msg, "256 is as low as llama.cpp goes")
+        self.assertFalse(self.record.exists(), "llama-finetune is not started")
+        self.assertFalse((self.tmp / "full.gguf.train.txt").exists())
+        rec = json.loads(self.tok_record.read_text())
+        self.assertEqual(rec["args"], ["-m", str(self.base), "--stdin", "--ids", "--log-disable"])
+        self.assertTrue(rec["text"].endswith("4<|im_end|>"), "one trailing newline is dropped, as llama-finetune -f does")
+
+    def test_enough_text_trains(self):
+        env = self.add_tokenize()
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_COUNT": "513"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(ev[-1], {"event": "done"})
+        self.assertIn("513 tokens, 2 windows of 256", " ".join(e.get("message", "") for e in ev))
+
+    def test_context_is_rounded_up_to_256(self):
+        env = self.add_tokenize()
+        self.config.write_text(json.dumps({"epochs": 1, "learning_rate": 1e-5, "context": 300, "batch": 1}))
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_COUNT": "700"})
+        self.assertEqual(r.returncode, 1)
+        msg = ev[-1]["message"]
+        for part in ("renders to 700 tokens", "at least 1025", "context 300 trains as 512", "lower --context (down to 256, which needs 513)"):
+            self.assertIn(part, msg)
+
+    def test_tokenize_failure_is_refused(self):
+        env = self.add_tokenize()
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_FAIL": "1"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("could not count the training text's tokens", ev[-1]["message"])
+        self.assertFalse(self.record.exists())
+
+    def test_short_text_crash_without_tokenize(self):
+        """A build without llama-tokenize: upstream's crash on a short text becomes the same refusal."""
+        r, ev = self.train(env={**self.env, "FAKE_FINETUNE_SHORT": "1"})
+        self.assertEqual(r.returncode, 1)
+        logs = " ".join(e.get("message", "") for e in ev)
+        self.assertIn("no llama-tokenize next to", logs)
+        msg = ev[-1]["message"]
+        self.assertIn("the dataset is too short", msg)
+        self.assertIn("at least 513 (2 x context + 1)", msg)
+        self.assertFalse((self.tmp / "full.gguf.train.txt").exists())
 
     def test_cancel(self):
         out = self.tmp / "full.gguf"

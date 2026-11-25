@@ -25,6 +25,11 @@ templates: `pip install -r scripts/trainer-requirements.txt`. With them in a ven
 YMIR_TRAINER_PYTHON (under [train.env] in node.toml) to its python and this program runs itself
 there.
 
+Before training, the rendered text is counted with `llama-tokenize` from the same build (next to
+llama-finetune, or $YMIR_LLAMA_TOKENIZE): upstream's llama-finetune needs at least 2 x context + 1
+tokens, with the context rounded up to a multiple of 256 as llama.cpp does, and crashes on less, so
+a shorter dataset is refused with its count (see min_tokens).
+
 Environment: YMIR_TRAINER_NGL (llama-finetune -ngl, default all; 0 trains on the CPU),
 YMIR_TRAINER_ARGS (extra llama-finetune arguments, shell-quoted).
 """
@@ -99,6 +104,61 @@ def need_deps():
 
 # ---------------------------------------------------------------------------------------------
 # llama-finetune
+
+# llama.cpp rounds a context up to a multiple of this (src/llama-context.cpp, GGML_PAD(n_ctx, 256)).
+CONTEXT_PAD = 256
+# What upstream's llama-finetune prints when the text is too short for one datapoint: the size_t
+# underflow in common_opt_dataset_init (common/common.cpp) trips ggml_new_tensor's assert.
+SHORT_TEXT_CRASH = ("ggml_opt_dataset_init", "INT64_MAX / ne[i]")
+
+
+def trained_context(context):
+    """The context llama-finetune trains at for `-c context`."""
+    return max(CONTEXT_PAD, -(-int(context) // CONTEXT_PAD) * CONTEXT_PAD)
+
+
+def min_tokens(context):
+    """The fewest tokens llama-finetune trains on at `context`: it cuts the text into windows of the
+    trained context n every n/2 tokens, (tokens - n - 1) // (n/2) of them, and holds 5% back for
+    validation, so one training step needs two windows: 2n + 1 tokens."""
+    return 2 * trained_context(context) + 1
+
+
+def short_text(count, context):
+    """The refusal for a text of `count` tokens (None: unknown) at `context`."""
+    n, need = trained_context(context), min_tokens(context)
+    have = f"renders to {count} tokens" if count is not None else "is too short"
+    rounded = f"; context {context} trains as {n}, since llama.cpp rounds it up to a multiple of {CONTEXT_PAD}" if n != int(context) else ""
+    more = f" (about {need - count} more tokens)" if count is not None else ""
+    lower = f", or a lower --context (down to {CONTEXT_PAD}, which needs {min_tokens(CONTEXT_PAD)})" if n > CONTEXT_PAD else ""
+    return Refusal(f"the dataset {have}, and llama-finetune needs at least {need} (2 x context + 1) for one training step{rounded}: add conversations{more}{lower}")
+
+
+def find_tokenize(finetune):
+    """llama-tokenize from the same build: $YMIR_LLAMA_TOKENIZE, else next to llama-finetune."""
+    env = os.environ.get("YMIR_LLAMA_TOKENIZE")
+    if env:
+        return Path(env)
+    name = "llama-tokenize.exe" if os.name == "nt" else "llama-tokenize"
+    p = Path(finetune).parent / name
+    return p if p.exists() else None
+
+
+def count_tokens(exe, base, text):
+    """The tokens llama-finetune makes of `text`, counted by llama-tokenize on the base's vocabulary:
+    special tokens parsed, BOS as the base wants, escapes processed, and one trailing newline
+    dropped, as llama-finetune's -f does (common/arg.cpp)."""
+    if text.endswith("\n"):
+        text = text[:-1]
+    try:
+        r = subprocess.run([str(exe), "-m", str(base), "--stdin", "--ids", "--log-disable"], input=text.encode("utf-8"), capture_output=True, timeout=600)
+    except OSError as e:
+        raise Refusal(f"running {exe}: {e}") from e
+    out = r.stdout.decode("utf-8", "replace")
+    m = re.search(r"^\[([0-9,\s]*)\]\s*$", out, re.M)
+    if r.returncode != 0 or not m:
+        raise Refusal(f"{exe} could not count the training text's tokens: {(out + r.stderr.decode('utf-8', 'replace')).strip()[-300:]!r}")
+    return len([t for t in m.group(1).split(",") if t.strip()])
 
 
 def find_finetune():
@@ -221,7 +281,7 @@ def run_finetune(cmd, progress):
                 emit("progress", **ev)
             elif not PROGRESS.match(line):
                 print(line, flush=True)  # not an event: goes to the run's log
-                tail = (tail + [line])[-20:]
+                tail = (tail + [line])[-40:]
     if buf.strip():
         print(buf.decode("utf-8", "replace"), flush=True)
     code = proc.wait()
@@ -352,9 +412,19 @@ def cmd_train(a):
     log(f"llama-finetune {build}: {len(rows)} conversations, {len(text)} characters, {epochs} epoch(s), context {ctx}")
     progress = Progress(epochs)
     try:
+        tok = find_tokenize(exe)
+        if tok:
+            count = count_tokens(tok, a.base, text)
+            if count < min_tokens(ctx):
+                raise short_text(count, ctx)
+            log(f"{count} tokens, {(count - trained_context(ctx) - 1) // (trained_context(ctx) // 2)} windows of {trained_context(ctx)}")
+        else:
+            log(f"no llama-tokenize next to {exe}, so the text's length is not checked first (rebuild with scripts/engine.py build --trainer)")
         code, tail = run_finetune(cmd, progress)
     finally:
         corpus.unlink(missing_ok=True)
+    if code != 0 and any(any(s in line for s in SHORT_TEXT_CRASH) for line in tail):
+        raise short_text(None, ctx)
     if code != 0 or not out.exists():
         raise Refusal(f"llama-finetune exited with {code}" + (f": {tail[-1]}" if tail else ""))
     if progress.val_loss is not None:
