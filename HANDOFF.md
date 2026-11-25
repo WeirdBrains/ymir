@@ -3,6 +3,25 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 00:40 EST: model upload U3, `ymirctl models upload ... --rollout NAME` (branch `feature/model-upload-rollout`)
+
+Slice U3 of [docs/design/model-upload.md](docs/design/model-upload.md), on P4b's rollouts; no Weirdnet crate edited. Details in the plan's "U3 as built".
+
+**What changed**
+- [crates/ymirctl/src/models/upload_rollout.rs](crates/ymirctl/src/models/upload_rollout.rs) (new): `--rollout NAME`, `--canary W`, `--eval ROWS`, `--judge MODEL`, `--force` on `models upload --node`. The next version N comes from this machine's rollouts (live, else node.toml); without `--name` the id becomes `ID-rN`. After the node serves the upload, `rollout add NAME@N --weight 0`; an adapter loaded on its base's next start gets the "waits at weight 0" note. `--canary` runs `rollout weight` through the P4b gate, after `ymirctl eval` on the new model and the incumbent's when `--eval` is given (skipped when nothing has traffic). A refusal leaves the version at weight 0 and says so. `--rollout` without `--node` is refused.
+- [crates/ymirctl/src/models/rollout.rs](crates/ymirctl/src/models/rollout.rs): `rollout list` prints each version's origin, license, base and dataset hash from the pool's `models list --node all` (best effort, 10 s).
+- [crates/ymir-core/src/control.rs](crates/ymir-core/src/control.rs): status rows (`NodeModel`) carry `revision`, the weights' revision the node reports.
+- Tests: `models_upload.rs` now reads the uploaded revision back from the pool (closes the U2 gap) and runs three `--rollout support` uploads (first `--canary 100` with no incumbent; `--canary 50` refused, stays at 0; `--canary 5` passes; `rollout list` shows provenance; no `--node` refused). Unit tests for next version, incumbent, ids and the provenance line.
+- Docs: plan "U3 as built", [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), the site's ymirctl page.
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` (see the merge).
+
+**Not tested**: `--eval` end to end (no testkit model answers; the gate itself has P4b's tests); the adapter "waits at weight 0" note; `rollout list` provenance for trained adapters (base and dataset: unit test only).
+
+**Not built**: `--inference NAME|all` (rollouts stay per inference node, agreed 2026-11-25); `--replace` (U2 refuses other files under a taken id, so a version's model cannot be swapped).
+
+**Next**: U4 (Bragi desktop upload, decision 6) or U6 (pools, waits on Weirdnet requests B and C).
+
 ## 2026-11-24 23:58 EST: v0.11.0 released, signed and on TAUR
 
 **v0.11.0** (release commit 8ff1654, tag v0.11.0, cut with `weirdnet_release.py cut --minor` on main bc665df after CI and Pages were green there; the cut's own checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 325 passed, 0 failed): model uploads to other nodes (U2) on `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4. CI, macOS and the Release workflow passed on the tag. Artifacts were downloaded into `dist/`, checked against the workflow's sums and scanned (Linux, macOS, Windows archives: no host names or home paths). The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.11.0) has 35 files (`assets 0.11.0` ok): the 31 release files with `SHA256SUMS`, plus detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key as v0.8.0/v0.9.0 (each "Good signature"; the packages' SHA-256s match the workflow's). `weirdnet_release.py taur 0.11.0` published `ymir-bin` 0.11.0-1 and `ymir-cuda-bin` 0.11.0-1. The Arch recipes carry the v0.11.0 tarball hashes (this branch).
