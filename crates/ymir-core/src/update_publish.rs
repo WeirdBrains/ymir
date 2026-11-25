@@ -125,10 +125,10 @@ pub fn sign_bundle(dir: &Path, key: &SigningKey, root_env: &[u8], pin: Option<&s
     let root_signed = Signed::from_bytes(root_env).map_err(|e| anyhow!("the root file: {e}"))?;
     let root: Root = root_signed.decode().map_err(|e| anyhow!("the root file: {e}"))?;
     let root_pin = root.pin().to_string();
-    if let Some(p) = pin {
-        if !p.eq_ignore_ascii_case(&root_pin) {
-            bail!("the root file's fingerprint is {root_pin}, not the expected {p}");
-        }
+    if let Some(p) = pin
+        && !p.eq_ignore_ascii_case(&root_pin)
+    {
+        bail!("the root file's fingerprint is {root_pin}, not the expected {p}");
     }
     let public = key.public();
     let delegated = root.release.iter().any(|d| {
