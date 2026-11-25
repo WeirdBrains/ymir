@@ -9,10 +9,26 @@ All notable changes to Ymir are listed here. The format follows
 ### Added
 
 - Hands-off self-update: `ymird` checks the release feed on a schedule (`[update]` in node.toml: on by default, `interval = "6h"`, `channel`, `feed`, `variant`, `restart`), downloads this machine's signed `.update.tar.gz`, verifies and stages it against the pinned root, and restarts into it under its service; a release that doesn't come up healthy is rolled back to the last good one. `ymirctl update check` does one check by hand. Nothing happens without a pinned update root.
+- The pool catalog says where each model came from (`hub`, `upload`, `train`) and its license, when its node knows
+  (model upload U8): model nodes put both in their capability record from provenance records and node.toml, and on
+  every upload, peer copy and Hub pull; catalog/1, `/v1/models` (`weirdnet.origin`, `weirdnet.license`),
+  `ymirctl models` and the MCP `ymir_models` tool show them.
+
+### Changed
+
+- weirdnet-agent 0.5.4, weirdnet-backends 0.4.5 and weirdnet-openai 0.2.3 (Weirdnet request D).
+- A model placed in a node's store but not served (for example a projector for an embedding model) is logged as a
+  warning on that node.
+
+## [0.15.2] - 2026-11-25
 
 ### Added
 
 - Signed self-update bundles with every release: `ymirctl update sign-bundle` signs a bundle directory with a release key (checked against the org root and verified as a node would before anything is written), and the release flow (`scripts/weirdnet_release.py updates VERSION --upload`, weirdnet-project-helpers 0.4.0) publishes `ymir-VERSION-linux-{x86_64,aarch64}.update.tar.gz`, the CUDA ones and the macOS ones. A node takes one with `ymirctl update stage` and a restart.
+
+### Fixed
+
+- Signed self-update bundles with every release (ymirctl update sign-bundle; weirdnet_release.py updates).
 
 ## [0.15.1] - 2026-11-25
 

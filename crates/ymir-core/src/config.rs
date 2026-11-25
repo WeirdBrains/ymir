@@ -880,6 +880,31 @@ impl NodeConfig {
         models.chain(adapters).collect()
     }
 
+    /// `(id, origin, license)` for each `[[model.local]]` model and LoRA adapter whose origin is
+    /// known, for the capability record (and so the pool catalog). A `provenance.json` beside the
+    /// weights (an upload, or a trained adapter) says both; else weights under `models_dir`
+    /// (`ymirctl models pull`, a catalog model) or a Hub id are `hub`, with no license. A file
+    /// elsewhere without a record, and a `wrap`ped server, say nothing.
+    pub fn origins(&self) -> Vec<(String, Option<String>, Option<String>)> {
+        let dir = self.models_dir();
+        let mut out = Vec::new();
+        for (m, l) in self.model.local.iter().zip(self.launches()) {
+            if m.wrap.is_none() {
+                let (o, lic) = origin_of(&l.source, &dir);
+                if o.is_some() || lic.is_some() {
+                    out.push((m.id.clone(), o, lic));
+                }
+            }
+            for a in &l.adapters {
+                let (o, lic) = origin_of(&a.path, &dir);
+                if o.is_some() || lic.is_some() {
+                    out.push((a.id.clone(), o, lic));
+                }
+            }
+        }
+        out
+    }
+
     /// Launch specs for `[[model.local]]`.
     pub fn launches(&self) -> Vec<ModelLaunch> {
         let dir = self.models_dir();
@@ -956,6 +981,21 @@ impl NodeConfig {
             })
             .collect()
     }
+}
+
+/// Where the weights at `source` (a path, or a Hub id) came from, and their license; see
+/// [`NodeConfig::origins`].
+fn origin_of(source: &str, models_dir: &Path) -> (Option<String>, Option<String>) {
+    let p = Path::new(source);
+    let record_dir = if p.is_dir() { Some(p) } else { p.parent() };
+    if let Some(rec) = record_dir.filter(|d| !d.as_os_str().is_empty()).and_then(weirdnet_model::artifact::Provenance::read) {
+        return (Some(rec.origin).filter(|o| !o.is_empty()), rec.license);
+    }
+    let hub_id = !p.is_absolute() && !p.exists() && source.matches('/').count() == 1;
+    if p.starts_with(models_dir) || hub_id {
+        return (Some(weirdnet_agent::remote::catalog::ORIGIN_HUB.to_string()), None);
+    }
+    (None, None)
 }
 
 /// The `[[model.local]]` backends.
@@ -1172,6 +1212,59 @@ mod tests {
         let mut cfg = NodeConfig::default();
         cfg.model.local = vec![LocalModel { id: "a".into(), ..Default::default() }, LocalModel { id: "a".into(), ..Default::default() }];
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn origins_come_from_provenance_records_else_the_models_dir_or_a_hub_id() {
+        let models = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let rec = |dir: &Path, kind: &str, id: &str, origin: &str, license: Option<&str>| {
+            std::fs::create_dir_all(dir).unwrap();
+            let mut r = serde_json::json!({"format": "weirdnet-provenance/1", "kind": kind, "id": id, "origin": origin, "revision": "sha256:00", "files": []});
+            if let Some(l) = license {
+                r["license"] = l.into();
+            }
+            std::fs::write(dir.join(weirdnet_model::artifact::PROVENANCE_FILE), serde_json::to_vec(&r).unwrap()).unwrap();
+        };
+        rec(&models.path().join("uploads/up"), "model", "up", "upload", Some("MIT"));
+        rec(&models.path().join("adapters/tune"), "adapter", "tune", "train", Some("Apache-2.0"));
+        std::fs::write(elsewhere.path().join("own.gguf"), b"x").unwrap();
+        let text = format!(
+            r#"
+            [model]
+            models_dir = "{m}"
+            [[model.local]]
+            id = "up"
+            file = "uploads/up/up.gguf"
+            [[model.local.lora]]
+            id = "up+tune"
+            file = "adapters/tune/tune.gguf"
+            [[model.local]]
+            id = "pulled"
+            file = "pulled-Q4_K_M.gguf"
+            [[model.local]]
+            id = "own"
+            file = "{e}/own.gguf"
+            [[model.local]]
+            id = "big"
+            backend = "vllm"
+            file = "org/big"
+            [[model.local]]
+            id = "wrapped"
+            wrap = "http://127.0.0.1:8000"
+            "#,
+            m = models.path().display(),
+            e = elsewhere.path().display()
+        );
+        let cfg: NodeConfig = toml::from_str(&text).unwrap();
+        let got = cfg.origins();
+        let of = |id: &str| got.iter().find(|(i, ..)| i == id).map(|(_, o, l)| (o.as_deref(), l.as_deref()));
+        assert_eq!(of("up"), Some((Some("upload"), Some("MIT"))));
+        assert_eq!(of("up+tune"), Some((Some("train"), Some("Apache-2.0"))));
+        assert_eq!(of("pulled"), Some((Some("hub"), None)));
+        assert_eq!(of("big"), Some((Some("hub"), None)));
+        assert_eq!(of("own"), None, "a file elsewhere without a record says nothing");
+        assert_eq!(of("wrapped"), None);
     }
 
     #[test]

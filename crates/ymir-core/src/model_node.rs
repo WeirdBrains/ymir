@@ -34,6 +34,9 @@ pub fn inputs_of(s: &ModelStatus) -> weirdnet_agent::Modalities {
     s.capabilities.map_or(weirdnet_agent::Modalities::TEXT, |c| c.inputs())
 }
 
+/// A model's origin (`hub`, `upload`, `train`) and license, either unknown.
+pub type Origin = (Option<String>, Option<String>);
+
 pub trait ModelNode: Send + Sync {
     fn name(&self) -> &str;
     /// The node's models and their states (its capability record).
@@ -49,6 +52,11 @@ pub trait ModelNode: Send + Sync {
     /// known. The answer cache keys on it, so new weights under the same id don't replay old answers.
     fn revision(&self, _model: &str) -> Option<String> {
         None
+    }
+    /// Where `model` here came from (`hub`, `upload`, `train`) and its license, when known; the
+    /// pool catalog shows them (U8).
+    fn origin(&self, _model: &str) -> Origin {
+        (None, None)
     }
     /// Whether the node is draining: it finishes what it has and takes no new requests. A
     /// reserved node ([`ModelNode::reserved`]) counts as draining, so nothing is routed or
@@ -112,6 +120,8 @@ pub struct LocalModelNode {
     workers: Mutex<Option<Arc<crate::group::RpcWorkers>>>,
     /// Weights revisions from node.toml (`revision` on `[[model.local]]`).
     revisions: Mutex<HashMap<String, String>>,
+    /// Origins and licenses (from node.toml and provenance records, and models placed since).
+    origins: Mutex<HashMap<String, Origin>>,
     /// Sizes a model's context beside what runs before it loads.
     planner: Mutex<Option<Arc<crate::ctxplan::Planner>>>,
 }
@@ -129,6 +139,7 @@ impl LocalModelNode {
             service_host: Mutex::new(None),
             workers: Mutex::new(None),
             revisions: Mutex::new(HashMap::new()),
+            origins: Mutex::new(HashMap::new()),
             planner: Mutex::new(None),
         }
     }
@@ -145,6 +156,16 @@ impl LocalModelNode {
     /// Sets the weights revision of each model that has one (see [`ModelNode::revision`]).
     pub fn set_revisions(&self, revisions: impl IntoIterator<Item = (String, String)>) {
         *self.revisions.lock().unwrap_or_else(|e| e.into_inner()) = revisions.into_iter().collect();
+    }
+
+    /// Sets a model's origin and license (see [`ModelNode::origin`]); both `None` forgets them.
+    pub fn set_origin(&self, model: &str, origin: Option<String>, license: Option<String>) {
+        let mut o = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+        if origin.is_none() && license.is_none() {
+            o.remove(model);
+        } else {
+            o.insert(model.to_string(), (origin, license));
+        }
     }
 
     /// Lets this node join split-model groups (M7).
@@ -188,6 +209,10 @@ impl ModelNode for LocalModelNode {
 
     fn revision(&self, model: &str) -> Option<String> {
         self.revisions.lock().unwrap_or_else(|e| e.into_inner()).get(model).cloned()
+    }
+
+    fn origin(&self, model: &str) -> Origin {
+        self.origins.lock().unwrap_or_else(|e| e.into_inner()).get(model).cloned().unwrap_or_default()
     }
 
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {

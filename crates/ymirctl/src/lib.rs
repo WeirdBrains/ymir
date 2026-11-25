@@ -1078,15 +1078,24 @@ pub(crate) async fn bridge(paths: &Paths) -> Result<BridgeClient> {
 async fn models(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     let v = bridge(paths).await?.models().await?;
     for m in v["data"].as_array().into_iter().flatten() {
-        let ready = match m["weirdnet"]["state"].as_str() {
-            Some("warm") => "ready",
-            Some("busy") => "ready (busy)",
-            Some("loading") => "loading",
-            _ => "on disk",
-        };
-        writeln!(out, "{:<24} {:<10} {}", m["id"].as_str().unwrap_or("?"), m["weirdnet"]["purpose"].as_str().unwrap_or(""), ready)?;
+        writeln!(out, "{}", pool_line(m))?;
     }
     Ok(())
+}
+
+/// One `ymirctl models` line for a `/v1/models` entry: id, purpose, state, and where it came
+/// from with its license when the pool knows (`upload, MIT`; U8).
+fn pool_line(m: &serde_json::Value) -> String {
+    let w = &m["weirdnet"];
+    let ready = match w["state"].as_str() {
+        Some("warm") => "ready",
+        Some("busy") => "ready (busy)",
+        Some("loading") => "loading",
+        _ => "on disk",
+    };
+    let from: Vec<&str> = [w["origin"].as_str(), w["license"].as_str()].into_iter().flatten().collect();
+    let line = format!("{:<24} {:<10} {:<13} {}", m["id"].as_str().unwrap_or("?"), w["purpose"].as_str().unwrap_or(""), ready, from.join(", "));
+    line.trim_end().to_string()
 }
 
 async fn for_training(paths: &Paths) -> Result<Vec<ymir_core::context::RawConversation>> {
@@ -1409,4 +1418,19 @@ async fn batch_jsonl(
     )?;
     writeln!(out, "manifest: {}", s.manifest_path.display())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pool_line_tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_pool_line_says_where_a_model_came_from_when_known() {
+        let up = json!({"id": "tuned", "weirdnet": {"purpose": "chat", "state": "warm", "origin": "upload", "license": "MIT"}});
+        assert_eq!(super::pool_line(&up), format!("{:<24} {:<10} {:<13} upload, MIT", "tuned", "chat", "ready"));
+        let hub = json!({"id": "qwen", "weirdnet": {"purpose": "chat", "state": "loadable", "origin": "hub", "license": null}});
+        assert!(super::pool_line(&hub).ends_with("on disk       hub"), "{}", super::pool_line(&hub));
+        let old = json!({"id": "e", "weirdnet": {"purpose": "embedding", "state": "warm"}});
+        assert_eq!(super::pool_line(&old), format!("{:<24} {:<10} ready", "e", "embedding"));
+    }
 }
