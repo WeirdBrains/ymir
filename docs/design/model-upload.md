@@ -593,6 +593,34 @@ running on. Rollouts stay per inference node, as in U3.
   node and a weight of 0, 1, 5 or 10 percent; the upload is added as the rollout's next version, kept in that
   node's node.toml, and a refusal or an older Ymir shows the `ymirctl ... --inference NODE` command instead.
 
+## U6: pools, upload once and copy node to node (planned 2026-11-25)
+
+Decision 3: the file leaves this device once; the other nodes copy it from the node that took it. Weirdnet's
+`ModelsClient::replicate` and `Pull::from_peer` (`PullSource::Peer` over models/1 `Fetch`, weirdnet-backends 0.4.4)
+do the copy, checked against the same hashes and resumable like an upload.
+
+- **Targets:** `ymirctl models upload FILE --node all` (every model node among your devices except this one) or
+  `--node A,B,...`. `--node auto` stays refused for uploads. One target is a plain U2 upload.
+- **Space first (decision 4):** before anything is sent, each target's `Disk` report is read. A node whose free
+  space less what it keeps (`upload_keep_free`, by default the larger of 10% and 20 GiB) is smaller than the files is
+  left out with the no-space message; the others go ahead. Each node still checks for itself when it writes.
+- **The stage:** `--stage NODE` (one of the targets), else the target with the most room. The upload goes there as
+  in U2 (resumable, recorded and saved in its node.toml).
+- **Copies:** the other targets pull it from the stage at once (`replicate`), node to node, so this device's
+  uplink is used once. Each copy is recorded with `/ymir/uploads/1` like an upload (saved in that node's node.toml
+  unless `--no-persist`; the same role). A target that already has these exact files is "already there".
+- **Fallback:** a target that can't pull from a peer (a Ymir older than 0.14.0: no peer dialer, or the stage's
+  `Fetch` unknown) gets the upload from this device instead, and says so.
+- **Serving nodes:** `ymird` gives its models/1 service a peer dialer and its node certificate
+  (`with_peer_dialer`), so it can pull from the owner's other nodes; the stage answers `Fetch` for the owner's linked
+  devices (the same roster auth as models/1).
+- **Rollouts:** `--rollout` works with a pool upload as with one node (the version is the model id, served by every
+  node that has it); it joins only when every target has it.
+- **Tests:** a testkit test with four daemons (a laptop, two model nodes and one that keeps more free than it
+  has): `--node all` sends once and the other node copies from the stage (same bytes, saved in its node.toml);
+  the full node is left out before sending; `--stage` picks the stage; again is "already there"; `--node auto`
+  and a `--stage` outside the targets are refused.
+
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
 1. **Who may upload:** every linked device. No `ymir.models.write` grant.
