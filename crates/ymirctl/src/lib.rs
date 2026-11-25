@@ -1254,7 +1254,9 @@ async fn update_check(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     // The version and build of the ymird that runs here decide what is newer and which bundle.
     let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
     let exe = std::env::current_exe().unwrap_or_default();
-    match au::check_once(paths, &cfg, &running, &exe, &http).await? {
+    let o = au::check_once(paths, &cfg, &running, &exe, &http).await;
+    au::record(paths, &au::describe(&o));
+    match o? {
         Outcome::UpToDate { latest } => writeln!(out, "up to date: the feed's latest is {latest}")?,
         Outcome::Skipped(why) => writeln!(out, "nothing taken: {why}")?,
         Outcome::Staged { update_id, version } => writeln!(out, "staged {update_id} {version}; it runs on trial at the next start")?,
@@ -1337,6 +1339,16 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             writeln!(out, "health: {:?}", s.health)?;
             if !s.bad.is_empty() {
                 writeln!(out, "marked bad: {}", s.bad.join(", "))?;
+            }
+            let cfg = NodeConfig::load(&paths.config()).map(|c| c.update).unwrap_or_default();
+            writeln!(
+                out,
+                "self-update: {}",
+                if cfg.auto { format!("on, every {} from {}", cfg.interval, cfg.feed) } else { "off ([update] auto = false)".into() }
+            )?;
+            if let Some(c) = ymir_core::autoupdate::last_check(paths) {
+                let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).saturating_sub(c.at);
+                writeln!(out, "last check: {} ({}m ago)", c.result, ago / 60)?;
             }
         }
         UpdateCmd::Boot { exec, installed, args } => {
