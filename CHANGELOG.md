@@ -13,7 +13,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
-- `scripts/trainer.py extract-lora` is fast: a randomized, truncated SVD, on the GPU through PyTorch when the trainer's venv has a CUDA build of it, else on the CPU several matrices at a time with one BLAS thread each. A rank 16 adapter for Qwen2.5-0.5B took 79 minutes on a busy machine before, and now 8 s on the CPU or 4 s on the GPU. `YMIR_TRAINER_SVD` (`auto`, `cuda`, `cpu`, `exact`) and `YMIR_TRAINER_THREADS` choose where and how wide.
+- `scripts/trainer.py extract-lora` is fast: a randomized, truncated SVD, on the GPU through PyTorch when the trainer's venv has a CUDA build of it, else on the CPU several matrices at a time with one BLAS thread each. A rank 16 adapter for Qwen2.5-0.5B took 79 minutes on a busy machine before (28 minutes on a less busy one), and now 8 s on the CPU or 4 s on the GPU. `YMIR_TRAINER_SVD` (`auto`, `cuda`, `cpu`, `exact`) and `YMIR_TRAINER_THREADS` choose where and how wide.
 
 ### Fixed
 

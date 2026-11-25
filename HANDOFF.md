@@ -20,7 +20,7 @@ The first real run's `extract-lora` (Qwen2.5-0.5B, rank 16, 168 matrices) took 7
 - Docs: training plan (trainer section), CHANGELOG (Unreleased, Changed).
 
 **Timings** (the run's full model was not kept, so a stand-in: the f32 base plus the run's adapter plus full-rank noise of the same size, the real shapes; load ~30 from other jobs on the machine; rank 16):
-- before, exact float64 SVD, 16 BLAS threads: BEFORE_TIME
+- before (the old code), exact float64 SVD, 16 BLAS threads: 1704 s (28 min; the real run took 79 min at load ~40)
 - after, exact SVD on 4 threads: 45.2 s
 - after, CPU (randomized, 4 threads): 8.2 s (17.4 s wall with loading and writing)
 - after, GPU (torch 2.11 cu128, RTX 3060): 4.4 s (21.5 s wall)
