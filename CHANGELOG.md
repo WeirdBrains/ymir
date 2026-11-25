@@ -6,6 +6,10 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The Release workflow no longer puts the WiX debug database (`YmirSetup-VERSION.wixpdb`) among the release files or in `SHA256SUMS` (the bundle is built with `-pdbtype none`, as the MSIs were).
+
 ## [0.12.0] - 2026-11-25
 
 ### Added

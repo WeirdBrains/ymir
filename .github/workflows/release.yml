@@ -238,6 +238,8 @@ jobs:
           if ($msis.ContainsKey("arm64")) { $setup += @("-MsiArm64", $msis["arm64"]) }
           powershell -File packaging\windows\make-installer.ps1 @setup
           if ($LASTEXITCODE -ne 0) { throw "YmirSetup build failed" }
+          # WiX debug databases are build output, not release files.
+          Remove-Item -Path dist\*.wixpdb -ErrorAction SilentlyContinue
           Get-ChildItem dist
       - uses: actions/upload-artifact@v4
         with:
