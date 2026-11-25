@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-25
+
 ### Added
 
 - Hands-off self-update: `ymird` checks the release feed on a schedule (`[update]` in node.toml: on by default, `interval = "6h"`, `channel`, `feed`, `variant`, `restart`), downloads this machine's signed `.update.tar.gz`, verifies and stages it against the pinned root, and restarts into it under its service; a release that doesn't come up healthy is rolled back to the last good one. `ymirctl update check` does one check by hand. Nothing happens without a pinned update root.
@@ -19,6 +21,10 @@ All notable changes to Ymir are listed here. The format follows
 - weirdnet-agent 0.5.4, weirdnet-backends 0.4.5 and weirdnet-openai 0.2.3 (Weirdnet request D).
 - A model placed in a node's store but not served (for example a projector for an embedding model) is logged as a
   warning on that node.
+
+### Fixed
+
+- Hands-off self-update in ymird ([update]); model origin and license in the pool catalog (U8).
 
 ## [0.15.2] - 2026-11-25
 
