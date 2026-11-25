@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-25
+
 ### Added
 
 - A larger synthetic training fixture, `crates/ymir-testkit/tests/fixtures/decentralized-networks-large.dataset.jsonl` with its `ymir-dataset/1` manifest (16 conversations, 1297 tokens with Qwen2.5's chat template), long enough for a real `llama-finetune` step at context 256; the small fixture renders to 256 tokens.
@@ -18,6 +20,7 @@ All notable changes to Ymir are listed here. The format follows
 ### Fixed
 
 - `scripts/trainer.py train` refuses a dataset too short to train on, with its token count and how many it needs, instead of letting `llama-finetune` crash (`GGML_ASSERT ... ggml_opt_dataset_init`). Upstream needs at least 2 x context + 1 tokens, with the context rounded up to a multiple of 256 as llama.cpp does, so at least 513. Without `llama-tokenize` next to `llama-finetune` (an older trainer build), the crash is turned into the same refusal.
+- The trainer refuses a dataset too short for llama-finetune, a larger synthetic training fixture, and a fast extract-lora (seconds instead of over an hour).
 
 ## [0.15.0] - 2026-11-25
 
