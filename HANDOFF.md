@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 04:53 EST: v0.14.0 release in progress
+
+Cut with `weirdnet_release.py cut --minor` on main 42707ce after CI, macOS and Pages were green there (release commit 560283b, tag v0.14.0; the cut's checks passed): uploads to a pool (U6). Left: the Release workflow, scan, `github`/`assets`, signing the Arch packages, the Arch recipes' hashes (this branch) and `taur`.
+
 ## 2026-11-25 04:33 EST: model upload U6, pools (branch `feature/upload-pools`)
 
 Slice U6 of [docs/design/model-upload.md](docs/design/model-upload.md): upload once, the other nodes copy it from that node, on Weirdnet's `ModelsClient::replicate` and `Pull::from_peer` (weirdnet-backends 0.4.4, already locked); no Weirdnet crate edited. Details in the plan's "U6 as built".
