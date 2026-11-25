@@ -276,6 +276,17 @@ pub fn serve_uploads(
     crate::upload_net::UploadsServer::start(node, Arc::new(service.with_auth(roster_auth(m))))
 }
 
+/// Serves `/ymir/rollouts/1` on an inference node: the owner's linked devices (narrowed to
+/// `allow`, `[inference] rollout_callers`) read and change its rollouts.
+pub fn serve_rollouts(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    allow: &[String],
+    service: crate::rollouts_net::RolloutsService,
+) -> Result<crate::rollouts_net::RolloutsServer, RemoteError> {
+    crate::rollouts_net::RolloutsServer::start(node, Arc::new(service.with_auth(role_auth(m, allow))))
+}
+
 /// When a model node's stream counts as stalled: no frame for 5 s, or 3x the recent gap between
 /// frames, up to 12 s; before the first frame, `first` (the prompt's processing time, from
 /// [`crate::coordinator::prefill_allowance`]) when longer.
