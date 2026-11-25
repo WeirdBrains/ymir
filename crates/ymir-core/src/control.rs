@@ -156,6 +156,13 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         set: Option<Vec<crate::rollout::Rollout>>,
     },
+    /// Another inference node's rollouts over Weirdnet (`ymirctl models rollout --inference NODE`,
+    /// `/ymir/rollouts/1`): read them, or change them by that node's rules.
+    RemoteRollouts {
+        /// A roster label or a peer id.
+        node: String,
+        request: crate::rollouts_net::Request,
+    },
     /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
     /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
     Shutdown,
@@ -288,6 +295,9 @@ pub struct ControlResponse {
     /// The rollouts in force, for [`ControlRequest::Rollouts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollouts: Option<Vec<crate::rollout::Rollout>>,
+    /// Another inference node's answer, for [`ControlRequest::RemoteRollouts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_rollouts: Option<crate::rollouts_net::Rollouts>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -327,6 +337,7 @@ impl ControlResponse {
             groups: Vec::new(),
             group_losses: Vec::new(),
             rollouts: None,
+            remote_rollouts: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -341,6 +352,7 @@ impl ControlResponse {
             groups: Vec::new(),
             group_losses: Vec::new(),
             rollouts: None,
+            remote_rollouts: None,
         }
     }
 }
@@ -516,6 +528,19 @@ impl ControlHandler {
                 resp.rollouts = Some(c.rollouts());
                 resp
             }
+            ControlRequest::RemoteRollouts { node, request } => {
+                let Some(hub) = &self.models else {
+                    return ControlResponse::err("changing rollouts over Weirdnet needs a device identity on this node (see `ymirctl pool link`)");
+                };
+                match hub.rollouts(&node, request).await {
+                    Ok((label, r)) => {
+                        let mut resp = ControlResponse::ok(label);
+                        resp.remote_rollouts = Some(r);
+                        resp
+                    }
+                    Err(e) => ControlResponse::err(e),
+                }
+            }
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -572,6 +597,7 @@ impl ControlHandler {
                     groups: Vec::new(),
                     group_losses: Vec::new(),
                     rollouts: None,
+                    remote_rollouts: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),

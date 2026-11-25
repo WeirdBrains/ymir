@@ -160,25 +160,8 @@ pub fn verdict(reply: &str) -> Option<bool> {
     }
 }
 
-/// One (model, row) result.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Scored {
-    pub model: String,
-    pub id: String,
-    pub ok: bool,
-    pub answer: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub check: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub judge: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub judge_reply: Option<String>,
-    pub cache_hit: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub standin: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+/// One (model, row) result (shared with the rollout gate).
+pub use ymir_core::rollout_edit::Scored;
 
 /// Per-model totals.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

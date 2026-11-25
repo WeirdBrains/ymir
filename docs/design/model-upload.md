@@ -538,6 +538,58 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   than its disk has, and an adapter. The demo's engine takes adapters live, so the restart note's shot is a seeded
   view state; not tested against a real Ymir node.
 
+## Rollouts over Weirdnet, `/ymir/rollouts/1` (planned 2026-11-25, follow-up to U4)
+
+So that Bragi (or `ymirctl` on a laptop) can put an upload into a rollout on an inference node it is not
+running on. Rollouts stay per inference node, as in U3.
+
+- **Protocol:** `/ymir/rollouts/1`, JSON request and reply on one stream, served by `ymird` when it has the
+  inference role, next to `/ymir/uploads/1`. Requests (tag `op`): `list`; `add {name, version?, model,
+  weight}` (no `version`: one more than the highest, as U3 picks it); `weight {name, version, weight}`;
+  `rollback {name}`; `retire {name, version, force}`. Each change may carry `force` and `eval` (the scored
+  rows of a `ymirctl eval --out` file, inline). Replies: `rollouts {rollouts, said}` (the rollouts in
+  force after the change and what changed, as `ymirctl models rollout` says it) or `failed {message}`.
+- **The same rules as `ymirctl models rollout`:** the edit logic moves from `ymirctl` into `ymir-core`
+  (`apply`, the canary gate at 10 percent, `eval_gate`, `write_rollouts`, and the eval's `Scored` row), so both
+  paths share it. A change is validated, written to node.toml (`[[inference.rollout]]`, other content
+  kept, one edit at a time) and set live through the coordinator, so new conversations follow at once.
+- **Who:** the owner's linked devices, the same callers as `/ymir/uploads/1` (roster auth).
+- **Clients:** `ymir_core::rollouts_net::RolloutsClient`; `ymirctl models rollout ... --inference NODE` runs a
+  change on another inference node. Bragi gets the same small temporary copy of the wire types as for
+  uploads, and a rollout section in the upload dialog (rollout name, weight 0 by default, a canary share
+  up to 10 percent).
+- **Tests:** unit tests for the moved logic (unchanged behaviour), and a testkit test with two daemons:
+  an `add` over the network lands in the inference node's node.toml and in its live rollouts; a weight
+  above the canary share without an eval is refused; an unlinked caller is refused.
+
+**Decisions (2026-11-25 2:51 AM ET, made by llm dev from Michael's upload answers; Michael can override them):**
+
+1. Any linked device may change rollouts on an inference node, as for uploads; `[inference]
+   rollout_callers` (peer ids, like `[train] callers`) narrows the list.
+2. A remote change above the 10 percent canary share carries the scored eval rows or `force`. Bragi
+   offers 0 to 10 percent only, for now.
+3. Every operation works remotely, rollback and retire included: rollback is the safety valve.
+4. A remote change is written to the node's node.toml by default, as uploads are; a request with
+   `persist: false` changes only the live rollouts (until ymird restarts).
+
+### `/ymir/rollouts/1` as built (2026-11-25)
+
+- `ymir_core::rollout_edit`: `Change` (`add`, `weight`, `rollback`, `retire`), `Gate` (scored rows, their source,
+  `force`), `apply`, `eval_gate`, `write_rollouts`, `next_version`, and the eval's `Scored` row (re-exported by
+  `ymirctl::eval`). `ymirctl models rollout` converts its arguments to a `Change` and reads `--eval FILE` into rows.
+- `ymir_core::rollouts_net`: `Request {cert, change, gate, persist}` (no change: a read), `Reply::{Rollouts {rollouts,
+  said, saved, note}, Failed}`, `RolloutsService` (changes the coordinator's rollouts in force, one edit at a time,
+  then node.toml when `persist`; a node.toml that can't be written leaves the change live and says so),
+  `RolloutsServer`, `RolloutsClient`. `ymird` serves it with the inference role when `[inference] remote_rollouts`
+  (default on); callers are the roster narrowed by `[inference] rollout_callers` (validated as peer ids).
+- `ymirctl models rollout ... --inference NODE [--no-persist]` goes through this machine's `ymird`
+  (`ControlRequest::RemoteRollouts`, the `ModelsHub`'s `RolloutsClient`). `--inference` naming this device is
+  refused. `models upload --rollout` still applies on this machine only.
+- Tests: `rollout_edit` and `rollouts_net` unit tests; the moved logic's existing `ymirctl` tests unchanged;
+  `crates/ymir-testkit/tests/rollouts_net.rs` (three daemons: add with all the traffic, saved and live; the canary
+  gate refusing 50 and taking 5; `--no-persist` live only; list; rollback; retire; a linked device outside
+  `rollout_callers` refused; `--inference` at this device refused).
+
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 
 1. **Who may upload:** every linked device. No `ymir.models.write` grant.

@@ -33,6 +33,8 @@ pub mod models;
 pub mod paths;
 pub mod remote;
 pub mod rollout;
+pub mod rollout_edit;
+pub mod rollouts_net;
 pub mod service;
 pub mod setup;
 pub mod tasks;

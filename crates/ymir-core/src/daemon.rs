@@ -215,6 +215,12 @@ impl Daemon {
                 .map_err(|e| anyhow!("serving the inference role on Weirdnet: {e}"))?;
                 serving.push(Box::new(server));
                 serving.push(Box::new(feed));
+                if cfg.inference.remote_rollouts {
+                    let svc = crate::rollouts_net::RolloutsService::new(paths.config(), c.clone());
+                    let server = remote::serve_rollouts(&net.node, &net.membership, &cfg.inference.rollout_callers, svc)
+                        .map_err(|e| anyhow!("serving rollouts on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                }
                 if cfg.inference.agent.enabled {
                     let auth = remote::roster_auth(&net.membership);
                     let t = crate::tasks::serve(&net.node, c.clone(), auth, &cfg.node.name, &cfg.inference.agent)

@@ -6,6 +6,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Rollouts over Weirdnet (`/ymir/rollouts/1`, the follow-up to model-upload U4): `ymirctl models rollout list|add|weight|rollback|retire ... --inference NODE` reads and changes another inference node's rollouts by that node's rules (above the 10 percent canary share the request carries the eval rows from `--eval FILE`, or `--force`). A change applies at once and is saved in that node's node.toml; `--no-persist` changes only its live rollouts. Any of the owner's linked devices may, narrowed by `[inference] rollout_callers` (peer ids); `[inference] remote_rollouts = false` turns it off.
+
+### Changed
+
+- The rollout rules (`apply`, the canary gate, the eval gate, the node.toml rewrite) and the eval's scored row moved from `ymirctl` into `ymir_core::rollout_edit`, shared by both paths; behaviour unchanged.
+
 ### Fixed
 
 - The Release workflow no longer puts the WiX debug database (`YmirSetup-VERSION.wixpdb`) among the release files or in `SHA256SUMS` (the bundle is built with `-pdbtype none`, as the MSIs were).

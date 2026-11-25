@@ -452,6 +452,16 @@ pub struct InferenceSection {
     /// Versioned rollouts (training plan P4b): a name, its versions and their traffic weights.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rollout: Vec<crate::rollout::Rollout>,
+    /// Let the owner's linked devices read and change these rollouts over Weirdnet
+    /// (`/ymir/rollouts/1`: Bragi, `ymirctl models rollout --inference`), with the same rules as
+    /// `ymirctl models rollout` here; changes are saved in this file unless the caller asks not to.
+    /// `false` turns the protocol off.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub remote_rollouts: bool,
+    /// Which linked devices may do that, by peer id (as `[train] callers`). Empty (the default):
+    /// any linked device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollout_callers: Vec<String>,
 }
 
 fn standin_after() -> String {
@@ -475,6 +485,8 @@ impl Default for InferenceSection {
             alerts: weirdnet_alerts::AlertsConfig::default(),
             split: Vec::new(),
             rollout: Vec::new(),
+            remote_rollouts: true,
+            rollout_callers: Vec::new(),
         }
     }
 }
@@ -588,6 +600,11 @@ impl NodeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        for c in &self.inference.rollout_callers {
+            if c.parse::<weirdnet_net::PeerId>().is_err() {
+                bail!("[inference] rollout_callers: `{c}` is not a peer id (list the device's peer id, as the pool's device list shows it)");
+            }
+        }
         for c in &self.model.callers {
             if c.parse::<weirdnet_net::PeerId>().is_err() {
                 bail!(
