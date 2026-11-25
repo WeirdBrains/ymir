@@ -1229,7 +1229,7 @@ mod tests {
         let text = format!(
             r#"
             [model]
-            models_dir = "{m}"
+            models_dir = '{m}'
             [[model.local]]
             id = "up"
             file = "uploads/up/up.gguf"
@@ -1241,7 +1241,7 @@ mod tests {
             file = "pulled-Q4_K_M.gguf"
             [[model.local]]
             id = "own"
-            file = "{e}/own.gguf"
+            file = '{e}/own.gguf'
             [[model.local]]
             id = "big"
             backend = "vllm"
