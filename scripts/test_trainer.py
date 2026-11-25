@@ -308,6 +308,84 @@ class TrainerTest(unittest.TestCase):
         t = {x.name: np.array(x.data) for x in GGUFReader(adapter).tensors}
         self.assertEqual(t["blk.0.attn_q.weight.lora_a"].shape, (8, 6), "a matrix smaller than the rank is padded, so alpha / rank holds")
 
+    def test_randomized_svd_matches_exact(self):
+        """A fine-tune's difference: a strong low-rank part plus full-rank noise, at a real model's
+        shapes (Qwen2.5-0.5B's ffn and attention)."""
+        rng = np.random.default_rng(3)
+        for m, n in ((4864, 896), (896, 896), (128, 896)):
+            low = rng.standard_normal((m, 24)).astype(np.float32) @ (rng.standard_normal((24, n)).astype(np.float32) * np.geomspace(1, 0.05, 24)[:, None].astype(np.float32))
+            delta = low + rng.standard_normal((m, n)).astype(np.float32) * float(np.linalg.norm(low) / np.sqrt(low.size))
+            delta *= 1e-4
+            ue, ve, ke = trainer.top_svd(delta, 16, ("exact", None))
+            ur, vr, kr = trainer.top_svd(delta, 16, ("cpu", None))
+            self.assertEqual((ur.shape, vr.shape), ((m, 16), (16, n)))
+            self.assertAlmostEqual(kr, ke, delta=1e-3 * ke)
+            err = lambda u, v: np.linalg.norm(delta - u @ v) / np.linalg.norm(delta)
+            self.assertLess(err(ur, vr), err(ue, ve) * 1.001, f"{m}x{n}: within 0.1% of the best rank-16 approximation")
+            np.testing.assert_allclose(np.linalg.norm(ur, axis=0), np.linalg.norm(ue, axis=0), rtol=5e-3)
+
+    def test_randomized_svd_is_exact_on_low_rank(self):
+        rng = np.random.default_rng(4)
+        delta = (rng.standard_normal((600, 5)) @ rng.standard_normal((5, 300))).astype(np.float32)
+        u, v, kept = trainer.top_svd(delta, 16, ("cpu", None))
+        np.testing.assert_allclose(u @ v, delta, atol=1e-4)
+        self.assertAlmostEqual(kept, 1.0, places=5)
+        u2, v2, _ = trainer.top_svd(delta, 16, ("cpu", None))
+        np.testing.assert_array_equal(u, u2, "the same sketch every time")
+
+    def test_svd_device_choice(self):
+        old = os.environ.get("YMIR_TRAINER_SVD")
+        self.addCleanup(lambda: os.environ.__setitem__("YMIR_TRAINER_SVD", old) if old is not None else os.environ.pop("YMIR_TRAINER_SVD", None))
+        os.environ["YMIR_TRAINER_SVD"] = "exact"
+        self.assertEqual(trainer.svd_device()[0], "exact")
+        os.environ["YMIR_TRAINER_SVD"] = "cpu"
+        self.assertEqual(trainer.svd_device()[0], "cpu")
+        os.environ["YMIR_TRAINER_SVD"] = "gpu-please"
+        with self.assertRaises(trainer.Refusal):
+            trainer.svd_device()
+        os.environ["YMIR_TRAINER_SVD"] = "auto"
+        self.assertIn(trainer.svd_device()[0], ("cuda", "cpu"))
+        try:
+            import torch
+
+            has_cuda = torch.cuda.is_available()
+        except ImportError:
+            has_cuda = False
+        os.environ["YMIR_TRAINER_SVD"] = "cuda"
+        if has_cuda:
+            self.assertEqual(trainer.svd_device()[0], "cuda")
+        else:
+            with self.assertRaises(trainer.Refusal) as e:
+                trainer.svd_device()
+            self.assertIn("pip install torch", str(e.exception))
+
+    @unittest.skipUnless(os.environ.get("YMIR_TEST_CUDA"), "set YMIR_TEST_CUDA=1 with a CUDA build of torch")
+    def test_cuda_svd_matches_cpu(self):
+        import torch
+
+        rng = np.random.default_rng(5)
+        delta = (rng.standard_normal((4864, 40)) @ rng.standard_normal((40, 896)) + 0.3 * rng.standard_normal((4864, 896))).astype(np.float32)
+        uc, vc, kc = trainer.top_svd(delta, 16, ("cpu", None), seed=7)
+        ug, vg, kg = trainer.top_svd(delta, 16, ("cuda", torch), seed=7)
+        self.assertAlmostEqual(kg, kc, delta=1e-4)
+        np.testing.assert_allclose(ug @ vg, uc @ vc, atol=1e-3 * float(np.abs(uc @ vc).max()))
+
+    def test_extract_modes_agree(self):
+        self.train()
+        tuned = self.tmp / "full.gguf"
+        out = {}
+        for mode in ("exact", "cpu"):
+            adapter = self.tmp / f"adapter-{mode}.gguf"
+            r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(adapter), env={**self.env, "YMIR_TRAINER_SVD": mode})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("on the CPU", " ".join(e.get("message", "") for e in ev))
+            out[mode] = {t.name: np.array(t.data) for t in GGUFReader(adapter).tensors}
+        for k in out["exact"]:
+            np.testing.assert_allclose(out["cpu"][k], out["exact"][k], atol=1e-6)
+        r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(self.tmp / "x.gguf"), env={**self.env, "YMIR_TRAINER_SVD": "bogus"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("YMIR_TRAINER_SVD", ev[-1]["message"])
+
     def test_extract_refusals(self):
         r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(self.base), "--rank", "4", "--out", str(self.tmp / "a.gguf"))
         self.assertEqual(r.returncode, 1)

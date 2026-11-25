@@ -31,7 +31,9 @@ tokens, with the context rounded up to a multiple of 256 as llama.cpp does, and 
 a shorter dataset is refused with its count (see min_tokens).
 
 Environment: YMIR_TRAINER_NGL (llama-finetune -ngl, default all; 0 trains on the CPU),
-YMIR_TRAINER_ARGS (extra llama-finetune arguments, shell-quoted).
+YMIR_TRAINER_ARGS (extra llama-finetune arguments, shell-quoted), YMIR_TRAINER_SVD (where
+extract-lora's SVD runs: auto, cuda, cpu or exact; see svd_device). With PyTorch (a CUDA build) in
+the trainer's venv, extract-lora runs on the GPU; without it, on the CPU.
 """
 
 import argparse
@@ -43,6 +45,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 INTERFACE = 1
@@ -433,14 +436,95 @@ def cmd_train(a):
     return 0
 
 
-def lora_tensors(base, tuned, rank):
+# extract-lora's SVD. A truncated, randomized SVD (Halko, Martinsson and Tropp 2011): the top `rank`
+# directions from a sketch of rank + OVERSAMPLE columns, sharpened by POWER_ITERS power iterations,
+# in float32. It costs O(m n (rank + OVERSAMPLE)) per matrix instead of a full SVD's O(m n min(m, n)),
+# and matches the exact top singular values to within 0.5% (the change kept to 0.1%) on fine-tune differences
+# (test_trainer.py checks it). Matrices too small for a sketch to pay take the exact SVD.
+OVERSAMPLE = 16
+POWER_ITERS = 5
+SVD_CHOICES = ("auto", "cuda", "cpu", "exact")
+
+
+def svd_device():
+    """Where extract-lora's SVD runs, from $YMIR_TRAINER_SVD: `auto` (the default: CUDA through
+    PyTorch when it is installed and sees a GPU, else the CPU), `cuda` (refused without one), `cpu`
+    (the randomized SVD with numpy) or `exact` (a full float64 SVD on the CPU, the slow reference).
+    Returns (kind, torch module or None, description)."""
+    choice = os.environ.get("YMIR_TRAINER_SVD", "auto").strip().lower() or "auto"
+    if choice not in SVD_CHOICES:
+        raise Refusal(f"YMIR_TRAINER_SVD is {choice!r}; it takes one of {', '.join(SVD_CHOICES)}")
+    if choice in ("auto", "cuda"):
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            return "cuda", torch, f"CUDA ({torch.cuda.get_device_name(0)}, torch {torch.__version__})"
+        if choice == "cuda":
+            why = "PyTorch is not installed in the trainer's Python" if torch is None else f"torch {torch.__version__} sees no CUDA GPU"
+            raise Refusal(f"YMIR_TRAINER_SVD=cuda, but {why}; pip install torch (a CUDA build) into the trainer's venv, or unset it")
+    if choice == "exact":
+        return "exact", None, "the CPU (exact SVD)"
+    return "cpu", None, "the CPU"
+
+
+def sketch(n, cols, seed):
+    """The random test matrix, the same on every device (numpy's generator, seeded)."""
+    import numpy as np
+
+    return np.random.default_rng(seed).standard_normal((n, cols), dtype=np.float32)
+
+
+def top_svd(delta, rank, device=("cpu", None), seed=0):
+    """(U[:, :r] * S[:r], Vt[:r], kept) for the top r = min(rank, ...) singular directions of `delta`
+    (float32, [out, in]); kept is the share of its energy (squared Frobenius norm) they hold."""
+    import numpy as np
+
+    kind, torch = device
+    m, n = delta.shape
+    small = min(m, n)
+    energy = float(np.einsum("ij,ij->", delta, delta, dtype=np.float64))
+    cols = min(rank + OVERSAMPLE, small)
+    if kind == "exact" or cols * 2 >= small:
+        U, S, Vt = np.linalg.svd(delta.astype(np.float64), full_matrices=False)
+        r = min(rank, S.shape[0])
+        us, vt, s = (U[:, :r] * S[:r]).astype(np.float32), Vt[:r].astype(np.float32), S[:r]
+    elif kind == "cuda":
+        with torch.no_grad():
+            A = torch.from_numpy(delta).to("cuda")
+            Q = torch.linalg.qr(A @ torch.from_numpy(sketch(n, cols, seed)).to("cuda")).Q
+            for _ in range(POWER_ITERS):
+                Q = torch.linalg.qr(A.T @ Q).Q
+                Q = torch.linalg.qr(A @ Q).Q
+            Ub, S, Vt = torch.linalg.svd((Q.T @ A).double(), full_matrices=False)
+            r = min(rank, S.shape[0])
+            U = Q.double() @ Ub[:, :r]
+            us = (U * S[:r]).float().cpu().numpy()
+            vt = Vt[:r].float().cpu().numpy()
+            s = S[:r].cpu().numpy()
+            del A, Q
+    else:
+        Q, _ = np.linalg.qr(delta @ sketch(n, cols, seed))
+        for _ in range(POWER_ITERS):
+            Q, _ = np.linalg.qr(delta.T @ Q)
+            Q, _ = np.linalg.qr(delta @ Q)
+        Ub, S, Vt = np.linalg.svd((Q.T @ delta).astype(np.float64), full_matrices=False)
+        r = min(rank, S.shape[0])
+        us = ((Q.astype(np.float64) @ Ub[:, :r]) * S[:r]).astype(np.float32)
+        vt, s = Vt[:r].astype(np.float32), S[:r]
+    kept = min(1.0, float((np.asarray(s, np.float64) ** 2).sum()) / energy) if energy else 1.0
+    return us, vt, kept
+
+
+def lora_tensors(base, tuned, rank, device=("cpu", None)):
     """(name, lora_a, lora_b, kept) for each matrix the fine-tune changed; kept is the share of
     the change's energy the rank keeps."""
     import numpy as np
     from gguf.quants import dequantize
 
     tuned_by_name = {t.name: t for t in tuned.tensors}
-    for t in base.tensors:
+    for i, t in enumerate(base.tensors):
         if len(t.shape) != 2 or not t.name.startswith("blk."):
             continue  # norms, biases, embeddings and the output head stay as the base has them
         u = tuned_by_name.get(t.name)
@@ -451,17 +535,16 @@ def lora_tensors(base, tuned, rank):
         if w.shape != b.shape:
             raise Refusal(f"{t.name} is {list(w.shape)} in the tuned model and {list(b.shape)} in the base")
         delta = w - b
+        del b, w
         if not np.any(delta):
             yield t.name, None, None, 1.0
             continue
-        U, S, Vt = np.linalg.svd(delta.astype(np.float64), full_matrices=False)
-        r = min(rank, S.shape[0])
-        energy = float((S**2).sum())
-        kept = float((S[:r] ** 2).sum()) / energy if energy else 1.0
+        us, vt, kept = top_svd(delta, rank, device, seed=i)
+        r = us.shape[1]
         lora_b = np.zeros((delta.shape[0], rank), np.float32)
         lora_a = np.zeros((rank, delta.shape[1]), np.float32)
-        lora_b[:, :r] = U[:, :r] * S[:r]
-        lora_a[:r] = Vt[:r]
+        lora_b[:, :r] = us
+        lora_a[:r] = vt
         yield t.name, lora_a, lora_b, kept
 
 
@@ -480,6 +563,9 @@ def cmd_extract(a):
     if field_str(tuned, "general.architecture") != arch:
         raise Refusal(f"{a.tuned} is not a fine-tune of {a.base} (architecture {field_str(tuned, 'general.architecture')} vs {arch})")
     total = sum(1 for t in base.tensors if len(t.shape) == 2 and t.name.startswith("blk."))
+    kind, torch, where = svd_device()
+    log(f"extracting a rank {a.rank} adapter from {total} matrices on {where}")
+    started = time.monotonic()
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     w = gguf.GGUFWriter(str(out), arch)
@@ -492,7 +578,7 @@ def cmd_extract(a):
         w.add_name(f"{name} LoRA")
     done = changed = 0
     kept_sum = 0.0
-    for tname, la, lb, kept in lora_tensors(base, tuned, a.rank):
+    for tname, la, lb, kept in lora_tensors(base, tuned, a.rank, (kind, torch)):
         done += 1
         if la is not None:
             w.add_tensor(f"{tname}.lora_a", la)
@@ -506,7 +592,7 @@ def cmd_extract(a):
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    log(f"rank {a.rank} adapter for {changed} of {total} matrices; it keeps {100 * kept_sum / changed:.1f}% of the fine-tune's change on average")
+    log(f"rank {a.rank} adapter for {changed} of {total} matrices; it keeps {100 * kept_sum / changed:.1f}% of the fine-tune's change on average ({time.monotonic() - started:.1f} s)")
     emit("done")
     return 0
 
