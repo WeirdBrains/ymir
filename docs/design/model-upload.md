@@ -383,7 +383,7 @@ should not be open to every linked device, and the 2026-11-20 rule says to autho
    `--no-persist`), chunked, resumable, sha256-checked, with the free-disk check. Needs A and B. This is the main use case from a laptop.
 4. **U3: into a rollout.** `--rollout NAME [--eval ROWS] [--canary W]`, provenance in `rollout list`.
 5. **U4: Bragi upload dialog** (desktop first, decision 6), on the Models screen, with progress, cancel, resume
-   and "add to rollout".
+   and "add to rollout". Built without "add to rollout" in Bragi 0.7.0 (see "U4 as built").
 6. **U6: pools.** `--pool` / `--node all` with staging and node-to-node `Fetch`; push-to-each fallback. Waits on
    Weirdnet B's peer pull; Ymir does not stub a peer copy of its own (lead, 2026-11-24).
 7. **U7: more formats.** safetensors for vLLM, MLX directories, PEFT adapters, mmproj projectors.
@@ -502,6 +502,41 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   takes `--canary 100` with no eval, the second's `--canary 50` is refused and stays at weight 0, the third's
   `--canary 5` passes; `rollout list` shows origin and license. The `--eval` path is covered by P4b's gate tests;
   no testkit model can answer an eval.
+
+## U4 as built (2026-11-25, Bragi 0.7.0)
+
+- **Where:** Bragi's desktop (GPUI) Models screen, `Upload…` (decision 6); the logic is in `bragi-core`
+  (`models/upload.rs`: `inspect`, `UploadSpec`, `ModelsManager::upload`; `Core::models_inspect_upload`,
+  `models_upload`, `models_pending_uploads`, `models_forget_upload`). Bragi uses only published Weirdnet crates
+  (`weirdnet-backends` 0.4.4, `weirdnet-model` 0.5.3, `weirdnet-agent` 0.5.2).
+- **Dialog:** a file picker; Bragi inspects and hashes the file here (`weirdnet_model::artifact::inspect`) and
+  shows kind, format, architecture, size and, for an adapter, the base it was made from, before anything is sent.
+  Then one target node (the ready model nodes), for an adapter a base picker of the models that node serves, the
+  name (suggested from the file), the license (optional, decision 2) and "keep it after the node restarts"
+  (persist into the node's node.toml, on by default, decision 5).
+- **Sending:** over models/1 (`ModelsClient::upload`, as `ymirctl models upload --node`), one progress bar that never
+  goes back, and Cancel, which keeps the parts on the node. Bragi keeps unfinished uploads per pool in
+  `uploads.json`; the screen lists them with Resume and Forget, also after Bragi restarts. `exists` with the same
+  revision counts as "already there". The node's refusals are shown with what to do: `no-space` (after
+  `[model] upload_keep_free`, decision 4), `exists`, `wrong-arch`/`no-base` for an adapter, an older Ymir without
+  `/ymir/uploads/1`. An adapter the node loads at its base's next start (`AdapterChange::NextLoad`, llama.cpp) gets
+  the restart note.
+- **Recorded with the node** over `/ymir/uploads/1` like ymirctl does. Bragi can't depend on `ymir-core` (not
+  published), so it carries a small copy of the wire types marked temporary (`models/ymir_uploads.rs`); it goes when
+  Weirdnet's "upload placed" hook on `ModelsService` lands.
+- **Rollouts:** not set from Bragi (decided 2026-11-25): the result shows the `ymirctl models upload ... --rollout
+  NAME` and `models rollout add NAME@N --model ID --weight 0` commands for the inference node. A Ymir
+  `/ymir/rollouts/1` for remote rollout changes is the follow-up.
+- **Not built yet:** the Flutter dialog (the bridge passes the `uploaded` event on); the terminal app's
+  `/models upload PATH`; "auto" and pool targets (U6); each node's fit and free disk in the target picker; filtering
+  bases by architecture and engine; a dataset manifest; speed and direct-or-relay path; refusing a pool switch
+  mid-upload.
+- **Tests:** `bragi-core` `models/upload_tests.rs` (five, over the in-memory transport: a model uploaded and saved,
+  uploaded twice, `exists`; refusals for no-space, an older Ymir, an adapter's missing base, a node not on the
+  roster; pending uploads). The desktop scenario (`scripts/desktop-scenario.sh`, Xvfb, the demo profile) covers the
+  preview, progress, Cancel, the unfinished list, Resume, a no-space refusal from a demo node that keeps more free
+  than its disk has, and an adapter. The demo's engine takes adapters live, so the restart note's shot is a seeded
+  view state; not tested against a real Ymir node.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 

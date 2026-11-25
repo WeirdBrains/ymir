@@ -1874,7 +1874,7 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
   and push wake-ups, on both shells.
 - **B5 Breadth** (in progress; see [B5 status](#b5-status-in-progress-2026-11-20)): attachments (text, image and audio) and agent mode are built on both shells. The BSD desktop window does not build yet, so on BSD it is the terminal app only.
 - **B6 Your own endpoints** (built 2026-11-21; see [B6 status](#b6-status-built-2026-11-21)): any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback. Built in the core, the Flutter app and the GPUI desktop shell.
-- **B7 Models on your pool** (in progress; see [B7 status](#b7-status-in-progress)): a Models screen to search, pull and remove models on your Ymir nodes. Built in both shells and tried against demo nodes and a mock Hub. Next: a check against a real Ymir node.
+- **B7 Models on your pool** (in progress; see [B7 status](#b7-status-in-progress)): a Models screen to search, pull and remove models on your Ymir nodes, and (desktop, Bragi 0.7.0) upload one from this device. Built in both shells and tried against demo nodes and a mock Hub. Next: the upload dialog in the Flutter app, rollouts from Bragi, and a check against a real Ymir node.
 - **v0.2 Chat, code and the desktop link** (shipped in Bragi v0.2.1): chat and code as modes of one conversation, a desktop linker with QR pairing over Weirdnet so the phone's code mode works against a paired desktop, project scaffolding, a shell-out command, prompt history, a notification log, mouse support in the terminal app, and thinking blocks that stay collapsed and can be expanded.
 - **v0.4 History bar and more than one pool** (shipped in Bragi v0.4.0): the history sidebar can be hidden and the choice is remembered, in the terminal app, the desktop window and a wide Flutter layout; a device can be linked to more than one Ymir pool and switch which one is active, each with its own history.
 
@@ -2713,8 +2713,13 @@ A Models screen on both shells searches the Hugging Face Hub with a fit badge fo
 Ymir nodes, pulls a model to one node, the best-fitting one or all of them with progress and cancel,
 lists what each node has, and removes with a confirm. It runs over Weirdnet with this device's own
 identity; nodes accept it only from devices linked to their owner. Built in the core, the Flutter app
-and the GPUI desktop shell, and tried against demo nodes and a mock Hub (`models_scenario.rs`). Next:
-a check against a real Ymir node.
+and the GPUI desktop shell, and tried against demo nodes and a mock Hub (`models_scenario.rs`). The
+desktop also uploads a GGUF model or LoRA adapter from this device to one node (model-upload slice U4,
+Bragi 0.7.0, on Ymir 0.12.0): a preview before sending, progress, Cancel and Resume, an optional
+license, the node's refusals such as too little free space, and the llama.cpp restart note for an
+adapter; the result shows the `ymirctl` commands for a rollout ([U4 as built](design/model-upload.md#u4-as-built-2026-11-25-bragi-070)).
+Next: the Flutter upload dialog, `/ymir/rollouts/1` so Bragi can add an upload to a rollout, and a
+check against a real Ymir node.
 
 ## v0.2 status (shipped in Bragi v0.2.1)
 
