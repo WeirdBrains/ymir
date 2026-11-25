@@ -3,6 +3,10 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 03:26 EST: v0.13.0 release in progress
+
+Cut with `weirdnet_release.py cut --minor` on main 33764a5 after CI, macOS and Pages were green there (release commit 2ef42b8, tag v0.13.0; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 331 passed, 0 failed): rollouts over Weirdnet (`/ymir/rollouts/1`, `ymirctl models rollout ... --inference NODE`). Bragi's desktop upload dialog now uses it (Bragi `feature/upload-rollout`, released as Bragi 0.8.0). Left: the Release workflow, scan, `github`/`assets`, signing the Arch packages, the Arch recipes' hashes (this branch) and `taur`.
+
 ## 2026-11-25 03:03 EST: rollouts over Weirdnet, `/ymir/rollouts/1` (branch `feature/rollouts-net`)
 
 The follow-up to model-upload U4, so Bragi and `ymirctl` on another device can put an upload into an inference node's rollout. Decisions of 2026-11-25 2:51 AM ET (made by llm dev from Michael's upload answers; he can override them) are in [docs/design/model-upload.md](docs/design/model-upload.md): any linked device, narrowed by `[inference] rollout_callers`; above the canary share the request carries eval rows or `force`; every operation remotely, rollback included; saved in node.toml by default, with an opt-out. Details in the plan's "`/ymir/rollouts/1` as built".
