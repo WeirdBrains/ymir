@@ -3,6 +3,15 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-24 23:03 EST: v0.10.0 released; the first real P3a run's node is configured, the run waits on a restart
+
+**v0.10.0** (release commit 8721d41, tag v0.10.0): `train run --node` and the trainable dataset fixture. CI, macOS and the Release workflow passed on 8721d41; the [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.10.0) has 31 files (`assets` ok). The Arch recipes carry the v0.10.0 tarball hashes (this commit). The upload was interrupted once and left a draft with 25 files; the 6 missing files were uploaded and the draft published, nothing re-cut. Package signatures and TAUR: see the next entry or the report (the GPU node downloads the packages slowly).
+
+**First real P3a run (approved once by m3talsmith, as was adding the model role and `[train]` to one GPU node):**
+- That node's node.toml has a timestamped backup and two changes only: `model = true`, and a `[train]` section (the v0.9.0 `scripts/trainer.py`, `build = "b12628"`, `[train.env]` with the trainer's venv python, the patched `llama-finetune` built with `engine.py build --trainer`, CPU only since that node has no CUDA toolkit or Vulkan headers, and `YMIR_TRAINER_NGL = "0"`). `ymirctl train check` (0.8.0) passes: b12628, patch `parse-special`. A throwaway copy of the config starts ymird 0.8.0 with the model role and no models, so a later restart is safe.
+- A base is in that node's models directory: Qwen2.5-0.5B-Instruct F16 GGUF (Apache-2.0, sha256 checked against the Hub) and an F32 copy of it for `--from` (every tensor F32; a test chat on it answered).
+- Not run, two steps outside what was approved: ymird there is a systemd user service, so loading the model role needs `systemctl --user restart ymird`; and `train run --base` takes a `[[model.local]]` id, so node.toml also needs a `[[model.local]]` entry for the F16 base (not approved yet).
+
 ## 2026-11-24 21:45 EST: `train run --node` (P3a option C) and a trainable dataset fixture
 
 **Dataset fixture (merged d871bc9):** `crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl` (5 synthetic rows: 4 usable, 1 cached duplicate marked unusable) with its `ymir-dataset/1` manifest (teacher `synthetic-fixture`, CC0-1.0, input and sources hashes of the existing fixtures). `tests/dataset.rs` checks that `train::prepare_dataset` takes it (4 rows trained) and that the manifest's hashes and counts match. The 21:45 entry's run command named the batch prompt input, which has no manifest; it now names this file.
