@@ -12,7 +12,7 @@ Michael asked at 7:24 AM ET for a canary percentage such as 20 or 50 (decision 8
 - ymirctl: `models rollout add ... --canary PCT` (an add at weight 0, then the share) and `models rollout weight NAME@N --canary PCT`, both also with `--inference NODE` (one `/ymir/rollouts/1` request per change); `models upload ... --rollout NAME --canary PCT` is a percentage now.
 - Docs: decision 8, DESIGN, training plan, CHANGELOG (Added and Changed), the site's ymirctl page.
 
-**Checks so far:** fmt; clippy `-D warnings`; `rollout_edit` and ymirctl `rollout` unit tests; testkit `models_upload`, `rollouts_net` and `p4b` pass. The full workspace run comes before the merge.
+**Checks:** `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 339 passed, 0 failed, 7 ignored (new: `rollout_edit` share tests, ymirctl `add_and_weight_take_a_named_percentage`; testkit `models_upload` and `rollouts_net` use `--canary 20`/`50` and check the split).
 
 **Next:** full checks, merge, CI on main, then cut 0.15.0 (with U7 and this) and Bragi 0.10.0 (percentage field), sign, TAUR.
 
