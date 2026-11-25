@@ -1,5 +1,5 @@
 # Ymir release config for weirdnet-project-helpers (scripts/weirdnet_release.py, vendored; never edit it here).
-helpers = "0.3.2"
+helpers = "0.4.0"
 project = "ymir"
 require_message = true
 next = [
@@ -107,6 +107,10 @@ channels = ["github", "taur", "nix"]
 assets = [
   "ymir-{version}-x86_64-unknown-linux-gnu.tar.gz",
   "ymir-{version}-aarch64-unknown-linux-gnu.tar.gz",
+  "ymir-{version}-linux-x86_64.update.tar.gz",
+  "ymir-{version}-linux-aarch64.update.tar.gz",
+  "ymir-cuda-{version}-linux-x86_64.update.tar.gz",
+  "ymir-cuda-{version}-linux-aarch64.update.tar.gz",
   "ymir_{debver}-1_amd64.deb",
   "ymir_{debver}-1_arm64.deb",
   "ymir-{version}-1.x86_64.rpm",
@@ -128,7 +132,7 @@ os = "macos"
 arch = ["x86_64", "aarch64"]
 formats = ["tar.gz", "zip", "brew-formula"]
 channels = ["github", "homebrew"]
-assets = ["ymir-{version}-*-apple-darwin.tar.gz"]
+assets = ["ymir-{version}-*-apple-darwin.tar.gz", "ymir-{version}-macos-x86_64.update.tar.gz", "ymir-{version}-macos-aarch64.update.tar.gz"]
 
 [[platforms]]
 os = "windows"
@@ -144,3 +148,58 @@ opt_out = "a serving daemon can't run in the background on mobile (Android needs
 [[platforms]]
 os = "ios"
 opt_out = "a serving daemon can't run in the background on mobile (iOS forbids it)"
+
+# Signed self-update bundles (`scripts/weirdnet_release.py updates VERSION --upload`), what
+# `ymirctl update stage` takes. Signed on the release machine, never in CI: WEIRDNET_UPDATE_KEY is
+# the path of the release key file. The updater tells bundles apart by OS and CPU only, so the
+# CUDA builds are separate bundles a node is pointed at on purpose. seq = MAJOR*10^6 + MINOR*10^3
+# + PATCH (ymirctl's default), so it rises with versions.
+[updates]
+root = "packaging/updates/root.env"
+pin = "ac3d19b0ee9c99435b7c0142e360a4019fe03ca4fc85b6bc949372c92fd0d0b2"
+key_env = "WEIRDNET_UPDATE_KEY"
+signer = "@ymirctl"
+sign = ["{signer}", "update", "sign-bundle", "{dir}", "--key", "{key}", "--root", "{root}", "--pin", "{pin}",
+        "--version", "{version}", "--os", "{os}", "--arch", "{arch}", "--notes", "Ymir {version}"]
+
+[[updates.bundles]]
+name = "ymir-{version}-linux-x86_64.update.tar.gz"
+asset = "ymir-{version}-x86_64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "x86_64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-{version}-linux-aarch64.update.tar.gz"
+asset = "ymir-{version}-aarch64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "aarch64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-cuda-{version}-linux-x86_64.update.tar.gz"
+asset = "ymir-cuda-{version}-x86_64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "x86_64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-cuda-{version}-linux-aarch64.update.tar.gz"
+asset = "ymir-cuda-{version}-aarch64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "aarch64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-{version}-macos-x86_64.update.tar.gz"
+asset = "ymir-{version}-x86_64-apple-darwin.tar.gz"
+os = "macos"
+arch = "x86_64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-{version}-macos-aarch64.update.tar.gz"
+asset = "ymir-{version}-aarch64-apple-darwin.tar.gz"
+os = "macos"
+arch = "aarch64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]

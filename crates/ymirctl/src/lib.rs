@@ -69,6 +69,37 @@ pub enum UpdateCmd {
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
     },
+    /// Publisher side: sign a bundle directory (a plain file set with `ymird` at the top) with a
+    /// release key, writing `manifest.env` and the org root as `roots/1.env`. The key file holds
+    /// the seed as 64 hex characters and is never printed. The result is checked as a node
+    /// would check it before anything is written.
+    SignBundle {
+        dir: PathBuf,
+        /// The release key file.
+        #[arg(long)]
+        key: PathBuf,
+        /// The signed org root file.
+        #[arg(long)]
+        root: PathBuf,
+        /// The root fingerprint the root file must have.
+        #[arg(long)]
+        pin: Option<String>,
+        /// The release version (default: this ymirctl's).
+        #[arg(long)]
+        version: Option<String>,
+        /// The update's seq (default: from the version, MAJOR*10^6 + MINOR*10^3 + PATCH).
+        #[arg(long)]
+        seq: Option<u64>,
+        #[arg(long, default_value = "linux")]
+        os: String,
+        #[arg(long)]
+        arch: String,
+        #[arg(long, default_value = "")]
+        notes: String,
+        /// How many days the manifest can be staged for.
+        #[arg(long, default_value_t = 90)]
+        valid_days: u64,
+    },
     /// What is pinned, the good release, a trial under way, and releases marked bad.
     Status,
     /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
@@ -1205,6 +1236,20 @@ async fn chat(
 fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> {
     use ymir_core::update::{Boot, Updater};
     let now = weirdnet_update::Timestamp::now();
+    if let UpdateCmd::SignBundle { dir, key, root, pin, version, seq, os, arch, notes, valid_days } = cmd {
+        use ymir_core::update_publish as p;
+        let version = semver::Version::parse(version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")))?;
+        let seq = match seq {
+            Some(s) => s,
+            None => p::seq_for(&version)?,
+        };
+        let spec = p::BundleSpec { version, seq, platform: p::platform(&os)?, arch: p::arch(&arch)?, notes, valid_secs: valid_days * 86_400 };
+        let k = p::read_key(&key)?;
+        let root_env = std::fs::read(&root).with_context(|| format!("reading {}", root.display()))?;
+        let s = p::sign_bundle(&dir, &k, &root_env, pin.as_deref(), &spec, now)?;
+        writeln!(out, "signed {} {} ({} files, {} bytes) for {os}/{arch} under root {}", s.update_id, spec.version, s.files, s.bytes, s.pin)?;
+        return Ok(());
+    }
     let mut u = Updater::open(paths, now)?;
     match cmd {
         UpdateCmd::Trust { pin, root } => {
@@ -1246,6 +1291,7 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
                 f.update.manifest.version
             )?;
         }
+        UpdateCmd::SignBundle { .. } => unreachable!("handled before the updater opens"),
         UpdateCmd::Watch { .. } => bail!("`update watch` runs in the async dispatcher"),
         UpdateCmd::Status => {
             let s = u.status();

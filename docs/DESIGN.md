@@ -2840,9 +2840,21 @@ sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP se
     stages what it hears.
   - Tests: `ymir-core` unit tests, and `ymir-testkit/tests/update_fetch.rs` against a local HTTP server and an in-test
     carrier built on `weirdnet-update`'s `Carrier` (not a running `weirdnet-relay`).
-  - Not built: publishing (nothing writes bundles to an HTTPS host or announces them; the release script would), a
-    `weirdnet:` content source, and a watcher inside `ymird`. Nothing is signed with a real org key (m3talsmith holds
-    those) and no release was cut.
+  - Publishing (0.15.2): `ymirctl update sign-bundle DIR --key FILE --root FILE [--pin HEX] --arch A` (`ymir_core::update_publish`)
+    signs a plain file set with a release key: it checks that the key is delegated by the root for
+    `com.weirdbrains.ymir`/`stable`, writes `manifest.env` (each file's size and BLAKE3, kind `full`/`tar-gz`, update id
+    `com.weirdbrains.ymir-stable-SEQ`, seq `MAJOR*10^6 + MINOR*10^3 + PATCH`, valid 90 days for staging) and the root as
+    `roots/1.env`, and verifies the result as a node would before writing. The key file is the 32-byte seed in hex and
+    is never printed. `scripts/weirdnet_release.py updates VERSION --upload` (weirdnet-project-helpers 0.4.0, config in
+    `release.toml [updates]`) builds `ymir[-cuda]-VERSION-linux-ARCH.update.tar.gz` and `ymir-VERSION-macos-ARCH.update.tar.gz`
+    from the release archives, signs them on the release machine with the release's own `ymirctl` (the key path in
+    `WEIRDNET_UPDATE_KEY`; CI holds no key and only checks the plan), and uploads them with a sha256 list. The updater
+    tells bundles apart only by OS and CPU, so the CUDA bundles are separate and a node is given one on purpose. The
+    org root is `packaging/updates/root.env`.
+  - A node takes one with: download the `.update.tar.gz`, unpack it, `ymirctl update stage DIR`, restart the service
+    (the trial start and rollback do the rest). GitHub release assets can't hold the bundle's `llama.cpp/` paths, so
+    `update fetch https://...` needs an HTTPS host serving the unpacked directory. Not built: that host, announcements,
+    a `weirdnet:` content source, and a watcher inside `ymird`.
 - **Updating `ymirctl` and the engines with `ymird`:** the release directory may hold `ymirctl`, but only `ymird` is started from
   it; the service still calls the installed `ymirctl`.
 - **Self-update on a real machine** was not exercised: the tests run on one box with fake binaries and test keys.

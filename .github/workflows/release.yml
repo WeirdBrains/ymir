@@ -257,6 +257,19 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
+          path: src
+      - name: Every self-update bundle has its archive
+        # Signing happens on the release machine (`weirdnet_release.py updates VERSION --upload`),
+        # never here: the release key is not a CI secret. This checks the plan against the build.
+        run: |
+          ref="${{ github.event.inputs.checkout_ref || github.ref_name }}"
+          v="${ref#v}"
+          case "$v" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a release tag ($ref): skipped"; exit 0;; esac
+          case "$v" in *-*) echo "pre-release $v: no update bundles"; exit 0;; esac
+          python3 src/scripts/weirdnet_release.py --repo src updates "$v" --dist dist --dry-run
       - name: One SHA256SUMS for every file
         run: |
           cd dist && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
