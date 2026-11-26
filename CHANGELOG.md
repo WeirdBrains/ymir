@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-25
+
 ### Added
 
 - `ymirctl models upload DIR|PROJECTOR` without `--node` (model-upload U9): on a machine that serves models (the model role) a directory of safetensors or MLX weights, a PEFT adapter or a GGUF vision projector is placed in this machine's models directory with its provenance and saved in node.toml, as a node does with an upload (it serves after a restart); on a machine that serves none it goes to the other model node with the most room after what it keeps free. `--node auto` picks that node for any upload.
@@ -26,6 +28,7 @@ All notable changes to Ymir are listed here. The format follows
 - Trainer interface 2: `train --checkpoint-dir DIR` and `--resume CKPT` (`ymir-train-checkpoint/1`); Ymir still runs
   interface 1 trainers for plain runs. `scripts/trainer.py` speaks it: with checkpoints it runs `llama-finetune` one
   epoch at a time (the pinned build saves weights only, so AdamW's state restarts each epoch).
+- Model uploads without --node (local placement, --node auto, rollouts on another inference node); resumable training jobs (P3b); teacher license from the Hub or pool; train seed questions|prompts; training status over /ymir/train-status/1
 
 ### Changed
 
