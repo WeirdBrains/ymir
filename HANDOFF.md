@@ -3,13 +3,21 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
-## 2026-11-25 22:40 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
+## 2026-11-25 22:15 EST: training status over Weirdnet (branch `feature/train-status`)
 
-**What changed:** trainer interface 2 (`train --checkpoint-dir DIR` writes `epoch-NNNN/` with `checkpoint.json`, `ymir-train-checkpoint/1`; `--resume CKPT`), spoken by the mock trainer and `scripts/trainer.py` (one `llama-finetune --epochs 1` per epoch: the pinned build saves weights only at the end and has no optimizer state, so AdamW restarts each epoch; no shuffle and a constant learning rate keep the data order and schedule the same). `ymir_core::train_job`: the job record, lease with fencing term, attempts, back-off and checkpoint pointer as the `JobStore` trait asked of `weirdnet-agent` 0.6.0, with `FileJobStore` and `LocalBlobs` standing in on one node; `start`/`resume` drive a run under a claim (renew, publish checkpoints, finish, fail with or without retry, pause on Ctrl-C, stop on a lost lease) after `check_resumable` (trainer build, base revision, `--from`, adapter id, `[train] resume`). `ymirctl train run --job`, `train jobs`, `train resume JOB`, `train job pause|unpause|cancel JOB`. Docs: [training.md](docs/design/training.md) (P3b), DESIGN, CHANGELOG, site.
+- `/ymir/train-status/1` (`ymir_core::train_net::{TrainStatus, RunSummary, JobSummary, StatusReply}`), served by every
+  model node on Weirdnet for any linked device (`remote::serve_train_status`), and `TrainHub::status`;
+  `ControlRequest::TrainStatus`; `ymirctl train status [--node X] [--json]`. For Bragi's training view.
+- Tests: `p3a_remote.rs` (status from an app-only device, of a node with and without `[train] remote`), `p3b.rs` (jobs).
 
-**Checks:** `cargo clippy -p ymir-core -p ymirctl -p ymir-testkit --all-targets -D warnings`; `cargo test -p ymir-core --lib train` (7 new store tests); `tests/p3b.rs` (5, three runs in a row), `p3a`, `p3a_remote`, `p3a_llamacpp` (with the trainer venv); `scripts/test_trainer.py` (28). Not tested: a real `llama-finetune` with checkpoints (no run cleared), Windows/macOS (CI).
+## 2026-11-25 22:05 EST: teacher license lookup and seed prompts (branch `feature/teacher-license`)
 
-**Left:** swap the stand-ins for `weirdnet-agent` 0.6.0's `JobBoard<TrainJob>` and a blob fetch from the holders over Weirdnet; let a `[train] resume = true` node take over stalled jobs by itself; enforce `needs`. The request sent to the lead is in [training.md](docs/design/training.md)'s P3b section.
+- `batch --jsonl` without `--license`: `--license-from OWNER/NAME` reads the Hub repo's model card
+  (`MlxHub::license`, `ymir_core::dataset::hub_license`; the token goes to the public Hub only), else the pool
+  catalog's `weirdnet.license` (`catalog_license`). `Generate.license_source` records `operator`, `hub:REPO` or `pool`.
+- `ymirctl train seed questions|prompts` (`ymir_core::seed`): source texts to question rows, answers to prompt rows.
+- Tests: `dataset.rs` (pool-catalog license, both seed passes through the mock pool), unit tests in `seed.rs`,
+  `dataset.rs`, `models/hub.rs`. Built on `feature/p3b-resume`.
 
 ## 2026-11-25 22:02 EST: model-upload U9: directories and projectors without --node, `--node auto`, rollouts on another inference node (branch `feature/upload-auto-node`)
 
@@ -29,6 +37,14 @@ Michael asked at 9:33 PM ET for `ymirctl models upload` of folders and vision pr
 **Not built:** `[model] upload = false` (uploads off, everything else on): `WritePolicy` in weirdnet-backends 0.4.5 has no switch for uploads alone (its `auth` also covers pulls and removals, `max_upload = 0` would read as `too-big`), so this needs a small Weirdnet request; `--serve` as a flag (uploads always serve; `--store-only` would be the useful opposite). `--node auto` does not look at engines: a directory sent to a llama.cpp node is refused there as before.
 
 **Next:** merge after CI; release 0.16.0.
+
+## 2026-11-25 21:50 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
+
+**What changed:** trainer interface 2 (`train --checkpoint-dir DIR` writes `epoch-NNNN/` with `checkpoint.json`, `ymir-train-checkpoint/1`; `--resume CKPT`), spoken by the mock trainer and `scripts/trainer.py` (one `llama-finetune --epochs 1` per epoch: the pinned build saves weights only at the end and has no optimizer state, so AdamW restarts each epoch; no shuffle and a constant learning rate keep the data order and schedule the same). `ymir_core::train_job`: the job record, lease with fencing term, attempts, back-off and checkpoint pointer as the `JobStore` trait asked of `weirdnet-agent` 0.6.0, with `FileJobStore` and `LocalBlobs` standing in on one node; `start`/`resume` drive a run under a claim (renew, publish checkpoints, finish, fail with or without retry, pause on Ctrl-C, stop on a lost lease) after `check_resumable` (trainer build, base revision, `--from`, adapter id, `[train] resume`). `ymirctl train run --job`, `train jobs`, `train resume JOB`, `train job pause|unpause|cancel JOB`. Docs: [training.md](docs/design/training.md) (P3b), [DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), site.
+
+**Checks:** `cargo clippy -p ymir-core -p ymirctl -p ymir-testkit --all-targets -D warnings`; `cargo test -p ymir-core --lib train` (7 new store tests); `tests/p3b.rs` (5, three runs in a row), `p3a`, `p3a_remote`, `p3a_llamacpp` (with the trainer venv); `scripts/test_trainer.py` (28). Not tested: a real `llama-finetune` with checkpoints (no run cleared), Windows/macOS (CI).
+
+**Left:** swap the stand-ins for `weirdnet-agent` 0.6.0's `JobBoard<TrainJob>` and a blob fetch from the holders over Weirdnet; let a `[train] resume = true` node take over stalled jobs by itself; enforce `needs`. The request went to the lead on 2026-11-25 and is summarised, with the lead's plan, in [training.md](docs/design/training.md)'s P3b section.
 
 ## 2026-11-25 18:40 EST: v0.15.4 released; first hands-off self-update confirmed
 

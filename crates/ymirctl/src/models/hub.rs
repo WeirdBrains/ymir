@@ -143,6 +143,15 @@ impl MlxHub {
         resp.body_mut().read_to_vec().with_context(|| format!("reading {name}"))
     }
 
+    /// The license a repo's model card states ([`ymir_core::dataset::hub_license`]).
+    pub fn license(&self, repo: &str) -> Result<Option<String>> {
+        weirdnet_model::hf::check_repo(repo).map_err(|_| anyhow::anyhow!("`{repo}` is not a repo id (use owner/name)"))?;
+        let mut resp = self.get(&format!("{}/api/models/{repo}", self.base), None)?;
+        self.ok(&resp, repo)?;
+        let text = resp.body_mut().read_to_string().context("reading the repo answer")?;
+        Ok(ymir_core::dataset::hub_license(&serde_json::from_str(&text).context("the Hub's repo answer is not JSON")?))
+    }
+
     pub fn repo(&self, repo: &str) -> Result<RepoInfo> {
         weirdnet_model::hf::check_repo(repo).map_err(|_| anyhow::anyhow!("`{repo}` is not a repo id (use owner/name)"))?;
         let mut resp = self.get(&format!("{}/api/models/{repo}?blobs=true", self.base), None)?;
@@ -369,6 +378,18 @@ mod tests {
         assert!(MlxHub::new(&m.url, None).repo("a/limited").unwrap_err().to_string().contains("rate limiting"));
         assert!(MlxHub::new(&m.url, None).repo("a/missing").unwrap_err().to_string().contains("not found"));
         assert!(MlxHub::new(&m.url, None).repo("../etc").unwrap_err().to_string().contains("not a repo id"));
+    }
+
+    #[test]
+    fn reads_a_repo_license() {
+        let hub = MockHub::start();
+        hub.route("/api/models/acme/Teacher", 200, r#"{"cardData": {"license": "apache-2.0"}, "tags": ["license:apache-2.0"]}"#);
+        hub.route("/api/models/acme/Bare", 200, r#"{"tags": ["gguf"]}"#);
+        let h = MlxHub::new(&hub.url, None);
+        assert_eq!(h.license("acme/Teacher").unwrap().as_deref(), Some("apache-2.0"));
+        assert_eq!(h.license("acme/Bare").unwrap(), None);
+        assert!(h.license("acme/Missing").is_err());
+        assert!(h.license("not a repo").is_err());
     }
 
     #[test]

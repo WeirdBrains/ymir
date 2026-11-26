@@ -36,6 +36,7 @@ pub mod remote;
 pub mod rollout;
 pub mod rollout_edit;
 pub mod rollouts_net;
+pub mod seed;
 pub mod service;
 pub mod setup;
 pub mod tasks;

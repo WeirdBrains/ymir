@@ -16,7 +16,7 @@ mod adapters;
 pub(crate) use adapters::{add as adapters_add, save as adapters_save};
 mod ctxcmd;
 pub use ctxcmd::Live;
-mod hub;
+pub(crate) mod hub;
 mod local;
 mod plan;
 mod remote;

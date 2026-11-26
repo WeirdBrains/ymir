@@ -150,6 +150,12 @@ pub enum ControlRequest {
         node: String,
         request: crate::train_net::TrainOp,
     },
+    /// Another model node's training status over Weirdnet (`ymirctl train status --node`,
+    /// `/ymir/train-status/1`).
+    TrainStatus {
+        /// A roster label or a peer id.
+        node: String,
+    },
     /// The versioned rollouts in force (P4b), or, with `set`, replace them live (new
     /// conversations follow at once). `ymirctl models rollout` also writes them to node.toml.
     Rollouts {
@@ -298,6 +304,9 @@ pub struct ControlResponse {
     /// Another inference node's answer, for [`ControlRequest::RemoteRollouts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_rollouts: Option<crate::rollouts_net::Rollouts>,
+    /// The answer to [`ControlRequest::TrainStatus`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train_status: Option<crate::train_net::TrainStatus>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -338,6 +347,7 @@ impl ControlResponse {
             group_losses: Vec::new(),
             rollouts: None,
             remote_rollouts: None,
+            train_status: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -353,6 +363,7 @@ impl ControlResponse {
             group_losses: Vec::new(),
             rollouts: None,
             remote_rollouts: None,
+            train_status: None,
         }
     }
 }
@@ -541,6 +552,19 @@ impl ControlHandler {
                     Err(e) => ControlResponse::err(e),
                 }
             }
+            ControlRequest::TrainStatus { node } => {
+                let Some(hub) = &self.train else {
+                    return ControlResponse::err("training status over Weirdnet needs a device identity on this node (see `ymirctl pool link`)");
+                };
+                match hub.status(&node).await {
+                    Ok((label, s)) => {
+                        let mut resp = ControlResponse::ok(label);
+                        resp.train_status = Some(s);
+                        resp
+                    }
+                    Err(e) => ControlResponse::err(e),
+                }
+            }
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -598,6 +622,7 @@ impl ControlHandler {
                     group_losses: Vec::new(),
                     rollouts: None,
                     remote_rollouts: None,
+                    train_status: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
