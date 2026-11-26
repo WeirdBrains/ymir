@@ -40,6 +40,12 @@ All notable changes to Ymir are listed here. The format follows
   `ymir.context`. Since 0.8.3 a peer refuses a service device's sync for any type outside its grant
   (`type-not-granted`), so the model node's grant lists `ymir.pool` too.
 
+### Fixed
+
+- Two saves of a device's Weirdnet state at once (the sync pass and a control request, say) no longer fail
+  with "writing .../roster.json: No such file or directory": each write has its own temporary file and
+  saves take turns (the p2 failure under load).
+
 ## [0.17.0] - 2026-11-26
 
 ### Added

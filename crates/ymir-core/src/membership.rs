@@ -149,6 +149,9 @@ pub struct Membership {
     /// Whether sync passes also carry conversations (inference and app roles; a model-only
     /// node holds no conversation state).
     context_sync: std::sync::atomic::AtomicBool,
+    /// Held across [`Membership::save`]: the sync loop, the control socket and link flows all
+    /// save, and two saves at once must not interleave (an older snapshot written last).
+    saving: Mutex<()>,
 }
 
 fn now_ms() -> i64 {
@@ -163,7 +166,12 @@ fn user_from_seed(seed: &[u8]) -> Result<Keypair> {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    // A temporary name of its own per write: two writers of one file sharing `x.tmp` would
+    // rename it away from each other ("writing x: No such file or directory", seen in p2).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
     {
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create(true).truncate(true);
@@ -176,7 +184,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("writing {}", path.display()));
+    }
     Ok(())
 }
 
@@ -322,7 +333,13 @@ impl Membership {
     fn wrap(dir: &Path, node_key: Keypair, mut st: SyncState) -> Result<Self> {
         ensure_dir(dir)?;
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
-        Ok(Self { dir: dir.to_path_buf(), node_key, state: Arc::new(Mutex::new(st)), context_sync: std::sync::atomic::AtomicBool::new(false) })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            node_key,
+            state: Arc::new(Mutex::new(st)),
+            context_sync: std::sync::atomic::AtomicBool::new(false),
+            saving: Mutex::new(()),
+        })
     }
 
     /// The identity stored in `dir`, if any.
@@ -389,7 +406,13 @@ impl Membership {
         load_log(dir, &mut st);
         st.publish_device_key(now_ms()).map_err(|e| anyhow!("device key: {e}"))?;
         st.refresh_keys();
-        Ok(Self { dir: dir.to_path_buf(), node_key, state: Arc::new(Mutex::new(st)), context_sync: std::sync::atomic::AtomicBool::new(false) })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            node_key,
+            state: Arc::new(Mutex::new(st)),
+            context_sync: std::sync::atomic::AtomicBool::new(false),
+            saving: Mutex::new(()),
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SyncState> {
@@ -398,6 +421,7 @@ impl Membership {
 
     /// Writes the roster and keys (and, the first time, the seed or credential and the node key).
     pub fn save(&self) -> Result<()> {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
         ensure_dir(&self.dir)?;
         let (seed, user_key, roster, keys, log) = {
             let st = self.lock();
@@ -670,6 +694,28 @@ impl Membership {
 mod tests {
     use super::*;
     use weirdnet_sync::CallerCheck;
+
+    #[test]
+    fn concurrent_saves_do_not_trip_over_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = Arc::new(Membership::create(&tmp.path().join("a"), "box-a").unwrap());
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let m = m.clone();
+                std::thread::spawn(move || (0..40).try_for_each(|_| m.save()))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        let left: Vec<_> = std::fs::read_dir(tmp.path().join("a"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "no temporary files are left behind");
+        assert!(Membership::open(&tmp.path().join("a")).unwrap().is_some());
+    }
 
     #[test]
     fn create_open_link_and_revoke() {
