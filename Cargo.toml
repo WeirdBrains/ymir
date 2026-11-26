@@ -24,7 +24,7 @@ ymird = { path = "crates/ymird", version = "0.16.0" }
 ymirctl = { path = "crates/ymirctl", version = "0.16.0" }
 
 # Published Weirdnet crates, used as they are.
-weirdnet-agent = { version = "0.5.4", features = ["pool", "serve"] }
+weirdnet-agent = { version = "0.5.6", features = ["pool", "serve"] }
 weirdnet-backends = { version = "=0.4.7", features = ["node"] }
 weirdnet-device-link = "0.4.2"
 weirdnet-model = { version = "0.5.3", default-features = false }

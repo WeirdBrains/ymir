@@ -45,7 +45,7 @@ lock = "Cargo.lock"
 
 [[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D)
 crate = "weirdnet-agent"
-version = "0.5.4"
+version = "0.5.6"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
