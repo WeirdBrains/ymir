@@ -165,10 +165,10 @@ async fn until(devs: &[Dev], dev: usize, what: &str, f: impl Fn(&JobRecord<Train
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         sync_all(devs);
-        if let Some(j) = devs[dev].store.get(id).unwrap() {
-            if f(&j) {
-                return j;
-            }
+        if let Some(j) = devs[dev].store.get(id).unwrap()
+            && f(&j)
+        {
+            return j;
         }
         assert!(std::time::Instant::now() < deadline, "waiting for {what}: {:?}", devs[dev].store.get(id).unwrap());
         tokio::time::sleep(Duration::from_millis(100)).await;
