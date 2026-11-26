@@ -16,8 +16,21 @@ All notable changes to Ymir are listed here. The format follows
 - `scripts/package.py --target x86_64-unknown-freebsd` (or aarch64) writes `ymir-VERSION-TRIPLE.tar.gz` and, on a FreeBSD
   host, `ymir-VERSION-TRIPLE.pkg` (`pkg create`; its message names the `misc/llama-cpp` port, since there is no bundled
   engine for FreeBSD).
+- Releases carry `ymir-VERSION-x86_64-unknown-freebsd.tar.gz` and `.pkg`, built in a FreeBSD 14.2 VM by a new
+  Release workflow job (x86_64 only; no bundled engine).
 - `.github/workflows/freebsd.yml`: a FreeBSD 14.2 VM builds and tests `ymird` and `ymirctl`, packages them, installs the
   pkg, and runs the rc.d service through a chat with the mock engine, a stop (no engine left) and an uninstall.
+- M6 semantic answer cache: `[inference.cache] embedding_model = "ID"` (with `threshold`, a cosine distance, default
+  0.12; `ttl`, default `24h`; `entries`, default 1024) puts `weirdnet-semcache` 0.2.2's `SemanticCache` behind the
+  exact cache. Single-turn, text-only prompts with no tools are embedded with that model (only while it is loaded)
+  and replay a stored answer for the same model, weights, system prompt and sampling when they mean the same; hits
+  are served by `semantic-cache`. `cache: bypass` and `refresh` apply. `[inference.cache]` is now validated (mode,
+  threshold, ttl, entries).
+
+### Changed
+
+- `weirdnet-semcache` 0.2.1 → 0.2.2.
+- Device sync pulls the roster and every other type due (conversations, wake cards, training jobs) from each device in one session (`weirdnet-sync` 0.8.5 `pull_types_shared`: one hello and roster catch-up, not one per type). A type a device refuses fails alone; devices on 0.7.1 to 0.8.4 answer it. `weirdnet-sync` 0.8.4 → 0.8.5.
 
 ## [0.20.0] - 2026-11-26
 

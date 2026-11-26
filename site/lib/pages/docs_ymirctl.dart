@@ -208,6 +208,18 @@ doesn't count, a node with answers in flight is never unloaded, and models not l
 several inference nodes, the one holding the scheduler lease places (inference nodes linked cert-only vote on it).</p>
 <pre><code>[inference.placement]
 replicas = { "qwen3.6-35b-a3b" = 2 }</code></pre>
+<h3 id="semantic-cache">Semantic answer cache</h3>
+<p>Every inference node replays an answer it already gave to the very same temperature-0 request. Give it an
+embedding model from the pool and it also replays answers to questions that mean the same: one user message (after
+any system prompt), text only, no tools. The question is embedded with that model, but only while it is loaded
+somewhere, and an answer is used only for the same model, weights, system prompt and sampling settings. Hits show
+as served by <code>semantic-cache</code>; a request with <code>cache: bypass</code> skips it, and
+<code>cache: refresh</code> asks the model and stores the new answer. The cache is in memory on each inference node.</p>
+<pre><code>[inference.cache]
+embedding_model = "bge-m3"   # an embedding model in the pool
+threshold = 0.12             # cosine distance: lower is stricter
+ttl = "24h"
+entries = 1024</code></pre>
 <h3 id="nodes"><code>ymirctl nodes</code></h3>
 <p>Lists the model nodes the pool routes to: serving or draining, how many of their models are ready, and requests in flight.</p>
 <h3 id="drain"><code>ymirctl drain NODE [--resume]</code></h3>

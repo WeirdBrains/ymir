@@ -34,10 +34,16 @@ jobs:
             # The pkg `rust` lags the crates' minimum, so use rustup's stable.
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"
-            cargo build --release --locked -p ymird -p ymirctl
-            cargo build --locked -p ymir-testkit --bin ymir-mock-engine
+            # The VM's disk is small: no debug info or incremental files, and the debug tree goes
+            # before the release build.
+            export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
             cargo test --locked -p ymir-core --lib
             cargo test --locked -p ymirctl
+            cargo build --locked -p ymir-testkit --bin ymir-mock-engine
+            cp target/debug/ymir-mock-engine /tmp/ymir-mock-engine
+            rm -rf target/debug
+            df -h .
+            cargo build --release --locked -p ymird -p ymirctl
             python3 scripts/package.py --out dist
             ls -l dist
             V=$(python3 -c "import re;print(re.search(r'\[workspace\.package\][^\[]*?\nversion\s*=\s*\"([^\"]+)\"', open('Cargo.toml').read(), re.S).group(1))")
@@ -48,12 +54,14 @@ jobs:
             # The rc.d service, as root, running as an unprivileged account.
             sudo pw useradd ymir -d /var/db/ymir -s /usr/sbin/nologin || true
             printf 'GGUF mock' > /tmp/tiny.gguf
-            M="$PWD/target/debug/ymir-mock-engine"
-            sudo chmod 755 "$HOME" "$PWD" "$PWD/target" "$PWD/target/debug"
+            M=/tmp/ymir-mock-engine
+            chmod 755 "$M"
             H=/var/db/ymir
             sudo /usr/local/bin/ymirctl --home "$H" setup --name ci --backend llamacpp --llama-server "$M" --model /tmp/tiny.gguf --port 18484
             sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --dry-run | tee out.txt
             grep -q 'would write /usr/local/etc/rc.d/ymird' out.txt
+            # Not under timeout(1): on FreeBSD it reaps every descendant, so it would wait for (and on
+            # expiry kill) the daemon(8) that `service ymird restart` leaves running.
             sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --ymird /usr/local/bin/ymird
             up() { for i in $(seq 60); do sudo /usr/local/bin/ymirctl --home "$H" service status --system | grep -q 'ymird: answering' && return 0; sleep 1; done; return 1; }
             down() { for i in $(seq 60); do sudo /usr/local/bin/ymirctl --home "$H" service status --system | grep -q 'ymird: not answering' && return 0; sleep 1; done; return 1; }
@@ -61,13 +69,13 @@ jobs:
             sudo /usr/local/bin/ymirctl --home "$H" service status --system | tee status.txt
             grep -q 'rc.d: ymird is running' status.txt
             ps -axo user,command | grep '[y]mird --home' | grep -q '^ymir '
-            sudo /usr/local/bin/ymirctl --home "$H" chat hi | tee chat.txt
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" chat hi | tee chat.txt
             grep -q 'You said: hi' chat.txt
-            sudo /usr/local/bin/ymirctl --home "$H" service stop --system
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" service stop --system
             down
             sleep 2
             if pgrep -f ymir-mock-engine; then echo "an engine outlived ymird"; exit 1; fi
-            sudo /usr/local/bin/ymirctl --home "$H" service uninstall --system
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" service uninstall --system
             test ! -e /usr/local/etc/rc.d/ymird
             if sysrc -n ymird_enable 2>/dev/null; then echo 'ymird_enable is still set'; exit 1; fi
             sudo pkg delete -y ymir

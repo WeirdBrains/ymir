@@ -534,8 +534,57 @@ pub struct CacheSection {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_url: Option<String>,
+    /// Cosine distance (0 = the same meaning) under which a stored answer stands in for a prompt
+    /// in the semantic cache.
     #[serde(default = "threshold")]
     pub threshold: f32,
+    /// The embedding model (an id in the pool's catalog) the semantic cache embeds prompts with.
+    /// Unset: exact matches only. It is used only while loaded somewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    /// How long a semantic-cache entry may stand in (`24h`).
+    #[serde(default = "ttl")]
+    pub ttl: String,
+    /// At most this many semantic-cache entries; the least recently used go first.
+    #[serde(default = "entries")]
+    pub entries: usize,
+}
+
+fn ttl() -> String {
+    "24h".into()
+}
+
+fn entries() -> usize {
+    1024
+}
+
+impl CacheSection {
+    /// The semantic cache's settings, `None` when it is off (no embedding model, or `mode = "off"`).
+    pub fn semantic(&self) -> Option<crate::semantic::SemanticOptions> {
+        let model = self.embedding_model.clone().filter(|m| !m.trim().is_empty() && self.mode != "off")?;
+        Some(crate::semantic::SemanticOptions {
+            embedding_model: model,
+            similarity: 1.0 - self.threshold,
+            ttl: parse_duration(&self.ttl).ok(),
+            max_entries: self.entries,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !matches!(self.mode.as_str(), "off" | "local" | "pool") {
+            bail!("[inference.cache] mode must be off, local or pool, not {:?}", self.mode);
+        }
+        if !(0.0..=1.0).contains(&self.threshold) {
+            bail!("[inference.cache] threshold is a cosine distance from 0 to 1, not {}", self.threshold);
+        }
+        if parse_duration(&self.ttl).is_err() {
+            bail!("[inference.cache] ttl {:?} is not a duration (like 24h)", self.ttl);
+        }
+        if !(1..=1_000_000).contains(&self.entries) {
+            bail!("[inference.cache] entries must be 1 to 1000000, not {}", self.entries);
+        }
+        Ok(())
+    }
 }
 
 fn local() -> String {
@@ -552,7 +601,7 @@ fn threshold() -> f32 {
 
 impl Default for CacheSection {
     fn default() -> Self {
-        Self { mode: local(), backend: embedded(), redis_url: None, threshold: threshold() }
+        Self { mode: local(), backend: embedded(), redis_url: None, threshold: threshold(), embedding_model: None, ttl: ttl(), entries: entries() }
     }
 }
 
@@ -634,6 +683,7 @@ impl NodeConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.inference.placement.validate()?;
+        self.inference.cache.validate()?;
         for c in &self.inference.rollout_callers {
             if c.parse::<weirdnet_net::PeerId>().is_err() {
                 bail!("[inference] rollout_callers: `{c}` is not a peer id (list the device's peer id, as the pool's device list shows it)");
@@ -823,6 +873,7 @@ impl NodeConfig {
             standin_after: parse_duration(&self.inference.standin_after).unwrap_or(std::time::Duration::from_secs(10)),
             splits: self.inference.split.clone(),
             rollouts: self.inference.rollout.clone(),
+            semantic: self.inference.cache.semantic(),
         }
     }
 

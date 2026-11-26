@@ -16,6 +16,15 @@ Michael (11-26): "Let's do the video uploads". Bragi samples clips into frames s
 **Blocked on Weirdnet:** per-image token cost and edge, `max_images`, audio length and the request size (`BridgeOptions` max body, a 413 that names it; today a fixed 32 MiB `DefaultBodyLimit` in `weirdnet-openai` 0.2.3) need `weirdnet-agent` `CatalogModel` fields, `weirdnet-backends` `Capabilities`/`ModelStatus` fields and a `weirdnet-openai` option. Operator `[[models]] image_tokens`/`max_images` in `node.toml` are left until there is a field to publish them in.
 
 **Next:** once the lock is free: clippy, `cargo test --workspace`, merge `--no-ff`. Then the Weirdnet asks; transcription route (milestone 2).
+## 2026-11-26 10:45 EST: M6 semantic answer cache; one sync session per device (merged `feature/semcache`)
+
+- [semantic.rs](crates/ymir-core/src/semantic.rs) on `weirdnet-semcache` 0.2.2 `SemanticCache`: `[inference.cache] embedding_model = "ID"` (plus `threshold`, a cosine distance, default 0.12; `ttl` `24h`; `entries` 1024) adds a semantic layer behind the exact cache in `Coordinator::run`. Cacheable: one user turn after any system messages, text only, no tools, no prefix, no stand-in. Scope: model + weights revision + embedding model + its revision + SHA-256 of system prompt, sampling, seed, response format, adapter scale. The embedding model is used only while loaded (never cold-started); a failed embedding skips the cache. Hits are `served_by = "semantic-cache"`; `cache: bypass` / `refresh` apply. `[inference.cache]` is now validated. Tests: [tests/semantic.rs](crates/ymir-core/tests/semantic.rs) (4) and 3 unit tests.
+- [membership.rs](crates/ymir-core/src/membership.rs): `tick` pulls roster, conversations, wake cards and training jobs in one session per device with `weirdnet_sync::pull_types_shared` (0.8.5), not one `pull_from_shared` per type. `release.toml` `[[requires]]`: weirdnet-sync 0.8.5, weirdnet-semcache 0.2.2 (the `release_requires` test caught the stale one).
+- Bragi main b4383e7 has the same sync change (no release cut).
+
+**Checks:** fmt, clippy `-D warnings`, `cargo test --workspace --no-fail-fast`: 59 of 61 suites ok in the full parallel run; `m5` `conversations_sync_and_any_inference_node_answers_from_them` and `p3b` `on_the_synced_board_a_run_that_loses_its_lease_stops_and_writes_nothing_more` failed once there under load, then passed alone (2/2 each) and as whole files (m5 4/4, p3b 8/8 twice). Watch them on CI. Docs: CHANGELOG, DESIGN (cache section, config example, M6 status, gaps), ROADMAP/roadmap.toml/site roadmap, site docs `#semantic-cache`.
+
+**Not built:** the pool-mode (shared, sharded) semantic cache, the Redis backend, persisting entries across restarts.
 
 ## 2026-11-26 10:30 EST: M9 FreeBSD service and packages (merged `wip/freebsd`)
 

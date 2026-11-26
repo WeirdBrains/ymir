@@ -50,11 +50,13 @@ pub struct CoordinatorOptions {
     pub splits: Vec<crate::group::SplitPolicy>,
     /// Versioned rollouts at start (P4b); [`Coordinator::set_rollouts`] changes them live.
     pub rollouts: Vec<crate::rollout::Rollout>,
+    /// The semantic answer cache (M6), behind the exact one; `None`: off.
+    pub semantic: Option<crate::semantic::SemanticOptions>,
 }
 
 impl Default for CoordinatorOptions {
     fn default() -> Self {
-        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new(), rollouts: Vec::new() }
+        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new(), rollouts: Vec::new(), semantic: None }
     }
 }
 
@@ -193,6 +195,8 @@ pub struct Coordinator {
     /// Models being moved off a node (M6, `ymirctl move`): `(node, model)` gets no new
     /// requests while what it has finishes.
     leaving: Mutex<HashSet<(String, String)>>,
+    /// The semantic answer cache (M6), when `[inference.cache] embedding_model` is set.
+    semantic: Option<crate::semantic::Semantic>,
 }
 
 /// Where a request goes.
@@ -255,6 +259,7 @@ impl Coordinator {
             groups: Mutex::new(crate::group::GroupBook::default()),
             rollouts: RwLock::new(opts.rollouts.clone()),
             leaving: Mutex::new(HashSet::new()),
+            semantic: opts.semantic.clone().map(crate::semantic::Semantic::new),
             opts,
         }
     }
@@ -794,9 +799,13 @@ impl Coordinator {
     /// request moves to another node that has the model. After the first token the error goes to
     /// the asker: the app's pool resumes from what it received.
     pub async fn run(&self, p: Prepared, req: &Request, out: &dyn Sink, cancel: &CancelToken) -> Result<Finish, RemoteError> {
-        let (mut node, mut cold) = match p.route {
-            Route::Cached(hit) => return Ok(replay(hit, out)),
-            Route::Node { node, cold } => (node, cold),
+        let (mut node, mut cold) = match &p.route {
+            Route::Cached(hit) => return Ok(replay(hit.clone(), out)),
+            Route::Node { node, cold } => (node.clone(), *cold),
+        };
+        let pending = match self.semantic_lookup(&p, req, out).await {
+            Ok(f) => return Ok(f),
+            Err(pending) => pending,
         };
         let _running = Running::start(&self.running);
         let mut tried: HashSet<String> = HashSet::new();
@@ -807,16 +816,17 @@ impl Coordinator {
         let mut resumes = 0u32;
         loop {
             let dispatch = self.balance.begin(node.name(), &p.model);
-            let (err, sent) = match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw, &mut shown).await {
-                Ok(mut f) => {
-                    dispatch.finish();
-                    if resumes > 0 {
-                        f.meta.resumed_from = Some(req.assistant_prefix.as_ref().map_or(0, |p| p.text.chars().count() as u64));
+            let (err, sent) =
+                match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw, &mut shown, pending.as_ref()).await {
+                    Ok(mut f) => {
+                        dispatch.finish();
+                        if resumes > 0 {
+                            f.meta.resumed_from = Some(req.assistant_prefix.as_ref().map_or(0, |p| p.text.chars().count() as u64));
+                        }
+                        return Ok(f);
                     }
-                    return Ok(f);
-                }
-                Err(e) => e,
-            };
+                    Err(e) => e,
+                };
             drop(dispatch);
             if matches!(err, RemoteError::Busy) {
                 self.balance.busy(node.name());
@@ -866,6 +876,7 @@ impl Coordinator {
         standin: Option<&str>,
         raw: bool,
         shown: &mut String,
+        pending: Option<&crate::semantic::Pending>,
     ) -> Result<Finish, (RemoteError, bool)> {
         if cold {
             tracing::info!(model = %model, node = node.name(), "cold start: loading");
@@ -963,12 +974,64 @@ impl Coordinator {
                     answer.usage = usage;
                     if !raw && req.cache.may_store() && answer.complete() && req.assistant_prefix.is_none() && *shown == answer.text {
                         self.cache.put_rev(model, revision.as_deref(), req, &answer);
+                        if let (Some(sem), Some(pending)) = (&self.semantic, pending) {
+                            sem.store(pending, model, &answer);
+                        }
                     }
                     return Ok(f);
                 }
                 other => tracing::debug!(?other, "engine chunk this version does not use"),
             }
         }
+    }
+
+    /// The semantic cache's turn for a request the exact cache missed: `Ok` with the replayed
+    /// answer on a hit, else `Err` with what to store the answer under (`None`: not cached). It
+    /// only uses an embedding model that is already loaded, never cold-starts one, and a failed
+    /// embedding just skips the cache.
+    async fn semantic_lookup(&self, p: &Prepared, req: &Request, out: &dyn Sink) -> Result<Finish, Option<crate::semantic::Pending>> {
+        let Some(sem) = &self.semantic else { return Err(None) };
+        if p.raw || p.standin.is_some() || !(req.cache.may_read() || req.cache.may_store()) {
+            return Err(None);
+        }
+        let Some(c) = crate::semantic::cacheable(req) else { return Err(None) };
+        let Some(rev) = self.cache_revision(&p.model) else { return Err(None) };
+        let embed_model = &sem.opts.embedding_model;
+        let Some(embed_rev) = self.ready_embedding(embed_model) else {
+            tracing::debug!(model = %embed_model, "semantic cache: the embedding model is not loaded; skipped");
+            return Err(None);
+        };
+        let embedding = match self.embed(embed_model, std::slice::from_ref(&c.prompt)).await {
+            Ok((mut v, _, _)) if !v.is_empty() => v.swap_remove(0),
+            Ok(_) => return Err(None),
+            Err(e) => {
+                tracing::debug!(model = %embed_model, "semantic cache: embedding failed, skipped: {e}");
+                return Err(None);
+            }
+        };
+        let scope = sem.scope(&p.model, rev.as_deref(), embed_rev.as_deref(), &c.context);
+        if req.cache.may_read()
+            && let Some((hit, score)) = sem.lookup(&scope, &embedding)
+        {
+            tracing::debug!(model = %p.model, score, "semantic cache hit");
+            let mut f = replay(hit, out);
+            f.meta.served_by = Some("semantic-cache".into());
+            return Ok(f);
+        }
+        Err(req.cache.may_store().then(|| crate::semantic::Pending { model: p.model.clone(), scope, embedding }))
+    }
+
+    /// The revision of `model` on a node where it is a loaded embedding model, `None` when none.
+    fn ready_embedding(&self, model: &str) -> Option<Option<String>> {
+        self.nodes()
+            .into_iter()
+            .find(|n| !n.draining() && n.status().iter().any(|s| s.id == model && s.state == ModelState::Ready && crate::model_node::embeds(s)))
+            .map(|n| n.revision(model))
+    }
+
+    /// Entries in the semantic cache (0 when it is off).
+    pub fn semantic_entries(&self) -> usize {
+        self.semantic.as_ref().map_or(0, |s| s.len())
     }
 
     /// The embedding model a request means (`None`/`default`: the first one in the catalog).

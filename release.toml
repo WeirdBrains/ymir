@@ -56,9 +56,16 @@ version = "0.8.3"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 
-[[requires]]                    # the synced job board's log and leases (P3b), per-type keys (0.8.3) and type-scoped sealed records for cert-only inference nodes (0.8.4)
+[[requires]]                    # the synced job board's log and leases (P3b), per-type keys (0.8.3) and type-scoped sealed records for cert-only inference nodes (0.8.4), one session for every type (pull_types_shared, 0.8.5)
 crate = "weirdnet-sync"
-version = "0.8.4"
+version = "0.8.5"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # the semantic answer cache (SemanticCache, M6)
+crate = "weirdnet-semcache"
+version = "0.2.2"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
@@ -116,6 +123,10 @@ files = [
   "dist/ymir-cuda-{version}-*-pc-windows-msvc.zip",
   "dist/ymir-{version}-*.msi",
   "dist/YmirSetup-{version}.exe",
+  # FreeBSD (M9), from the Release workflow's VM job. Not a [[platforms]] entry yet: the shared
+  # release script (weirdnet-project-helpers 0.4.0) knows no `freebsd` OS; asked of the Weirdnet lead.
+  "dist/ymir-{version}-x86_64-unknown-freebsd.tar.gz",
+  "dist/ymir-{version}-x86_64-unknown-freebsd.pkg",
 ]
 sums = "SHA256SUMS"
 

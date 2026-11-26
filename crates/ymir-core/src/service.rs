@@ -776,13 +776,28 @@ pub fn execute(plan: &Plan, dry_run: bool) -> Result<Vec<String>> {
     Ok(log)
 }
 
+/// Runs a service manager command. Its output goes to a file, not a pipe: a service manager may
+/// leave a long-lived child holding what it inherited (FreeBSD's `daemon(8)`, started by
+/// `service ymird restart`, keeps stdout and stderr), and waiting for a pipe's end would wait for it.
 fn run(cmd: &[String]) -> Result<()> {
-    let out = Command::new(&cmd[0]).args(&cmd[1..]).output().with_context(|| format!("running {}", cmd[0]))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let msg = String::from_utf8_lossy(&out.stdout);
-        let detail = [err.trim(), msg.trim()].into_iter().find(|t| !t.is_empty()).unwrap_or("");
-        bail!("`{}` failed ({}){}", cmd.join(" "), out.status, if detail.is_empty() { String::new() } else { format!(": {detail}") });
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!("ymirctl-service-{}-{n}.out", std::process::id()));
+    let file = std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    let status = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(file.try_clone()?)
+        .stderr(file)
+        .status()
+        .with_context(|| format!("running {}", cmd[0]));
+    let output = std::fs::read(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    let status = status?;
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&output);
+        let detail = detail.trim();
+        bail!("`{}` failed ({status}){}", cmd.join(" "), if detail.is_empty() { String::new() } else { format!(": {detail}") });
     }
     Ok(())
 }
@@ -1166,7 +1181,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let sp = ServiceSpec::user("/opt/ymir/bin/ymird", home.path());
-        let t = Target { os: Os::current(), scope: Scope::User, dir: Some(dir.path().into()), custom: true, uid: 501 };
+        // FreeBSD has no user scope (see `freebsd_rc_script_and_commands`); a user unit's files there
+        // are the Linux ones.
+        let os = if Os::current() == Os::FreeBsd { Os::Linux } else { Os::current() };
+        let t = Target { os, scope: Scope::User, dir: Some(dir.path().into()), custom: true, uid: 501 };
         let p = install_plan(&sp, &t, &host(), true).unwrap();
         assert!(p.steps.is_empty(), "{p:?}");
         let log = execute(&p, true).unwrap();
