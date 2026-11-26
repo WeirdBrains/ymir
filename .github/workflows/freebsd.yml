@@ -60,7 +60,9 @@ jobs:
             sudo /usr/local/bin/ymirctl --home "$H" setup --name ci --backend llamacpp --llama-server "$M" --model /tmp/tiny.gguf --port 18484
             sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --dry-run | tee out.txt
             grep -q 'would write /usr/local/etc/rc.d/ymird' out.txt
-            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --ymird /usr/local/bin/ymird
+            # Not under timeout(1): on FreeBSD it reaps every descendant, so it would wait for (and on
+            # expiry kill) the daemon(8) that `service ymird restart` leaves running.
+            sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --ymird /usr/local/bin/ymird
             up() { for i in $(seq 60); do sudo /usr/local/bin/ymirctl --home "$H" service status --system | grep -q 'ymird: answering' && return 0; sleep 1; done; return 1; }
             down() { for i in $(seq 60); do sudo /usr/local/bin/ymirctl --home "$H" service status --system | grep -q 'ymird: not answering' && return 0; sleep 1; done; return 1; }
             up || { sudo cat "$H/state/logs/ymird.log"; exit 1; }
