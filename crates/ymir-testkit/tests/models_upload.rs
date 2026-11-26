@@ -179,14 +179,18 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     let root = tmp.path();
     let lap_h = home(root, "lap", "inference", &[], &[], "")?;
     let first = Membership::create(&lap_h.paths.pool(), "lap")?;
-    let gpu_h = home(root, "gpu", "model", &[], &["base"], "upload_keep_free = \"0\"\n")?;
+    // gpu keeps 1 MiB free so `off` (uploads off, nothing kept free) has the most room (U10).
+    let gpu_h = home(root, "gpu", "model", &[], &["base"], "upload_keep_free = \"1MiB\"\n")?;
     let full_h = home(root, "full", "model", &[], &[], "upload_keep_free = \"1000000TiB\"\n")?;
+    let off_h = home(root, "off", "model", &[], &[], "upload = false\nupload_keep_free = \"0\"\n")?;
     prelink(&first, &gpu_h, "gpu");
     prelink(&first, &full_h, "full");
+    prelink(&first, &off_h, "off");
     drop(first);
     let gpu = start(&gpu_h).await?;
     let full = start(&full_h).await?;
-    let lap_h = home(root, "lap", "inference", &[addr(&gpu_h).await?, addr(&full_h).await?], &[], "")?;
+    let off = start(&off_h).await?;
+    let lap_h = home(root, "lap", "inference", &[addr(&gpu_h).await?, addr(&full_h).await?, addr(&off_h).await?], &[], "")?;
     let lap = start(&lap_h).await?;
     let lap_peer = peer_of(&lap_h).await?;
     eventually(40, "gpu answers models/1", async || Ok(ctl(&lap_h.home, &["models", "list", "--node", "gpu"]).await.is_ok())).await?;
@@ -207,6 +211,7 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     let sent = ctl_with(&lap_h.home, &["models", "upload", &other_s, "--node", "auto", "--name", "auto-pick", "--no-persist"], &mut buf, "").await;
     let out = String::from_utf8(buf)?;
     assert!(sent.is_ok() && out.contains("Chose gpu") && out.contains("gpu: stored `auto-pick`"), "{out} {sent:?}");
+    assert!(!root.join("off-models/auto-pick").exists(), "off takes no uploads, so auto went on to gpu");
 
     // A model: sent, placed with its provenance, saved in gpu's node.toml.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu", "--license", "mit"]).await?;
@@ -368,6 +373,7 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
 
     lap.shutdown().await;
     full.shutdown().await;
+    off.shutdown().await;
     gpu.shutdown().await;
     Ok(())
 }

@@ -287,9 +287,9 @@ pub struct UploadsServer {
 impl UploadsServer {
     pub fn start<Q: Message, R: Message>(node: &Arc<Node<Q, R>>, service: Arc<UploadsService>) -> Result<Self, RemoteError> {
         let mut limits = stream_limits();
-        // One small request per upload; a finished stream can stay counted for a while after both
-        // sides are done, so several uploads in a row (a pool, a rollout) need room.
-        limits.max_streams = 64;
+        // One small request per upload; weirdnet-net 0.8.3 releases a stream as soon as both sides
+        // drop it, so this only has to cover uploads running at once (a pool, a rollout).
+        limits.max_streams = 16;
         let mut incoming = node.accept_streams(UPLOADS_PROTOCOL, limits).map_err(|e| RemoteError::Failed { message: e.to_string() })?;
         let task = tokio::spawn(async move {
             while let Some(stream) = futures::StreamExt::next(&mut incoming).await {
@@ -356,6 +356,9 @@ impl RegisterError {
     }
 }
 
+/// The hint for a node with `[model] upload = false` (`--node auto` passes over such a node).
+pub const UPLOADS_OFF: &str = "that node has `[model] upload = false`; pick another node or turn uploads on there";
+
 /// What a refused upload means, in words a person can act on.
 pub fn explain_refusal(label: &str, e: &RemoteError) -> Option<String> {
     use weirdnet_backends::models::{refusal, refusal_reason};
@@ -390,6 +393,23 @@ mod tests {
         assert!(m.starts_with("gpu refused the upload (no-space): 3 GiB free") && m.contains("upload_keep_free"), "{m}");
         assert!(explain_refusal("gpu", &RemoteError::refused("not-on-roster")).is_none());
         assert!(explain_refusal("gpu", &RemoteError::Busy).is_none());
+    }
+
+    #[test]
+    fn uploads_are_on_unless_turned_off_and_round_trip() {
+        let cfg = NodeConfig::default();
+        assert!(cfg.model.upload);
+        assert!(!cfg.to_toml().unwrap().contains("upload ="), "the default is not written");
+        let mut off = NodeConfig::default();
+        off.model.upload = false;
+        let text = off.to_toml().unwrap();
+        assert!(text.contains("upload = false"), "{text}");
+        let back: NodeConfig = toml::from_str(&text).unwrap();
+        assert!(!back.model.upload);
+        let m = explain_refusal("gpu", &RemoteError::refused("not-allowed: uploads are off on this node")).unwrap();
+        assert!(m.contains(UPLOADS_OFF), "{m}");
+        let m = explain_refusal("gpu", &RemoteError::refused("not-allowed: not linked")).unwrap();
+        assert!(m.contains("pool link"), "{m}");
     }
 
     #[test]
