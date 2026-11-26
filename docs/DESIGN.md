@@ -1998,7 +1998,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). Still to do: a published placement plan with fencing, cloud-wide swap, prefix warming, and the pool-mode (shared) semantic cache. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
-- **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
+- **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only) and [vLLM with Ray](#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only)). llama.cpp RPC groups and vLLM-on-Ray groups are built (opt-in pool policy, private-link-only planning and binds, group up and down, teardown when a member is lost). Still to do: a `vllm-ray` run on real GPUs, and the big-mode reproduction on server-a/server-b.
 - **M8 server-a/server-b migration** (done 2026-11-20; each step approved by m3talsmith).
 - **M9 Breadth and hardening** (in progress; see [M9 status](#m9-status-in-progress-2026-11-20)). Built: self-update via `weirdnet-update` with rollback; agent tasks; the Windows service (2026-11-20, see [Running as a service](#running-as-a-service)); a security review of the roster check, role boundaries and backend ports; Inkling 2 Mini; automatic context sizing (fit fixes in 0.3.0 and 0.3.1); MLX mock end-to-end tests; outside MCP servers for tasks; and a bundle fetcher (`update fetch`, `update watch`). Still to do: push wake-ups (once the `weirdnet-push` front end exists), BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release.
 - **M10 Cert-only server link** (built 2026-11-24; see [M10 status](#m10-status-built-2026-11-24)).
@@ -2518,9 +2518,8 @@ tested on the dev box only, over loopback, with mocks and with a real model. No 
 
 **Not done or untested:**
 
-- **vLLM with Ray (and tensor parallel over RoCE) groups.** Not built. `RpcWorkers` answers Unsupported
-  for any worker kind except `rpc-server`. They need a Ray cluster over 100 Gb/s links; the only such
-  machines are server-a and server-b, which were off limits.
+- **vLLM with Ray groups** are built since 2026-11-26 (next section), tested with mocks only. A run on
+  real GPUs over RoCE needs server-a and server-b (or other GPU nodes m3talsmith picks).
 - **The big-mode reproduction on server-a and server-b** (a group job across the two servers, replacing the hand-run
   big mode) has not been run. It needs m3talsmith's go-ahead and a plan for the private link between them.
 - **Capability records carry no link information**, only `group_jobs` and `groups`; so links, ports and
@@ -2534,6 +2533,120 @@ tested on the dev box only, over loopback, with mocks and with a real model. No 
   demand or by placement, because the lease and synced plan are waiting on sync 0.7.0.
 - The group's leader serves through a loopback `llama-server` the node did not start through the
   Supervisor, so engine args cannot be changed at runtime; the leader's args come from `[[model.split]]`.
+
+
+## M7 vLLM with Ray groups (built 2026-11-26, mocks only)
+
+A `vllm-ray` group serves a vLLM model across Linux GPU nodes: a Ray cluster over the private link and
+`vllm serve --distributed-executor-backend ray` on the leader. Same planner, lifecycle, member-loss
+watch and `ymirctl group up|down|status` as llama.cpp RPC; only the processes differ
+([`ymir-core::ray`](../crates/ymir-core/src/ray.rs), `RpcWorkers::up_ray` in
+[`group.rs`](../crates/ymir-core/src/group.rs)).
+
+**Config.**
+
+```toml
+# Inference node: the pool policy.
+[[inference.split]]
+id = "big"
+backend = "vllm-ray"
+size = "140GiB"
+leader = "server-a"
+ray_port = 6379          # the head's GCS port on its private link (default 6379)
+# tensor_parallel = 8    # default: the fewest GPUs of any member
+# pipeline_parallel = 2  # default: the number of members
+[[inference.split.node]]
+node = "server-a"
+link = "10.10.0.1"
+memory = "80GiB"
+gpus = 1
+gbps = 200
+[[inference.split.node]]
+node = "server-b"
+link = "10.10.0.2"
+memory = "80GiB"
+gpus = 1
+gbps = 200
+
+# Each model node: its link, and Ray (the managed vLLM venv's `ray`, else PATH).
+[model]
+private_link = "10.10.0.1"
+ray = "auto"               # or "system:/path/to/ray", or "off"
+# ray_args = ["--num-gpus=1"]
+# ray_trust_firewall = true  # see "Security boundary"
+
+# The leader only: what `vllm serve` runs.
+[[model.split]]
+id = "big"
+engine = "vllm"
+file = "Org/Big-Model"     # a Hub id, or a directory (absolute or under models_dir)
+serve_port = 18090
+context = 32768
+```
+
+**Lifecycle.** The coordinator sends `GroupUp` (worker kind `ray`) to every member at once, since the
+head is the one waiting. The plan carries every member's link, `ray.port` and the sizing (`vllm.tp`,
+`vllm.pp`).
+
+1. The leader runs `ray start --head --block --node-ip-address LINK --port P --include-dashboard=false
+   --disable-usage-stats` and waits until the GCS port answers on `LINK:P`.
+2. Each other member waits for that port, then runs `ray start --block --address LEADER:P
+   --node-ip-address LINK --disable-usage-stats`.
+3. The leader polls `ray status --address LINK:P` until every member is active (up to 3 minutes),
+   then runs `vllm serve MODEL --host 127.0.0.1 --port SERVE --served-model-name ID
+   --distributed-executor-backend ray --tensor-parallel-size TP --pipeline-parallel-size PP`, with
+   `RAY_ADDRESS`, `VLLM_HOST_IP` and the key in `VLLM_API_KEY` (not on the command line), and waits for
+   `/health` (up to 30 minutes, since weights load slowly). Its node advertises the model as a wrapped vLLM
+   launch, as with llama.cpp RPC.
+4. **Sizing** comes from the plan: by default tensor parallel is the fewest GPUs any member has and
+   pipeline parallel is the number of members. Either can be set; `TP x PP` must fit the members'
+   GPUs, or the planner refuses before anything starts.
+
+**Teardown.** Every group process (`ray start`, `vllm serve`, `rpc-server`, `llama-server`) leads its
+own process group. Stopping one sends SIGTERM to the whole process group, waits up to 10 s, then sends
+SIGKILL to anything left. That covers Ray's GCS, raylet and the vLLM workers Ray started. The leader
+stops vLLM before the head. `group down`, a lost member, a failed start and daemon shutdown all go
+through this path; dropping a process handle also kills its process group. When the leader fails, the
+coordinator does not wait for members still waiting on the head; it takes down any that come up after.
+
+**Security boundary.** Ray has **no authentication**: anyone who reaches its ports can run code on
+the node. So:
+
+- Ray binds the node's `[model] private_link` only (loopback, RFC 1918, link-local or ULA; never a
+  public, CGNAT or tailnet address). The plan's address must match it. `ray_args` may not set
+  `--head`, `--address`, `--node-ip-address`, `--port`, `--block`, `--dashboard-host`,
+  `--include-dashboard` or any all-interfaces address. The dashboard is off.
+- **Ymir checks the binds.** It lists the TCP listeners of each Ray process group (`/proc`, so Linux
+  only; `vllm-ray` groups are refused elsewhere). Any listener on an address other than the private
+  link or loopback makes it refuse the group and tear it down. It checks after the head is up, after
+  members join, after vLLM is ready, and on every group watch tick.
+- **Ray's GCS listens on all interfaces** whatever `--node-ip-address` says (a known Ray limitation).
+  So by default a real Ray cluster is refused. `[model] ray_trust_firewall = true` lets all-interface
+  listeners through (they are logged). Set it only when a host firewall drops Ray's ports on every
+  interface but the private link. Listeners on any other specific address are still refused. The
+  "private link" must still be a direct cable or an isolated VLAN, as for `rpc-server`.
+- vLLM's API binds loopback, behind a key, like every other engine.
+
+**Tested (mocks only, no GPU).** `ymir-mock-ray` (head, join, `ray status`; the head starts a child
+in its process group the way Ray starts `gcs_server`, and `--mock-bind-any` makes that child listen
+on `0.0.0.0` like the real GCS). The mock engine acts as `vllm serve`: with the Ray executor it asks
+the cluster for its node count and exits when there are fewer than `--pipeline-parallel-size`.
+
+- Unit tests: args and refusals, `ray status` parsing, sizing, `vllm serve` arguments (no key in argv),
+  `/proc/net/tcp` parsing, the listener rule, finding a process group's listeners, Ray plans, member
+  refusals.
+- [`m7_ray.rs`](../crates/ymir-testkit/tests/m7_ray.rs): three daemons over Weirdnet. A sizing that
+  does not fit is refused before anything starts. `group up` brings up the head on the link, the
+  member joins, and vLLM starts on a two-node cluster with `tp=1 pp=2` and answers a chat through the
+  pool. `group down` stops the head and its child. After another `up`, the member's node shutting down
+  takes the group down along with the head's child. A head whose child listens on `0.0.0.0` is
+  refused with the `ray_trust_firewall` hint and torn down, and nothing is left listening on all
+  interfaces.
+
+**Not done.** A run on real GPUs (Ray and vLLM versions, NCCL over RoCE, how real `ray start
+--block` handles SIGTERM) needs hardware m3talsmith picks. UDP listeners are not checked. A member's
+own vLLM worker processes run under its raylet, so they are in its Ray process group and checked
+with it.
 
 ## B1 status (built 2026-11-19)
 
@@ -2905,7 +3018,10 @@ sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP se
   accepts only Noise-authenticated peers and then the roster check.
 - *Group workers (M7):* llama.cpp `rpc-server` has no authentication, so Ymir binds it to a declared private-link address only and refuses
   any address that is not loopback, RFC 1918 or link-local (tests in `m7.rs`). Anything else on that network can talk to the worker, so a
-  "private link" must be a cable or an isolated VLAN, as the design already says. The M9 check does not start a group.
+  "private link" must be a cable or an isolated VLAN, as the design already says. The M9 check does not start a group. Ray
+  (`vllm-ray` groups) has no authentication either: it binds the private link only, Ymir checks each Ray process group's TCP
+  listeners and refuses any off the link or loopback. Ray's GCS listens on all interfaces anyway, so a real cluster needs a host
+  firewall and `[model] ray_trust_firewall = true` (see [vLLM with Ray](#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only)).
 - *Secrets:* the bridge token and seed are files (0600), not in the OS keyring; the keyring is still open work. A cert-only
   node (M10) has `credential.json` (the user's public key) instead of a seed. The unit file
   carries no secret. Update state is 0700.

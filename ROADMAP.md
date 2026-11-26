@@ -50,7 +50,7 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
 
 ## M7 Split models (In progress)
 
-A model too big for one machine is split across several with llama.cpp RPC: an opt-in pool policy, private-link-only planning, group up and down, and teardown when a member is lost. Next: vLLM with Ray groups.
+A model too big for one machine is split across several, with llama.cpp RPC or with vLLM on a Ray cluster (`vllm-ray`): an opt-in pool policy, private-link-only planning and binds, group up and down, and teardown when a member is lost. Next: a real GPU run of `vllm-ray` and the big-mode reproduction on server-a and server-b.
 
 Weirdnet crates: `weirdnet-backends`.
 

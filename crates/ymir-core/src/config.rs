@@ -237,9 +237,22 @@ pub struct ModelSection {
     /// More `rpc-server` arguments (such as `-d CPU` or `-t 8`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rpc_args: Vec<String>,
-    /// `auto` (only where supported) | `system:/path/to/vllm` | `off`.
+    /// `auto` (the venv `ymirctl engines install vllm` makes, else `PATH`) |
+    /// `system:/path/to/vllm` | `image:NAME` | `off`.
     #[serde(default = "auto")]
     pub vllm: String,
+    /// Ray, for `vllm-ray` split models: `auto` (the managed vLLM venv, else `PATH`) |
+    /// `system:/path/to/ray` | `off`.
+    #[serde(default = "auto", skip_serializing_if = "is_auto")]
+    pub ray: String,
+    /// More `ray start` arguments (such as `--num-gpus=2`); never the bind flags Ymir sets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ray_args: Vec<String>,
+    /// Allow Ray listeners on all interfaces. Ray has no authentication and its GCS ignores
+    /// `--node-ip-address`, so a `vllm-ray` group is refused unless this says a host firewall
+    /// drops Ray's ports on every interface but the private link.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ray_trust_firewall: bool,
     /// MLX-LM's `mlx_lm.server`, for `backend = "mlx"` (Apple Silicon): `managed` (the venv
     /// `ymirctl setup` installs, else on `PATH`) | `system:/path/to/mlx_lm.server` | `off`.
     #[serde(default = "managed", skip_serializing_if = "is_managed")]
@@ -266,6 +279,14 @@ fn is_yes(b: &bool) -> bool {
     *b
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_auto(s: &str) -> bool {
+    s == "auto"
+}
+
 fn is_managed(s: &str) -> bool {
     s == "managed"
 }
@@ -285,6 +306,9 @@ impl Default for ModelSection {
             rpc_server: managed(),
             rpc_args: Vec::new(),
             vllm: auto(),
+            ray: auto(),
+            ray_args: Vec::new(),
+            ray_trust_firewall: false,
             mlx: managed(),
             models_dir: None,
             local: Vec::new(),
@@ -827,9 +851,16 @@ impl NodeConfig {
             crate::group::parse_link(l).map_err(|e| anyhow::anyhow!("model.private_link: {e}"))?;
         }
         let mut ids = std::collections::HashSet::new();
+        crate::ray::check_args(&self.model.ray_args).map_err(|e| anyhow::anyhow!("model.{e}"))?;
         for s in &self.model.split {
             if s.id.is_empty() || s.id.contains(char::is_whitespace) {
                 bail!("model.split id `{}` must be non-empty and have no spaces", s.id);
+            }
+            if let Some(e) = &s.engine
+                && e != "llamacpp"
+                && e != "vllm"
+            {
+                bail!("model.split `{}`: engine `{e}` is not `llamacpp` or `vllm`", s.id);
             }
             if !ids.insert(&s.id) || self.model.local.iter().any(|m| m.id == s.id) {
                 bail!("model `{}` is listed twice (split models are not also [[model.local]])", s.id);
@@ -837,8 +868,11 @@ impl NodeConfig {
         }
         let mut seen = std::collections::HashSet::new();
         for p in &self.inference.split {
-            if p.backend != crate::group::BACKEND {
-                bail!("inference.split `{}`: backend `{}` is not built (only `{}`)", p.id, p.backend, crate::group::BACKEND);
+            if p.backend != crate::group::BACKEND && p.backend != crate::group::RAY_BACKEND {
+                bail!("inference.split `{}`: backend `{}` is not `{}` or `{}`", p.id, p.backend, crate::group::BACKEND, crate::group::RAY_BACKEND);
+            }
+            if p.tensor_parallel == Some(0) || p.pipeline_parallel == Some(0) || p.nodes.iter().any(|n| n.gpus == Some(0)) {
+                bail!("inference.split `{}`: tensor_parallel, pipeline_parallel and gpus are at least 1", p.id);
             }
             if !seen.insert(&p.id) {
                 bail!("inference.split `{}` is listed twice", p.id);
@@ -927,6 +961,10 @@ impl NodeConfig {
             models_dir: self.models_dir(),
             key,
             log_dir: Some(paths.logs()),
+            ray: resolve_ray(&self.model, paths),
+            ray_args: self.model.ray_args.clone(),
+            vllm: resolve_vllm(&self.model, paths),
+            ray_trust_firewall: self.model.ray_trust_firewall,
         }
     }
 
@@ -937,7 +975,8 @@ impl NodeConfig {
             .split
             .iter()
             .map(|s| {
-                let mut l = ModelLaunch::new(&s.id, EngineKind::Llamacpp, s.file.clone().unwrap_or_default());
+                let engine = if s.engine.as_deref() == Some("vllm") { EngineKind::Vllm } else { EngineKind::Llamacpp };
+                let mut l = ModelLaunch::new(&s.id, engine, s.file.clone().unwrap_or_default());
                 l.context = s.context;
                 l.slots = s.slots;
                 l.wrap = Some(weirdnet_backends::Wrap { url: format!("http://127.0.0.1:{}", s.serve_port), api_key: Some(key.to_string()) });
@@ -1136,7 +1175,21 @@ fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
             }
         };
     }
-    resolve_engine(setting, "vllm", &paths.engines().join("vllm").join("bin").join("vllm"))
+    let managed = crate::vllm::bin_in(&crate::vllm::venv(&paths.engines()), "vllm");
+    if setting == "auto" && managed.is_file() {
+        return Some(managed);
+    }
+    resolve_engine(setting, "vllm", &managed)
+}
+
+/// `ray`: `auto` (or `managed`) is the managed vLLM venv's, else `PATH`'s.
+pub fn resolve_ray(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+    let managed = crate::vllm::bin_in(&crate::vllm::venv(&paths.engines()), "ray");
+    match model.ray.trim() {
+        "off" => None,
+        s if s.starts_with("system:") => Some(PathBuf::from(&s["system:".len()..])),
+        _ => Some(managed).filter(|p| p.is_file()).or_else(|| find_in_path("ray")),
+    }
 }
 
 /// The image unwrapped vLLM models agree on, if any.

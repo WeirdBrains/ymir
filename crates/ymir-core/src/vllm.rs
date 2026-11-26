@@ -28,6 +28,16 @@ pub const SPARK_MAX_MODEL_LEN: u32 = 262_144;
 
 /// A Hugging Face repo, file path or Hub id that is Inkling 2 Mini (or its varloop research
 /// checkpoint).
+/// The managed vLLM venv (`ymirctl engines install vllm`): vLLM and Ray, under the engines dir.
+pub fn venv(engines_dir: &Path) -> PathBuf {
+    engines_dir.join("vllm")
+}
+
+/// A program in a venv: `bin/NAME` (`Scripts\\NAME.exe` on Windows).
+pub fn bin_in(venv: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) { venv.join("Scripts").join(format!("{name}.exe")) } else { venv.join("bin").join(name) }
+}
+
 pub fn is_inkling(source: &str) -> bool {
     let s = source.to_ascii_lowercase();
     s.contains("inkling-2-mini") || s.contains("inkling2_loop") || s.contains("inkling2-mini") || s.contains("tml-d24-varloop")

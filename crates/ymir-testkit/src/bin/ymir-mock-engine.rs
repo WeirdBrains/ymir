@@ -9,6 +9,11 @@
 //! the answer ends with ` [N image(s)]`; without one, a request with an image fails like
 //! `llama-server`'s ("image input is not supported").
 //!
+//! vLLM: as `vllm serve MODEL --served-model-name ID` (key in `VLLM_API_KEY`). With
+//! `--distributed-executor-backend ray` it asks the Ray cluster at `RAY_ADDRESS` (a
+//! `ymir-mock-ray` head) how many nodes it has and exits unless there are
+//! `--pipeline-parallel-size` of them, like vLLM failing to place its workers.
+//!
 //! LoRA: `--lora FILE` (repeatable) as llama-server takes it; a chat body's `"lora": [{"id": i,
 //! "scale": s}]` applies file `i`, and the answer reads "Hello from `<alias>` with `<file stem>` at
 //! `<s>`!". An id past the list is refused like llama-server's "invalid adapter id".
@@ -39,13 +44,29 @@ async fn main() {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let host = flag("--host").unwrap_or_else(|| "127.0.0.1".into());
     let port: u16 = flag("--port").and_then(|p| p.parse().ok()).unwrap_or(8080);
-    let alias = flag("--alias").or_else(|| flag("--model")).unwrap_or_else(|| "mock".into());
+    let alias = flag("--alias").or_else(|| flag("--served-model-name")).or_else(|| flag("--model")).unwrap_or_else(|| "mock".into());
+    if flag("--distributed-executor-backend").as_deref() == Some("ray") {
+        let addr = std::env::var("RAY_ADDRESS").expect("RAY_ADDRESS for a Ray executor");
+        let pp: usize = flag("--pipeline-parallel-size").and_then(|p| p.parse().ok()).unwrap_or(1);
+        let tp: usize = flag("--tensor-parallel-size").and_then(|p| p.parse().ok()).unwrap_or(1);
+        let nodes = ray_nodes(&addr);
+        eprintln!("mock vllm: ray {addr} nodes={nodes} tp={tp} pp={pp}");
+        if nodes < pp {
+            eprintln!("mock vllm: the Ray cluster has {nodes} nodes; pipeline parallel {pp} needs {pp}");
+            std::process::exit(1);
+        }
+    }
     let load_ms = std::env::var("YMIR_MOCK_LOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     assert_eq!(host, "127.0.0.1", "engines must bind loopback only");
     let vision = flag("--mmproj").is_some_and(|p| std::path::Path::new(&p).is_file());
     let loras: Vec<String> = args.windows(2).filter(|w| w[0] == "--lora").map(|w| w[1].clone()).collect();
-    let st =
-        Arc::new(Mock { alias, key: std::env::var("LLAMA_API_KEY").ok(), vision, ready_at: Instant::now() + Duration::from_millis(load_ms), loras });
+    let st = Arc::new(Mock {
+        alias,
+        key: std::env::var("LLAMA_API_KEY").or_else(|_| std::env::var("VLLM_API_KEY")).ok(),
+        vision,
+        ready_at: Instant::now() + Duration::from_millis(load_ms),
+        loras,
+    });
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(models))
@@ -206,4 +227,14 @@ async fn chat(State(st): State<Arc<Mock>>, headers: HeaderMap, axum::Json(body):
         }
     });
     Sse::new(stream).into_response()
+}
+
+/// The node count a `ymir-mock-ray` head reports.
+fn ray_nodes(addr: &str) -> usize {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect(addr) else { return 0 };
+    let _ = s.write_all(b"status\n");
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    out.trim().parse().unwrap_or(0)
 }

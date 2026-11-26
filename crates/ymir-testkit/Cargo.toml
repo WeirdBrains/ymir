@@ -15,6 +15,11 @@ path = "src/bin/ymir-mock-rpc.rs"
 test = false
 
 [[bin]]
+name = "ymir-mock-ray"
+path = "src/bin/ymir-mock-ray.rs"
+test = false
+
+[[bin]]
 name = "ymir-mock-engine"
 path = "src/bin/ymir-mock-engine.rs"
 test = false

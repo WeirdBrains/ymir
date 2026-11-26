@@ -8,11 +8,26 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- M7 vLLM with Ray groups: `[[inference.split]] backend = "vllm-ray"`. The leader runs `ray start --head` on its private link,
+  waits until every member's `ray start --address` has joined (`ray status`), then runs `vllm serve
+  --distributed-executor-backend ray` on loopback, with `--tensor-parallel-size` and `--pipeline-parallel-size` from the plan
+  (default: the fewest GPUs per member, by the number of members; `tensor_parallel`, `pipeline_parallel` and per-node `gpus`
+  override them). New settings: `[model] ray`, `ray_args`, `ray_trust_firewall`, and `[[model.split]] engine = "vllm"`. Ray has no
+  authentication, so Ymir checks every Ray process group's TCP listeners and refuses any that is not on the private link or
+  loopback. Ray's GCS listens on all interfaces anyway, so a real cluster needs a host firewall and `ray_trust_firewall = true`.
+  Linux only. Tested with mock `ray` and `vllm` ([m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs)); not yet on real GPUs.
 - Limits for video clients (LF-43): catalog/1 entries carry `context`, the window one request can count on (smallest
   across nodes, llama.cpp's context split over its slots, absent when any node doesn't say), and `limits`, the strictest
   `MediaLimits` across nodes (images per request, per-image token cost or patch, edge, audio length, request bytes), from the
   engine or `limits = { ... }` on a `[model.local]`; nothing is defaulted. `[bridge] max_request_bytes` sets the OpenAI
   bridge's body limit (a 413 names it). `ymirctl status` shows both. Weirdnet: agent 0.5.7, backends 0.4.8, openai 0.2.4.
+
+### Changed
+
+- Group processes (`rpc-server`, the leader's `llama-server`) now stop with their whole process group (SIGTERM, 10 s, then
+  SIGKILL), and `ymird` stops every group on shutdown, so nothing a group started outlives it.
+- `[model] vllm = "auto"` (the default) and the new `ray = "auto"` use the managed venv under the engines dir
+  (`engines/vllm/bin/`) when it exists, before `PATH`.
 
 ## [0.21.0] - 2026-11-26
 

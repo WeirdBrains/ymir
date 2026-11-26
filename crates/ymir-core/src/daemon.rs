@@ -132,6 +132,8 @@ pub struct Daemon {
     network: Option<Network>,
     /// Woken by a `shutdown` control request.
     exit: Arc<tokio::sync::Notify>,
+    /// This node's part of split-model groups, stopped on shutdown.
+    group_workers: Option<Arc<RpcWorkers>>,
 }
 
 /// (device, inode) of a file, to tell our socket from a successor's.
@@ -501,7 +503,7 @@ impl Daemon {
         });
         tasks.push(tokio::spawn(control::serve(listener, handler, stop_rx)));
         tracing::info!(node = %name, roles = ?roles.names(), "ymird started");
-        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper, serving, network, exit })
+        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper, serving, network, exit, group_workers })
     }
 
     /// Resolves when a `shutdown` control request arrives (`ymirctl service stop` on a Windows
@@ -530,6 +532,10 @@ impl Daemon {
             if let Ok(node) = Arc::try_unwrap(net.node) {
                 let _ = tokio::task::spawn_blocking(move || node.stop()).await;
             }
+        }
+        // Group processes (rpc-server, Ray, the leader's vLLM) with their whole process groups.
+        if let Some(w) = &self.group_workers {
+            w.down_all().await;
         }
         if let Some(s) = &self.supervisor {
             s.shutdown().await;
