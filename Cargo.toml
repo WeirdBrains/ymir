@@ -31,7 +31,7 @@ weirdnet-model = { version = "0.5.3", default-features = false }
 weirdnet-net = "=0.8.3"
 weirdnet-openai = "0.2.3"
 weirdnet-semcache = "0.2.1"
-weirdnet-sync = "0.8.3"
+weirdnet-sync = "0.8.4"
 weirdnet-alerts = { version = "0.2.2", features = ["backends"] }
 weirdnet-rules = "=0.1.1"
 weirdnet-update = { version = "0.2.2", features = ["wire"] }
