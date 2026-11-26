@@ -8,9 +8,6 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
-- `[model] upload = false`: the node refuses uploads (`not-allowed`, "uploads are off on this node") while pulls,
-  listing and removals keep working (model-upload U10, weirdnet-backends 0.4.7 `WritePolicy::with_uploads`).
-  `ymirctl models upload` says that node has uploads off, and `--node auto` passes over it to the next node with room.
 - Resumable training jobs on the synced job board (training plan P3b, between nodes):
   `ymir_core::train_board::BoardJobStore`, the `JobStore` over `weirdnet-agent`'s `JobBoard<TrainJob>`
   (job type `ymir.train`, claims as majority-vote leases among the devices with the model role). A claim
@@ -36,15 +33,27 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
-- weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. Local placement lists the store with `StoredEntry::list` instead of
-  building entries from JSON; `/ymir/uploads/1` takes 16 streams at once (was 64), since dropped streams are now
-  released promptly.
 - `JobStore::claim`, `finish`, `fail` and `release` are async (the board asks the voters); checkpoints and
   renewals stay as they were. `ClaimError::NoQuorum`.
 - weirdnet-agent 0.5.6 (feature `jobs`) and weirdnet-sync 0.8.4: per-type keys for service devices
   (0.8.3) and type-scoped sealed records (0.8.4), so a cert-only inference node still seals and opens
   `ymir.context`. Since 0.8.3 a peer refuses a service device's sync for any type outside its grant
   (`type-not-granted`), so the model node's grant lists `ymir.pool` too.
+
+## [0.17.0] - 2026-11-26
+
+### Added
+
+- `[model] upload = false`: the node refuses uploads (`not-allowed`, "uploads are off on this node") while pulls,
+  listing and removals keep working (model-upload U10, weirdnet-backends 0.4.7 `WritePolicy::with_uploads`).
+  `ymirctl models upload` says that node has uploads off, and `--node auto` passes over it to the next node with room.
+- Uploads can be turned off per node ([model] upload = false); weirdnet-backends 0.4.7 and weirdnet-net 0.8.3
+
+### Changed
+
+- weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. Local placement lists the store with `StoredEntry::list` instead of
+  building entries from JSON; `/ymir/uploads/1` takes 16 streams at once (was 64), since dropped streams are now
+  released promptly.
 
 ## [0.16.0] - 2026-11-25
 

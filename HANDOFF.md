@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 04:05 EST: v0.17.0 released
+
+**Release:** [v0.17.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.17.0) (release commit 90f71fb on 8bfe741; Release run 45776523009, green): model-upload U10, `[model] upload = false`, on weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. The jobboard work waits for the next release. The cut ran its checks before pushing; its first try stopped on one failure of `p2.rs` (`only_marked_conversations_are_exported_and_withdrawal_is_reported`: the pool roster's directory missing) while the build machine was heavily loaded, which passed three times alone and on the second try. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the signed update bundles with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.17.0-1; their recipes are on this branch (`chore/release-0.17.0`).
+
+**Next:** v0.18.0 with the training lead's jobboard (weirdnet-sync 0.8.4).
+
 ## 2026-11-26 03:35 EST: model nodes on the job board, ymird holds it (branch `feature/jobboard`)
 
 - weirdnet-sync 0.8.4 (Cargo.toml, Cargo.lock, release.toml `[[requires]]`): per-type keys for service devices (0.8.3) and type-scoped sealed records (0.8.4). On 0.8.3 alone m10 failed: the model node's grant lacked `ymir.pool` (refused `type-not-granted`, fixed here) and a cert-only inference node could not open sealed `ymir.context` records (fixed in weirdnet-sync 0.8.4).
@@ -11,7 +17,7 @@ A running log of finished work, newest first. Each entry says what changed, the 
 - [train_jobs_ctl.rs](crates/ymir-core/src/train_jobs_ctl.rs): `ControlRequest::Jobs { call }` / `ControlResponse.job`; `ControlJobStore` (the `JobStore` over the socket; claims only as the daemon's own peer id, renewing in ymird); `cli_ctx` for `ymirctl train` (board when ymird is up on Weirdnet, else the file store). `TrainStatus::read_with` in [train_net.rs](crates/ymir-core/src/train_net.rs).
 - Tests: [tests/train_isolation.rs](crates/ymir-testkit/tests/train_isolation.rs) (a cert-only model node syncs, votes on and claims a job the seed holder posted; no epoch key and no `ymir.context` key; its context pull fails; a sealed context entry handed to it does not open), [tests/train_daemon.rs](crates/ymir-testkit/tests/train_daemon.rs) (two ymirds on 127.0.0.1: post on the holder, claim, renew, checkpoint and finish on the cert-only model node over the control socket, `train status` lists it; ~64 s, mostly the voter's 60 s restart grace).
 
-**Checks:** see the merge entry for the full run and CI.
+**Checks:** workspace clippy `-D warnings`; m10 2/2, p3b 8/8, p3a_remote 2/2, train_board 3/3, train_isolation 1/1 (3 runs), train_daemon 1/1; CI 45782530375 and macOS 45782535575 green on 93414c4, Pages 45784606192 green on cc4252b (a rustdoc link fix).
 
 **Not done:** datasets and checkpoints stay in the writing node's `LocalBlobs`, so another node resumes a board job only if it has those files; blob transfer over Weirdnet is the follow-up after 0.18.0. Already linked cert-only model nodes keep their old roster-only grant until re-linked from a seed holder. No live nodes were touched.
 
