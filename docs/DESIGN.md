@@ -1911,8 +1911,9 @@ public relay, like M3 and M4. Approved 2026-11-19; released: `weirdnet-device-li
   the `weirdnet-agent` pool, retries, automatic mid-answer failover, stand-in and cache flags, in both shells. A rollout (P4b) is one row with its versions under it.
 - **B3 Platforms** (in progress 2026-11-19; see [B3 status](#b3-status-in-progress-2026-11-19)): iOS (TestFlight), macOS and Windows; Android apk, aab and F-Droid packaging.
 - **B4 Sync and optional extras:** history on the shared context store (after M5), and a per-chat training consent
-  (the `{conversation}/train` record of training plan P2, built in every shell 2026-11-24); the optional on-device model
-  and push wake-ups, on both shells.
+  (the `{conversation}/train` record of training plan P2, built in every shell 2026-11-24); push wake-ups (Bragi side
+  built 2026-11-26, [Bragi v0.15.0](https://github.com/WeirdBrains/bragi/releases/tag/v0.15.0), see [B4 status](#b4-status-in-progress-2026-11-19));
+  the optional on-device model, on both shells.
 - **B5 Breadth** (in progress; see [B5 status](#b5-status-in-progress-2026-11-20)): attachments (text, image and audio) and agent mode are built on both shells. The BSD desktop window does not build yet, so on BSD it is the terminal app only.
 - **B6 Your own endpoints** (built 2026-11-21; see [B6 status](#b6-status-built-2026-11-21)): any OpenAI-compatible server, with an optional API key, next to the Weirdnet pool or as a fallback. Built in the core, the Flutter app and the GPUI desktop shell.
 - **B7 Models on your pool** (in progress; see [B7 status](#b7-status-in-progress)): a Models screen to search, pull and remove models on your Ymir nodes, and (desktop, Bragi 0.7.0) upload one from this device. Built in both shells and tried against demo nodes and a mock Hub. Next: the upload dialog in the Flutter app, rollouts from Bragi, and a check against a real Ymir node.
@@ -2692,7 +2693,16 @@ apk, debug-signed, demo mode). Screenshots: `~/bragi-shots/b4/` on the dev box.
 
 **Not built, and why:**
 
-- **Push wake-ups: blocked on the Weirdnet lead.** `weirdnet-push` is unpublished.
+- **Push wake-ups: Bragi side built (2026-11-26, Bragi v0.15.0, `weirdnet-push` 0.1.1).** Each Bragi device makes a wake
+  key and handle per pool and shares its wake card as a sealed record of its own type, `bragi.wake`, pulled only between
+  full devices (a cert-only server granted `ymir.context` can't read it). Wakes carry no content; a replay guard (600 s)
+  refuses repeats, stale wakes and other handles. Settings: wake-ups on by default with an off switch (off withdraws the
+  card and forgets the key); the relay wake path (`/weirdnet/wake/1` to the home relay) is opt-in, off by default, and every
+  shell shows its battery cost before turning it on; on Android it runs as a foreground service, so F-Droid builds have a
+  wake path without FCM. Cards are pulled every 2 minutes, not every sync pass (each record type pulled is a sync
+  session of its own). **Not built:** APNs and FCM delivery (needs push accounts and a push server), and Ymir's side:
+  `ymird` sending a wake to a linked Bragi when an answer or job is waiting, and keeping `bragi.wake` out of cert-only
+  grants. Not checked against the public relay (does it serve `/weirdnet/wake/1`?).
 - **On-device model: not built.** It needs a llama.cpp build and model packaging for Android and the desktop, and a
   place in the pool as a local node; that is its own piece of work, not started.
 - **Not run across real machines or with Morph or Ymir as the other device** (test identities, memory transport):
