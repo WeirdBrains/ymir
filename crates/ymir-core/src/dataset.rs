@@ -231,8 +231,38 @@ pub struct Teacher {
     pub model: String,
     /// An SPDX id or license name, as given with `--license`; `unknown` only when allowed.
     pub license: String,
-    /// Where the license came from (`operator`, for now).
+    /// Where the license came from: `operator` (`--license`), `hub:OWNER/NAME` (the repo's model
+    /// card on the Hugging Face Hub, `--license-from`) or `pool` (the license the pool's catalog
+    /// reports for the teacher, from its node's provenance records).
     pub license_source: String,
+}
+
+/// The license a Hub repo's model info states: its model card's `license` (with `license_name`
+/// for `other`), else a `license:ID` tag.
+pub fn hub_license(info: &serde_json::Value) -> Option<String> {
+    let card = &info["cardData"];
+    let first = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => Some(s.trim().to_string()),
+        serde_json::Value::Array(a) => a.first().and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+        _ => None,
+    };
+    let tagged = || info["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).find_map(|t| t.strip_prefix("license:")).map(str::to_string);
+    let l = first(&card["license"]).filter(|l| !l.is_empty()).or_else(tagged)?;
+    if l.eq_ignore_ascii_case("other")
+        && let Some(name) = first(&card["license_name"]).filter(|n| !n.is_empty())
+    {
+        return Some(format!("other:{name}"));
+    }
+    Some(l)
+}
+
+/// The license the pool's catalog (`/v1/models`) reports for `teacher`, with where its node had it
+/// from (`hub`, `upload`, `train`), when it reports one.
+pub fn catalog_license(models: &serde_json::Value, teacher: &str) -> Option<(String, Option<String>)> {
+    let m = models["data"].as_array()?.iter().find(|m| m["id"].as_str() == Some(teacher))?;
+    let w = &m["weirdnet"];
+    let l = w["license"].as_str().map(str::trim).filter(|l| !l.is_empty())?;
+    Some((l.to_string(), w["origin"].as_str().map(str::to_string)))
 }
 
 /// The sources a dataset is drawn from (`--sources FILE`, JSON). The operator writes it; Ymir
@@ -383,6 +413,8 @@ pub struct Generate {
     pub output: PathBuf,
     pub teacher: String,
     pub license: String,
+    /// Where `license` came from (see [`Teacher::license_source`]).
+    pub license_source: String,
     pub allow_unknown_license: bool,
     pub defaults: RowDefaults,
     /// A sources manifest ([`Sources`]); every row then names its `source`.
@@ -504,7 +536,7 @@ pub async fn generate(socket: &Path, g: &Generate, progress: &mut dyn FnMut(usiz
     let mut manifest = Manifest {
         format: MANIFEST_FORMAT.into(),
         job: job.clone(),
-        teacher: Teacher { model: g.teacher.clone(), license: g.license.trim().to_string(), license_source: "operator".into() },
+        teacher: Teacher { model: g.teacher.clone(), license: g.license.trim().to_string(), license_source: g.license_source.clone() },
         input_name: file_name(&g.input),
         input_sha256,
         output_name: file_name(&g.output),
@@ -565,6 +597,24 @@ fn write_manifest(path: &Path, m: &Manifest) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hub_and_catalog_licenses() {
+        use serde_json::json;
+        assert_eq!(hub_license(&json!({"cardData": {"license": "apache-2.0"}, "tags": ["license:mit"]})).as_deref(), Some("apache-2.0"));
+        assert_eq!(hub_license(&json!({"cardData": {"license": ["llama3.1"]}})).as_deref(), Some("llama3.1"));
+        assert_eq!(hub_license(&json!({"tags": ["gguf", "license:mit"]})).as_deref(), Some("mit"));
+        assert_eq!(hub_license(&json!({"cardData": {"license": "other", "license_name": "qwen-research"}})).as_deref(), Some("other:qwen-research"));
+        assert_eq!(hub_license(&json!({"cardData": {"license": "other"}})).as_deref(), Some("other"));
+        assert_eq!(hub_license(&json!({"cardData": {}, "tags": []})), None);
+        let models = json!({"data": [
+            {"id": "qwen", "weirdnet": {"origin": "hub", "license": "apache-2.0"}},
+            {"id": "mine", "weirdnet": {"origin": "upload", "license": null}},
+        ]});
+        assert_eq!(catalog_license(&models, "qwen"), Some(("apache-2.0".into(), Some("hub".into()))));
+        assert_eq!(catalog_license(&models, "mine"), None);
+        assert_eq!(catalog_license(&models, "nope"), None);
+    }
+
     use super::*;
 
     fn item(ok: bool, text: &str, model: &str) -> BatchItem {

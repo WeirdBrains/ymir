@@ -20,6 +20,7 @@ pub mod coordinator;
 pub mod ctxplan;
 pub mod daemon;
 pub mod dataset;
+pub mod seed;
 pub mod direct;
 pub mod engine;
 pub mod fair;
