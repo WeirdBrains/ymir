@@ -2,6 +2,13 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 07:45 EST: push wake-ups, Ymir side (branch `feature/push-wake`, LD-3)
+
+- [membership.rs](crates/ymir-core/src/membership.rs): `WAKE_TYPE = "bragi.wake"`, configured (sealed) on full devices only; a sync pass pulls it from full devices every `WAKE_PULL_EVERY` (2 min: each type pulled is a sync session of its own), and `refresh_wake_cards` makes the next pass pull again. `ServiceRole::types` never lists it and `service_bundle` refuses a grant that would (unit test `no_service_grant_lists_the_wake_cards`).
+- [wake.rs](crates/ymir-core/src/wake.rs): `DeviceWake` (the record Bragi 0.15.0 writes), `wakeable` (active full devices' cards; empty on a cert-only node), `wake` (seals with the card's key, delivers through the device's relay on `/weirdnet/wake/1`), `find` (peer id or label).
+- `ymirctl pool wake [DEVICE] [--connection]`: lists offline from the identity; sending goes through the running node (`ControlRequest::PoolWake`).
+- **Test:** [crates/ymir-testkit/tests/wake.rs](crates/ymir-testkit/tests/wake.rs): a seed holder, a full "Bragi" device and a cert-only inference node on loopback with a stand-in wake relay: the card reaches the holder by `tick`, the inference grant has no `bragi.wake`, its pull is refused and it holds none, a wake before the device subscribes is `Offline`, after it is `Delivered` and opens with the device's key, a withdrawn card leaves nothing to wake. clippy `-D warnings` on the workspace.
+- **Not done:** `ymird` waking a device on its own (when an agent task or a training job finishes for it) — needs a decision on which events; APNs/FCM; a check against the public relay (does it serve `/weirdnet/wake/1`?). Not merged: Ymir main is LD-1's for v0.19.0.
 
 ## 2026-11-26 09:00 EST: v0.19.0 released
 

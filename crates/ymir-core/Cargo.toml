@@ -36,6 +36,7 @@ weirdnet-net.workspace = true
 weirdnet-openai.workspace = true
 weirdnet-semcache.workspace = true
 weirdnet-sync.workspace = true
+weirdnet-push.workspace = true
 weirdnet-alerts.workspace = true
 weirdnet-update.workspace = true
 semver.workspace = true
