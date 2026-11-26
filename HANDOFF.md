@@ -3,7 +3,7 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
-## 2026-11-26 09:05 EST: v0.19.0 released
+## 2026-11-26 09:00 EST: v0.19.0 released
 
 **Release:** [v0.19.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.19.0) (release commit c72762d on 0a3e0b0, the `--no-ff` merge of `feature/blobs`; Release run 45824407253, green): training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): another node resumes a board job with its dataset and checkpoint fetched from the devices that hold them, each file checked against its manifest, and registers itself as a holder. The cut ran every check before pushing (fmt, clippy, 55 test suites). The leak scan of dist found nothing (31 files, 0 hits); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles with their sums (42 files); the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.19.0-1; their recipes are on this branch (`chore/release-0.19.0`).
 
