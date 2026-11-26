@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-26
+
 ### Added
 
 - Resumable training jobs on the synced job board (training plan P3b, between nodes):
@@ -24,6 +26,7 @@ All notable changes to Ymir are listed here. The format follows
   (`ymirctl pool add --service ... model` from a seed holder) to give them the new grant.
 - The sync pass pulls `ymir.train` with every device that holds it (full devices, and service devices
   granted it); a cert-only device syncs every type in its grant.
+- Training jobs on the synced job board between nodes (P3b): ymird holds it, model nodes vote on and claim jobs without access to conversations; weirdnet-sync 0.8.4
 
 ### Known limits
 
