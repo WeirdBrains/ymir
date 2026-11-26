@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-26
+
 ### Added
 
 - Training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): a board job's dataset and checkpoints
@@ -19,6 +21,7 @@ All notable changes to Ymir are listed here. The format follows
   list comes from the manifest, each file's size and sha256 are checked as it arrives into a staging
   folder, and only a complete bundle enters the store. A node that fetched a checkpoint to resume adds
   itself to the checkpoint's holders on the job (`JobStore::set_holders`, the board's `Claim::set_holders`).
+- Training files over Weirdnet (P3b blob transfer, /ymir/blobs/1): another node resumes a board job with its dataset and checkpoint fetched from the devices that hold them, each file checked against its manifest; no shared folder or copying by hand.
 
 ## [0.18.0] - 2026-11-26
 
