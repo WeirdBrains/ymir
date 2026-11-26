@@ -371,6 +371,38 @@ command. Answers from different versions must not share answer-cache entries: do
 (`[[model.local]] revision`, keyed with `get_rev`/`put_rev`); P4 must set it for every fine-tune. Adapters are tied to the exact base revision and quantisation; loading one on another base must be
 refused, not attempted (done in P4a for adapters in `node.toml` that record their base).
 
+### Optional: two-node data-parallel LoRA on a private link (design, 2026-11-25)
+
+**Status.** Design only; nothing is built. It needs two decisions from m3talsmith first (below).
+
+**Why it can't be llama.cpp.** The pinned trainer cannot do it: `llama-finetune` at b12628
+(`examples/training/finetune.cpp`) is one process on one context, looping `llama_opt_epoch` over the dataset and saving
+once; it has no rank, no gradient exchange and no optimizer state to share. Data-parallel training needs a trainer that
+averages gradients between processes, which in practice is PyTorch with `torch.distributed` (NCCL over the link) and
+PEFT for the LoRA, the "PEFT/TRL trainer behind the same interface" decision 1 left for later. Its bases are
+safetensors, not GGUF: the adapter it makes is converted to a GGUF LoRA (llama.cpp's `convert_lora_to_gguf.py`) for
+P4a to serve, and the base it trains on has to be the same weights as the served GGUF (recorded by revision).
+
+**Shape.**
+- Trainer interface 3: `train` takes `--world-size N --rank R --rendezvous ADDR:PORT`; `version` says
+  `"data_parallel": true`. Rank 0 writes checkpoints (interface 2's format) and the adapter; other ranks write nothing.
+- The link is configured on each node, never discovered: `[[train.link]] node = "PEER", address = "...", min_gbps = 10`
+  in node.toml (the address is the peer's on the private link). Ymir refuses an address on an interface that carries
+  Weirdnet traffic or a default route, so the run can't fall back to the internet.
+- `ymirctl train run --nodes A,B` (or a P3b job with `needs.nodes = 2`): the asking `ymird` reserves both GPUs over
+  `/ymir/train/1` as today; the two nodes run a link probe (one TCP stream for two seconds over the configured
+  addresses) and refuse below `min_gbps`; both must have the same base revision and trainer build. Then each node starts
+  its rank with the same dataset (sent with the run, as now) and streams its lines; rank 0's are the run's. Either
+  rank failing or its caller closing cancels both and releases both GPUs.
+- With P3b, the job's lease is held by rank 0's node; resume restarts both ranks from rank 0's last checkpoint, on the
+  same pair or another pair that passes the same checks.
+- Tests: the mock trainer with ranks on loopback (a fake rendezvous), the probe against loopback with a threshold, and
+  the refusals (no link configured, a slow link, mismatched revision or build, one node not opted in).
+
+**Decisions needed (m3talsmith).** (1) A second trainer: PyTorch + PEFT for data-parallel runs, pinned like the
+llama.cpp one, with its Python dependencies on the nodes. (2) Which two nodes share a private link of 10 Gb/s or more,
+and the OK for a first run on them (both serve the pool).
+
 ## Order (confirmed 2026-11-22)
 
 Smallest useful end-to-end slice first. Slices 1 and 2 together give a complete loop with no new GPU
@@ -387,7 +419,8 @@ serve it as an adapter, and score it against the base through the pool.
 5. **P4b: versions, canary weights and rollback**, gated by P1's eval. Built (2026-11-24) against mock models.
 6. **P3b: synced training job record and checkpoint resume.** Ymir side built (2026-11-25) on a local stand-in; the
    synced record waits for `weirdnet-agent` 0.6.0's `jobs`.
-7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet.
+7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet. Designed
+   (2026-11-25, above); waits on a second trainer and a node pair.
 
 ## Testing
 
