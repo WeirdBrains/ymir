@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 06:45 EST: v0.18.0 released
+
+**Release:** [v0.18.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.18.0) (release commit 35188d7 on add1902; Release run 45802019717, green): training jobs on the synced job board between nodes (P3b), `ymird` holding the board for `ymirctl train`, model nodes granted `["ymir.pool", "ymir.train"]` voting on and claiming jobs without access to conversations, and the fix for concurrent saves of a device's Weirdnet state (the `p2.rs` failure under load), on weirdnet-sync 0.8.4. The cut ran every check before pushing (54 test suites); its first try stopped before the commit because `release.toml`'s default `CARGO_TARGET_DIR` was not writable on the build machine, and the second set its own. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles with their sums (42 files); the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.18.0-1; their recipes are on this branch (`chore/release-0.18.0`).
+
+**Next:** P3b blob transfer: a job's dataset and checkpoints fetched over Weirdnet from the devices that hold them, so another node resumes a board job without copying files by hand.
+
 ## 2026-11-26 04:05 EST: v0.17.0 released
 
 **Release:** [v0.17.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.17.0) (release commit 90f71fb on 8bfe741; Release run 45776523009, green): model-upload U10, `[model] upload = false`, on weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. The jobboard work waits for the next release. The cut ran its checks before pushing; its first try stopped on one failure of `p2.rs` (`only_marked_conversations_are_exported_and_withdrawal_is_reported`: the pool roster's directory missing) while the build machine was heavily loaded, which passed three times alone and on the second try. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the signed update bundles with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.17.0-1; their recipes are on this branch (`chore/release-0.17.0`).
