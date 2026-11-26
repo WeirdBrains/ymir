@@ -3,6 +3,14 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 09:05 EST: v0.19.0 released
+
+**Release:** [v0.19.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.19.0) (release commit c72762d on 0a3e0b0, the `--no-ff` merge of `feature/blobs`; Release run 45824407253, green): training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): another node resumes a board job with its dataset and checkpoint fetched from the devices that hold them, each file checked against its manifest, and registers itself as a holder. The cut ran every check before pushing (fmt, clippy, 55 test suites). The leak scan of dist found nothing (31 files, 0 hits); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles with their sums (42 files); the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.19.0-1; their recipes are on this branch (`chore/release-0.19.0`).
+
+**Known flake:** `train_board.rs` `a_lapsed_board_claim_is_taken_over_after_the_wait` failed once on CI (45795286711, add1902, Linux): the cut-off device kept renewing its lease. Likely cause: a paused weirdnet-net node still dials out to addresses it remembers, and a resumed `/tcp/0` listener can get its old port back, so the test's `isolate()` did not cut it off. Fix on `fix/board-isolate` (875955a): `isolate()` brings the other devices back on addresses the cut-off one never saw; train_board 3/3 locally, going through CI after this release. Separately, main's push CI 45815845665 (79b55b6) failed once on Windows only with the runner's disk full in kvfit's sparse test files (NTFS does not keep `set_len` files sparse); the rerun passed.
+
+**Next:** merge `fix/board-isolate` once green. Two-node training on real nodes waits for Michael.
+
 ## 2026-11-26 07:05 EST: training files over Weirdnet, P3b blob transfer (branch `feature/blobs`)
 
 - [blobs_net.rs](crates/ymir-core/src/blobs_net.rs): `/ymir/blobs/1` (CBOR): `BlobAsk { cert, root }`; the holder answers `Bundle { manifest_name, manifest }`, each listed file's bytes as 48 KiB `Chunk`s in manifest order, `Done` (or `Missing` / `Refused`). `BlobsService` (roster auth: the owner's linked devices) and `BlobsServer`; `BlobsClient::ensure(root, holders)` checks the manifest against the root, takes the file list from the manifest (paths inside the bundle only), checks each file's size and sha256 while writing into a staging folder in the store, gives up on a holder after 60 s of silence and tries the next, and stores only a whole bundle (`LocalBlobs::put_checked`); staging is removed either way.
