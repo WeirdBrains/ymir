@@ -126,7 +126,7 @@ class TrainerTest(unittest.TestCase):
     def test_version(self):
         r, _ = self.run_trainer("version")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), {"interface": 1, "engine": "llama.cpp", "build": "b12628", "patches": ["parse-special"]})
+        self.assertEqual(json.loads(r.stdout), {"interface": 2, "engine": "llama.cpp", "build": "b12628", "patches": ["parse-special"]})
         r, _ = self.run_trainer("version", env={**self.env, "FAKE_FINETUNE_BUILD": "13000"})
         self.assertEqual(json.loads(r.stdout)["build"], "b13000", "version reports the real build, so Ymir's pin check sees it")
         env = {k: v for k, v in self.env.items() if k != "YMIR_LLAMA_FINETUNE"}
@@ -155,6 +155,50 @@ class TrainerTest(unittest.TestCase):
         self.assertEqual(rec["text"], "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nhello<|im_end|>\n<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n4<|im_end|>\n")
         self.assertTrue((self.tmp / "full.gguf").exists())
         self.assertFalse((self.tmp / "full.gguf.train.txt").exists(), "the training text (private data) is removed")
+
+    def test_checkpoints_each_epoch(self):
+        ck = self.tmp / "ck"
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "full.gguf"), "--checkpoint-dir", str(ck))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([p["step"] for p in ev if p["event"] == "progress"], list(range(1, 9)), "steps run on across the per-epoch calls")
+        cps = [e for e in ev if e["event"] == "checkpoint"]
+        self.assertEqual(cps, [{"event": "checkpoint", "dir": "epoch-0001", "epoch": 1, "step": 4}, {"event": "checkpoint", "dir": "epoch-0002", "epoch": 2, "step": 8}])
+        c = json.loads((ck / "epoch-0001/checkpoint.json").read_text())
+        self.assertEqual((c["format"], c["epochs"], c["steps"], c["seed"], c["optimizer"]), ("ymir-train-checkpoint/1", 2, 8, 9, "reset"))
+        self.assertEqual(c["data_sha256"], trainer.sha256_file(self.data))
+        self.assertEqual(c["files"][0]["sha256"], trainer.sha256_file(ck / "epoch-0001/model.gguf"))
+        a = json.loads(self.record.read_text())["args"]
+        self.assertEqual(a[a.index("--epochs") + 1], "1")
+        self.assertEqual(a[a.index("-m") + 1], str(ck / "epoch-0001/model.gguf"), "epoch 2 trains from epoch 1's model")
+        self.assertEqual((self.tmp / "full.gguf").read_bytes(), (ck / "epoch-0002/model.gguf").read_bytes())
+
+    def test_resume(self):
+        ck = self.tmp / "ck"
+        r, _ = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "a.gguf"), "--checkpoint-dir", str(ck))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        first = ck / "epoch-0001"
+        ck2 = self.tmp / "ck2"
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "b.gguf"), "--checkpoint-dir", str(ck2), "--resume", str(first))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([p["step"] for p in ev if p["event"] == "progress"], [5, 6, 7, 8])
+        self.assertEqual([e["epoch"] for e in ev if e["event"] == "checkpoint"], [2])
+        a = json.loads(self.record.read_text())["args"]
+        self.assertEqual(a[a.index("-m") + 1], str(first / "model.gguf"))
+        self.assertIn("carrying on from", " ".join(e["message"] for e in ev if e["event"] == "log"))
+        # Other settings, a changed model file or a finished checkpoint are refused.
+        other = self.tmp / "other.json"
+        other.write_text(json.dumps({"epochs": 2, "learning_rate": 2e-5, "context": 256, "batch": 4, "seed": 9, "rank": 4}))
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(other), "--out", str(self.tmp / "c.gguf"), "--resume", str(first))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("other training data or settings", ev[-1]["message"])
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "c.gguf"), "--resume", str(ck / "epoch-0002"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nothing is left", ev[-1]["message"])
+        with open(first / "model.gguf", "ab") as f:
+            f.write(b"x")
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "c.gguf"), "--resume", str(first))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("doesn't match its checkpoint", ev[-1]["message"])
 
     def test_train_env_args(self):
         r, _ = self.train(env={**self.env, "YMIR_TRAINER_NGL": "0", "YMIR_TRAINER_ARGS": "--threads 3"})

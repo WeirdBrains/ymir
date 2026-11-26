@@ -1,7 +1,9 @@
 //! `ymirctl train`: fine-tuning on this node (training plan P3a, see `ymir_core::train`).
 //! `run` trains a LoRA adapter for a llama.cpp base with the pinned trainer, holding the GPU for
 //! the run; `reserve` and `release` hold and free a node's GPU by hand; `check` tests the
-//! trainer against the pin; `list` shows past runs.
+//! trainer against the pin; `list` shows past runs. `run --job` makes the run a resumable job
+//! (P3b, `ymir_core::train_job`): a checkpoint after each epoch, and `jobs`, `resume` and `job`
+//! to see, carry on and pause or cancel it.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -10,7 +12,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use ymir_core::config::LocalAdapter;
 use ymir_core::control::{self, ControlRequest};
-use ymir_core::train::{self, Event, Hyper, RunSpec, Stage, Update};
+use ymir_core::train::{self, Event, Hyper, RunRecord, RunSpec, Stage, Update};
+use ymir_core::train_job::{self, JobState, JobUpdate};
 use ymir_core::{NodeConfig, Paths};
 
 #[derive(Subcommand, Debug)]
@@ -38,6 +41,24 @@ pub enum TrainCmd {
     Check,
     /// The runs on this node, newest first.
     List,
+    /// Resumable training jobs (`run --job`), newest first.
+    Jobs,
+    /// Carry a job on from its last checkpoint on this node: one that failed with a retry left, was
+    /// lost, or (after `job unpause`) was paused. Another node's job needs `[train] resume = true`.
+    Resume {
+        job: String,
+        /// Reserve this node even when it is the only one serving a loaded model.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        keep_full: bool,
+    },
+    /// Pause, unpause or cancel a job this device owns.
+    Job {
+        #[arg(value_parser = ["pause", "unpause", "cancel"])]
+        action: String,
+        job: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -82,6 +103,11 @@ pub struct RunArgs {
     /// Add the adapter to node.toml (`[[model.local.lora]]`) when the run succeeds.
     #[arg(long)]
     pub add: bool,
+    /// Run it as a resumable job (needs trainer interface 2): a checkpoint after each epoch, and
+    /// if the run fails or stops, `ymirctl train resume JOB` carries it on from the last one.
+    /// Ctrl-C pauses the job. The job record is kept on this node until Weirdnet syncs it.
+    #[arg(long, conflicts_with = "node")]
+    pub job: bool,
     /// Run on this model node instead (a roster label or peer id), over Weirdnet through this
     /// device's ymird. The node needs `[train] remote = true`; the dataset is sent with the run
     /// (up to 24 MiB), --from names a GGUF in the node's models directory, and node.toml there is
@@ -117,6 +143,54 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
             if let Some(l) = train::held(paths) {
                 writeln!(out, "This node's GPU is held by {}.", l.holder)?;
             }
+            Ok(())
+        }
+        TrainCmd::Jobs => {
+            let cfg = crate::load_cfg(paths)?;
+            let ctx = train_job::Ctx::local(paths, &cfg)?;
+            let jobs = ctx.store.list()?;
+            if jobs.is_empty() {
+                writeln!(out, "No training jobs on this node.")?;
+            }
+            let now = now_ms();
+            for j in jobs {
+                let state = if j.stalled(now) { "stalled".to_string() } else { j.state.to_string() };
+                let at = j.checkpoint.as_ref().map(|c| format!(", checkpoint epoch {} of {}", c.seq, j.payload.hyper.epochs)).unwrap_or_default();
+                let holder = j.lease.as_ref().filter(|_| j.state == JobState::Running).map(|l| format!(" on {}", l.holder)).unwrap_or_default();
+                writeln!(
+                    out,
+                    "{}  {state:<9}{holder} {} -> {} (attempt {} of {}{at})",
+                    j.id, j.payload.base, j.payload.adapter_id, j.attempts, j.policy.max_attempts
+                )?;
+                if let Some(f) = &j.failure
+                    && j.state != JobState::Done
+                {
+                    writeln!(out, "    {f}")?;
+                }
+            }
+            Ok(())
+        }
+        TrainCmd::Resume { job, force, keep_full } => {
+            let cfg = crate::load_cfg(paths)?;
+            let ctx = train_job::Ctx::local(paths, &cfg)?;
+            let mut cancel = ctrl_c();
+            let (mut on, rx) = job_printer();
+            let record = pump(out, rx, train_job::resume(paths, &cfg, &ctx, &job, force, keep_full, &mut cancel, &mut on)).await?;
+            let adapter = record.adapter.clone().context("the run produced no adapter")?;
+            writeln!(out, "Done: {} steps. Adapter `{}` is {} in the models directory.", record.steps, adapter.id, adapter.file)?;
+            writeln!(out, "To serve it: ymirctl models adapter add {} {} --id {}", record.base, adapter.file, adapter.id)?;
+            Ok(())
+        }
+        TrainCmd::Job { action, job } => {
+            let cfg = crate::load_cfg(paths)?;
+            let ctx = train_job::Ctx::local(paths, &cfg)?;
+            match action.as_str() {
+                "pause" => ctx.store.pause(&job, &ctx.me, now_ms())?,
+                "unpause" => ctx.store.unpause(&job, &ctx.me, now_ms())?,
+                _ => ctx.store.cancel(&job, &ctx.me, now_ms())?,
+            }
+            let state = ctx.store.get(&job)?.map(|j| j.state.to_string()).unwrap_or_default();
+            writeln!(out, "Job {job} is {state}.")?;
             Ok(())
         }
         TrainCmd::Reserve { node: Some(node), force } => {
@@ -180,6 +254,7 @@ fn show(shown: &mut Option<(Stage, u64)>, stage: Stage, event: &Event) -> Option
         }
         Event::Log { message } => Some(format!("{stage}: {message}")),
         Event::Error { message } => Some(format!("{stage}: error: {message}")),
+        Event::Checkpoint { epoch, step, .. } => Some(format!("{stage}: checkpoint after epoch {epoch} (step {step})")),
         Event::Done => None,
     }
 }
@@ -260,7 +335,72 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, mut a: RunArgs) -> Result<(
         allow_unknown_license: a.allow_unknown_license,
         keep_full: a.keep_full,
         force: a.force,
+        ..Default::default()
     };
+    let record = if a.job {
+        let ctx = train_job::Ctx::local(paths, &cfg)?;
+        let mut cancel = ctrl_c();
+        let (mut on, rx) = job_printer();
+        pump(out, rx, train_job::start(paths, &cfg, &ctx, &spec, train_job::JobPolicy::default(), &mut cancel, &mut on)).await?.1
+    } else {
+        plain_run(out, paths, &cfg, &spec).await?
+    };
+    finish_run(out, &config, &text, &a.base, a.add, record)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+fn ctrl_c() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+}
+
+/// A job's updates as printable lines.
+fn job_printer() -> (impl FnMut(JobUpdate) + Send, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut shown: Option<(Stage, u64)> = None;
+    let on = move |u: JobUpdate| {
+        let line = match u {
+            JobUpdate::Posted { job } => Some(format!("Job {job} (resumable: `ymirctl train resume {job}` carries it on from its last checkpoint)")),
+            JobUpdate::Claimed { job, attempt, .. } => Some(format!("Running job {job}, attempt {attempt}")),
+            JobUpdate::Resuming { epoch, root, .. } => Some(format!("Carrying on after epoch {epoch} (checkpoint {})", &root[..root.len().min(16)])),
+            JobUpdate::Published { seq, .. } => Some(format!("Checkpoint after epoch {seq} saved to the job")),
+            JobUpdate::Lost => Some("This node lost the job's lease; another node carries it on.".into()),
+            JobUpdate::Run(Update::Started { run, dir, adapter }) => Some(format!("Run {run} for `{adapter}` (work in {})", dir.display())),
+            JobUpdate::Run(Update::Reserved { .. }) => Some("This node's GPU is held for the run.".into()),
+            JobUpdate::Run(Update::Event(stage, event)) => show(&mut shown, stage, &event),
+            JobUpdate::Run(Update::Checkpoint { .. }) => None,
+        };
+        if let Some(l) = line {
+            let _ = tx.send(l);
+        }
+    };
+    (on, rx)
+}
+
+/// Prints lines from `rx` while `fut` runs.
+async fn pump<T>(
+    out: &mut dyn Write,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::pin!(fut);
+    let result = loop {
+        tokio::select! {
+            Some(l) = rx.recv() => writeln!(out, "{l}")?,
+            r = &mut fut => break r,
+        }
+    };
+    while let Ok(l) = rx.try_recv() {
+        writeln!(out, "{l}")?;
+    }
+    result
+}
+
+async fn plain_run(out: &mut dyn Write, paths: &Paths, cfg: &NodeConfig, spec: &RunSpec) -> Result<RunRecord> {
     let mut cancel = Box::pin(async {
         let _ = tokio::signal::ctrl_c().await;
     });
@@ -272,13 +412,14 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, mut a: RunArgs) -> Result<(
             Update::Reserved { in_ymird: true } => Some("Reserved this node in ymird: its models are unloaded until the run ends.".into()),
             Update::Reserved { in_ymird: false } => Some("ymird isn't running; the run holds the GPU (ymird loads nothing if it starts).".into()),
             Update::Event(stage, event) => show(&mut shown, stage, &event),
+            Update::Checkpoint { info, .. } => Some(format!("Checkpoint {} kept ({} bytes, root {})", info.dir, info.bytes, info.root)),
         };
         if let Some(l) = line {
             let _ = tx.send(l);
         }
     };
     let result = {
-        let run = train::run(paths, &cfg, &spec, &mut cancel, &mut on);
+        let run = train::run(paths, cfg, spec, &mut cancel, &mut on);
         tokio::pin!(run);
         loop {
             tokio::select! {
@@ -290,7 +431,10 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, mut a: RunArgs) -> Result<(
     while let Ok(l) = rx.try_recv() {
         writeln!(out, "{l}")?;
     }
-    let record = result?;
+    result
+}
+
+fn finish_run(out: &mut dyn Write, config: &std::path::Path, text: &str, base: &str, add: bool, record: RunRecord) -> Result<()> {
     let adapter = record.adapter.clone().context("the run produced no adapter")?;
     let loss = record.final_loss.map(|l| format!(", final loss {l:.4}")).unwrap_or_default();
     writeln!(out, "Done: {} steps{loss}. Adapter `{}` is {} in the models directory.", record.steps, adapter.id, adapter.file)?;
@@ -308,12 +452,12 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, mut a: RunArgs) -> Result<(
         base_revision: adapter.base_revision.clone(),
         base_quant: adapter.base_quant.clone(),
     };
-    if a.add {
-        let new = crate::models::adapters_add(&text, &a.base, &la)?;
-        crate::models::adapters_save(&config, &text, &new)?;
-        writeln!(out, "Added it to node.toml on `{}` (revision {revision}). Restart ymird to serve it.", a.base)?;
+    if add {
+        let new = crate::models::adapters_add(text, base, &la)?;
+        crate::models::adapters_save(config, text, &new)?;
+        writeln!(out, "Added it to node.toml on `{}` (revision {revision}). Restart ymird to serve it.", base)?;
     } else {
-        writeln!(out, "To serve it: ymirctl models adapter add {} {} --id {} --revision {revision}", a.base, adapter.file, adapter.id)?;
+        writeln!(out, "To serve it: ymirctl models adapter add {} {} --id {} --revision {revision}", base, adapter.file, adapter.id)?;
     }
     Ok(())
 }

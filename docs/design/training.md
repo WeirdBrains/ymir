@@ -4,7 +4,8 @@ Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymir
 license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
 base) is built. P2 (consented conversation export) is built on the Ymir side. P3a (one run on one node) is built and
 tested against a mock trainer; no real run has been made. P4b (versioned rollout, canary and rollback) is built and
-tested against mock models. P3b has not started. This document turns the four training proposals in the
+tested against mock models. P3b's Ymir side is built (2026-11-25: checkpoints, trainer interface 2, resumable jobs on a
+local stand-in for the synced job record); the synced record itself waits for `weirdnet-agent` 0.6.0. This document turns the four training proposals in the
 white paper's "Training and fine-tuning (proposal)" section
 ([`docs/whitepaper/sections/10-training.tex`](../whitepaper/sections/10-training.tex)) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
@@ -227,6 +228,44 @@ build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.to
   [`crates/ymir-testkit/tests/p3a_llamacpp.rs`](../../crates/ymir-testkit/tests/p3a_llamacpp.rs) (`ymirctl train run`
   through the real wrapper). Linux CI runs both. No model has been trained with it.
 
+**P3b, Ymir side (2026-11-25).** Built on a stand-in for the synced record, so it works on one node now and across
+nodes once `weirdnet-agent` 0.6.0's `jobs` (requested 2026-11-25; the lead's plan: `JobRecord<P>` over
+`weirdnet-sync` 0.8's job log and majority-vote leases) replaces it.
+- *llama.cpp at the pin has no checkpoints.* `examples/training/finetune.cpp` at b12628 loops `llama_opt_epoch` over
+  the epochs and calls `llama_model_save_to_file` once at the end; nothing saves the optimizer's state, and
+  `llama_opt_epoch` doesn't shuffle. The learning rate is constant unless `-lr-min` is given (Ymir doesn't). So
+  `trainer.py train --checkpoint-dir DIR` runs `llama-finetune --epochs 1` once per epoch, each from the last epoch's
+  model, and each epoch trains on the same sequences in the same order as one long run would; only AdamW's moments
+  start again at each epoch (`"optimizer": "reset"` in the checkpoint).
+- *Trainer interface 2.* `train ... --checkpoint-dir DIR` writes `DIR/epoch-NNNN/` (the model so far and
+  `checkpoint.json`: format `ymir-train-checkpoint/1`, epoch, steps, loss, seed, the sha256 of the run's data and
+  config, every file's hash) and prints `{"event": "checkpoint", "dir", "epoch", "step"}`; `--resume CKPT` carries on
+  after CKPT's epoch and refuses a checkpoint of other data or settings. Ymir checks each checkpoint's files before it
+  keeps it, keeps only the newest in the run, and drops them when the run is done (a failed run keeps its last).
+  Interface 1 trainers still run plain runs.
+- *Jobs* ([`crates/ymir-core/src/train_job.rs`](../../crates/ymir-core/src/train_job.rs)). `ymirctl train run --job`
+  posts a job (`ymir.train`: base and its revision, the dataset as a content-addressed bundle, settings, adapter id,
+  trainer build) and runs it under a claim: a lease (60 s, renewed every 20 s) whose term fences every write, so a
+  node that lost the job can't overwrite the next holder's record. Each checkpoint goes into the blob store and the
+  record (its root and who holds it). The run ends the job as done, failed with a retry (after the GPU was held: a
+  crash, out of memory, a lost node; up to 3 attempts, 60 s apart), failed for good (before: the job can't run here or
+  anywhere), or paused (Ctrl-C, no attempt spent). If the lease is lost the run stops. `train resume JOB` claims it
+  again, after [`check_resumable`]: the same trainer build (interface 2), the base at the same revision, the `--from`
+  file in the models directory, the adapter id free, and `[train] resume = true` for another node's job. A lapsed
+  lease can be taken over after 5 minutes, so a network blip doesn't move a multi-GB job. `train jobs` and
+  `train job pause|unpause|cancel` (owner only) manage them.
+- *Stand-ins.* `JobStore` is the API asked of `weirdnet-agent` 0.6.0; `FileJobStore` keeps it in
+  `state/train/jobs/` on one node with the same semantics, and `LocalBlobs` keeps bundles in `state/train/blobs/`
+  (hard links where possible). Swapping in the synced record and a blob fetch from the holders over Weirdnet is the
+  remaining step; nothing else changes. Not yet: a node taking over stalled jobs by itself (it will watch the synced
+  record), and hardware checks beyond the base and trainer (`needs` is recorded, not enforced).
+- Tests: [`crates/ymir-testkit/tests/p3b.rs`](../../crates/ymir-testkit/tests/p3b.rs) (two node homes sharing the
+  stand-in stores: a job lost after epoch 1 is refused by a node with another base revision or without `resume`,
+  then carried on from epoch 1's checkpoint by one with them; Ctrl-C pauses; a run that loses its lease stops and
+  writes nothing over the new holder; an interface 1 trainer can't run a job; the `ymirctl` commands), the store's
+  unit tests (fencing, takeover wait, back-off, attempts, owner operations, candidates, blob hashes) and
+  `scripts/test_trainer.py` (per-epoch checkpoints, resume and its refusals).
+
 **Work, in two parts.**
 - **P3a, one node, no hand-off.** `ymirctl train reserve --node X` drains the node, unloads its models, and
   marks it unavailable for placement until `release` (or until the run ends); `ymirctl train run` starts the
@@ -337,7 +376,8 @@ serve it as an adapter, and score it against the base through the pool.
 4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Built (2026-11-24) on the
    `weirdnet-backends` 0.4.3 reservation, tested with a mock trainer; each run on a serving node needs the lead's OK.
 5. **P4b: versions, canary weights and rollback**, gated by P1's eval. Built (2026-11-24) against mock models.
-6. **P3b: synced training job record and checkpoint resume**, once `weirdnet-agent` has the synced job record.
+6. **P3b: synced training job record and checkpoint resume.** Ymir side built (2026-11-25) on a local stand-in; the
+   synced record waits for `weirdnet-agent` 0.6.0's `jobs`.
 7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet.
 
 ## Testing

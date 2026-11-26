@@ -3,6 +3,14 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 22:40 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
+
+**What changed:** trainer interface 2 (`train --checkpoint-dir DIR` writes `epoch-NNNN/` with `checkpoint.json`, `ymir-train-checkpoint/1`; `--resume CKPT`), spoken by the mock trainer and `scripts/trainer.py` (one `llama-finetune --epochs 1` per epoch: the pinned build saves weights only at the end and has no optimizer state, so AdamW restarts each epoch; no shuffle and a constant learning rate keep the data order and schedule the same). `ymir_core::train_job`: the job record, lease with fencing term, attempts, back-off and checkpoint pointer as the `JobStore` trait asked of `weirdnet-agent` 0.6.0, with `FileJobStore` and `LocalBlobs` standing in on one node; `start`/`resume` drive a run under a claim (renew, publish checkpoints, finish, fail with or without retry, pause on Ctrl-C, stop on a lost lease) after `check_resumable` (trainer build, base revision, `--from`, adapter id, `[train] resume`). `ymirctl train run --job`, `train jobs`, `train resume JOB`, `train job pause|unpause|cancel JOB`. Docs: training.md (P3b), DESIGN, CHANGELOG, site.
+
+**Checks:** `cargo clippy -p ymir-core -p ymirctl -p ymir-testkit --all-targets -D warnings`; `cargo test -p ymir-core --lib train` (7 new store tests); `tests/p3b.rs` (5, three runs in a row), `p3a`, `p3a_remote`, `p3a_llamacpp` (with the trainer venv); `scripts/test_trainer.py` (28). Not tested: a real `llama-finetune` with checkpoints (no run cleared), Windows/macOS (CI).
+
+**Left:** swap the stand-ins for `weirdnet-agent` 0.6.0's `JobBoard<TrainJob>` and a blob fetch from the holders over Weirdnet; let a `[train] resume = true` node take over stalled jobs by itself; enforce `needs`. The request sent to the lead is in training.md's P3b section.
+
 ## 2026-11-25 18:40 EST: v0.15.4 released; first hands-off self-update confirmed
 
 **Release:** https://github.com/WeirdBrains/ymir/releases/tag/v0.15.4 (Release run 45711728332, green). `ymirctl update status` now shows the self-update settings and the last feed check. The assets check passes, including the six signed update bundles (`com.weirdbrains.ymir-stable-15004`) and the gpg-signed Arch packages. The leak scan of dist found nothing.

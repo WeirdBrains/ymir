@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Ymir's llama.cpp trainer: the program `[train] trainer` points at (training plan P3a).
 
-It speaks Ymir's trainer interface 1 (crates/ymir-core/src/train.rs) around upstream llama.cpp at
+It speaks Ymir's trainer interface 2 (crates/ymir-core/src/train.rs) around upstream llama.cpp at
 the build pinned in packaging/engines/llama.cpp.toml (the one scripts/engine.py ships):
 
     trainer.py version
     trainer.py train --base BASE.gguf --data DATA.jsonl --config CONFIG.json --out FULL.gguf
+                     [--checkpoint-dir DIR] [--resume CKPT]
     trainer.py extract-lora --base BASE.gguf --tuned FULL.gguf --rank N --out ADAPTER.gguf
+
+Checkpoints (interface 2, training plan P3b): upstream llama-finetune at the pin saves the model only
+when it ends, with no optimizer state, so with --checkpoint-dir `train` runs it one epoch at a time,
+each from the last epoch's model, and writes DIR/epoch-NNNN/ (model.gguf and checkpoint.json) after
+each. The learning rate is constant at the pin (no -lr-min), and upstream doesn't shuffle, so an epoch
+trains on the same sequences in the same order either way; AdamW's moments start again each epoch
+(checkpoint.json says `"optimizer": "reset"`). --resume CKPT carries on after CKPT's epoch, and is
+refused for a checkpoint of other data or settings.
 
 `train` is a full fine-tune with upstream `llama-finetune`: every weight of an F32 GGUF base (the
 only kind upstream trains), on the dataset's conversations rendered with the base's own chat
@@ -38,6 +47,7 @@ the trainer's venv, extract-lora runs on the GPU; without it, on the CPU.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -49,7 +59,8 @@ import sys
 import time
 from pathlib import Path
 
-INTERFACE = 1
+INTERFACE = 2
+CHECKPOINT_FORMAT = "ymir-train-checkpoint/1"
 ENGINE = "llama.cpp"
 HERE = Path(__file__).resolve().parent
 PIN_FILE = HERE.parent / "packaging/engines/llama.cpp.toml"
@@ -236,6 +247,8 @@ class Progress:
         self.epoch = 0
         self.last = None
         self.val_loss = None
+        self.loss = None
+        self.imax = 0
 
     def feed(self, chunk):
         m = PROGRESS.match(chunk)
@@ -247,6 +260,7 @@ class Progress:
             return None
         if imax <= 0:
             return None
+        self.imax, self.loss = imax, loss
         step = min(self.epoch, self.epochs - 1) * imax + idata
         if idata >= imax:
             self.epoch += 1
@@ -375,6 +389,67 @@ def read_rows(path):
 # Commands
 
 
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_checkpoint(ckpt, data_sha, config_sha, epochs):
+    """The checkpoint folder `ckpt`, checked against this run's data and settings, and its files."""
+    path = Path(ckpt) / "checkpoint.json"
+    try:
+        c = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise Refusal(f"{path}: {e}")
+    if c.get("format") != CHECKPOINT_FORMAT:
+        raise Refusal(f"{path} is not a {CHECKPOINT_FORMAT} checkpoint")
+    if c.get("data_sha256") != data_sha or c.get("config_sha256") != config_sha:
+        raise Refusal(f"{ckpt} is a checkpoint of other training data or settings")
+    if int(c.get("epochs", 0)) != epochs or not 0 < int(c.get("epoch", 0)) < epochs:
+        raise Refusal(f"{ckpt} is at epoch {c.get('epoch')} of {c.get('epochs')}; nothing is left to carry on for {epochs} epochs")
+    for f in c.get("files", []):
+        p = Path(ckpt) / f["path"]
+        if ".." in Path(f["path"]).parts or not p.is_file() or p.stat().st_size != f["bytes"] or sha256_file(p) != f["sha256"]:
+            raise Refusal(f"{p} doesn't match its checkpoint")
+    model = Path(ckpt) / c["model"]
+    if not model.is_file():
+        raise Refusal(f"{ckpt} has no model {c['model']}")
+    return c, model
+
+
+def write_checkpoint(cdir, epoch, epochs, progress, seed, data_sha, config_sha):
+    model = cdir / "model.gguf"
+    c = {
+        "format": CHECKPOINT_FORMAT,
+        "epoch": epoch,
+        "epochs": epochs,
+        "step": epoch * progress.imax,
+        "steps": epochs * progress.imax,
+        "loss": progress.loss,
+        "seed": seed,
+        "data_sha256": data_sha,
+        "config_sha256": config_sha,
+        "model": "model.gguf",
+        "optimizer": "reset",
+        "files": [{"path": "model.gguf", "sha256": sha256_file(model), "bytes": model.stat().st_size}],
+    }
+    tmp = cdir / "checkpoint.json.tmp"
+    tmp.write_text(json.dumps(c, indent=1))
+    os.replace(tmp, cdir / "checkpoint.json")
+    emit("checkpoint", dir=cdir.name, epoch=epoch, step=c["step"])
+
+
+def link_or_copy(src, dst):
+    Path(dst).unlink(missing_ok=True)
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)
+
+
 def cmd_version(_a):
     exe = find_finetune()
     print(json.dumps({"interface": INTERFACE, "engine": ENGINE, "build": finetune_build(exe), "patches": finetune_patches(exe)}), flush=True)
@@ -405,16 +480,27 @@ def cmd_train(a):
         f.write(text)
     if int(hyper.get("batch", 1)) != 1:
         log(f"llama-finetune {build} trains one {ctx}-token sequence per step; batch {hyper['batch']} is not used")
-    cmd = [
-        str(exe), "-m", str(a.base), "-f", str(corpus), "-o", str(out),
-        "-c", str(ctx), "-b", str(ctx), "-ub", str(ctx),
-        "--epochs", str(epochs), "-lr", repr(float(hyper["learning_rate"])),
-        "--seed", str(int(hyper.get("seed", 0))),
-        "-ngl", os.environ.get("YMIR_TRAINER_NGL", "all"), "-fa", "off",
-        *shlex.split(os.environ.get("YMIR_TRAINER_ARGS", "")),
-    ]
+    seed = int(hyper.get("seed", 0))
+
+    def finetune_cmd(model, n_epochs, output):
+        return [
+            str(exe), "-m", str(model), "-f", str(corpus), "-o", str(output),
+            "-c", str(ctx), "-b", str(ctx), "-ub", str(ctx),
+            "--epochs", str(n_epochs), "-lr", repr(float(hyper["learning_rate"])),
+            "--seed", str(seed),
+            "-ngl", os.environ.get("YMIR_TRAINER_NGL", "all"), "-fa", "off",
+            *shlex.split(os.environ.get("YMIR_TRAINER_ARGS", "")),
+        ]
+
+    data_sha, config_sha = sha256_file(a.data), sha256_file(a.config)
+    start, model = 0, Path(a.base)
+    if a.resume:
+        c, model = read_checkpoint(a.resume, data_sha, config_sha, epochs)
+        start = int(c["epoch"])
+        log(f"carrying on from {a.resume} after epoch {start} of {epochs} (the optimizer's state starts again)")
     log(f"llama-finetune {build}: {len(rows)} conversations, {len(text)} characters, {epochs} epoch(s), context {ctx}")
     progress = Progress(epochs)
+    progress.epoch = start
     try:
         tok = find_tokenize(exe)
         if tok:
@@ -424,7 +510,22 @@ def cmd_train(a):
             log(f"{count} tokens, {(count - trained_context(ctx) - 1) // (trained_context(ctx) // 2)} windows of {trained_context(ctx)}")
         else:
             log(f"no llama-tokenize next to {exe}, so the text's length is not checked first (rebuild with scripts/engine.py build --trainer)")
-        code, tail = run_finetune(cmd, progress)
+        if a.checkpoint_dir:
+            # One epoch at a time, a checkpoint after each.
+            code, tail = 0, []
+            for e in range(start + 1, epochs + 1):
+                cdir = Path(a.checkpoint_dir) / f"epoch-{e:04d}"
+                cdir.mkdir(parents=True, exist_ok=True)
+                progress.epoch = e - 1
+                code, tail = run_finetune(finetune_cmd(model, 1, cdir / "model.gguf"), progress)
+                if code != 0 or not (cdir / "model.gguf").exists():
+                    break
+                write_checkpoint(cdir, e, epochs, progress, seed, data_sha, config_sha)
+                model = cdir / "model.gguf"
+            if code == 0 and model != Path(a.base) and model.exists():
+                link_or_copy(model, out)
+        else:
+            code, tail = run_finetune(finetune_cmd(model, epochs - start, out), progress)
     finally:
         corpus.unlink(missing_ok=True)
     if code != 0 and any(any(s in line for s in SHORT_TEXT_CRASH) for line in tail):
@@ -641,6 +742,8 @@ def main(argv=None):
     p = sub.add_parser("train")
     for k in ("--base", "--data", "--config", "--out"):
         p.add_argument(k, required=True)
+    p.add_argument("--checkpoint-dir")
+    p.add_argument("--resume")
     p = sub.add_parser("extract-lora")
     for k in ("--base", "--tuned", "--out"):
         p.add_argument(k, required=True)

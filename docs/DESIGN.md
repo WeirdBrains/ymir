@@ -820,6 +820,12 @@ node on the roster and sends the dataset, manifest and settings with its certifi
 `[train] remote = true`, to the owner's devices (`[train] callers` narrows them), runs `train::run` in process and
 streams its lines back. Closing the stream cancels the run; node.toml is never edited from the network.
 
+`ymirctl train run --job` (P3b, 2026-11-25) makes the run a resumable job: trainer interface 2 checkpoints after each
+epoch, and the job record (`ymir_core::train_job`: a lease with a fencing term, attempts, back-off, the last
+checkpoint's content root) lets `ymirctl train resume JOB` carry it on from there, on this node or, with `[train]
+resume = true`, on another with the same base revision and trainer build. The record is kept on the node until
+`weirdnet-agent` 0.6.0's synced job record replaces the stand-in; see [training.md](design/training.md).
+
 ### LoRA adapters on a loaded base (training plan P4a, 2026-11-23)
 
 An adapter is served as a model of its own, on its base's engine. The engine side is
@@ -1627,6 +1633,7 @@ port = 8484                          # always 127.0.0.1; there is no address set
 # [train]
 # trainer = "/path/to/scripts/trainer.py"  # speaks Ymir's trainer interface (docs/design/training.md)
 # build = "b12628"                   # the llama.cpp build it must report; any other is refused
+# resume = false                     # carry on other nodes' training jobs from their checkpoints (P3b)
 # [train.env]
 # YMIR_TRAINER_PYTHON = "/opt/ymir-trainer/bin/python"  # a venv with scripts/trainer-requirements.txt
 # YMIR_LLAMA_FINETUNE = "/opt/ymir-trainer/llama-finetune"  # scripts/engine.py build --trainer

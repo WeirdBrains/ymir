@@ -6,6 +6,18 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Resumable training jobs (training plan P3b, Ymir side): `ymirctl train run --job` checkpoints after each epoch, and
+  `ymirctl train resume JOB` carries a failed, lost or paused job on from its last checkpoint, checked against the
+  job's dataset, settings, base revision and trainer build; `train jobs` lists them and `train job pause|unpause|cancel`
+  manages them. Ctrl-C pauses a job. A job has a lease with a fencing term, attempts (3) and a retry back-off. The job
+  record is kept on the node until `weirdnet-agent` 0.6.0 syncs it (`ymir_core::train_job`); then `[train] resume =
+  true` lets a node carry on other nodes' jobs.
+- Trainer interface 2: `train --checkpoint-dir DIR` and `--resume CKPT` (`ymir-train-checkpoint/1`); Ymir still runs
+  interface 1 trainers for plain runs. `scripts/trainer.py` speaks it: with checkpoints it runs `llama-finetune` one
+  epoch at a time (the pinned build saves weights only, so AdamW's state restarts each epoch).
+
 ## [0.15.4] - 2026-11-25
 
 ### Added
