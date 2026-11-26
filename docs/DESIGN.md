@@ -631,6 +631,19 @@ are not cached. `tests/vision.rs` checks the bridge end to end (images reach the
 projector, one without is refused) and `tests/nodes.rs` the routing. Remote `https://` image URLs
 are not fetched; data URLs only.
 
+**Limits for media, reported, never defaulted (video milestone 1, LF-43, started 2026-11-26).** Clients
+such as Bragi size video frames from what the model reports and refuse when it reports nothing
+([docs/design/video.md](design/video.md)). Each catalog/1 entry now carries `context`: the context
+window a request can count on wherever it is routed, the smallest `request_context` of the nodes that
+have the model (the configured context, split over the parallel slots for llama.cpp). When any node
+with the model sets no context the field is absent, because the request may be routed there; Ymir
+never fills it in. `ymirctl status` shows `context N per request` or `context not reported`. The
+other limits (per-image token cost and edge, `max_images`, audio length, the bridge's request size,
+which is fixed at 32 MiB inside `weirdnet-openai` 0.2.3) need fields in `weirdnet-agent`'s
+`CatalogModel` and `weirdnet-backends`' `Capabilities` (both `#[non_exhaustive]`) and an option in
+`weirdnet-openai`'s `BridgeOptions`; they are on the Weirdnet wish list in the video design and are not
+reported until those ship. Operators set the context per model in `node.toml` as today.
+
 ### Model sizing
 
 `weirdnet-model`'s catalog grows from Gemma 4 only to a tiered catalog with per-quant memory

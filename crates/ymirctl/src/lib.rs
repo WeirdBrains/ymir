@@ -990,6 +990,12 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
                 extra.push_str(&format!(", takes {}", media.join(" and ")));
             }
         }
+        if m.capabilities.is_none_or(|c| c.chat) && m.base.is_none() {
+            match ymir_core::model_node::request_context(m.engine, m.context, m.slots) {
+                Some(c) => extra.push_str(&format!(", context {c} per request")),
+                None => extra.push_str(", context not reported"),
+            }
+        }
         if let Some(s) = m.last_load_secs {
             extra.push_str(&format!(", loads in {s:.1}s"));
         }

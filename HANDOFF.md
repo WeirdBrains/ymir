@@ -2,6 +2,21 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 11:40 EST: video milestone 1, context in catalog/1 (branch `feature/video-upload`, LF-43)
+
+Michael (11-26): "Let's do the video uploads". Bragi samples clips into frames sized from the limits Ymir reports and refuses when they are missing (Bragi branch `feature/video-upload`), so Ymir's part is milestone 1 of [docs/design/video.md](docs/design/video.md): report limits, never invent them.
+
+- [model_node.rs](crates/ymir-core/src/model_node.rs): `request_context(engine, context, slots)`, the context one request can count on (llama.cpp's `--ctx-size` split over its slots), `None` when none is set.
+- [coordinator.rs](crates/ymir-core/src/coordinator.rs): `CatalogRow::context` is the smallest across the nodes that have the model, `None` when any of them doesn't say; catalog/1 entries carry it (`CatalogModel::with_context`), rollout versions inherit it. Bragi already reads it (`CatalogView::context_for`).
+- [ymirctl status](crates/ymirctl/src/lib.rs): `context N per request` or `context not reported` for chat models.
+- Test `the_catalog_reports_the_context_a_request_can_count_on_and_never_invents_one` in [tests/nodes.rs](crates/ymir-core/tests/nodes.rs). DESIGN.md "Limits for media" paragraph; video.md status.
+
+**Checks:** `cargo fmt --all --check` only. **Not compiled or tested:** `/mnt/ext1/scratch/heavy-build.lock` is held by three leftover `git-daemon` processes from 2026-11-25 15:23 (PIDs 4004288, 4004289, 4004314, inherited from a test run whose parent, PID 3990290, is gone), so no clippy or tests ran; nothing merged.
+
+**Blocked on Weirdnet:** per-image token cost and edge, `max_images`, audio length and the request size (`BridgeOptions` max body, a 413 that names it; today a fixed 32 MiB `DefaultBodyLimit` in `weirdnet-openai` 0.2.3) need `weirdnet-agent` `CatalogModel` fields, `weirdnet-backends` `Capabilities`/`ModelStatus` fields and a `weirdnet-openai` option. Operator `[[models]] image_tokens`/`max_images` in `node.toml` are left until there is a field to publish them in.
+
+**Next:** once the lock is free: clippy, `cargo test --workspace`, merge `--no-ff`. Then the Weirdnet asks; transcription route (milestone 2).
+
 ## 2026-11-26 10:30 EST: M9 FreeBSD service and packages (merged `wip/freebsd`)
 
 - [service.rs](crates/ymir-core/src/service.rs): `Os::FreeBsd`. `service install --system --run-as USER` writes `/usr/local/etc/rc.d/ymird` (rc.subr; `daemon(8) -r -R 5 -u USER` runs `ymird --home DIR`, output to `state/logs/ymird.log`), runs `sysrc ymird_enable=YES` and `service ymird restart`; stop/start/status go through `service ymird`; uninstall stops it, `sysrc -x ymird_enable` and removes the script. User scope is refused (FreeBSD has no per-user services). The system node folder defaults to `/var/db/ymir`. Unit test checks the script with `sh -n`.

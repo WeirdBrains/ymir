@@ -61,6 +61,8 @@ struct Scripted {
     revision: Mutex<Option<String>>,
     /// Origins and licenses by model.
     origins: Mutex<Vec<KnownOrigin>>,
+    /// Configured context and slots by model.
+    contexts: Mutex<Vec<(&'static str, u32, Option<u32>)>>,
 }
 
 impl Scripted {
@@ -78,6 +80,7 @@ impl Scripted {
             media: AtomicBool::new(false),
             revision: Mutex::new(None),
             origins: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         })
     }
     fn set(&self, m: Mode) {
@@ -107,6 +110,10 @@ impl ModelNode for Scripted {
                 let mut st = status(id, *e, s.clone());
                 if self.media.load(Ordering::SeqCst) {
                     st.capabilities = Some(weirdnet_backends::Capabilities::text().with_vision(true).with_audio(true));
+                }
+                if let Some((_, ctx, slots)) = self.contexts.lock().unwrap().iter().find(|(m, ..)| *m == *id) {
+                    st.context = Some(*ctx);
+                    st.slots = *slots;
                 }
                 st
             })
@@ -238,6 +245,23 @@ async fn the_catalog_says_where_each_model_came_from() {
     assert_eq!(of("alpha"), (Some("hub".into()), None), "the first node that knows says");
     assert_eq!(of("tuned"), (Some("upload".into()), Some("MIT".into())));
     assert_eq!(of("beta"), (None, None));
+}
+
+#[tokio::test]
+async fn the_catalog_reports_the_context_a_request_can_count_on_and_never_invents_one() {
+    let a = Scripted::new("a", &[("alpha", false, READY), ("beta", false, READY), ("gamma", false, READY), ("delta", false, READY)]);
+    let b = Scripted::new("b", &[("alpha", false, READY), ("beta", false, READY)]);
+    *a.contexts.lock().unwrap() = vec![("alpha", 32_768, Some(4)), ("beta", 8192, None), ("gamma", 16_384, Some(2))];
+    *b.contexts.lock().unwrap() = vec![("alpha", 16_384, None)];
+    let c = coordinator(&[&a, &b]);
+    let cat = c.agent_catalog();
+    let ctx = |id: &str| cat.iter().find(|m| m.id == id).unwrap().context;
+    assert_eq!(ctx("alpha"), Some(8192), "a splits 32768 over 4 llama.cpp slots; b gives 16384");
+    assert_eq!(ctx("beta"), None, "b doesn't say, and a request may be routed there");
+    assert_eq!(ctx("gamma"), Some(8192));
+    assert_eq!(ctx("delta"), None, "no context set anywhere: absent, not a default");
+    assert_eq!(ymir_core::model_node::request_context(weirdnet_backends::EngineKind::Vllm, Some(8192), Some(4)), Some(8192));
+    assert_eq!(ymir_core::model_node::request_context(weirdnet_backends::EngineKind::Llamacpp, Some(0), None), None);
 }
 
 #[tokio::test]

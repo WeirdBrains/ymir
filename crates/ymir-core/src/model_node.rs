@@ -34,6 +34,16 @@ pub fn inputs_of(s: &ModelStatus) -> weirdnet_agent::Modalities {
     s.capabilities.map_or(weirdnet_agent::Modalities::TEXT, |c| c.inputs())
 }
 
+/// The context window one request gets, in tokens: the configured context, split over the
+/// parallel slots for llama.cpp (it divides `--ctx-size` between them unless the KV cache is
+/// unified, so the split is the most a request can count on). `None` when no context is set:
+/// Ymir reports a limit it knows and never fills in one it doesn't (video design, milestone 1).
+pub fn request_context(engine: EngineKind, context: Option<u32>, slots: Option<u32>) -> Option<u32> {
+    let ctx = context.filter(|c| *c > 0)?;
+    let slots = if matches!(engine, EngineKind::Llamacpp) { slots.unwrap_or(1).max(1) } else { 1 };
+    Some(ctx / slots)
+}
+
 /// A model's origin (`hub`, `upload`, `train`) and license, either unknown.
 pub type Origin = (Option<String>, Option<String>);
 
