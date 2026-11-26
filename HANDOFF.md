@@ -3,7 +3,7 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
-## 2026-11-26 07:20 EST: training files over Weirdnet, P3b blob transfer (branch `feature/blobs`)
+## 2026-11-26 07:05 EST: training files over Weirdnet, P3b blob transfer (branch `feature/blobs`)
 
 - [blobs_net.rs](crates/ymir-core/src/blobs_net.rs): `/ymir/blobs/1` (CBOR): `BlobAsk { cert, root }`; the holder answers `Bundle { manifest_name, manifest }`, each listed file's bytes as 48 KiB `Chunk`s in manifest order, `Done` (or `Missing` / `Refused`). `BlobsService` (roster auth: the owner's linked devices) and `BlobsServer`; `BlobsClient::ensure(root, holders)` checks the manifest against the root, takes the file list from the manifest (paths inside the bundle only), checks each file's size and sha256 while writing into a staging folder in the store, gives up on a holder after 60 s of silence and tries the next, and stores only a whole bundle (`LocalBlobs::put_checked`); staging is removed either way.
 - [train_job.rs](crates/ymir-core/src/train_job.rs): `Ctx.fetch` (`BlobFetch`); before a run, the dataset from the job's owner or its checkpoint's holders and the last checkpoint from its holders; a fetch failure fails the attempt as retryable. A node that resumes from a checkpoint it did not hold adds itself to the holders (`JobStore::set_holders`: file store, board via `Claim::set_holders`, control socket). `LocalBlobs::bundle` / `staging` / `put_checked`.
