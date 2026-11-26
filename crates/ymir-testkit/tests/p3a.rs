@@ -139,7 +139,7 @@ async fn a_run_trains_an_adapter_with_the_pinned_trainer_and_adds_it() -> Result
     let data = generated(tmp.path(), "kad.jsonl", "apache-2.0")?;
 
     let out = ctl(&h.home, &["train", "check"]).await?;
-    assert!(out.contains("mock build b0000 (interface 1), as pinned"), "{out}");
+    assert!(out.contains("mock build b0000 (interface 2), as pinned"), "{out}");
 
     let d = data.display().to_string();
     let out =

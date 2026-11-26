@@ -67,7 +67,7 @@ async fn the_llamacpp_trainer_trains_and_extracts_an_adapter_ymir_serves() -> Re
     let paths = Paths::new(&home);
 
     let out = ctl(&home, &["train", "check"]).await?;
-    assert!(out.contains("llama.cpp build b12628 (interface 1), as pinned"), "{out}");
+    assert!(out.contains("llama.cpp build b12628 (interface 2), as pinned"), "{out}");
 
     let data = root.join("chats.jsonl");
     let body = "{\"id\": \"c1\", \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}, {\"role\": \"assistant\", \"content\": \"hello\"}]}\n";

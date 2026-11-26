@@ -5935,6 +5935,7 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "hex",
  "libc",
  "reqwest",
  "semver",
