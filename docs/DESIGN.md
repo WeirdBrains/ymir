@@ -1623,6 +1623,10 @@ id = "qwen3-embedding-0.6b"
 scheduler_eligible = true            # may hold the placement lease
 context_disk_budget = "2GiB"         # working set of synced conversations
 
+[inference.placement]                # optional (M6): models kept loaded on a number of model nodes
+replicas = { "qwen3.6-35b-a3b" = 2 }
+every_secs = 15                      # how often the scheduler looks
+
 [inference.cache]
 mode = "local"                       # off | local | pool
 backend = "embedded"                 # embedded | redis
@@ -1958,8 +1962,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   context and no duplicate text.
 - **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
   device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
-  nodes active-active. Moving a model between nodes is built (`ymirctl move`, 2026-11-26). Still to do: placement and replication, scheduler
-  lease, cloud-wide swap, prefix warming, and a pool-mode semantic cache. Exit
+  nodes active-active. Moving a model between nodes, and placement with replica counts under the scheduler lease, are built
+  (`ymirctl move`, `[inference.placement]`, 2026-11-26). Still to do: a published placement plan with fencing, cloud-wide swap, prefix warming, and a pool-mode semantic cache. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
@@ -2396,13 +2400,32 @@ that release, and the M6 p95 comparison is between two equally delayed runs unti
   the `(source, model)` pair is taken out of routing so new requests go to the target, the source finishes
   what it reports in flight for the model (up to a grace time, 60 s by default) and then unloads it. A load
   that fails on the target leaves the source serving. Copying the weights over is not part of it (pull them
-  on the target first). Tests: `crates/ymir-core/tests/move_model.rs`.
+  on the target first). Tests: `crates/ymir-core/tests/move_model.rs` (fake nodes) and
+  `crates/ymir-testkit/tests/m6_move.rs` (daemons over Weirdnet: a slow answer on the source finishes whole
+  before it unloads; the MCP tool `ymir_move_model` does the same with `confirm: true`).
+- **Placement and replication** (built 2026-11-26, `ymir_core::placement`). `[inference.placement] replicas =
+  { MODEL = N }` keeps each listed model loading or ready on N model nodes that take new requests; models not
+  listed are left alone. Every `every_secs` (15 s) the placing inference node takes one step per model: load
+  it on the node with its own copy and the fewest loaded models (never a draining or reserved node, one where
+  it failed to load, or one where it would evict another ready model of its swap group), or unload it from an
+  idle extra (never one with answers in flight, never below N). Draining a replica brings one up elsewhere;
+  resuming it unloads an idle extra.
+  **Who places:** the holder of the `ymir.scheduler` lease (`weirdnet-sync` 0.8 majority-vote lease; voters and
+  candidates are the devices whose grant has `ymir.inference`, that is cert-only inference nodes, each voting
+  with its terms in `voter.cbor`). An inference node that holds the seed has no such grant, so it places only
+  while no cert-only inference node exists; `scheduler_eligible = false` never places. Tests:
+  `placement::tests` (the rules), `crates/ymir-testkit/tests/m6_placement.rs` (daemons: two replicas come up,
+  stay at two, follow a drain and settle back) and `m6_scheduler_lease.rs` (two cert-only inference nodes:
+  exactly one holds the lease and the other takes over with a higher term).
 
 **Gaps:**
 
-- **Not built: scheduler lease, placement plan, cloud-wide swap, replication on queue wait, prefix warming.**
-  They need a lease and a signed, synced plan (`weirdnet-sync` has no lease primitive) and warm-prefix data in the
-  capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
+- **Not built: a published placement plan, fencing, cloud-wide swap, replication on queue wait, prefix warming.**
+  The lease and the replica counts are built (above). Still to do: publishing the plan (`SyncState::publish_plan`
+  under a sealed `ymir.plan` type that cert-only inference grants would need to list), model nodes refusing a
+  stale holder's load or unload (`FenceGuard`; today a stale holder can at worst add or drop one replica for a
+  round, which the next round undoes), several seed-holding inference nodes taking part in the lease (they would
+  need an `ymir.inference` grant of their own), and warm-prefix data in the capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
   and relays for the same reason.
 - **Not built: the pool-mode semantic cache.** `weirdnet-semcache` still has only the exact cache here.
 - **Batch jobs are not synced.** The submitting node runs the fan-out, so if it goes down the job stops

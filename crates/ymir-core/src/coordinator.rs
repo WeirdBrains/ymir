@@ -602,7 +602,7 @@ impl Coordinator {
             .ok_or_else(|| unknown_model(model))
     }
 
-    fn is_leaving(&self, node: &str, model: &str) -> bool {
+    pub(crate) fn is_leaving(&self, node: &str, model: &str) -> bool {
         self.leaving.lock().unwrap_or_else(|e| e.into_inner()).contains(&(node.to_string(), model.to_string()))
     }
 

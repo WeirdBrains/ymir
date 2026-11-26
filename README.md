@@ -92,6 +92,9 @@ backend = "vllm"
 wrap = "http://127.0.0.1:8000/v1"     # a stock server Ymir didn't start (loopback only)
 wrap_api_key = "env:VLLM_API_KEY"     # secrets are env: or file: references, never inline
 
+[inference.placement]                 # optional: keep these models loaded on this many model nodes
+replicas = { "qwen3-8b" = 2 }
+
 [inference.alerts]
 dry_run = true                        # log what would be sent
 [inference.alerts.smtp]

@@ -200,6 +200,14 @@ own copy of the model; <code>ymirctl models pull MODEL --node NODE</code>), new 
 unloads it once the answers it is streaming finish (at most <code>--grace</code> seconds). If the load on the new node
 fails, nothing changes on the old one.</p>
 <pre><code>ymirctl move qwen3.6-35b-a3b --to server-b</code></pre>
+<h3 id="placement">Keeping replicas loaded</h3>
+<p>To keep a model loaded on a number of model nodes without loading it by hand, list it in the inference node's
+<code>node.toml</code>. Every 15 seconds (<code>every_secs</code>) one step is taken per model: it loads on a node
+that has its own copy and the fewest models loaded, or unloads from an idle extra. A draining or reserved node
+doesn't count, a node with answers in flight is never unloaded, and models not listed are left alone. With
+several inference nodes, the one holding the scheduler lease places (inference nodes linked cert-only vote on it).</p>
+<pre><code>[inference.placement]
+replicas = { "qwen3.6-35b-a3b" = 2 }</code></pre>
 <h3 id="nodes"><code>ymirctl nodes</code></h3>
 <p>Lists the model nodes the pool routes to: serving or draining, how many of their models are ready, and requests in flight.</p>
 <h3 id="drain"><code>ymirctl drain NODE [--resume]</code></h3>

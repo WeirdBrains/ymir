@@ -33,6 +33,7 @@ pub mod mlx;
 pub mod model_node;
 pub mod models;
 pub mod paths;
+pub mod placement;
 pub mod remote;
 pub mod rollout;
 pub mod rollout_edit;

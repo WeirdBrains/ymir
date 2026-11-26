@@ -94,6 +94,29 @@ impl Network {
     }
 }
 
+/// Whether this inference node places models now: alone with no Weirdnet; with the
+/// `ymir.scheduler` lease held, on a cert-only inference node (which also votes on it); or,
+/// on one that holds the seed, while no cert-only inference node exists to hold the lease.
+fn placement_leader(network: Option<&Network>, serving: &mut Vec<Box<dyn std::any::Any + Send + Sync>>) -> Box<dyn Fn() -> bool + Send + Sync> {
+    let Some(net) = network else { return Box::new(|| true) };
+    let m = net.membership.clone();
+    if !m.scheduler_candidate() {
+        tracing::info!("placement: this node holds the seed, so it places only while no cert-only inference node holds the scheduler lease");
+        return Box::new(move || m.scheduler_voters() == 0);
+    }
+    if let Err(e) = m.enable_scheduler_voter() {
+        tracing::warn!("placement: the scheduler lease voter: {e:#}; not placing");
+        return Box::new(|| false);
+    }
+    let Ok(name) = weirdnet_sync::LeaseName::new(crate::placement::SCHEDULER_LEASE) else { return Box::new(|| false) };
+    let hints = net.hints.clone();
+    let leases = weirdnet_sync::Leases::new(net.node.clone(), m.state())
+        .with_addrs(move |p| hints.iter().find(|(h, _)| h.to_string() == p).map(|(_, a)| a.clone()).unwrap_or_default());
+    let elector = Arc::new(leases.elect(name, weirdnet_sync::LeaseConfig::for_role(crate::membership::ROLE_INFERENCE)));
+    serving.push(Box::new(elector.clone()));
+    Box::new(move || elector.handle().is_some())
+}
+
 pub struct Daemon {
     pub name: String,
     pub bridge_addr: Option<SocketAddr>,
@@ -387,6 +410,13 @@ impl Daemon {
                     Err(e) => tracing::warn!(model = %standin, "stand-in not warm: {e}"),
                 }
             }));
+        }
+
+        // Placement and replication (M6): one inference node at a time keeps the listed models
+        // loaded on their number of model nodes (see `placement`).
+        if let (Some(c), false, true) = (&coordinator, cfg.inference.placement.is_empty(), cfg.inference.scheduler_eligible) {
+            let leads = placement_leader(network.as_ref(), &mut serving);
+            tasks.push(c.spawn_placement(cfg.inference.placement.clone(), leads));
         }
 
         let mut alerter = None;

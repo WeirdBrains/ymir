@@ -13,12 +13,25 @@ All notable changes to Ymir are listed here. The format follows
   it is streaming (at most the grace time) and then unloads it there. A target without a copy, a model loaded
   nowhere else, the same node twice and a failed load on the target are refused, with the old node left as it
   was (`Coordinator::move_model`, `ControlRequest::Move`).
+- M6, placement and replication: `[inference.placement] replicas = { MODEL = N }` (and `every_secs`, default 15)
+  keeps each listed model loaded on N model nodes that take new requests, one step per model per round: load it
+  on the node with its own copy and the fewest loaded models (never a draining or reserved node, one where it
+  failed to load, or one where it would evict another ready model of its swap group), or unload it from an
+  idle extra (never one with answers in flight). Models not listed are left alone. A count of 0 or over 64 is
+  refused when node.toml loads.
+- One inference node places at a time: a cert-only inference node (`ymir.inference` grant) votes on and stands
+  for the `ymir.scheduler` lease (weirdnet-sync 0.8 leases; terms kept in `voter.cbor`) and places while it
+  holds it; one that holds the seed places only while no cert-only inference node exists;
+  `scheduler_eligible = false` never places (`Membership::scheduler_candidate`, `enable_scheduler_voter`).
 - The MCP tool `ymir_move_model` does the same, marked MUTATES THE POOL and only with `confirm: true`
   (`grace` capped at 600 s); `--read-only` hides it.
 - Tests: `crates/ymir-core/tests/move_model.rs` (fake nodes) and `crates/ymir-testkit/tests/m6_move.rs`
   (separate daemons over Weirdnet: a slow answer streaming from the old node finishes whole, the move waits
   for it, new answers come from the new node, refusals change nothing, and the MCP tool moves it back). The
-  daemon-test helpers that `m6.rs` had are now shared in `tests/common/pool.rs`.
+  daemon-test helpers that `m6.rs` had are now shared in `tests/common/pool.rs`. Placement:
+  `placement::tests`, `m6_placement.rs` (daemons: two replicas come up, stay at two, follow a drain and settle
+  back) and `m6_scheduler_lease.rs` (two cert-only inference nodes: one holder at a time, takeover with a
+  higher term).
 
 ## [0.19.0] - 2026-11-26
 

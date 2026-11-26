@@ -478,6 +478,9 @@ pub struct InferenceSection {
     /// Models that may be split across model nodes (M7). Off unless listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<crate::group::SplitPolicy>,
+    /// Placement and replication (M6): models to keep loaded on a number of model nodes.
+    #[serde(default, skip_serializing_if = "crate::placement::PlacementPolicy::is_empty")]
+    pub placement: crate::placement::PlacementPolicy,
     /// Versioned rollouts (training plan P4b): a name, its versions and their traffic weights.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rollout: Vec<crate::rollout::Rollout>,
@@ -513,6 +516,7 @@ impl Default for InferenceSection {
             standin_warm: true,
             alerts: weirdnet_alerts::AlertsConfig::default(),
             split: Vec::new(),
+            placement: Default::default(),
             rollout: Vec::new(),
             remote_rollouts: true,
             rollout_callers: Vec::new(),
@@ -629,6 +633,7 @@ impl NodeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.inference.placement.validate()?;
         for c in &self.inference.rollout_callers {
             if c.parse::<weirdnet_net::PeerId>().is_err() {
                 bail!("[inference] rollout_callers: `{c}` is not a peer id (list the device's peer id, as the pool's device list shows it)");
