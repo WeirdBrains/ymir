@@ -247,9 +247,42 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  freebsd:
+    # M9: built in a FreeBSD 14.2 VM (no cross build: aws-lc-sys needs a FreeBSD sysroot), x86_64
+    # only. No bundled llama.cpp (upstream has no BSD builds; the pkg message names misc/llama-cpp),
+    # so no real-model smoke test here; .github/workflows/freebsd.yml runs the rc.d service.
+    name: freebsd (x86_64-unknown-freebsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
+      - uses: cross-platform-actions/action@v0.29.0
+        with:
+          operating_system: freebsd
+          version: '14.2'
+          memory: 12G
+          cpu_count: 4
+          run: |
+            set -eux
+            set -o pipefail
+            sudo pkg install -y ca_root_nss curl git cmake pkgconf python3 perl5
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --release --locked -p ymird -p ymirctl
+            python3 scripts/package.py --out dist
+            ls -l dist
+            ls dist/ymir-*-x86_64-unknown-freebsd.tar.gz dist/ymir-*-x86_64-unknown-freebsd.pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-x86_64-unknown-freebsd
+          path: dist/
+          if-no-files-found: error
+
   sums:
     name: SHA256SUMS
-    needs: [linux, arch, macos, windows, windows-installer]
+    needs: [linux, arch, macos, windows, windows-installer, freebsd]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v5

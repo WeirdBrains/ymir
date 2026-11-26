@@ -16,6 +16,8 @@ All notable changes to Ymir are listed here. The format follows
 - `scripts/package.py --target x86_64-unknown-freebsd` (or aarch64) writes `ymir-VERSION-TRIPLE.tar.gz` and, on a FreeBSD
   host, `ymir-VERSION-TRIPLE.pkg` (`pkg create`; its message names the `misc/llama-cpp` port, since there is no bundled
   engine for FreeBSD).
+- Releases carry `ymir-VERSION-x86_64-unknown-freebsd.tar.gz` and `.pkg`, built in a FreeBSD 14.2 VM by a new
+  Release workflow job (x86_64 only; no bundled engine).
 - `.github/workflows/freebsd.yml`: a FreeBSD 14.2 VM builds and tests `ymird` and `ymirctl`, packages them, installs the
   pkg, and runs the rc.d service through a chat with the mock engine, a stop (no engine left) and an uninstall.
 - M6 semantic answer cache: `[inference.cache] embedding_model = "ID"` (with `threshold`, a cosine distance, default

@@ -123,6 +123,10 @@ files = [
   "dist/ymir-cuda-{version}-*-pc-windows-msvc.zip",
   "dist/ymir-{version}-*.msi",
   "dist/YmirSetup-{version}.exe",
+  # FreeBSD (M9), from the Release workflow's VM job. Not a [[platforms]] entry yet: the shared
+  # release script (weirdnet-project-helpers 0.4.0) knows no `freebsd` OS; asked of the Weirdnet lead.
+  "dist/ymir-{version}-x86_64-unknown-freebsd.tar.gz",
+  "dist/ymir-{version}-x86_64-unknown-freebsd.pkg",
 ]
 sums = "SHA256SUMS"
 
