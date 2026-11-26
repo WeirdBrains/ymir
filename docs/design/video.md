@@ -1,6 +1,9 @@
 # Video through Ymir: the server and node side
 
-Status: design, post-v1, 2026-11-22 (LF-38). Nothing here is built, and none of it blocks v1. The client side (sampling, attach,
+Status: design, post-v1, 2026-11-22 (LF-38). Milestone 1 started 2026-11-26 (LF-43): catalog/1 reports the per-request
+context (smallest across nodes, absent when any node doesn't say) and the media limits (`weirdnet-agent` 0.5.7 `MediaLimits`,
+strictest across nodes, from the engine or `[model.local] limits`), `[bridge] max_request_bytes` sets the bridge's body limit,
+and `ymirctl status` shows both. Transcription and a video part still wait on the Weirdnet wish list below. None of it blocks v1. The client side (sampling, attach,
 players in all three front ends, ffmpeg packaging) is in [`bragi/docs/design/video.md`](https://github.com/WeirdBrains/bragi/blob/main/docs/design/video.md);
 read it first. This document covers what Ymir does so that video works for Bragi and for every other client of the pool.
 

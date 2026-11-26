@@ -61,6 +61,8 @@ struct Scripted {
     revision: Mutex<Option<String>>,
     /// Origins and licenses by model.
     origins: Mutex<Vec<KnownOrigin>>,
+    /// Configured context and slots by model.
+    contexts: Mutex<Vec<(&'static str, u32, Option<u32>)>>,
 }
 
 impl Scripted {
@@ -78,6 +80,7 @@ impl Scripted {
             media: AtomicBool::new(false),
             revision: Mutex::new(None),
             origins: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         })
     }
     fn set(&self, m: Mode) {
@@ -107,6 +110,10 @@ impl ModelNode for Scripted {
                 let mut st = status(id, *e, s.clone());
                 if self.media.load(Ordering::SeqCst) {
                     st.capabilities = Some(weirdnet_backends::Capabilities::text().with_vision(true).with_audio(true));
+                }
+                if let Some((_, ctx, slots)) = self.contexts.lock().unwrap().iter().find(|(m, ..)| *m == *id) {
+                    st.context = Some(*ctx);
+                    st.slots = *slots;
                 }
                 st
             })
@@ -238,6 +245,69 @@ async fn the_catalog_says_where_each_model_came_from() {
     assert_eq!(of("alpha"), (Some("hub".into()), None), "the first node that knows says");
     assert_eq!(of("tuned"), (Some("upload".into()), Some("MIT".into())));
     assert_eq!(of("beta"), (None, None));
+}
+
+#[tokio::test]
+async fn the_catalog_reports_the_context_a_request_can_count_on_and_never_invents_one() {
+    let a = Scripted::new("a", &[("alpha", false, READY), ("beta", false, READY), ("gamma", false, READY), ("delta", false, READY)]);
+    let b = Scripted::new("b", &[("alpha", false, READY), ("beta", false, READY)]);
+    *a.contexts.lock().unwrap() = vec![("alpha", 32_768, Some(4)), ("beta", 8192, None), ("gamma", 16_384, Some(2))];
+    *b.contexts.lock().unwrap() = vec![("alpha", 16_384, None)];
+    let c = coordinator(&[&a, &b]);
+    let cat = c.agent_catalog();
+    let ctx = |id: &str| cat.iter().find(|m| m.id == id).unwrap().context;
+    assert_eq!(ctx("alpha"), Some(8192), "a splits 32768 over 4 llama.cpp slots; b gives 16384");
+    assert_eq!(ctx("beta"), None, "b doesn't say, and a request may be routed there");
+    assert_eq!(ctx("gamma"), Some(8192));
+    assert_eq!(ctx("delta"), None, "no context set anywhere: absent, not a default");
+    assert_eq!(ymir_core::model_node::request_context(weirdnet_backends::EngineKind::Vllm, Some(8192), Some(4)), Some(8192));
+    assert_eq!(ymir_core::model_node::request_context(weirdnet_backends::EngineKind::Llamacpp, Some(0), None), None);
+}
+
+#[test]
+fn the_catalog_reports_the_strictest_media_limits_and_leaves_unknown_ones_out() {
+    use weirdnet_agent::MediaLimits;
+    struct Limited(&'static str, Vec<(&'static str, MediaLimits)>);
+    impl ModelNode for Limited {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn status(&self) -> Vec<ModelStatus> {
+            self.1
+                .iter()
+                .map(|(id, l)| {
+                    let mut s = status(id, false, READY);
+                    s.capabilities = Some(weirdnet_backends::Capabilities::text().with_vision(true).with_limits(*l));
+                    s
+                })
+                .collect()
+        }
+        fn load<'a>(&'a self, _model: &'a str, _force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn unload<'a>(&'a self, _model: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn chat<'a>(&'a self, _model: &'a str, _req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
+            Box::pin(async { Err(RemoteError::unavailable("not in this test")) })
+        }
+        fn embed<'a>(&'a self, _model: &'a str, _input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {
+            Box::pin(async { Err(RemoteError::unavailable("not in this test")) })
+        }
+    }
+    let a = Arc::new(Limited(
+        "a",
+        vec![("alpha", MediaLimits::new().with_max_images(8).with_image_tokens(256).with_image_edge(896)), ("beta", MediaLimits::UNKNOWN)],
+    ));
+    let b = Arc::new(Limited("b", vec![("alpha", MediaLimits::new().with_max_images(4).with_image_tokens(280).with_audio_max_seconds(30))]));
+    let c = Coordinator::new(vec![a as Arc<dyn ModelNode>, b as Arc<dyn ModelNode>], Some("alpha".into()), Arc::new(NoCache));
+    let cat = c.agent_catalog();
+    let of = |id: &str| cat.iter().find(|m| m.id == id).unwrap().limits;
+    let alpha = of("alpha");
+    assert_eq!((alpha.max_images, alpha.image_tokens, alpha.image_edge, alpha.audio_max_seconds), (Some(4), Some(280), Some(896), Some(30)));
+    assert!(of("beta").is_unknown(), "nothing reported, nothing invented");
+    assert_eq!(ymir_core::model_node::limits_line(&alpha).as_deref(), Some("4 images, 280 tokens per image, edge 896 px, audio up to 30 s"));
+    assert_eq!(ymir_core::model_node::limits_line(&MediaLimits::UNKNOWN), None);
 }
 
 #[tokio::test]

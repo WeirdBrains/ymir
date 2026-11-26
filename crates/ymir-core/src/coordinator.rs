@@ -76,6 +76,13 @@ pub struct CatalogRow {
     /// knows says (U8).
     pub origin: Option<String>,
     pub license: Option<String>,
+    /// The context window a request can count on wherever it is routed: the smallest
+    /// [`request_context`](crate::model_node::request_context) of the nodes that have it. `None`
+    /// when any of them doesn't say, since the request may go there; never a guess.
+    pub context: Option<u32>,
+    /// Media and request limits: the strictest of each limit across the nodes that have it
+    /// (`MediaLimits::tightest`); a limit no node reports stays absent.
+    pub limits: weirdnet_agent::MediaLimits,
 }
 
 impl CatalogRow {
@@ -319,6 +326,8 @@ impl Coordinator {
     /// The pool catalog: every model on every node, with its state there.
     pub fn merged_catalog(&self) -> Vec<CatalogRow> {
         let mut by_id: BTreeMap<String, CatalogRow> = BTreeMap::new();
+        // Models some node has without saying its context: theirs stays unreported.
+        let mut unknown_context: HashSet<String> = HashSet::new();
         for node in self.nodes() {
             for s in node.status() {
                 let row = by_id.entry(s.id.clone()).or_insert_with(|| CatalogRow {
@@ -330,7 +339,17 @@ impl Coordinator {
                     base: s.base.clone(),
                     origin: None,
                     license: None,
+                    context: None,
+                    limits: weirdnet_agent::MediaLimits::UNKNOWN,
                 });
+                row.limits = row.limits.tightest(s.limits());
+                match crate::model_node::request_context(s.engine, s.context, s.slots) {
+                    Some(c) if !unknown_context.contains(&s.id) => row.context = Some(row.context.map_or(c, |r| r.min(c))),
+                    _ => {
+                        unknown_context.insert(s.id.clone());
+                        row.context = None;
+                    }
+                }
                 if row.origin.is_none() && row.license.is_none() {
                     (row.origin, row.license) = node.origin(&s.id);
                 }
@@ -452,6 +471,10 @@ impl Coordinator {
                 let purpose = if m.embedding { Purpose::Embedding } else { Purpose::Chat };
                 let ready = states.iter().filter(|s| ***s == ModelState::Ready).count() as u32;
                 let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready).with_inputs(m.inputs);
+                if let Some(ctx) = m.context {
+                    c = c.with_context(ctx);
+                }
+                c = c.with_limits(m.limits);
                 if let Some(base) = &m.base {
                     c = c.with_base(base);
                 }

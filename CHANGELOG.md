@@ -6,6 +6,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Limits for video clients (LF-43): catalog/1 entries carry `context`, the window one request can count on (smallest
+  across nodes, llama.cpp's context split over its slots, absent when any node doesn't say), and `limits`, the strictest
+  `MediaLimits` across nodes (images per request, per-image token cost or patch, edge, audio length, request bytes), from the
+  engine or `limits = { ... }` on a `[model.local]`; nothing is defaulted. `[bridge] max_request_bytes` sets the OpenAI
+  bridge's body limit (a 413 names it). `ymirctl status` shows both. Weirdnet: agent 0.5.7, backends 0.4.8, openai 0.2.4.
+
 ## [0.21.0] - 2026-11-26
 
 ### Added

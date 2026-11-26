@@ -34,6 +34,44 @@ pub fn inputs_of(s: &ModelStatus) -> weirdnet_agent::Modalities {
     s.capabilities.map_or(weirdnet_agent::Modalities::TEXT, |c| c.inputs())
 }
 
+/// The context window one request gets, in tokens: the configured context, split over the
+/// parallel slots for llama.cpp (it divides `--ctx-size` between them unless the KV cache is
+/// unified, so the split is the most a request can count on). `None` when no context is set:
+/// Ymir reports a limit it knows and never fills in one it doesn't (video design, milestone 1).
+pub fn request_context(engine: EngineKind, context: Option<u32>, slots: Option<u32>) -> Option<u32> {
+    let ctx = context.filter(|c| *c > 0)?;
+    let slots = if matches!(engine, EngineKind::Llamacpp) { slots.unwrap_or(1).max(1) } else { 1 };
+    Some(ctx / slots)
+}
+
+/// The known media and request limits in a few words (`8 images, 256 tokens per image, edge
+/// 896 px`), or `None` when none are known; `ymirctl status` shows it.
+pub fn limits_line(l: &weirdnet_agent::MediaLimits) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(n) = l.max_images {
+        parts.push(format!("{n} image{}", if n == 1 { "" } else { "s" }));
+    }
+    if let Some(t) = l.image_tokens {
+        parts.push(format!("{t} tokens per image{}", if l.image_patch.is_some() { " at most" } else { "" }));
+    }
+    if let Some(p) = l.image_patch {
+        parts.push(format!("{p} px patches"));
+    }
+    if let Some(e) = l.image_edge {
+        parts.push(format!("edge {e} px"));
+    }
+    if let Some(s) = l.audio_max_seconds {
+        parts.push(format!("audio up to {s} s"));
+    }
+    if let Some(t) = l.audio_tokens_per_minute {
+        parts.push(format!("{t} audio tokens per minute"));
+    }
+    if let Some(b) = l.max_request_bytes {
+        parts.push(format!("requests up to {b} bytes"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 /// A model's origin (`hub`, `upload`, `train`) and license, either unknown.
 pub type Origin = (Option<String>, Option<String>);
 

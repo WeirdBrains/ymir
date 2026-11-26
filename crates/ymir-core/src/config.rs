@@ -355,6 +355,13 @@ pub struct LocalModel {
     /// base with adapters listed takes more at run time without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_slots: Option<u32>,
+    /// Media and request limits for this model on this hardware, for limits the node can't
+    /// measure (`limits = { max_images = 8, image_tokens = 256, image_edge = 896 }`; also
+    /// `image_patch`, `audio_max_seconds`, `audio_tokens_per_minute`, `max_request_bytes`).
+    /// Published in the capability record and catalog/1 (`weirdnet-agent` `MediaLimits`). Unset
+    /// fields stay unknown: there are no defaults in code (video design, milestone 1).
+    #[serde(default, skip_serializing_if = "weirdnet_agent::MediaLimits::is_unknown")]
+    pub limits: weirdnet_agent::MediaLimits,
 }
 
 /// A LoRA adapter on a `[[model.local]]` base, served as its own model id (for example
@@ -646,6 +653,10 @@ pub struct BridgeSection {
     /// Always on 127.0.0.1; there is no address setting.
     #[serde(default = "bridge_port")]
     pub port: u16,
+    /// Largest request body the bridge accepts, in bytes (`weirdnet-openai`'s 32 MiB when unset).
+    /// A larger one gets a 413 that names this setting; `/v1/models` reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
 }
 
 fn bridge_port() -> u16 {
@@ -654,7 +665,7 @@ fn bridge_port() -> u16 {
 
 impl Default for BridgeSection {
     fn default() -> Self {
-        Self { port: bridge_port() }
+        Self { port: bridge_port(), max_request_bytes: None }
     }
 }
 
@@ -997,6 +1008,7 @@ impl NodeConfig {
                 l.context = m.context;
                 l.slots = m.slots;
                 l.gpu_layers = m.gpu_layers;
+                l.limits = m.limits;
                 l.swap_group.clone_from(&m.swap_group);
                 l.embedding = m.is_embedding();
                 l.extra_args.clone_from(&m.args);

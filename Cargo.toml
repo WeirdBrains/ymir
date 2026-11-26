@@ -24,12 +24,12 @@ ymird = { path = "crates/ymird", version = "0.21.0" }
 ymirctl = { path = "crates/ymirctl", version = "0.21.0" }
 
 # Published Weirdnet crates, used as they are.
-weirdnet-agent = { version = "0.5.6", features = ["pool", "serve", "jobs"] }
-weirdnet-backends = { version = "=0.4.7", features = ["node"] }
+weirdnet-agent = { version = "0.5.7", features = ["pool", "serve", "jobs"] }
+weirdnet-backends = { version = "=0.4.8", features = ["node"] }
 weirdnet-device-link = "0.4.2"
 weirdnet-model = { version = "0.5.3", default-features = false }
 weirdnet-net = "=0.8.3"
-weirdnet-openai = "0.2.3"
+weirdnet-openai = "0.2.4"
 weirdnet-semcache = "0.2.2"
 weirdnet-sync = "0.8.5"
 # Push wake-ups (M9): sealed wakes to Bragi devices through their relay (/weirdnet/wake/1).

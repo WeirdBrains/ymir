@@ -460,6 +460,10 @@ impl Daemon {
             let bridge = weirdnet_openai::Bridge::bind(weirdnet_openai::BridgeOptions::new(cfg.app.bridge.port, token))
                 .await
                 .with_context(|| format!("binding the bridge on 127.0.0.1:{}", cfg.app.bridge.port))?;
+            let bridge = match cfg.app.bridge.max_request_bytes {
+                Some(n) => bridge.with_max_request_bytes(usize::try_from(n).unwrap_or(usize::MAX)),
+                None => bridge,
+            };
             let addr = bridge.local_addr()?;
             bridge_addr = Some(addr);
             let mut rx = stop_rx.clone();
