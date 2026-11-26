@@ -2,6 +2,12 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 15:05 EST: v0.21.0 released
+
+**Release:** [v0.21.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.21.0) (release commit 6f087b3 on 5e2b602; Release run 45870102685, green, the first with the FreeBSD job): M6 semantic answer cache (`weirdnet-semcache` 0.2.2), one sync session per device (`weirdnet-sync` 0.8.5 `pull_types_shared`), M9 FreeBSD rc.d service and `x86_64-unknown-freebsd` `.tar.gz` and `.pkg` (helpers 0.4.1 FreeBSD `[[platforms]]`). 44 files on GitHub: leak scan 33 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.21.0` EXIT 0; no FreeBSD update bundle, FreeBSD is GitHub-only); `weirdnet_release.py assets 0.21.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 614d11b on main; TAUR ymir-bin and ymir-cuda-bin 0.21.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched. `pub.sh`'s download ran at ~0.5 MB/s on alien-blue for most of the afternoon, so the publish took about 2 h.
+
+**Next:** M7 vLLM with Ray groups waits on Michael (GPU hardware; Ray has no auth). M9: OpenBSD (opted out in `release.toml`), GhostBSD and DragonFly not started; a FreeBSD self-update bundle and aarch64 FreeBSD are not built. M6: pool-mode semantic cache, Redis backend, persisting entries.
+
 ## 2026-11-26 10:45 EST: M6 semantic answer cache; one sync session per device (merged `feature/semcache`)
 
 - [semantic.rs](crates/ymir-core/src/semantic.rs) on `weirdnet-semcache` 0.2.2 `SemanticCache`: `[inference.cache] embedding_model = "ID"` (plus `threshold`, a cosine distance, default 0.12; `ttl` `24h`; `entries` 1024) adds a semantic layer behind the exact cache in `Coordinator::run`. Cacheable: one user turn after any system messages, text only, no tools, no prefix, no stand-in. Scope: model + weights revision + embedding model + its revision + SHA-256 of system prompt, sampling, seed, response format, adapter scale. The embedding model is used only while loaded (never cold-started); a failed embedding skips the cache. Hits are `served_by = "semantic-cache"`; `cache: bypass` / `refresh` apply. `[inference.cache]` is now validated. Tests: [tests/semantic.rs](crates/ymir-core/tests/semantic.rs) (4) and 3 unit tests.
