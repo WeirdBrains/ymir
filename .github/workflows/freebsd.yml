@@ -60,20 +60,20 @@ jobs:
             sudo /usr/local/bin/ymirctl --home "$H" setup --name ci --backend llamacpp --llama-server "$M" --model /tmp/tiny.gguf --port 18484
             sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --dry-run | tee out.txt
             grep -q 'would write /usr/local/etc/rc.d/ymird' out.txt
-            sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --ymird /usr/local/bin/ymird
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" service install --system --run-as ymir --ymird /usr/local/bin/ymird
             up() { for i in $(seq 60); do sudo /usr/local/bin/ymirctl --home "$H" service status --system | grep -q 'ymird: answering' && return 0; sleep 1; done; return 1; }
             down() { for i in $(seq 60); do sudo /usr/local/bin/ymirctl --home "$H" service status --system | grep -q 'ymird: not answering' && return 0; sleep 1; done; return 1; }
             up || { sudo cat "$H/state/logs/ymird.log"; exit 1; }
             sudo /usr/local/bin/ymirctl --home "$H" service status --system | tee status.txt
             grep -q 'rc.d: ymird is running' status.txt
             ps -axo user,command | grep '[y]mird --home' | grep -q '^ymir '
-            sudo /usr/local/bin/ymirctl --home "$H" chat hi | tee chat.txt
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" chat hi | tee chat.txt
             grep -q 'You said: hi' chat.txt
-            sudo /usr/local/bin/ymirctl --home "$H" service stop --system
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" service stop --system
             down
             sleep 2
             if pgrep -f ymir-mock-engine; then echo "an engine outlived ymird"; exit 1; fi
-            sudo /usr/local/bin/ymirctl --home "$H" service uninstall --system
+            timeout 120 sudo /usr/local/bin/ymirctl --home "$H" service uninstall --system
             test ! -e /usr/local/etc/rc.d/ymird
             if sysrc -n ymird_enable 2>/dev/null; then echo 'ymird_enable is still set'; exit 1; fi
             sudo pkg delete -y ymir
