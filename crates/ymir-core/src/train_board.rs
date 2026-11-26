@@ -183,6 +183,15 @@ impl JobStore for BoardJobStore {
             .map_err(|e| anyhow!("job {}: checkpoint {}: {e}", claim.id, at.seq))
     }
 
+    fn set_holders(&self, claim: &Claim, seq: u64, holders: Vec<String>, _now_ms: u64) -> Result<()> {
+        let claims = self.claims.lock().map_err(|_| anyhow!("claims lock poisoned"))?;
+        let c = claims
+            .get(&claim.id)
+            .filter(|c| c.term() == claim.term)
+            .ok_or_else(|| anyhow!("job {}: the claim of term {} is no longer held", claim.id, claim.term))?;
+        c.set_holders(seq, holders).map_err(|e| anyhow!("job {}: holders of checkpoint {seq}: {e}", claim.id))
+    }
+
     async fn finish(&self, claim: &Claim, result: serde_json::Value, _now_ms: u64) -> Result<()> {
         let c = self.take(claim)?;
         c.finish(serde_json::to_vec(&result)?).await.map_err(|e| anyhow!("job {}: finishing: {e}", claim.id))

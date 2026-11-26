@@ -42,6 +42,7 @@ pub mod setup;
 pub mod tasks;
 pub mod token;
 pub mod train;
+pub mod blobs_net;
 pub mod train_board;
 pub mod train_job;
 pub mod train_jobs_ctl;

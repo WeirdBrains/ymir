@@ -283,6 +283,17 @@ pub fn train_hub(node: &Arc<SyncNode>, m: &Arc<Membership>, hints: &Hints, opts:
     crate::train_net::TrainHub::new(dir, Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())))
 }
 
+/// Fetches training bundles (`/ymir/blobs/1`) from the user's other devices into `blobs`,
+/// presenting this device's certificate.
+pub fn blobs_client(node: &Arc<SyncNode>, m: &Membership, hints: &Hints, blobs: Arc<crate::train_job::LocalBlobs>) -> crate::blobs_net::BlobsClient {
+    crate::blobs_net::BlobsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())), blobs, m.peer_id().to_string())
+}
+
+/// Serves `/ymir/blobs/1` on `node`: this node's training bundles, for the user's linked devices.
+pub fn serve_blobs(node: &Arc<SyncNode>, m: &Membership, blobs: Arc<crate::train_job::LocalBlobs>) -> Result<crate::blobs_net::BlobsServer, RemoteError> {
+    crate::blobs_net::BlobsServer::start(node, Arc::new(crate::blobs_net::BlobsService::new(blobs, roster_auth(m))))
+}
+
 /// Serves `/ymir/train/1` on `node` (`[train] remote = true`): runs for the user's linked devices,
 /// narrowed to `[train] callers`.
 pub fn serve_train(

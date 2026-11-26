@@ -251,6 +251,9 @@ pub trait JobStore: Send + Sync {
     /// Renews the lease; `false` once the claim is lost (lapsed and taken, or superseded).
     fn renew(&self, claim: &Claim, now_ms: u64) -> Result<bool>;
     fn checkpoint(&self, claim: &Claim, at: CheckpointRef, now_ms: u64) -> Result<()>;
+    /// Replaces the holders of the job's checkpoint `seq` (a node that fetched it to resume
+    /// adds itself), without a new checkpoint.
+    fn set_holders(&self, claim: &Claim, seq: u64, holders: Vec<String>, now_ms: u64) -> Result<()>;
     async fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()>;
     /// A failure: `retry` puts the job back in the queue (after the back-off) while attempts
     /// are left.
@@ -474,6 +477,18 @@ impl JobStore for FileJobStore {
         })
     }
 
+    fn set_holders(&self, claim: &Claim, seq: u64, holders: Vec<String>, now_ms: u64) -> Result<()> {
+        self.update(&claim.id, |job| {
+            Self::fenced(job, claim)?;
+            match job.checkpoint.as_mut() {
+                Some(c) if c.seq == seq => c.holders = holders,
+                _ => bail!("job {}: checkpoint {seq} is not the job's latest", job.id),
+            }
+            job.updated_ms = now_ms;
+            Ok(())
+        })
+    }
+
     async fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()> {
         self.update(&claim.id, |job| {
             Self::fenced(job, claim)?;
@@ -578,6 +593,33 @@ impl LocalBlobs {
 
     pub fn for_node(paths: &Paths, cfg: &NodeConfig) -> Result<Self> {
         Self::open(cfg.train.work_dir(paths).join("blobs"))
+    }
+
+    /// The folder of a stored bundle and its manifest's name (what `/ymir/blobs/1` serves).
+    pub fn bundle(&self, root: &str) -> Option<(PathBuf, String)> {
+        if root.len() != 64 || !root.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let dir = self.dir.join(root);
+        let idx: Index = serde_json::from_slice(&std::fs::read(dir.join(INDEX)).ok()?).ok()?;
+        Some((dir, idx.manifest))
+    }
+
+    /// A fresh staging folder in the store for fetching `root`.
+    pub fn staging(&self, root: &str) -> Result<PathBuf> {
+        let d = crate::blobs_net::staging_dir(&self.dir, root);
+        std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
+        Ok(d)
+    }
+
+    /// Stores a fetched bundle whose files were checked against its manifest, and checks that
+    /// it lands under `root`.
+    pub fn put_checked(&self, dir: &Path, manifest: &str, files: &[CheckpointFile], root: &str) -> Result<()> {
+        let got = self.put(dir, manifest, files)?;
+        if got != root {
+            bail!("the fetched bundle stored as {got}, not {root}");
+        }
+        Ok(())
     }
 }
 
@@ -739,13 +781,28 @@ pub struct Ctx {
     pub blobs: Arc<dyn BlobStore>,
     /// This device (its peer id when it has one, else the node's name).
     pub me: String,
+    /// Brings a bundle into `blobs` from the devices that hold it (on Weirdnet: `ymird` over
+    /// `/ymir/blobs/1`). `None`: `blobs` is all there is (one box, or a shared folder).
+    pub fetch: Option<Arc<dyn BlobFetch>>,
 }
 
 impl Ctx {
     /// The stand-in stores of this node.
     pub fn local(paths: &Paths, cfg: &NodeConfig) -> Result<Self> {
-        Ok(Self { store: Arc::new(FileJobStore::for_node(paths, cfg)?), blobs: Arc::new(LocalBlobs::for_node(paths, cfg)?), me: cfg.name() })
+        Ok(Self {
+            store: Arc::new(FileJobStore::for_node(paths, cfg)?),
+            blobs: Arc::new(LocalBlobs::for_node(paths, cfg)?),
+            me: cfg.name(),
+            fetch: None,
+        })
     }
+}
+
+/// Makes a bundle local from its holders.
+#[async_trait::async_trait]
+pub trait BlobFetch: Send + Sync {
+    /// Returns the device it came from, `None` when it was here already.
+    async fn ensure(&self, root: &str, holders: &[String]) -> Result<Option<String>>;
 }
 
 /// What a job's run reports, besides the run's own updates.
@@ -869,6 +926,31 @@ pub async fn resume(
     on(JobUpdate::Claimed { job: id.to_string(), term: claim.term, attempt: job.attempts });
     let p = &job.payload;
     let work = job_dir(paths, cfg, id);
+    // Off-box bundles first: the dataset (from its poster, or whoever ran the job before) and
+    // the last checkpoint (from its holders). A node that fetched the checkpoint holds it too.
+    if let Some(fetch) = &ctx.fetch {
+        let fetched = async {
+            let mut from = vec![job.owner.clone()];
+            from.extend(job.checkpoint.iter().flat_map(|c| c.holders.iter().cloned()));
+            fetch.ensure(&p.dataset_root, &from).await.context("fetching the job's dataset")?;
+            if let Some(c) = &job.checkpoint {
+                fetch.ensure(&c.root, &c.holders).await.context("fetching the job's last checkpoint")?;
+                if !c.holders.contains(&ctx.me) {
+                    let mut holders = c.holders.clone();
+                    holders.push(ctx.me.clone());
+                    if let Err(e) = ctx.store.set_holders(&claim, c.seq, holders, train::train_now()) {
+                        tracing::warn!(job = id, "registering as a holder of checkpoint {}: {e:#}", c.seq);
+                    }
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = fetched {
+            let _ = ctx.store.fail(&claim, &format!("{e:#}"), true, train::train_now()).await;
+            return Err(e);
+        }
+    }
     // The dataset, from its bundle (checked file by file).
     let data_dir = work.join("dataset");
     let prepared = (|| -> Result<(PathBuf, Option<PathBuf>)> {

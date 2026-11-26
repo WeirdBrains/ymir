@@ -22,6 +22,9 @@ pub struct Network {
     pub hints: remote::Hints,
     /// The synced training job board (P3b), for `ymirctl train run --job` on this box.
     pub jobs: Option<Arc<crate::train_board::BoardJobStore>>,
+    /// This node's training bundles (datasets, checkpoints), served on `/ymir/blobs/1`, and the
+    /// client that fetches others' into it.
+    pub blobs: Option<(Arc<crate::train_job::LocalBlobs>, Arc<crate::blobs_net::BlobsClient>)>,
 }
 
 impl Network {
@@ -59,7 +62,17 @@ impl Network {
                 }
             }
         };
-        Ok(Some(Self { membership: m, node, hints, jobs }))
+        let blobs = match crate::train_job::LocalBlobs::for_node(paths, cfg) {
+            Ok(b) => {
+                let b = Arc::new(b);
+                Some((b.clone(), Arc::new(remote::blobs_client(&node, &m, &hints, b))))
+            }
+            Err(e) => {
+                tracing::warn!("training files: {e:#}");
+                None
+            }
+        };
+        Ok(Some(Self { membership: m, node, hints, jobs, blobs }))
     }
 
     /// Sync passes against the user's other devices every `every` (roster changes, revocations).
@@ -229,6 +242,12 @@ impl Daemon {
         });
         if let Some(net) = &network {
             tasks.push(net.sync_loop(std::time::Duration::from_secs(cfg.network.sync_secs.max(1)), stop_rx.clone()));
+            if let Some((blobs, _)) = &net.blobs {
+                match remote::serve_blobs(&net.node, &net.membership, blobs.clone()) {
+                    Ok(server) => serving.push(Box::new(server)),
+                    Err(e) => tracing::warn!("serving training files on Weirdnet: {e}"),
+                }
+            }
             if let Some(c) = &coordinator {
                 let (server, feed) = remote::serve(
                     &net.node,
@@ -441,6 +460,7 @@ impl Daemon {
             models: network.as_ref().map(|n| Arc::new(remote::models_hub(&n.node, &n.membership, &n.hints, &ropts, &name, models_service))),
             train: network.as_ref().map(|n| Arc::new(remote::train_hub(&n.node, &n.membership, &n.hints, &ropts, &name))),
             jobs: network.as_ref().and_then(|n| n.jobs.clone().map(|j| (j, n.membership.peer_id().to_string()))),
+            blobs: network.as_ref().and_then(|n| n.blobs.as_ref().map(|(_, c)| c.clone())),
             context,
             pool: app_pool,
             exit: exit.clone(),
