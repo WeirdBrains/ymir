@@ -345,7 +345,7 @@ pub enum ServiceCmd {
         /// Start through `ymirctl update boot`, so a staged update gets a trial and a rollback.
         #[arg(long)]
         managed_updates: bool,
-        /// With --system on Linux and macOS: the account ymird runs as (default: $SUDO_USER).
+        /// With --system on Linux, macOS and FreeBSD: the account ymird runs as (default: $SUDO_USER).
         #[arg(long)]
         run_as: Option<String>,
     },

@@ -2885,7 +2885,14 @@ sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP se
 
 - **Push wake-ups:** `weirdnet-push` 0.1.0 has sealed payloads and APNs/FCM senders, but its Weirdnet front end (so the inference node
   can embed it with no listener) does not exist; tracked below. It also needs Apple and Google credentials from m3talsmith.
-- **BSD packages:** not built or tried. The user and system services cover systemd, launchd and Windows (see [Running as a service](#running-as-a-service)), but nothing here was packaged for a BSD. (Bragi's FreeBSD CI job is a separate item, see the Bragi B5 status.)
+- **BSD packages: FreeBSD in progress (2026-11-26).** `ymirctl service install --system --run-as USER` writes an rc.d script
+  (`/usr/local/etc/rc.d/ymird`, `daemon(8)` running `ymird` as that account, `sysrc ymird_enable=YES`; FreeBSD has no per-user
+  services, so user scope is refused), and `scripts/package.py --target x86_64-unknown-freebsd` writes a `tar.gz` and, on a FreeBSD
+  host, a `pkg` (`pkg create`; no bundled llama.cpp, since upstream publishes no BSD builds: the `misc/llama-cpp` port, named in the
+  package message). [.github/workflows/freebsd.yml](../.github/workflows/freebsd.yml) builds and tests in a FreeBSD 14.2 VM,
+  installs the pkg and runs the rc.d service through a chat, a stop and an uninstall. Not yet in the Release workflow or
+  `release.toml`'s platforms; OpenBSD (`tar.gz`), GhostBSD and DragonFly not started. (Bragi's FreeBSD CI job is a separate item,
+  see the Bragi B5 status.)
 - **The bundle fetcher is built (2026-11-24); publishing is not.**
   - `update fetch SOURCE [--announcement FILE]` reads a bundle directory over HTTPS or from disk (`Updater::fetch` with a
     `Source`). The manifest is verified against the pinned root first, on a copy of the client state so nothing is
