@@ -42,6 +42,11 @@ pub const ROLE_INFERENCE: &str = "ymir.inference";
 
 /// The role a service grant gives a model node (`ymir.model`).
 pub const ROLE_MODEL: &str = "ymir.model";
+/// The synced training jobs (P3b): unsealed records, which a cert-only model node holds the
+/// per-type key for (weirdnet-sync 0.8.3), never the epoch key that opens `ymir.context`.
+pub const TRAIN_TYPE: &str = crate::train_job::JOB_KIND;
+/// Where a model node keeps its lease voter's terms (`Voter::export`), written before each grant.
+const VOTER_FILE: &str = "voter.cbor";
 
 /// `credential.json` on a service node: the user's public key (protobuf, hex), as
 /// `weirdnet_sync::Identity` writes it.
@@ -77,13 +82,28 @@ impl ServiceRole {
         }
     }
 
-    /// The sync types its grant lets it hold keys for (none: roster only).
+    /// The sync types its grant lets it hold keys for: an inference node the pool and context
+    /// records, a model node only the training jobs.
     pub fn types(self) -> Vec<String> {
         match self {
             Self::Inference => vec![SYNC_TYPE.to_string(), CONTEXT_TYPE.to_string()],
-            Self::Model => Vec::new(),
+            Self::Model => vec![TRAIN_TYPE.to_string()],
         }
     }
+}
+
+/// What a cert-only device syncs: the pool and every type its grant holds keys for (the
+/// context for an inference node, the training jobs for a model node). Since weirdnet-sync
+/// 0.8.3 a peer sends only the types both sides list, so a granted type left off here never
+/// arrives.
+fn service_types(bundle: &LinkBundle) -> Vec<String> {
+    let mut types = vec![SYNC_TYPE.to_string()];
+    for t in &bundle.grant.types {
+        if !types.contains(t) {
+            types.push(t.clone());
+        }
+    }
+    types
 }
 
 /// Overwrites `path` with zeros, syncs it and deletes it. Gone is gone only as far as the
@@ -252,7 +272,7 @@ impl Membership {
             bail!("the link's certificate is not for this identity");
         }
         let bundle = LinkBundle::from_bytes(bundle).map_err(|e| anyhow!("the link's sync bundle: {e}"))?;
-        let st = SyncState::new_service(user_key, cert, &node_key, vec![SYNC_TYPE.to_string()], &bundle)
+        let st = SyncState::new_service(user_key, cert, &node_key, service_types(&bundle), &bundle)
             .map_err(|e| anyhow!("the cert-only link did not check out: {e}"))?;
         let m = Self::wrap(dir, node_key, st)?;
         m.save()?;
@@ -276,7 +296,7 @@ impl Membership {
         }
         let user_key = PublicKey::try_decode_protobuf(user_key).map_err(|e| anyhow!("user key: {e}"))?;
         let bundle = LinkBundle::from_bytes(bundle).map_err(|e| anyhow!("the link's sync bundle: {e}"))?;
-        let mut st = SyncState::new_service(user_key, cert, old.node_key(), vec![SYNC_TYPE.to_string()], &bundle)
+        let mut st = SyncState::new_service(user_key, cert, old.node_key(), service_types(&bundle), &bundle)
             .map_err(|e| anyhow!("the cert-only link did not check out: {e}"))?;
         {
             let o = old.lock();
@@ -521,6 +541,36 @@ impl Membership {
         };
         self.save()?;
         b.to_bytes().map_err(|e| anyhow!("the sync bundle: {e}"))
+    }
+
+    /// Votes on the training job board's claims (`ymir.train/` leases) when this device's grant
+    /// has the model role and the training jobs: limits from Ymir's job policy, terms kept in
+    /// `voter.cbor` and written before each grant (so a restart never hands out a term twice).
+    /// Returns whether it votes.
+    pub fn enable_train_voter(&self) -> Result<bool> {
+        use weirdnet_sync::{Voter, Voters};
+        let mut st = self.lock();
+        let me = st.our_cert.peer_id.clone();
+        let granted = st.roster.grant_of(&me).map(|g| g.roles.iter().any(|r| r == ROLE_MODEL) && g.types.iter().any(|t| t == TRAIN_TYPE));
+        if !granted.unwrap_or(false) || !st.types.iter().any(|t| t == TRAIN_TYPE) {
+            st.set_voter(None);
+            return Ok(false);
+        }
+        let candidates = Voters::Role(crate::train_job::JOB_ROLE.to_string());
+        let path = self.dir.join(VOTER_FILE);
+        let base = match std::fs::read(&path) {
+            Ok(b) => Voter::import(&b, candidates).map_err(|e| anyhow!("{}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Voter::new(candidates),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let p = crate::train_job::JobPolicy::default();
+        let (claim, takeover) = (std::time::Duration::from_millis(p.claim_ms), std::time::Duration::from_millis(p.takeover_after_ms));
+        let voter = base
+            .with_max_duration(claim.max(weirdnet_sync::lease::DEFAULT_DURATION))
+            .with_limits(format!("{TRAIN_TYPE}/"), claim, takeover)
+            .with_persist(move |b| write_private(&path, b).map_err(std::io::Error::other));
+        st.set_voter(Some(voter));
+        Ok(true)
     }
 
     /// `peer`'s class and roles as its user-signed grant states them, if it has one.

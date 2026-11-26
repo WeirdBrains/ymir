@@ -29,6 +29,14 @@ impl Network {
             return Ok(None);
         }
         let Some(m) = Membership::open(&paths.pool())? else { return Ok(None) };
+        // A model node votes on the training job board's claims once its grant has the jobs.
+        if cfg.roles.model {
+            match m.enable_train_voter() {
+                Ok(true) => tracing::info!("training jobs: voting on {}/ claims", crate::membership::TRAIN_TYPE),
+                Ok(false) => tracing::debug!("training jobs: no {} grant, not voting", crate::membership::TRAIN_TYPE),
+                Err(e) => tracing::warn!("training jobs: the lease voter: {e:#}"),
+            }
+        }
         let m = Arc::new(m);
         let ncfg = cfg.network.node_config(&cfg.name())?;
         let hints = cfg.network.hints()?;
