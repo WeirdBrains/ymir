@@ -16,7 +16,8 @@
 //! this node. Ymir has no synced record types yet (context sync is M5), so a pass carries the
 //! roster and the key chain only.
 //!
-//! The pull itself (snapshot, pull, merge back) is `weirdnet_sync::pull_from_shared`.
+//! The pull itself (snapshot, pull every type in one session, merge back) is
+//! `weirdnet_sync::pull_types_shared`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -740,33 +741,32 @@ impl Membership {
         for cert in peers {
             let Ok(peer) = PeerId::from_str(&cert.peer_id) else { continue };
             let a = addrs(&cert);
-            // Pulls into a snapshot and merges it back, so our handler can answer a peer pulling
-            // from us at the same moment.
-            let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, SYNC_TYPE);
-            match &out.error {
-                None => reached += 1,
-                Some(e) => tracing::debug!(peer = %cert.peer_id, applied = out.applied, "sync pass: {e}"),
+            // One session for every type due (weirdnet-sync 0.8.5 `pull_types_shared`: one Hello
+            // and roster catch-up), pulled into a snapshot and merged back, so our handler can
+            // answer a peer pulling from us at the same moment. A type the peer refuses fails alone.
+            let wake = self.wake_pull_due(&cert.peer_id);
+            let jobs = self.syncs_jobs_with(&cert.peer_id);
+            let mut types = vec![SYNC_TYPE];
+            if context {
+                types.push(CONTEXT_TYPE);
             }
-            if context && out.error.is_none() {
-                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, CONTEXT_TYPE);
-                if let Some(e) = &out.error {
-                    tracing::debug!(peer = %cert.peer_id, applied = out.applied, "context pass: {e}");
-                }
+            if wake {
+                types.push(WAKE_TYPE);
             }
-            if out.error.is_none() && self.wake_pull_due(&cert.peer_id) {
-                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, WAKE_TYPE);
-                match &out.error {
-                    None => {
+            if jobs {
+                types.push(TRAIN_TYPE);
+            }
+            let outs = weirdnet_sync::pull_types_shared(&self.state, node, peer, &a, &types);
+            for (typ, out) in &outs.types {
+                let Some(e) = &out.error else {
+                    if typ == SYNC_TYPE {
+                        reached += 1;
+                    } else if typ == WAKE_TYPE {
                         self.wake_pulled.lock().unwrap_or_else(|e| e.into_inner()).insert(cert.peer_id.clone(), std::time::Instant::now());
                     }
-                    Some(e) => tracing::debug!(peer = %cert.peer_id, applied = out.applied, "wake cards pass: {e}"),
-                }
-            }
-            if out.error.is_none() && self.syncs_jobs_with(&cert.peer_id) {
-                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, TRAIN_TYPE);
-                if let Some(e) = &out.error {
-                    tracing::debug!(peer = %cert.peer_id, applied = out.applied, "training jobs pass: {e}");
-                }
+                    continue;
+                };
+                tracing::debug!(peer = %cert.peer_id, typ = %typ, applied = out.applied, "sync pass: {e}");
             }
         }
         if let Err(e) = self.save() {

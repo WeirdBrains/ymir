@@ -1357,6 +1357,17 @@ node.toml unless `--no-persist`. Any of the owner's linked devices may, narrowed
   the pool policy; a change starts a fresh cache. The pool is one owner, so entries are shared across
   all linked devices.
 - Hits are flagged to the client and can be skipped per request (`cache: false`).
+- **Built (2026-11-26, local mode):** `[inference.cache] embedding_model = "ID"` turns on `weirdnet-semcache`
+  0.2.2's `SemanticCache` behind the exact cache, in `Coordinator::run`
+  ([crates/ymir-core/src/semantic.rs](../crates/ymir-core/src/semantic.rs)). A prompt is cacheable when it is one user
+  turn after any system messages, text only, with no tools, no prefix to continue and no stand-in answering. The
+  user turn is embedded with that model, only while it is loaded on some node (the cache never cold-starts it, and
+  a failed embedding just skips the cache). The scope is the model, its weights' revision, the embedding model and
+  its revision, and a SHA-256 of the system prompt, sampling, seed, response format and adapter scale. A hit needs
+  cosine similarity `1 - threshold` (default distance 0.12, so 0.88), within `ttl` (default `24h`), among at most
+  `entries` (default 1024, least recently used first). A hit answers as `served_by = "semantic-cache"`.
+  `cache: bypass` neither reads nor stores, `refresh` stores without reading. Tests:
+  [crates/ymir-core/tests/semantic.rs](../crates/ymir-core/tests/semantic.rs).
 
 ### Fairness and priorities
 
@@ -1631,7 +1642,10 @@ every_secs = 15                      # how often the scheduler looks
 mode = "local"                       # off | local | pool
 backend = "embedded"                 # embedded | redis
 redis_url = "redis://127.0.0.1:6379" # used only when backend = "redis"
-threshold = 0.12
+threshold = 0.12                     # cosine distance for a semantic hit
+embedding_model = "bge-m3"           # optional: turns on the semantic cache (used only while loaded)
+ttl = "24h"
+entries = 1024
 
 [inference.alerts]
 push = true                          # Weirdnet push to m3talsmith's devices
@@ -1964,7 +1978,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
   device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
   nodes active-active. Moving a model between nodes, and placement with replica counts under the scheduler lease, are built
-  (`ymirctl move`, `[inference.placement]`, 2026-11-26). Still to do: a published placement plan with fencing, cloud-wide swap, prefix warming, and a pool-mode semantic cache. Exit
+  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). Still to do: a published placement plan with fencing, cloud-wide swap, prefix warming, and the pool-mode (shared) semantic cache. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only)). llama.cpp RPC groups are built (opt-in pool policy, private-link-only planning, group up and down, teardown when a member is lost). Still to do: vLLM with Ray groups, and the big-mode reproduction on server-a/server-b.
@@ -2008,7 +2022,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - The quickstart ran on one NVIDIA PC (the dev box, NVIDIA GPU, with a CPU llama.cpp build). Not yet run
   on a Spark, a Mac or a CPU-only box. `ymirctl setup` does not install or start a user service; it
   prints the `ymird` command.
-- The semantic cache is an exact-match placeholder (deterministic requests only).
+- The semantic cache is per inference node and in memory (see [Shared semantic cache](#shared-semantic-cache)); pool mode and Redis are not built.
 
 **Stubbed or not yet built:**
 
@@ -2151,7 +2165,7 @@ A box with both the inference and model roles now serves both: `NodeServer::star
 .with_legacy_infer2(false))` leaves `infer/2` to the inference role, and the inference node's
 pool of model nodes dials through `RawInferDialer` (raw inference on
 `/weirdnet-backends/infer/1`, falling back to `infer/2` for nodes on backends 0.1.0). The
-membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merge_back`).
+membership sync pass is `weirdnet_sync::pull_types_shared` (0.8.5: snapshot, every type due in one session, `merge_back`).
 
 **Open gaps (upstream, parked for M9): `weirdnet-openai` #1 and #2, `weirdnet-agent` #1 and
 `weirdnet-backends` #1.**
@@ -2160,8 +2174,10 @@ membership sync pass is `weirdnet_sync::pull_from_shared` (snapshot, pull, `merg
   OpenAI parameters are dropped.
 - **Streamed answers report the stand-in in the final chunk**; `BridgeClient` reads it there.
 - `Busy` always answers `Retry-After: 1`; Windows kills the engine outright; vLLM is Linux only.
-- **The answer cache is exact-match for temperature 0 only** (no tools, inline messages), per
-  `weirdnet-semcache`; other requests always go to a model. Since `weirdnet-agent` 0.5.1 a request can
+- **The exact answer cache is for temperature 0 only** (no tools, inline messages), per
+  `weirdnet-semcache`. With `[inference.cache] embedding_model` set, a semantic cache behind it answers
+  single-turn prompts that mean the same (see [Shared semantic cache](#shared-semantic-cache)); other
+  requests always go to a model. Since `weirdnet-agent` 0.5.1 a request can
   also skip it (`cache: bypass`) or refresh it (`cache: refresh`), and entries are keyed on the weights
   revision where a node reports one.
 - No `GroupWorkers` in M3 (group jobs answered Unsupported); M7 adds them for llama.cpp RPC.
@@ -2428,7 +2444,7 @@ that release, and the M6 p95 comparison is between two equally delayed runs unti
   round, which the next round undoes), several seed-holding inference nodes taking part in the lease (they would
   need an `ymir.inference` grant of their own), and warm-prefix data in the capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
   and relays for the same reason.
-- **Not built: the pool-mode semantic cache.** `weirdnet-semcache` still has only the exact cache here.
+- **Not built: the pool-mode semantic cache.** Each inference node has its own semantic cache (in memory, lost on restart); entries are not sharded or shared between inference nodes, and there is no Redis backend.
 - **Batch jobs are not synced.** The submitting node runs the fan-out, so if it goes down the job stops
   (the design wants the job record synced so another node picks it up). No tasks with tools or approvals.
 - **Fairness is a cap, not a weighted share.** Devices are held to the same cap; there are no per-device
