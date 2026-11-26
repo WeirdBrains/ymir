@@ -11,6 +11,10 @@ All notable changes to Ymir are listed here. The format follows
 - `ymirctl engines install vllm`: vLLM and Ray in a managed venv (`<home>/engines/vllm`), with `uv` when it is on PATH
   (else `python3 -m venv` and pip, Python 3.10 to 3.13), for CUDA, ROCm or CPU (detected, or `--accel`; ROCm and CPU need
   `--index-url`), `--version`, `--dry-run`, `--reinstall`. It checks that `vllm` and `ray` run and records what it installed.
+  By default it installs vLLM's nightly (`https://wheels.vllm.ai/nightly`), the only vLLM that runs Inkling 2 Mini until
+  0.35.0 (vllm-project/vllm#69028, merged 2026-11-21; 0.34.0 lacks it), checks that vLLM's registry has
+  `InklingForConditionalGeneration`, and records it so ymird's Inkling check accepts the nightly's `0.34.1rc1.devN`
+  version. `--version V` installs a PyPI release instead.
   `ymirctl engines status`, `upgrade vllm`, `uninstall vllm` (only a venv it made). `ymird` finds both programs with the
   default `vllm = "auto"` / `ray = "auto"`, so no `PATH` or `node.toml` change is needed.
 - M7 vLLM with Ray groups: `[[inference.split]] backend = "vllm-ray"`. The leader runs `ray start --head` on its private link,

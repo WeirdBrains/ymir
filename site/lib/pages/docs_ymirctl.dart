@@ -247,11 +247,16 @@ ymirctl group status</code></pre>
 (Python 3.10 to 3.13). <code>ymird</code> finds both there on its own (<code>[model] vllm = "auto"</code> and
 <code>ray = "auto"</code>, the defaults), so single-node vLLM models and <code>vllm-ray</code> split models need no
 <code>PATH</code> or <code>node.toml</code> change. Restart <code>ymird</code> afterwards. vLLM runs on Linux.</p>
+<p>The default is vLLM's nightly (<a href="https://wheels.vllm.ai/nightly"><code>wheels.vllm.ai/nightly</code></a>), because Inkling 2 Mini is in vLLM main
+(<a href="https://github.com/vllm-project/vllm/pull/69028">vllm#69028</a>) but in no release yet: 0.34.0 lacks it and the
+<a href="https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini">vLLM recipe</a> asks for 0.35.0 or a nightly. The installer
+checks that the installed vLLM registers Inkling 2 Mini and records it, so <code>ymird</code> accepts the nightly even though its
+version (<code>0.34.1rc1.devN</code>) is below 0.35.0. <code>--index-url</code> (ROCm, CPU) replaces the nightly index.</p>
 <table>
 <thead><tr><th>Command or flag</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>ymirctl engines install vllm</code></td><td>Make the venv and install vLLM and Ray, then check that <code>vllm --version</code> and <code>ray --version</code> run.</td></tr>
-<tr><td><code>--version V</code></td><td>A vLLM version, such as <code>0.11.0</code> (default: the newest).</td></tr>
+<tr><td><code>ymirctl engines install vllm</code></td><td>Make the venv and install vLLM's nightly and Ray, then check that <code>vllm --version</code> and <code>ray --version</code> run and that vLLM has Inkling 2 Mini.</td></tr>
+<tr><td><code>--version V</code></td><td>A vLLM release from PyPI, such as <code>0.34.0</code>, instead of the nightly. Inkling 2 Mini needs 0.35.0 or a nightly.</td></tr>
 <tr><td><code>--accel auto|cuda|rocm|cpu</code></td><td>The accelerator; <code>auto</code> looks for <code>nvidia-smi</code>, then <code>rocminfo</code> or <code>/opt/rocm</code>, else CPU.</td></tr>
 <tr><td><code>--index-url URL</code></td><td>A vLLM wheel index. ROCm and CPU need one, because PyPI's vLLM wheels are CUDA builds (or use a container image: <code>vllm = "image:..."</code>).</td></tr>
 <tr><td><code>--uv PATH</code>, <code>--python PATH</code></td><td>Which <code>uv</code>, or which Python for <code>-m venv</code> and pip instead of <code>uv</code>.</td></tr>

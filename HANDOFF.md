@@ -2,6 +2,19 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 16:59 EST: vLLM installer defaults to a nightly that runs Inkling 2 Mini (on main)
+
+Michael (11-26): "Make sure it is a version of vLLM that can run Inkling 2 mini". No live node touched.
+
+- Requirement, verified 2026-11-26: Inkling 2 Mini needs vLLM with [vllm#69028](https://github.com/vllm-project/vllm/pull/69028) (merged 2026-11-21, `ab18334`). No release has it: PyPI's newest is 0.34.0 (2026-11-16), which lacks it, and the [recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) says "vLLM 0.35.0+ nightly" (nightly wheel or `vllm/vllm-openai:nightly`). The nightly index then served `0.34.1rc1.dev231+g43108ffcc`, 341 commits past `ab18334`, whose registry has `InklingForCausalLM` and `InklingForConditionalGeneration`. The recipe pins no `transformers` or Ray version.
+- [vllm_install.rs](crates/ymir-core/src/vllm_install.rs): the default install adds `--extra-index-url https://wheels.vllm.ai/nightly` (uv `--prerelease=allow`, pip `--pre`); `--version V` installs a PyPI release and `--index-url` replaces the nightly. After installing it runs the venv's Python against vLLM's `ModelRegistry` and records `inkling` and `nightly` in `ymir-install.json`; a nightly install without Inkling fails, a pinned release without it says so.
+- [vllm.rs](crates/ymir-core/src/vllm.rs): `managed_with_inkling`, so ymird's Inkling preflight accepts the managed venv's `vllm` (numbered below 0.35.0) when the record says Inkling. `INKLING_MIN_VERSION` stays 0.35.0 for other binaries.
+- Docs: [DESIGN](docs/DESIGN.md) ("Inkling 2 Mini" and "Installing vLLM and Ray"), site ymirctl docs `#engines`, README, CHANGELOG.
+
+**Checks:** tests/engines.rs 2/2 (pinned 0.34.0 records no Inkling; default nightly records Inkling and passes `ensure_inkling`; status), vllm unit tests, fmt, clippy `-D warnings`, workspace tests, link check.
+
+**Not tested:** a real nightly download (PyTorch-sized; not run in tests or CI), the ROCm nightly index.
+
 ## 2026-11-26 16:30 EST: `ymirctl engines install vllm` (on main)
 
 Michael (11-26): "Also, make installing vLLM easy with Ymir". Built on the dev box; no live node touched.

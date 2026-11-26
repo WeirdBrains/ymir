@@ -61,7 +61,7 @@ python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --out target/r
 ymirctl hw                                   # what this machine has and the model budget
 ymirctl setup --model /path/to/model.gguf    # or --llama-server PATH for your own llama.cpp
 #   or: ymirctl setup --download             # catalog models that fit, asks before downloading
-ymirctl engines install vllm                 # optional: vLLM + Ray in a managed venv ymird finds (Linux; uv or python3)
+ymirctl engines install vllm                 # optional: vLLM nightly (runs Inkling 2 Mini) + Ray in a managed venv ymird finds (Linux)
 ymird &                                      # model, inference and app roles in one process
 ymirctl chat "Hello"                         # streams through the loopback bridge
 ymirctl status                               # roles, models and their state

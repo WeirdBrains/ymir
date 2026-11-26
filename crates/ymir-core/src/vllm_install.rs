@@ -10,6 +10,15 @@
 //! vLLM wheel index for that platform (or a container image: `vllm = "image:..."`). After
 //! installing, `vllm --version` and `ray --version` must run, and `ymir-install.json` records
 //! what was installed. Uninstall removes the venv only when that record is there.
+//!
+//! **Inkling 2 Mini.** By default this installs vLLM's nightly (from [`NIGHTLY_INDEX`]), because
+//! Inkling 2 Mini (`inkling2_loop`) is in vLLM main since vllm-project/vllm#69028 (merged
+//! 2026-11-21) but in no release yet: 0.34.0, the newest on PyPI, lacks it, and the recipe says
+//! "vLLM 0.35.0+ nightly". Nightlies are numbered `0.34.1rc1.devN+gSHA`, below 0.35.0, so the
+//! installer asks the installed vLLM's model registry for [`crate::vllm::INKLING_ARCH`] and records
+//! the answer; ymird trusts that record ([`crate::vllm::managed_with_inkling`]). A default install
+//! whose vLLM lacks Inkling fails. `--version V` installs that release from PyPI instead, and says
+//! when it cannot run Inkling.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +29,11 @@ use serde::{Deserialize, Serialize};
 pub const UV_PYTHON: &str = "3.12";
 /// What `ymir-install.json` is called, inside the venv.
 pub const RECORD: &str = "ymir-install.json";
+/// vLLM's nightly wheels (CUDA, x86_64 and aarch64), built from main.
+pub const NIGHTLY_INDEX: &str = "https://wheels.vllm.ai/nightly";
+/// Asks vLLM's model registry whether Inkling 2 Mini is there (prints `True` or `False`).
+pub const INKLING_CHECK: &str =
+    "from vllm.model_executor.models.registry import ModelRegistry as R; print('InklingForConditionalGeneration' in R.get_supported_archs())";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -84,7 +98,7 @@ pub fn detect(p: &dyn Probe) -> Accel {
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// A vLLM version (`0.11.0`); default the newest.
+    /// A vLLM release from PyPI (`0.34.0`); default the nightly (for Inkling 2 Mini).
     pub version: Option<String>,
     /// `None`: detect.
     pub accel: Option<Accel>,
@@ -127,6 +141,8 @@ pub struct Plan {
     pub installer: &'static str,
     /// The venv exists and is kept (an upgrade, or a second install).
     pub keep_venv: bool,
+    /// vLLM's nightly (the default; it has Inkling 2 Mini).
+    pub nightly: bool,
     pub steps: Vec<Step>,
 }
 
@@ -156,6 +172,8 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
         Some(v) => format!("vllm=={v}"),
         None => "vllm".into(),
     };
+    // The nightly, unless a release is pinned or the operator gave an index (ROCm, CPU).
+    let nightly = o.version.is_none() && o.index_url.is_none();
     let py = crate::vllm::bin_in(venv, "python");
     let keep_venv = !o.reinstall && p.exists(&py);
     let uv = if o.python.is_some() { None } else { o.uv.clone().or_else(|| p.which("uv")) };
@@ -178,6 +196,9 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
                 a.push("--upgrade".into());
             }
             a.push(format!("--torch-backend={}", if accel == Accel::Cpu { "cpu" } else { "auto" }));
+            if nightly {
+                a.extend(["--prerelease=allow".into(), "--extra-index-url".into(), NIGHTLY_INDEX.into()]);
+            }
             if let Some(u) = &o.index_url {
                 a.extend(["--extra-index-url".into(), u.clone()]);
             }
@@ -204,6 +225,9 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
             if o.upgrade {
                 a.push("--upgrade".into());
             }
+            if nightly {
+                a.extend(["--pre".into(), "--extra-index-url".into(), NIGHTLY_INDEX.into()]);
+            }
             if let Some(u) = &o.index_url {
                 a.extend(["--extra-index-url".into(), u.clone()]);
             }
@@ -211,7 +235,7 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
             steps.push(Step { program: py, args: a });
         }
     }
-    Ok(Plan { venv: venv.to_path_buf(), accel, installer, keep_venv, steps })
+    Ok(Plan { venv: venv.to_path_buf(), accel, installer, keep_venv, nightly, steps })
 }
 
 /// `Python 3.12.3` -> `(3, 12)`.
@@ -238,6 +262,12 @@ pub struct Record {
     pub requested: Option<String>,
     pub vllm: String,
     pub ray: String,
+    /// From vLLM's nightly index.
+    #[serde(default)]
+    pub nightly: bool,
+    /// vLLM's model registry has Inkling 2 Mini ([`INKLING_CHECK`]).
+    #[serde(default)]
+    pub inkling: bool,
     pub at_ms: u64,
 }
 
@@ -294,10 +324,37 @@ pub fn install(plan: &Plan, o: &Options, log: &mut dyn FnMut(&str)) -> Result<Re
     }
     let vllm = program_version(&crate::vllm::bin_in(&plan.venv, "vllm")).context("vLLM was installed but does not run")?;
     let ray = program_version(&crate::vllm::bin_in(&plan.venv, "ray")).context("Ray was installed but does not run")?;
+    let inkling = has_inkling(&crate::vllm::bin_in(&plan.venv, "python"));
     let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    let rec = Record { accel: plan.accel, installer: plan.installer.into(), requested: o.version.clone(), vllm, ray, at_ms };
+    let rec = Record {
+        accel: plan.accel,
+        installer: plan.installer.into(),
+        requested: o.version.clone(),
+        vllm,
+        ray,
+        nightly: plan.nightly,
+        inkling,
+        at_ms,
+    };
     std::fs::write(plan.venv.join(RECORD), serde_json::to_vec_pretty(&rec)?)?;
+    if plan.nightly && !inkling {
+        bail!(
+            "vLLM {} from the nightly index does not register Inkling 2 Mini ({}); it is kept in {} (see `ymirctl engines status`)",
+            rec.vllm,
+            crate::vllm::INKLING_ARCH,
+            plan.venv.display()
+        );
+    }
     Ok(rec)
+}
+
+/// Whether the venv's vLLM registers Inkling 2 Mini (runs [`INKLING_CHECK`] with its Python).
+pub fn has_inkling(python: &Path) -> bool {
+    std::process::Command::new(python)
+        .args(["-c", INKLING_CHECK])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "True")
 }
 
 /// Removes the managed venv, only when Ymir made it (its record is there).
@@ -355,10 +412,17 @@ mod tests {
     #[test]
     fn with_uv_one_venv_and_one_install_of_vllm_and_ray() {
         let v = Path::new("/h/engines/vllm");
-        let p = plan(v, &Options { version: Some("0.11.0".into()), ..Default::default() }, &fake(&["uv", "nvidia-smi"])).unwrap();
-        assert_eq!((p.installer, p.accel, p.keep_venv), ("uv", Accel::Cuda, false));
+        let p = plan(v, &Options { version: Some("0.34.0".into()), ..Default::default() }, &fake(&["uv", "nvidia-smi"])).unwrap();
+        assert_eq!((p.installer, p.accel, p.keep_venv, p.nightly), ("uv", Accel::Cuda, false, false));
         assert_eq!(p.steps[0].to_string(), "/usr/bin/uv venv --python 3.12 /h/engines/vllm");
-        assert_eq!(p.steps[1].to_string(), "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --torch-backend=auto vllm==0.11.0 ray");
+        assert_eq!(p.steps[1].to_string(), "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --torch-backend=auto vllm==0.34.0 ray");
+        // The default is the nightly, for Inkling 2 Mini.
+        let p = plan(v, &Options::default(), &fake(&["uv", "nvidia-smi"])).unwrap();
+        assert!(p.nightly);
+        assert_eq!(
+            p.steps[1].to_string(),
+            "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --torch-backend=auto --prerelease=allow --extra-index-url https://wheels.vllm.ai/nightly vllm ray"
+        );
     }
 
     // Unix paths in the expected commands (vLLM runs on Linux).
@@ -374,7 +438,7 @@ mod tests {
             [
                 "/usr/bin/python3 -m venv /h/engines/vllm",
                 "/h/engines/vllm/bin/python -m pip install --upgrade pip",
-                "/h/engines/vllm/bin/python -m pip install vllm ray"
+                "/h/engines/vllm/bin/python -m pip install --pre --extra-index-url https://wheels.vllm.ai/nightly vllm ray"
             ]
         );
         assert!(plan(v, &Options::default(), &fake(&["nvidia-smi"])).unwrap_err().to_string().contains("needs `uv`"));
@@ -389,6 +453,7 @@ mod tests {
         let p = plan(v, &o, &fake(&["uv"])).unwrap();
         let last = p.steps.last().unwrap().to_string();
         assert!(last.contains("--torch-backend=cpu") && last.contains("--extra-index-url https://wheels.example/cpu"), "{last}");
+        assert!(!p.nightly && !last.contains("wheels.vllm.ai/nightly"), "the operator's index replaces the nightly: {last}");
         let o = Options { accel: Some(Accel::Rocm), index_url: Some("https://wheels.example/rocm".into()), ..Default::default() };
         assert_eq!(plan(v, &o, &fake(&["uv", "nvidia-smi"])).unwrap().accel, Accel::Rocm, "the override wins");
     }

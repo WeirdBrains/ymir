@@ -13,9 +13,12 @@ use ymir_core::vllm_install::Probe;
 /// Writes the stub `vllm` and `ray` a real install would leave in `bin`.
 const STUBS: &str = r#"
 stubs() {
-  printf '#!/bin/sh\necho 0.11.0\n' > "$1/vllm"
+  case "$2" in *vllm==*) v=0.34.0 ink=False ;; *) v=0.34.1rc1.dev231+g43108ffcc ink=True ;; esac
+  printf '#!/bin/sh\necho %s\n' "$v" > "$1/vllm"
   printf '#!/bin/sh\necho "ray, version 2.49.1"\n' > "$1/ray"
-  chmod +x "$1/vllm" "$1/ray"
+  # The venv's python answers the registry check.
+  [ -s "$1/python" ] || printf '#!/bin/sh\n[ "$1" = -c ] && echo %s\n' "$ink" > "$1/python"
+  chmod +x "$1/vllm" "$1/ray" "$1/python"
 }
 "#;
 
@@ -31,7 +34,7 @@ fn fake_uv(dir: &Path) -> PathBuf {
     script(
         &uv,
         r#"if [ "$1" = venv ]; then for a; do d="$a"; done; mkdir -p "$d/bin"; : > "$d/bin/python"; exit 0; fi
-if [ "$1" = pip ]; then stubs "$(dirname "$4")"; exit 0; fi
+if [ "$1" = pip ]; then stubs "$(dirname "$4")" "$*"; exit 0; fi
 exit 2
 "#,
     );
@@ -47,7 +50,8 @@ fn fake_python(dir: &Path, version: &str) -> PathBuf {
         &format!(
             r#"if [ "$1" = --version ]; then echo "Python {version}"; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then for a; do d="$a"; done; mkdir -p "$d/bin"; cp "$0" "$d/bin/python"; exit 0; fi
-if [ "$1" = -m ] && [ "$2" = pip ]; then stubs "$(dirname "$0")"; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then stubs "$(dirname "$0")" "$*"; exit 0; fi
+if [ "$1" = -c ]; then echo True; exit 0; fi
 exit 2
 "#
         ),
@@ -95,15 +99,26 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     let venv = paths.engines().join("vllm");
 
     // Dry run: the plan, and nothing made.
-    let o = engines(&home, &["install", "vllm", "--version", "0.11.0", "--dry-run"], &probe).unwrap();
-    assert!(o.contains("for cuda") && o.contains("with uv") && o.contains("vllm==0.11.0 ray") && o.contains("dry run"), "{o}");
+    let o = engines(&home, &["install", "vllm", "--dry-run"], &probe).unwrap();
+    assert!(o.contains("vLLM nightly") && o.contains("for cuda") && o.contains("with uv") && o.contains("wheels.vllm.ai/nightly vllm ray"), "{o}");
+    assert!(o.contains("Inkling 2 Mini") && o.contains("dry run"), "{o}");
     assert!(!venv.exists() && !tools.join("calls.log").exists());
     assert!(engines(&home, &["upgrade", "vllm"], &probe).unwrap_err().to_string().contains("install vllm` first"));
 
-    let o = engines(&home, &["install", "vllm", "--version", "0.11.0"], &probe).unwrap();
-    assert!(o.contains("installed vLLM 0.11.0 and Ray 2.49.1 (cuda)"), "{o}");
+    // A pinned release without Inkling installs, and says so.
+    let o = engines(&home, &["install", "vllm", "--version", "0.34.0"], &probe).unwrap();
+    assert!(o.contains("installed vLLM 0.34.0") && o.contains("Inkling 2 Mini: not in this vLLM"), "{o}");
     let rec = ymir_core::vllm_install::read_record(&venv).unwrap();
-    assert_eq!((rec.requested.as_deref(), rec.installer.as_str()), (Some("0.11.0"), "uv"));
+    assert_eq!((rec.requested.as_deref(), rec.nightly, rec.inkling), (Some("0.34.0"), false, false));
+    assert!(!ymir_core::vllm::managed_with_inkling(&venv.join("bin/vllm")));
+
+    // The default: the nightly, which has Inkling, and ymird's preflight trusts the record.
+    let o = engines(&home, &["install", "vllm", "--reinstall"], &probe).unwrap();
+    assert!(o.contains("installed vLLM 0.34.1rc1.dev231+g43108ffcc and Ray 2.49.1 (cuda)") && o.contains("Inkling 2 Mini: supported"), "{o}");
+    let rec = ymir_core::vllm_install::read_record(&venv).unwrap();
+    assert_eq!((rec.requested.as_deref(), rec.installer.as_str(), rec.nightly, rec.inkling), (None, "uv", true, true));
+    assert!(ymir_core::vllm::managed_with_inkling(&venv.join("bin/vllm")));
+    assert!(ymir_core::vllm::ensure_inkling(&venv.join("bin/vllm"), false).is_ok(), "a nightly numbered below 0.35.0 is accepted by its record");
 
     // Auto-discovery: no node.toml edit, no PATH.
     let model = ymir_core::config::ModelSection::default();
@@ -118,8 +133,8 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     assert_eq!(ymir_core::config::resolve_vllm(&off, &paths), Some("/opt/vllm".into()));
 
     let s = engines(&home, &["status"], &probe).unwrap();
-    assert!(s.contains("managed:") && s.contains("vLLM 0.11.0, Ray 2.49.1"), "{s}");
-    assert!(s.contains("vllm: ") && s.contains("(managed; 0.11.0)") && s.contains("(managed; 2.49.1)"), "{s}");
+    assert!(s.contains("managed:") && s.contains("nightly, Ray 2.49.1") && s.contains("Inkling 2 Mini yes"), "{s}");
+    assert!(s.contains("(managed; 0.34.1rc1.dev231+g43108ffcc)") && s.contains("(managed; 2.49.1)"), "{s}");
 
     // Upgrade keeps the venv and asks for --upgrade.
     let calls_before = std::fs::read_to_string(tools.join("calls.log")).unwrap().lines().count();
@@ -127,7 +142,7 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     let calls = std::fs::read_to_string(tools.join("calls.log")).unwrap();
     let new: Vec<&str> = calls.lines().skip(calls_before).collect();
     assert_eq!(new.len(), 1, "no new venv: {new:?}");
-    assert!(new[0].contains("pip install") && new[0].contains("--upgrade") && new[0].contains("vllm ray"), "{new:?}");
+    assert!(new[0].contains("pip install") && new[0].contains("--upgrade") && new[0].contains("nightly vllm ray"), "{new:?}");
 
     // Uninstall removes it; a directory Ymir did not make is left alone.
     assert!(engines(&home, &["uninstall", "vllm"], &probe).unwrap().contains("removed"));
@@ -149,7 +164,7 @@ fn install_with_python_venv_and_pip_needs_a_python_vllm_supports() {
     assert!(e.contains("3.10 to 3.13"), "{e}");
     let py = fake_python(&tools, "3.12.3");
     let o = engines(&home, &["install", "vllm", "--python", py.to_str().unwrap()], &probe).unwrap();
-    assert!(o.contains("with pip") && o.contains("installed vLLM 0.11.0"), "{o}");
+    assert!(o.contains("with pip") && o.contains("installed vLLM 0.34.1rc1") && o.contains("Inkling 2 Mini: supported"), "{o}");
     assert_eq!(ymir_core::vllm_install::read_record(&Paths::new(&home).engines().join("vllm")).unwrap().installer, "pip");
     // CPU needs a wheel index.
     let e = engines(&home, &["install", "vllm", "--accel", "cpu", "--reinstall", "--dry-run"], &probe).unwrap_err().to_string();

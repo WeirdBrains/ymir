@@ -503,7 +503,12 @@ ready yet.
   so the full 1M fits on 128 GB). Support needs vLLM
   0.35.0 or a newer nightly, or that image; it is not in 0.34.0 and is not in a vLLM release yet
   ([recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini),
-  [vllm#69028](https://github.com/vllm-project/vllm/pull/69028)). If the node's `vllm` is too old,
+  [vllm#69028](https://github.com/vllm-project/vllm/pull/69028), merged 2026-11-21 as commit
+  `ab18334`). The recipe pins no `transformers` or Ray version beyond what vLLM requires.
+  `ymirctl engines install vllm` installs a nightly that has it by default (see "Installing vLLM and
+  Ray"); nightlies are numbered `0.34.1rc1.devN+gSHA`, below 0.35.0, so ymird accepts the managed
+  venv's `vllm` when its install record says the registry has `InklingForConditionalGeneration`
+  (checked on 2026-11-26 with `0.34.1rc1.dev231+g43108ffcc`). If the node's `vllm` is too old,
   ymird leaves the model unloaded and logs how to point `[model] vllm` at `image:vllm/vllm-openai:inkling-2-mini`
   or wrap a container the operator started:
 
@@ -2586,11 +2591,17 @@ context = 32768
 
 **Installing vLLM and Ray.** `ymirctl engines install vllm`
 ([`vllm_install.rs`](../crates/ymir-core/src/vllm_install.rs), [`engines.rs`](../crates/ymirctl/src/engines.rs)) makes a venv at
-`<home>/engines/vllm` and installs `vllm` (or `vllm==VERSION`) and `ray` in it. It uses `uv venv --python 3.12` and
+`<home>/engines/vllm` and installs `vllm` and `ray` in it. By default `vllm` is vLLM's nightly
+(`--extra-index-url https://wheels.vllm.ai/nightly` with `--prerelease=allow` for uv or `--pre` for pip), because only
+the nightly runs Inkling 2 Mini until vLLM 0.35.0 is released (see "Inkling 2 Mini" above); `--version V` installs
+`vllm==V` from PyPI instead, and `--index-url` replaces the nightly with that index. It uses `uv venv --python 3.12` and
 `uv pip install --torch-backend=auto` when `uv` is on `PATH`, else `python3 -m venv` and pip, refusing a Python outside 3.10 to
 3.13. It detects the accelerator (`nvidia-smi`: CUDA; `rocminfo` or `/opt/rocm`: ROCm; else CPU) unless `--accel` says. PyPI's
 vLLM wheels are CUDA builds, so ROCm and CPU need `--index-url` (or a container image). It checks that `vllm --version` and
-`ray --version` run and writes `ymir-install.json`. `upgrade` keeps the venv and passes `--upgrade`, `--reinstall` clears it,
+`ray --version` run, asks the venv's Python whether vLLM's model registry has `InklingForConditionalGeneration`, and writes
+`ymir-install.json` with the answer (`inkling`, `nightly`). A default (nightly) install without it fails; a pinned release
+without it installs and says Inkling 2 Mini needs 0.35.0 or a nightly. ymird's Inkling preflight trusts that record for the
+venv's `vllm`. `upgrade` keeps the venv and passes `--upgrade`, `--reinstall` clears it,
 `--dry-run` prints the commands, and `uninstall` removes the venv only when that record is there. `[model] vllm = "auto"` and
 `ray = "auto"` (the defaults) use the venv's programs before `PATH`, so nothing else is edited. Tests use fake `uv` and
 `python3` that leave stub programs ([`tests/engines.rs`](../crates/ymirctl/tests/engines.rs)); nothing is downloaded in tests or

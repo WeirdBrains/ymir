@@ -38,7 +38,8 @@ pub enum Engine {
 pub struct InstallArgs {
     #[arg(value_enum)]
     pub engine: Engine,
-    /// A vLLM version, such as 0.11.0 (default the newest).
+    /// A vLLM release from PyPI, such as 0.34.0. Default: vLLM's nightly, which has Inkling 2
+    /// Mini (no release has it yet; 0.35.0 will).
     #[arg(long)]
     pub version: Option<String>,
     /// auto (nvidia-smi: cuda; rocminfo or /opt/rocm: rocm; else cpu), cuda, rocm or cpu.
@@ -102,12 +103,13 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
         anyhow::bail!("no managed vLLM at {}; run `ymirctl engines install vllm` first", venv.display());
     }
     let plan = vllm_install::plan(venv, &o, probe)?;
-    writeln!(out, "vLLM and Ray for {} into {} (with {})", plan.accel.name(), plan.venv.display(), plan.installer)?;
+    let what = if plan.nightly { "vLLM nightly" } else { "vLLM" };
+    writeln!(out, "{what} and Ray for {} into {} (with {})", plan.accel.name(), plan.venv.display(), plan.installer)?;
     if a.dry_run {
         for s in &plan.steps {
             writeln!(out, "  {s}")?;
         }
-        writeln!(out, "  then check `vllm --version` and `ray --version` (dry run: nothing ran)")?;
+        writeln!(out, "  then check `vllm --version`, `ray --version` and that vLLM has Inkling 2 Mini (dry run: nothing ran)")?;
         return Ok(());
     }
     let mut lines = Vec::new();
@@ -116,6 +118,14 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
         writeln!(out, "  ran {l}")?;
     }
     writeln!(out, "installed vLLM {} and Ray {} ({})", rec.vllm, rec.ray, rec.accel.name())?;
+    if rec.inkling {
+        writeln!(out, "Inkling 2 Mini: supported (vLLM registers {})", ymir_core::vllm::INKLING_ARCH)?;
+    } else {
+        writeln!(
+            out,
+            "Inkling 2 Mini: not in this vLLM (it needs 0.35.0 or a nightly: run `ymirctl engines install vllm --reinstall` without --version)"
+        )?;
+    }
     writeln!(out, "ymird uses them with `[model] vllm = \"auto\"` and `ray = \"auto\"` (the defaults); restart ymird to pick them up")?;
     Ok(())
 }
@@ -126,12 +136,14 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     match vllm_install::read_record(&venv) {
         Some(r) => writeln!(
             out,
-            "managed: {} (vLLM {}, Ray {}, {}, by {}{})",
+            "managed: {} (vLLM {}{}, Ray {}, {}, by {}, Inkling 2 Mini {}{})",
             venv.display(),
             r.vllm,
+            if r.nightly { " nightly" } else { "" },
             r.ray,
             r.accel.name(),
             r.installer,
+            if r.inkling { "yes" } else { "no" },
             r.requested.map(|v| format!(", asked for {v}")).unwrap_or_default()
         )?,
         None => writeln!(out, "managed: none (`ymirctl engines install vllm`)")?,
