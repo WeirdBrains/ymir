@@ -342,7 +342,7 @@ impl ModelsHub {
         }
         // Most room first; a node with `[model] upload = false` refuses before anything is sent,
         // so the next one is tried.
-        fits.sort_by(|a, b| b.1.cmp(&a.1));
+        fits.sort_by_key(|f| std::cmp::Reverse(f.1));
         for (t, room) in fits {
             let chosen = Chosen { node: t.clone(), model: op.upload.id.clone(), size: total, usable_bytes: room };
             match self.upload(&t, op.clone(), tx).await {

@@ -260,8 +260,10 @@ async fn the_pool_searches_pulls_serves_and_removes_models_over_weirdnet() -> Re
     // An upload to big is refused with what to do; the pulls above went through.
     let file = root.join("Up-Q4_0.gguf");
     std::fs::write(&file, gguf(4000))?;
-    let err = format!("{:#}", ctl(&ctl_h.home, &["models", "upload", &file.display().to_string(), "--node", "big"]).await.unwrap_err());
-    assert!(err.contains("not-allowed") && err.contains("[model] upload = false"), "{err}");
+    let mut buf = Vec::new();
+    let sent = ctl_with(&ctl_h.home, &["models", "upload", &file.display().to_string(), "--node", "big"], &mut buf, "").await;
+    let out = String::from_utf8(buf)?;
+    assert!(sent.is_err() && out.contains("big refused the upload (not-allowed)") && out.contains("[model] upload = false"), "{out}");
     assert!(!root.join("big-models/up-q4_0").exists());
 
     // Only a node that fits is asked to take a model it cannot hold.
