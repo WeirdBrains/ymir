@@ -83,11 +83,13 @@ impl ServiceRole {
     }
 
     /// The sync types its grant lets it hold keys for: an inference node the pool and context
-    /// records, a model node only the training jobs.
+    /// records, a model node the pool and the training jobs (never the context). Since
+    /// weirdnet-sync 0.8.3 a device is refused (`type-not-granted`) for any type it syncs that
+    /// its grant does not list, so the pool must be here for both.
     pub fn types(self) -> Vec<String> {
         match self {
             Self::Inference => vec![SYNC_TYPE.to_string(), CONTEXT_TYPE.to_string()],
-            Self::Model => vec![TRAIN_TYPE.to_string()],
+            Self::Model => vec![SYNC_TYPE.to_string(), TRAIN_TYPE.to_string()],
         }
     }
 }
