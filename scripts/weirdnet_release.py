@@ -55,7 +55,7 @@ try:
 except ImportError:  # Python < 3.11 (e.g. Ubuntu 22.04 runners): mini_toml() below
     tomllib = None
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 CONFIG = "release.toml"
 ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
@@ -1629,7 +1629,7 @@ def taur_version(taurctl, name):
 
 # ---- platforms and release assets ----------------------------------------------------------
 
-OSES = ["linux", "macos", "windows", "android", "ios"]
+OSES = ["linux", "macos", "windows", "android", "ios", "freebsd", "openbsd"]
 ARCHES = ["x86_64", "aarch64", "universal"]
 FORMATS = {
     "linux": ["tar.gz", "zip", "pkg.tar.zst", "deb", "rpm", "nix", "appimage", "flatpak"],
@@ -1637,6 +1637,8 @@ FORMATS = {
     "windows": ["zip", "exe", "exe-wix", "msi", "winget"],
     "android": ["apk", "aab"],
     "ios": ["ipa"],
+    "freebsd": ["tar.gz", "pkg"],
+    "openbsd": ["tar.gz", "tgz"],
 }
 
 # Where a release reaches people. github = assets on the GitHub release.
@@ -1646,6 +1648,8 @@ CHANNELS = {
     "windows": ["github", "winget", "microsoft-store"],
     "android": ["github", "google-play", "fdroid", "apk-sideload"],
     "ios": ["app-store", "testflight", "eu-marketplace", "altstore", "adhoc-ipa"],
+    "freebsd": ["github"],
+    "openbsd": ["github"],
 }
 
 
@@ -1907,7 +1911,7 @@ def _key_strings(path):
 def _host_target():
     m = os.uname().machine if hasattr(os, "uname") else ""
     arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(m.lower(), m)
-    osn = {"linux": "linux", "darwin": "macos", "freebsd": "freebsd"}.get(sys.platform.rstrip("0123456789"), sys.platform)
+    osn = {"linux": "linux", "darwin": "macos", "freebsd": "freebsd", "openbsd": "openbsd"}.get(sys.platform.rstrip("0123456789"), sys.platform)
     return osn, arch
 
 

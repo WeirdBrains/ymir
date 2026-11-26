@@ -2907,8 +2907,8 @@ sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP se
   host, a `pkg` (`pkg create`; no bundled llama.cpp, since upstream publishes no BSD builds: the `misc/llama-cpp` port, named in the
   package message). [.github/workflows/freebsd.yml](../.github/workflows/freebsd.yml) builds and tests in a FreeBSD 14.2 VM,
   installs the pkg and runs the rc.d service through a chat, a stop and an uninstall. The Release workflow builds the
-  x86_64 tar.gz and pkg in the same VM and they go on the GitHub release (from 0.21.0); FreeBSD is not a `release.toml`
-  `[[platforms]]` entry yet, since the shared release script (weirdnet-project-helpers 0.4.0) knows no `freebsd` OS. No aarch64; OpenBSD (`tar.gz`), GhostBSD and DragonFly not started. (Bragi's FreeBSD CI job is a separate item,
+  x86_64 tar.gz and pkg in the same VM and they go on the GitHub release (from 0.21.0); FreeBSD is a `release.toml`
+  `[[platforms]]` entry (x86_64; weirdnet-project-helpers 0.4.1 added the `freebsd` OS), so `assets` checks both files. No aarch64; OpenBSD (`tar.gz`), GhostBSD and DragonFly not started. (Bragi's FreeBSD CI job is a separate item,
   see the Bragi B5 status.)
 - **The bundle fetcher is built (2026-11-24); publishing is not.**
   - `update fetch SOURCE [--announcement FILE]` reads a bundle directory over HTTPS or from disk (`Updater::fetch` with a
