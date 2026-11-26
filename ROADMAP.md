@@ -44,7 +44,7 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## M6 Workload spreading (In progress)
 
-Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, and the pool benchmark are built. Next: moving models between nodes, placement and replication, and a semantic cache.
+Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, the pool benchmark, and moving a model between nodes (`ymirctl move`, with the old node finishing first) are built. Next: placement and replication, and a semantic cache.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
 

@@ -3,6 +3,13 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 08:10 EST: moving a model between nodes, M6 (branch `feature/move-model`, LD-3)
+
+- [coordinator.rs](crates/ymir-core/src/coordinator.rs): `Coordinator::move_model(model, from, to, grace)`: loads on `to` (refused when `to` has no copy), takes `(source, model)` out of `pick` (`leaving`), waits until the source reports nothing in flight for the model (at most `grace`), unloads it there. `ControlRequest::Move` and `ymirctl move MODEL --to NODE [--from NODE] [--grace SECS]`.
+- **Test:** [crates/ymir-core/tests/move_model.rs](crates/ymir-core/tests/move_model.rs): a request running on the source finishes there, a request during the move goes to the target, the source unloads after; refused for a target without a copy, a model loaded nowhere, the same node, an unknown node, and a failed load on the target (the source keeps serving). clippy `-D warnings` on the workspace, ymirctl tests.
+- **M6 audit (rest):** placement and replication need a lease and a synced plan; weirdnet-sync 0.8.4 has leases now (the training board uses them), so a placement plan is buildable without a crate change. The semantic cache needs an embedding-keyed cache in `weirdnet-semcache` (0.2.1 has only the exact cache): a Weirdnet crate change.
+- **Not done:** a daemon-level test of `ymirctl move` over loopback; an MCP tool for it. Not merged: Ymir main is LD-1's for v0.19.0.
+
 ## 2026-11-26 07:05 EST: training files over Weirdnet, P3b blob transfer (branch `feature/blobs`)
 
 - [blobs_net.rs](crates/ymir-core/src/blobs_net.rs): `/ymir/blobs/1` (CBOR): `BlobAsk { cert, root }`; the holder answers `Bundle { manifest_name, manifest }`, each listed file's bytes as 48 KiB `Chunk`s in manifest order, `Done` (or `Missing` / `Refused`). `BlobsService` (roster auth: the owner's linked devices) and `BlobsServer`; `BlobsClient::ensure(root, holders)` checks the manifest against the root, takes the file list from the manifest (paths inside the bundle only), checks each file's size and sha256 while writing into a staging folder in the store, gives up on a holder after 60 s of silence and tries the next, and stores only a whole bundle (`LocalBlobs::put_checked`); staging is removed either way.

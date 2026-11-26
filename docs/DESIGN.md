@@ -1958,7 +1958,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   context and no duplicate text.
 - **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
   device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
-  nodes active-active. Still to do: moving models between nodes, placement and replication, scheduler
+  nodes active-active. Moving a model between nodes is built (`ymirctl move`, 2026-11-26). Still to do: placement and replication, scheduler
   lease, cloud-wide swap, prefix warming, and a pool-mode semantic cache. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
@@ -2390,6 +2390,13 @@ inference node, one model node) the first token takes 3.1 s, and 0.08 to 0.11 s 
 given the model node's address. Real pools hit this too: every phone or laptop that is off adds 3 s to
 every answer. Reported to the Weirdnet lead; `tests/latency.rs` (first token under 1 s) is ignored until
 that release, and the M6 p95 comparison is between two equally delayed runs until then.
+
+- **Moving a model between nodes** (built 2026-11-26, `Coordinator::move_model`, `ymirctl move MODEL --to NODE`).
+  The model loads on the target first (it needs its own copy of the weights; the move refuses otherwise),
+  the `(source, model)` pair is taken out of routing so new requests go to the target, the source finishes
+  what it reports in flight for the model (up to a grace time, 60 s by default) and then unloads it. A load
+  that fails on the target leaves the source serving. Copying the weights over is not part of it (pull them
+  on the target first). Tests: `crates/ymir-core/tests/move_model.rs`.
 
 **Gaps:**
 
