@@ -359,6 +359,8 @@ impl Membership {
             keys,
             auto_first_rotation: !service,
             records: Default::default(),
+            // A lease voter is set on model nodes for the training job board (`train_board`).
+            voter: None,
         };
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
         load_log(dir, &mut st);
