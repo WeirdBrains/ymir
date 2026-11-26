@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 00:43 EST: v0.16.0 released
+
+**Release:** [v0.16.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.16.0) (release commit 9c6c86b on 149dfe9; Release run 45758480177, green). It folds in what would have been 0.15.5: model-upload U9 (directories and projectors without `--node`, `--node auto`, `--rollout --inference`), resumable training jobs (P3b), the teacher license from the Hub or the pool catalog, `train seed questions|prompts` and training status over `/ymir/train-status/1`. The cut ran its checks (fmt, clippy `-D warnings`, `cargo test --workspace --locked`) before pushing. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles (`com.weirdbrains.ymir-stable-16000`) with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.16.0-1; their recipes are on this branch (`chore/release-0.16.0`).
+
+**Next:** adopt weirdnet-backends 0.4.7 and weirdnet-net 0.8.3: `[model] upload = false` with `WritePolicy::with_uploads`, `StoredEntry` built with its constructors instead of serde, and the streams limit back down now that dropped streams are released promptly.
+
 ## 2026-11-25 22:15 EST: training status over Weirdnet (branch `feature/train-status`)
 
 - `/ymir/train-status/1` (`ymir_core::train_net::{TrainStatus, RunSummary, JobSummary, StatusReply}`), served by every
