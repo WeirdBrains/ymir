@@ -373,7 +373,8 @@ impl Membership {
             our_node: weirdnet_sync::NodeId::new(our_cert.peer_id.clone()),
             our_cert,
             seed,
-            types: vec![SYNC_TYPE.to_string()],
+            // The pool, and the training jobs (P3b), served to every device granted them.
+            types: vec![SYNC_TYPE.to_string(), TRAIN_TYPE.to_string()],
             roster,
             log: weirdnet_sync::OpLog::new(),
             clock: None,
@@ -550,11 +551,18 @@ impl Membership {
     /// `voter.cbor` and written before each grant (so a restart never hands out a term twice).
     /// Returns whether it votes.
     pub fn enable_train_voter(&self) -> Result<bool> {
+        self.enable_train_voter_with(&crate::train_job::JobPolicy::default())
+    }
+
+    /// [`Self::enable_train_voter`] with the claim and takeover limits of `p`. After a start
+    /// the voter refuses for as long as its longest grant (the claim time), so a restart never
+    /// grants a lease another voter may still count as held.
+    pub fn enable_train_voter_with(&self, p: &crate::train_job::JobPolicy) -> Result<bool> {
         use weirdnet_sync::{Voter, Voters};
         let mut st = self.lock();
         let me = st.our_cert.peer_id.clone();
         let granted = st.roster.grant_of(&me).map(|g| g.roles.iter().any(|r| r == ROLE_MODEL) && g.types.iter().any(|t| t == TRAIN_TYPE));
-        if !granted.unwrap_or(false) || !st.types.iter().any(|t| t == TRAIN_TYPE) {
+        if !granted.unwrap_or(false) {
             st.set_voter(None);
             return Ok(false);
         }
@@ -565,10 +573,9 @@ impl Membership {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Voter::new(candidates),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        let p = crate::train_job::JobPolicy::default();
         let (claim, takeover) = (std::time::Duration::from_millis(p.claim_ms), std::time::Duration::from_millis(p.takeover_after_ms));
         let voter = base
-            .with_max_duration(claim.max(weirdnet_sync::lease::DEFAULT_DURATION))
+            .with_max_duration(claim)
             .with_limits(format!("{TRAIN_TYPE}/"), claim, takeover)
             .with_persist(move |b| write_private(&path, b).map_err(std::io::Error::other));
         st.set_voter(Some(voter));
