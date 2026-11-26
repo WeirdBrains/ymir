@@ -75,6 +75,15 @@ pub enum PoolCmd {
     Addresses,
     /// Revoke a device everywhere this roster reaches.
     Revoke { peer: String },
+    /// Bragi devices this node can wake (push wake-ups), or wake DEVICE (a peer id or label) so
+    /// it syncs. Through the relay the device keeps a wake connection to; a seed holder only (a
+    /// cert-only node never holds the wake cards). Sending needs the running node.
+    Wake {
+        device: Option<String>,
+        /// Say a connection is waiting, not a message.
+        #[arg(long)]
+        connection: bool,
+    },
     /// Start a new Weirdnet identity on this node, for a cloud of its own.
     Init {
         /// Yes, a new identity, separate from the one Morph holds.
@@ -347,6 +356,34 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 let c = m.revoke(&peer)?;
                 writeln!(out, "{} ({}) is revoked", c.label, c.peer_id)?;
             }
+            Ok(())
+        }
+        PoolCmd::Wake { device: None, .. } => {
+            let m = Membership::open(&dir)?.context("this node is not linked")?;
+            if m.is_service() {
+                writeln!(out, "This node is linked cert-only: it never holds the wake cards; wake from one that holds the seed.")?;
+                return Ok(());
+            }
+            let devices = ymir_core::wake::wakeable(&m);
+            if devices.is_empty() {
+                writeln!(out, "No device shares a wake card yet (Bragi 0.15.0 or newer, wake-ups on).")?;
+            }
+            for d in devices {
+                let how = if d.relay.is_some() { "through its relay" } else { "push only (not built here)" };
+                writeln!(out, "{}  {}  {how}", d.label, d.peer_id)?;
+            }
+            Ok(())
+        }
+        PoolCmd::Wake { device: Some(device), connection } => {
+            if !daemon_on_weirdnet(paths).await {
+                bail!("waking a device needs the running node (ymird on Weirdnet)");
+            }
+            let reason = if connection { "connection" } else { "message" }.to_string();
+            let r = control::request(&paths.socket(), &ControlRequest::PoolWake { device, reason }).await?;
+            if !r.ok {
+                bail!("{}", r.message.unwrap_or_default());
+            }
+            writeln!(out, "{}", r.message.unwrap_or_default())?;
             Ok(())
         }
     }

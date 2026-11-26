@@ -9,7 +9,7 @@ name = "Ymir"
 updated = "2026-11-24"
 intro = "Ymir is built in milestones. Each one lands its Weirdnet crate work first, published on crates.io, and then the Ymir side. Status comes from the design doc. Training work follows a separate plan: P1, P4a and P2 are built; P3a and P4b are built and tested with a mock trainer and mock models."
 design = "https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md"
-unpublished = ["weirdnet-push"]   # planned crates with no crates.io page yet
+unpublished = []   # planned crates with no crates.io page yet
 
 [[milestone]]
 id = "M0"
@@ -78,7 +78,7 @@ crates = []
 id = "M9"
 title = "Breadth and hardening"
 status = "in-progress"
-summary = "Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher (`ymirctl update fetch` and `update watch`, which hears announcements from a relay). Next: push wake-ups, BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it)."
+summary = "Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher (`ymirctl update fetch` and `update watch`, which hears announcements from a relay). Push wake-ups over the relay wake path: a seed holder syncs Bragi's wake cards (never a cert-only node) and `ymirctl pool wake DEVICE` wakes one. Next: APNs/FCM wake-ups, BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it)."
 crates = ["weirdnet-update", "weirdnet-push", "weirdnet-agent"]
 
 [[milestone]]

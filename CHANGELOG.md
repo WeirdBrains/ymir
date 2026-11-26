@@ -8,6 +8,7 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- Push wake-ups, Ymir's side (M9, with Bragi 0.15.0's B4; `weirdnet-push` 0.1.1): a node that holds the seed syncs Bragi's wake cards (`bragi.wake`, sealed) with the user's other full devices and can wake a Bragi device so it syncs: `ymirctl pool wake` lists the devices, `ymirctl pool wake DEVICE [--connection]` sends a sealed, content-free wake through the relay the device keeps a wake connection to (Bragi's opt-in "Wake through your relay"). No service grant lists `bragi.wake`, so a cert-only inference or model node never holds the cards (`service_bundle` refuses a grant that would). Cards are pulled every 2 minutes, not every sync pass. APNs and FCM are not built.
 - Training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): a board job's dataset and checkpoints
   move between the owner's devices, so another node resumes a job without a shared folder or copying files
   by hand. Every `ymird` on Weirdnet serves its training store (`LocalBlobs`) to the owner's linked devices

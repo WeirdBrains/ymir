@@ -65,6 +65,13 @@ pub enum ControlRequest {
     PoolRevoke {
         peer: String,
     },
+    /// Wake a Bragi device (peer id or label) through its relay so it syncs (`ymirctl pool
+    /// wake`); `reason` is `message` or `connection`.
+    PoolWake {
+        device: String,
+        #[serde(default = "message")]
+        reason: String,
+    },
     /// Add a message to a conversation in this node's context store (it syncs to the user's
     /// other inference and app nodes).
     ContextAdd {
@@ -181,6 +188,10 @@ pub enum ControlRequest {
 
 fn user() -> String {
     "user".into()
+}
+
+fn message() -> String {
+    "message".into()
 }
 
 fn yes() -> bool {
@@ -884,6 +895,23 @@ impl ControlHandler {
                 let mut r = ControlResponse::ok(format!("{} task(s), {failed} failed", items.len()));
                 r.batch = items;
                 r
+            }
+            ControlRequest::PoolWake { device, reason } => {
+                let Some((m, node)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                let reason = match reason.as_str() {
+                    "message" => weirdnet_push::Reason::MessageWaiting,
+                    "connection" => weirdnet_push::Reason::ConnectionRequested,
+                    other => return ControlResponse::err(format!("unknown wake reason {other:?} (message or connection)")),
+                };
+                let devices = crate::wake::wakeable(m);
+                let Some(d) = crate::wake::find(&devices, &device) else {
+                    return ControlResponse::err(format!("{device} shares no wake card with this node"));
+                };
+                match crate::wake::wake(node, d, reason).await {
+                    Ok(weirdnet_push::relaywake::Delivery::Delivered) => ControlResponse::ok(format!("woke {}", d.label)),
+                    Ok(other) => ControlResponse::err(format!("{}: the relay answered {other:?}", d.label)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
             }
             ControlRequest::PoolRevoke { peer } => {
                 let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
