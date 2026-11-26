@@ -264,6 +264,52 @@ async fn the_catalog_reports_the_context_a_request_can_count_on_and_never_invent
     assert_eq!(ymir_core::model_node::request_context(weirdnet_backends::EngineKind::Llamacpp, Some(0), None), None);
 }
 
+#[test]
+fn the_catalog_reports_the_strictest_media_limits_and_leaves_unknown_ones_out() {
+    use weirdnet_agent::MediaLimits;
+    struct Limited(&'static str, Vec<(&'static str, MediaLimits)>);
+    impl ModelNode for Limited {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn status(&self) -> Vec<ModelStatus> {
+            self.1
+                .iter()
+                .map(|(id, l)| {
+                    let mut s = status(id, false, READY);
+                    s.capabilities = Some(weirdnet_backends::Capabilities::text().with_vision(true).with_limits(*l));
+                    s
+                })
+                .collect()
+        }
+        fn load<'a>(&'a self, _model: &'a str, _force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn unload<'a>(&'a self, _model: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn chat<'a>(&'a self, _model: &'a str, _req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
+            Box::pin(async { Err(RemoteError::unavailable("not in this test")) })
+        }
+        fn embed<'a>(&'a self, _model: &'a str, _input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>> {
+            Box::pin(async { Err(RemoteError::unavailable("not in this test")) })
+        }
+    }
+    let a = Arc::new(Limited(
+        "a",
+        vec![("alpha", MediaLimits::new().with_max_images(8).with_image_tokens(256).with_image_edge(896)), ("beta", MediaLimits::UNKNOWN)],
+    ));
+    let b = Arc::new(Limited("b", vec![("alpha", MediaLimits::new().with_max_images(4).with_image_tokens(280).with_audio_max_seconds(30))]));
+    let c = Coordinator::new(vec![a as Arc<dyn ModelNode>, b as Arc<dyn ModelNode>], Some("alpha".into()), Arc::new(NoCache));
+    let cat = c.agent_catalog();
+    let of = |id: &str| cat.iter().find(|m| m.id == id).unwrap().limits;
+    let alpha = of("alpha");
+    assert_eq!((alpha.max_images, alpha.image_tokens, alpha.image_edge, alpha.audio_max_seconds), (Some(4), Some(280), Some(896), Some(30)));
+    assert!(of("beta").is_unknown(), "nothing reported, nothing invented");
+    assert_eq!(ymir_core::model_node::limits_line(&alpha).as_deref(), Some("4 images, 280 tokens per image, edge 896 px, audio up to 30 s"));
+    assert_eq!(ymir_core::model_node::limits_line(&MediaLimits::UNKNOWN), None);
+}
+
 #[tokio::test]
 async fn the_catalog_merges_nodes_with_different_models() {
     let a = Scripted::new("a", &[("alpha", false, READY), ("emb", true, READY)]);

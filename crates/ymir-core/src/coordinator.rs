@@ -80,6 +80,9 @@ pub struct CatalogRow {
     /// [`request_context`](crate::model_node::request_context) of the nodes that have it. `None`
     /// when any of them doesn't say, since the request may go there; never a guess.
     pub context: Option<u32>,
+    /// Media and request limits: the strictest of each limit across the nodes that have it
+    /// (`MediaLimits::tightest`); a limit no node reports stays absent.
+    pub limits: weirdnet_agent::MediaLimits,
 }
 
 impl CatalogRow {
@@ -337,7 +340,9 @@ impl Coordinator {
                     origin: None,
                     license: None,
                     context: None,
+                    limits: weirdnet_agent::MediaLimits::UNKNOWN,
                 });
+                row.limits = row.limits.tightest(s.limits());
                 match crate::model_node::request_context(s.engine, s.context, s.slots) {
                     Some(c) if !unknown_context.contains(&s.id) => row.context = Some(row.context.map_or(c, |r| r.min(c))),
                     _ => {
@@ -469,6 +474,7 @@ impl Coordinator {
                 if let Some(ctx) = m.context {
                     c = c.with_context(ctx);
                 }
+                c = c.with_limits(m.limits);
                 if let Some(base) = &m.base {
                     c = c.with_base(base);
                 }

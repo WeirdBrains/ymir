@@ -995,6 +995,10 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
                 Some(c) => extra.push_str(&format!(", context {c} per request")),
                 None => extra.push_str(", context not reported"),
             }
+            match m.capabilities.and_then(|c| ymir_core::model_node::limits_line(&c.limits)) {
+                Some(l) => extra.push_str(&format!(", limits: {l}")),
+                None => extra.push_str(", media limits not reported"),
+            }
         }
         if let Some(s) = m.last_load_secs {
             extra.push_str(&format!(", loads in {s:.1}s"));
