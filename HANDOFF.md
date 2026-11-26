@@ -2,6 +2,12 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 10:25 EST: v0.20.0 released
+
+**Release:** [v0.20.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.20.0) (release commit 7cec694 on 1a934ac, the `--no-ff` merges of `docs/bragi-status-0.15` ddb2210, `feature/push-wake` 77d35dc and `feature/m6-placement` 1a934ac; Release run 45838670704, green): M6 `ymirctl move` (also the `ymir_move_model` MCP tool), placement with replica counts under the `ymir.scheduler` lease (`[inference.placement]`), and push wake-ups of Bragi devices from seed holders. 42 files on GitHub: leak scan 31 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.20.0` EXIT 0); `weirdnet_release.py assets 0.20.0` ok. Arch recipes f9bf1cd on main; TAUR ymir-bin and ymir-cuda-bin 0.20.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched.
+
+**Next:** M9 FreeBSD (rc.d service, `package.py` tar.gz/pkg, FreeBSD VM CI job) and the M6 semantic cache (`weirdnet-semcache` 0.2.2) with one sync session per device (`weirdnet-sync` 0.8.5 `pull_types_shared`), merging to main next.
+
 ## 2026-11-26 09:00 EST: v0.19.0 released
 
 **Release:** [v0.19.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.19.0) (release commit c72762d on 0a3e0b0, the `--no-ff` merge of `feature/blobs`; Release run 45824407253, green): training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): another node resumes a board job with its dataset and checkpoint fetched from the devices that hold them, each file checked against its manifest, and registers itself as a holder. The cut ran every check before pushing (fmt, clippy, 55 test suites). The leak scan of dist found nothing (31 files, 0 hits); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles with their sums (42 files); the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.19.0-1; their recipes are on this branch (`chore/release-0.19.0`).
