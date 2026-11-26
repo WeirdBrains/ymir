@@ -271,9 +271,15 @@ pub struct BatchJsonlArgs {
     #[arg(long, requires = "jsonl")]
     pub out: Option<PathBuf>,
     /// The teacher model's license (an SPDX id such as `apache-2.0`), recorded in the manifest.
-    /// Some licenses forbid training on a model's outputs: check before you generate.
+    /// Some licenses forbid training on a model's outputs: check before you generate. Without it,
+    /// the license comes from `--license-from`, else from the pool's catalog when it knows the
+    /// teacher's (a model pulled from the Hub or uploaded with one).
     #[arg(long, requires = "jsonl")]
     pub license: Option<String>,
+    /// Read the teacher's license from this Hugging Face repo's model card (OWNER/NAME): the
+    /// repo the teacher's weights came from.
+    #[arg(long, requires = "jsonl", conflicts_with = "license")]
+    pub license_from: Option<String>,
     /// Accept `--license unknown`.
     #[arg(long, requires = "jsonl")]
     pub allow_unknown_license: bool,
@@ -1379,6 +1385,33 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
     Ok(())
 }
 
+/// The teacher's license and where it came from: `--license` (the operator), `--license-from`
+/// (the Hub repo's model card), or the pool's catalog.
+async fn teacher_license(paths: &Paths, out: &mut dyn Write, teacher: &str, license: Option<String>, from: Option<&str>) -> Result<(String, String)> {
+    if let Some(l) = license {
+        return Ok((l, "operator".into()));
+    }
+    if let Some(repo) = from {
+        // The token goes to the public Hub only, never to a mirror (as for downloads).
+        let hub_url = weirdnet_model::ModelStore::from_env().hub().to_string();
+        let token = ymir_core::models::find_hf_token(&paths.state()).map(|(t, _)| t).filter(|_| hub_url == weirdnet_model::store::HUB);
+        let repo_s = repo.to_string();
+        let l = tokio::task::spawn_blocking(move || models::hub::MlxHub::new(&hub_url, token).license(&repo_s)).await??;
+        let Some(l) = l else { bail!("{repo}'s model card states no license; give it with --license (or `unknown` with --allow-unknown-license)") };
+        writeln!(out, "Teacher license: {l} (from {repo}'s model card on the Hub)")?;
+        return Ok((l, format!("hub:{repo}")));
+    }
+    let models = bridge(paths).await?.models().await.ok();
+    if let Some((l, origin)) = models.as_ref().and_then(|m| ymir_core::dataset::catalog_license(m, teacher)) {
+        let via = origin.map(|o| format!(", {o}")).unwrap_or_default();
+        writeln!(out, "Teacher license: {l} (the pool's catalog{via})")?;
+        return Ok((l, "pool".into()));
+    }
+    bail!(
+        "--jsonl needs the teacher's license (some forbid training on outputs) and the pool doesn't know `{teacher}`'s: give --license, or --license-from OWNER/NAME to read it from the Hub repo's model card; `--license unknown` with --allow-unknown-license"
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn batch_jsonl(
     paths: &Paths,
@@ -1396,14 +1429,13 @@ async fn batch_jsonl(
     }
     let Some(teacher) = model else { bail!("--jsonl needs --model: the teacher model") };
     let Some(output) = a.out else { bail!("--jsonl needs --out FILE") };
-    let Some(license) = a.license else {
-        bail!("--jsonl needs --license: the teacher model's license (some forbid training on outputs); `unknown` with --allow-unknown-license")
-    };
+    let (license, license_source) = teacher_license(paths, out, &teacher, a.license, a.license_from.as_deref()).await?;
     let g = Generate {
         input: PathBuf::from(file),
         output,
         teacher,
         license,
+        license_source,
         allow_unknown_license: a.allow_unknown_license,
         defaults: RowDefaults { system: a.system, temperature: a.temperature, top_p: a.top_p, max_tokens: a.max_tokens, seed: a.seed },
         sources: a.sources,

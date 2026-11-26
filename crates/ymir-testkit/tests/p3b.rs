@@ -263,6 +263,8 @@ async fn ymirctl_runs_lists_and_resumes_a_job() -> Result<()> {
     let jobs = ctl(&home, &["train", "jobs"]).await?;
     assert!(jobs.contains("queued") && jobs.contains("checkpoint epoch 1 of 2") && jobs.contains("attempt 1 of 3"), "{jobs}");
     let id = jobs.split_whitespace().next().unwrap().to_string();
+    let st = ctl(&home, &["train", "status"]).await?;
+    assert!(st.contains(&format!("job {id}  queued")) && st.contains("(attempt 1, checkpoint epoch 1)") && st.contains("failed"), "{st}");
     // The retry waits out its back-off; the owner pauses and unpauses it to go now.
     ctl(&home, &["train", "job", "pause", &id]).await?;
     assert!(ctl(&home, &["train", "job", "unpause", &id]).await?.contains("queued"));

@@ -820,6 +820,13 @@ node on the roster and sends the dataset, manifest and settings with its certifi
 `[train] remote = true`, to the owner's devices (`[train] callers` narrows them), runs `train::run` in process and
 streams its lines back. Closing the stream cancels the run; node.toml is never edited from the network.
 
+Every model node on Weirdnet also answers `/ymir/train-status/1` (2026-11-25), read-only, for any of the owner's
+linked devices: `TrainStatus` with `[train] remote`, its newest 50 runs (`RunSummary`: status, base, adapter id and
+revision, dataset name and license, teacher, rows, epochs, steps, loss, times, error, checkpoints) and its jobs
+(`JobSummary`: state, holder, attempts, last checkpoint). No local paths leave the node. `ymirctl train status
+[--node X] [--json]` shows it, and Bragi's training view reads it with the rollouts (`/ymir/rollouts/1`) to show runs,
+versions and canary shares.
+
 `ymirctl train run --job` (P3b, 2026-11-25) makes the run a resumable job: trainer interface 2 checkpoints after each
 epoch, and the job record (`ymir_core::train_job`: a lease with a fencing term, attempts, back-off, the last
 checkpoint's content root) lets `ymirctl train resume JOB` carry it on from there, on this node or, with `[train]
@@ -1247,7 +1254,8 @@ the job carries on without it. A subtask never gains tools the parent didn't hav
 Built 2026-11-22 (see [docs/design/training.md](design/training.md)). `ymirctl batch --jsonl` sends rows with their own
 messages, sampling and seed (`ControlRequest::BatchTasks`, `ymir_core::batch::BatchTask`) in chunks of 32, waits for the
 teacher model (no stand-in), and writes JSONL rows plus `OUT.manifest.json` (`ymir_core::dataset`): teacher, the
-operator's `--license` (required; `unknown` only with `--allow-unknown-license`), input hash, counts and the models that
+teacher's license (`--license`, else `--license-from` a Hub repo's model card, else the pool catalog's; `unknown`
+only with `--allow-unknown-license`), input hash, counts and the models that
 answered. A row is `usable` only when it answered fresh from the teacher; cache hits and stand-ins are read from the
 answer's `Meta`. `--resume` skips rows already answered and keeps the job id. `ymirctl eval` scores models on rows with
 `expect` (the bench scorers) and/or `rubric` (graded by `--judge`), at temperature 0 with a fixed seed.

@@ -8,6 +8,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- `ymirctl batch --jsonl` without `--license` takes the teacher's license from `--license-from OWNER/NAME` (the Hub
+  repo's model card) or from the pool catalog, and records where it came from (`hub:OWNER/NAME`, `pool`); it still
+  refuses when neither knows it.
+- `ymirctl train status [--node NODE]`: a model node's runs and jobs over Weirdnet (`/ymir/train-status/1`, read-only,
+  any of the owner's linked devices), for Bragi's training view.
+- `ymirctl train seed questions` and `train seed prompts`: seed prompts from source texts the operator fetched, in two
+  passes through the teacher (excerpts to questions, questions to prompt rows that keep their source).
+
 - Resumable training jobs (training plan P3b, Ymir side): `ymirctl train run --job` checkpoints after each epoch, and
   `ymirctl train resume JOB` carries a failed, lost or paused job on from its last checkpoint, checked against the
   job's dataset, settings, base revision and trainer build; `train jobs` lists them and `train job pause|unpause|cancel`

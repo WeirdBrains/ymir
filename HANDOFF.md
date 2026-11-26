@@ -3,7 +3,23 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
-## 2026-11-25 22:40 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
+## 2026-11-25 22:15 EST: training status over Weirdnet (branch `feature/train-status`)
+
+- `/ymir/train-status/1` (`ymir_core::train_net::{TrainStatus, RunSummary, JobSummary, StatusReply}`), served by every
+  model node on Weirdnet for any linked device (`remote::serve_train_status`), and `TrainHub::status`;
+  `ControlRequest::TrainStatus`; `ymirctl train status [--node X] [--json]`. For Bragi's training view.
+- Tests: `p3a_remote.rs` (status from an app-only device, of a node with and without `[train] remote`), `p3b.rs` (jobs).
+
+## 2026-11-25 22:05 EST: teacher license lookup and seed prompts (branch `feature/teacher-license`)
+
+- `batch --jsonl` without `--license`: `--license-from OWNER/NAME` reads the Hub repo's model card
+  (`MlxHub::license`, `ymir_core::dataset::hub_license`; the token goes to the public Hub only), else the pool
+  catalog's `weirdnet.license` (`catalog_license`). `Generate.license_source` records `operator`, `hub:REPO` or `pool`.
+- `ymirctl train seed questions|prompts` (`ymir_core::seed`): source texts to question rows, answers to prompt rows.
+- Tests: `dataset.rs` (pool-catalog license, both seed passes through the mock pool), unit tests in `seed.rs`,
+  `dataset.rs`, `models/hub.rs`. Built on `feature/p3b-resume`.
+
+## 2026-11-25 21:50 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
 
 **What changed:** trainer interface 2 (`train --checkpoint-dir DIR` writes `epoch-NNNN/` with `checkpoint.json`, `ymir-train-checkpoint/1`; `--resume CKPT`), spoken by the mock trainer and `scripts/trainer.py` (one `llama-finetune --epochs 1` per epoch: the pinned build saves weights only at the end and has no optimizer state, so AdamW restarts each epoch; no shuffle and a constant learning rate keep the data order and schedule the same). `ymir_core::train_job`: the job record, lease with fencing term, attempts, back-off and checkpoint pointer as the `JobStore` trait asked of `weirdnet-agent` 0.6.0, with `FileJobStore` and `LocalBlobs` standing in on one node; `start`/`resume` drive a run under a claim (renew, publish checkpoints, finish, fail with or without retry, pause on Ctrl-C, stop on a lost lease) after `check_resumable` (trainer build, base revision, `--from`, adapter id, `[train] resume`). `ymirctl train run --job`, `train jobs`, `train resume JOB`, `train job pause|unpause|cancel JOB`. Docs: training.md (P3b), DESIGN, CHANGELOG, site.
 

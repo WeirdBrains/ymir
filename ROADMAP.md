@@ -74,7 +74,7 @@ Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
 
 ## P1 Data generation and evals (Done)
 
-Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests, resume, bench scorers and an optional judge). Left: the teacher license read from the Hugging Face Hub, turning sources into seed prompts, and a job record that stays in sync across nodes.
+Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests, resume, bench scorers and an optional judge). The teacher's license comes from `--license`, the Hub repo's model card (`--license-from`) or the pool catalog, and `ymirctl train seed` turns source texts into seed prompts in two passes through the teacher. Left: a job record that stays in sync across nodes.
 
 Weirdnet crates: `weirdnet-agent`.
 
@@ -98,6 +98,6 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## P3 Fine-tuning as a pool job (In progress)
 
-P3a is built: `ymirctl train run` fine-tunes a llama.cpp base on one node with the pinned upstream llama.cpp build (a full fine-tune, then a LoRA adapter extracted from it), from a dataset with a recorded source and license. The node's GPU is held for the run with `weirdnet-backends`' new reservation, so its models unload and nothing loads there until the run ends. The llama.cpp trainer (`scripts/trainer.py`: `llama-finetune` at the engine's pinned build, then LoRA extraction by truncated SVD) is built and tested against a fake `llama-finetune`; no real run yet. Next: a first real run on a node the lead clears. A synced job record and resume on another node come later (P3b).
+P3a is built: `ymirctl train run` fine-tunes a llama.cpp base on one node with the pinned upstream llama.cpp build (a full fine-tune, then a LoRA adapter extracted from it), from a dataset with a recorded source and license. The node's GPU is held for the run with `weirdnet-backends`' new reservation, so its models unload and nothing loads there until the run ends. The llama.cpp trainer (`scripts/trainer.py`: `llama-finetune` at the engine's pinned build, then LoRA extraction by truncated SVD) is built and tested against a fake `llama-finetune`; no real run yet. Next: a first real run on a node the lead clears. P3b's Ymir side is built: `train run --job` checkpoints each epoch and `train resume` carries a job on from its last checkpoint, on a local stand-in for the synced job record that `weirdnet-agent` 0.6.0 will provide.
 
 Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`.

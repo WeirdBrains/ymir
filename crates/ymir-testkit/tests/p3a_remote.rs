@@ -186,6 +186,19 @@ async fn an_app_only_device_trains_on_a_model_node_over_weirdnet() -> Result<()>
     let err = format!("{:#}", ctl(&ctl_h.home, &["train", "run", "--base", "alpha", "--dataset", DATASET, "--node", "laptop"]).await.unwrap_err());
     assert!(err.contains("is this device"), "{err}");
 
+    // Any linked device reads the node's training status (read-only, Bragi's training view),
+    // also from a node that doesn't take runs.
+    let said = ctl(&ctl_h.home, &["train", "status", "--node", "gpu"]).await?;
+    assert!(said.contains("gpu: 1 runs, 0 jobs; takes runs from your devices."), "{said}");
+    assert!(said.contains(&format!("run {}  done", r.id)) && said.contains("-> alpha+dn") && said.contains("CC0-1.0"), "{said}");
+    let json: serde_json::Value = serde_json::from_str(&ctl(&ctl_h.home, &["train", "status", "--node", "gpu", "--json"]).await?)?;
+    assert_eq!(json["runs"][0]["adapter"], "alpha+dn");
+    assert!(json["runs"][0]["adapter_revision"].as_str().is_some_and(|r| r.starts_with("sha256:")), "{json}");
+    let said = ctl(&ctl_h.home, &["train", "status", "--node", "off"]).await?;
+    assert!(said.contains("off: 0 runs, 0 jobs; trains only locally."), "{said}");
+    let local = ctl(&gpu_h.home, &["train", "status"]).await?;
+    assert!(local.contains("gpu: 1 runs"), "{local}");
+
     drop((laptop, gpu, off));
     Ok(())
 }

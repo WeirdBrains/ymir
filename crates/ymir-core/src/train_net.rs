@@ -292,6 +292,19 @@ impl TrainHub {
         }
     }
 
+    /// `node`'s training status over [`TRAIN_STATUS_PROTOCOL`], with its roster label.
+    pub async fn status(&self, node: &str) -> Result<(String, TrainStatus), String> {
+        let target = crate::models::resolve(&self.directory.devices(), node)?;
+        let mut ch = self.dialer.open(&target.peer, TRAIN_STATUS_PROTOCOL).await.map_err(|e| explain_status(&target, &e))?;
+        ch.send(&StatusAsk { cert: self.cert.clone() }).await.map_err(|e| explain_status(&target, &e))?;
+        match ch.recv::<StatusReply>().await {
+            Ok(Some(StatusReply::Status { status })) => Ok((target.label, *status)),
+            Ok(Some(StatusReply::Refused { message })) => Err(format!("{}: {message}", target.label)),
+            Ok(None) => Err(format!("{} closed the stream without answering", target.label)),
+            Err(e) => Err(explain_status(&target, &e)),
+        }
+    }
+
     fn request(&self, op: TrainOp) -> Result<RemoteRun> {
         let name = op.dataset.file_name().and_then(|n| n.to_str()).context("the dataset has no file name")?.to_string();
         let mpath = crate::dataset::manifest_path(&op.dataset);
@@ -317,6 +330,206 @@ impl TrainHub {
             keep_full: op.keep_full,
             force: op.force,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Training status (`/ymir/train-status/1`): what a model node has trained and is training
+
+/// Ymir's read-only training-status protocol on Weirdnet: a model node's runs and resumable jobs,
+/// for the owner's linked devices (Bragi's training view, `ymirctl train status --node`).
+pub const TRAIN_STATUS_PROTOCOL: &str = "/ymir/train-status/1";
+/// Runs in one answer, newest first.
+pub const STATUS_RUNS: usize = 50;
+
+/// The request on [`TRAIN_STATUS_PROTOCOL`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatusAsk {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<Vec<u8>>,
+}
+
+/// One run, as the status protocol shows it (no local paths).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub id: String,
+    pub status: train::RunStatus,
+    pub base: String,
+    /// The adapter's id and revision, when the run made one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_revision: Option<String>,
+    pub dataset: String,
+    pub dataset_license: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher: Option<String>,
+    pub rows_used: usize,
+    pub epochs: u32,
+    pub steps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_loss: Option<f64>,
+    pub started_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Checkpoints written; whether it carried on from one.
+    #[serde(default)]
+    pub checkpoints: usize,
+    #[serde(default)]
+    pub resumed: bool,
+}
+
+impl From<&RunRecord> for RunSummary {
+    fn from(r: &RunRecord) -> Self {
+        Self {
+            id: r.id.clone(),
+            status: r.status,
+            base: r.base.clone(),
+            adapter: r.adapter.as_ref().map(|a| a.id.clone()),
+            adapter_revision: r.adapter.as_ref().and_then(|a| a.revision.clone()),
+            dataset: r.dataset.name.clone(),
+            dataset_license: r.dataset.license.clone(),
+            teacher: r.dataset.teacher.clone(),
+            rows_used: r.dataset.rows_used,
+            epochs: r.hyper.epochs,
+            steps: r.steps,
+            final_loss: r.final_loss,
+            started_ms: r.started_ms,
+            ended_ms: r.ended_ms,
+            error: r.error.clone(),
+            checkpoints: r.checkpoints.len(),
+            resumed: r.resumed_from.is_some(),
+        }
+    }
+}
+
+/// One resumable job (P3b), as the status protocol shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub id: String,
+    pub state: crate::train_job::JobState,
+    pub base: String,
+    pub adapter: String,
+    /// The device running it, while it holds the lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    pub attempts: u32,
+    /// The last checkpoint's epoch, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A model node's training: whether it takes runs from other devices, its runs (newest first,
+/// at most [`STATUS_RUNS`]) and its jobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainStatus {
+    pub node: String,
+    /// `[train] remote`: it takes runs from the owner's devices.
+    pub remote: bool,
+    pub runs: Vec<RunSummary>,
+    #[serde(default)]
+    pub jobs: Vec<JobSummary>,
+}
+
+impl TrainStatus {
+    /// This node's training status, from its work directory.
+    pub fn read(paths: &Paths, cfg: &NodeConfig) -> Self {
+        let runs = train::runs(paths, &cfg.train).iter().take(STATUS_RUNS).map(RunSummary::from).collect();
+        let jobs = crate::train_job::FileJobStore::open_existing(paths, cfg)
+            .and_then(|s| crate::train_job::JobStore::list(&s).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|j| JobSummary {
+                adapter: j.payload.adapter_id.clone(),
+                base: j.payload.base.clone(),
+                holder: j.lease.as_ref().map(|l| l.holder.clone()),
+                attempts: j.attempts,
+                checkpoint_epoch: j.checkpoint.as_ref().map(|c| c.seq),
+                error: j.failure.clone(),
+                state: j.state,
+                id: j.id,
+            })
+            .collect();
+        Self { node: cfg.name(), remote: cfg.train.remote, runs, jobs }
+    }
+}
+
+/// The answer on [`TRAIN_STATUS_PROTOCOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "reply", rename_all = "snake_case")]
+pub enum StatusReply {
+    Status { status: Box<TrainStatus> },
+    Refused { message: String },
+}
+
+/// Answers [`TRAIN_STATUS_PROTOCOL`] on a model node.
+pub struct TrainStatusService {
+    paths: Paths,
+    cfg: NodeConfig,
+    auth: Arc<dyn Authorize>,
+}
+
+impl TrainStatusService {
+    pub fn new(paths: Paths, cfg: NodeConfig, auth: Arc<dyn Authorize>) -> Self {
+        Self { paths, cfg, auth }
+    }
+
+    pub async fn serve(&self, mut ch: Channel, caller: Caller) -> Result<(), RemoteError> {
+        let Some(req) = ch.recv::<StatusAsk>().await? else { return Ok(()) };
+        let caller = match (caller.cert_bytes.is_some(), req.cert) {
+            (false, Some(cert)) => caller.with_cert(cert),
+            _ => caller,
+        };
+        if let Err(e) = self.auth.authorize(&caller) {
+            return ch.send(&StatusReply::Refused { message: format!("refused: only the owner's linked devices see training here ({e})") }).await;
+        }
+        let (paths, cfg) = (self.paths.clone(), self.cfg.clone());
+        let status =
+            tokio::task::spawn_blocking(move || TrainStatus::read(&paths, &cfg)).await.map_err(|e| RemoteError::Failed { message: e.to_string() })?;
+        ch.send(&StatusReply::Status { status: Box::new(status) }).await
+    }
+}
+
+/// Accepts [`TRAIN_STATUS_PROTOCOL`] streams. Dropping it stops serving.
+pub struct TrainStatusServer {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TrainStatusServer {
+    pub fn start<Q: Message, R: Message>(node: &Arc<Node<Q, R>>, service: Arc<TrainStatusService>) -> Result<Self, RemoteError> {
+        let mut limits = stream_limits();
+        limits.max_streams = 8;
+        let mut incoming = node.accept_streams(TRAIN_STATUS_PROTOCOL, limits).map_err(|e| RemoteError::Failed { message: e.to_string() })?;
+        let task = tokio::spawn(async move {
+            while let Some(stream) = futures::StreamExt::next(&mut incoming).await {
+                let caller = Caller::new(stream.peer().to_string());
+                let svc = service.clone();
+                tokio::spawn(async move {
+                    let _ = svc.serve(channel(stream), caller).await;
+                });
+            }
+        });
+        Ok(Self { task })
+    }
+}
+
+impl Drop for TrainStatusServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// [`explain`], for the status protocol.
+fn explain_status(t: &Target, e: &RemoteError) -> String {
+    match e {
+        RemoteError::Unsupported { .. } | RemoteError::Protocol { .. } => {
+            format!("{} does not report training over Weirdnet (it needs the model role and a ymird that knows {TRAIN_STATUS_PROTOCOL})", t.label)
+        }
+        other => explain(t, other),
     }
 }
 

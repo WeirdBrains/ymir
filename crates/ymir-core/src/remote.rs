@@ -296,6 +296,18 @@ pub fn serve_train(
     crate::train_net::TrainServer::start(node, service)
 }
 
+/// Serves `/ymir/train-status/1` on a model node: its runs and jobs, read-only, for any linked
+/// device (like models/1).
+pub fn serve_train_status(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    paths: crate::Paths,
+    cfg: crate::NodeConfig,
+) -> Result<crate::train_net::TrainStatusServer, RemoteError> {
+    let service = Arc::new(crate::train_net::TrainStatusService::new(paths, cfg, roster_auth(m)));
+    crate::train_net::TrainStatusServer::start(node, service)
+}
+
 /// Serves `/ymir/uploads/1` on `node` next to models/1: after an upload, the uploader's `ymird`
 /// has this node record the entry's revision and (unless `--no-persist`) save it in node.toml.
 /// Any linked device, like models/1.

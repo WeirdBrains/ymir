@@ -41,6 +41,20 @@ pub enum TrainCmd {
     Check,
     /// The runs on this node, newest first.
     List,
+    /// Another model node's runs and jobs over Weirdnet (`/ymir/train-status/1`, read-only; what
+    /// Bragi's training view shows). Without --node, this node's.
+    Status {
+        #[arg(long)]
+        node: Option<String>,
+        /// Print the answer as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Seed prompts from sources, in two passes through the teacher: `questions` turns the
+    /// operator's source texts into rows asking for questions, `prompts` turns the teacher's
+    /// answers into prompt rows for `batch --jsonl`.
+    #[command(subcommand)]
+    Seed(SeedCmd),
     /// Resumable training jobs (`run --job`), newest first.
     Jobs,
     /// Carry a job on from its last checkpoint on this node: one that failed with a retry left, was
@@ -123,6 +137,36 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
             let cfg = crate::load_cfg(paths)?;
             let (program, v) = train::check_trainer(&cfg.train).await?;
             writeln!(out, "{}: {} build {} (interface {}), as pinned.", program.display(), v.engine, v.build, v.interface)?;
+            Ok(())
+        }
+        TrainCmd::Seed(c) => seed(out, c),
+        TrainCmd::Status { node, json } => {
+            let status = match node {
+                None => ymir_core::train_net::TrainStatus::read(paths, &crate::load_cfg(paths)?),
+                Some(node) => {
+                    let r = control::request(&paths.socket(), &ControlRequest::TrainStatus { node }).await?;
+                    if !r.ok {
+                        bail!("{}", r.message.unwrap_or_default());
+                    }
+                    r.train_status.context("ymird answered without a training status (is it older than this ymirctl?)")?
+                }
+            };
+            if json {
+                writeln!(out, "{}", serde_json::to_string_pretty(&status)?)?;
+                return Ok(());
+            }
+            let remote = if status.remote { "takes runs from your devices" } else { "trains only locally" };
+            writeln!(out, "{}: {} runs, {} jobs; {remote}.", status.node, status.runs.len(), status.jobs.len())?;
+            for r in &status.runs {
+                let st = serde_json::to_value(r.status)?.as_str().unwrap_or_default().to_string();
+                let adapter = r.adapter.as_ref().map(|a| format!("  -> {a}")).unwrap_or_default();
+                let loss = r.final_loss.map(|l| format!("  loss {l:.4}")).unwrap_or_default();
+                writeln!(out, "  run {}  {st:<9} {} on {} ({} rows, {}){loss}{adapter}", r.id, r.base, r.dataset, r.rows_used, r.dataset_license)?;
+            }
+            for j in &status.jobs {
+                let at = j.checkpoint_epoch.map(|e| format!(", checkpoint epoch {e}")).unwrap_or_default();
+                writeln!(out, "  job {}  {:<9} {} -> {} (attempt {}{at})", j.id, j.state.to_string(), j.base, j.adapter, j.attempts)?;
+            }
             Ok(())
         }
         TrainCmd::List => {
@@ -458,6 +502,76 @@ fn finish_run(out: &mut dyn Write, config: &std::path::Path, text: &str, base: &
         writeln!(out, "Added it to node.toml on `{}` (revision {revision}). Restart ymird to serve it.", base)?;
     } else {
         writeln!(out, "To serve it: ymirctl models adapter add {} {} --id {} --revision {revision}", base, adapter.file, adapter.id)?;
+    }
+    Ok(())
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SeedCmd {
+    /// Pass 1: cut each source's text (DIR/ID.txt or DIR/ID.md, one per source in the manifest;
+    /// Ymir fetches nothing) into excerpts, one row each asking the teacher for questions the
+    /// excerpt answers. Then: `ymirctl batch OUT --jsonl --model TEACHER --sources FILE --out ANSWERS`.
+    Questions {
+        /// The sources manifest (as for `batch --sources`).
+        #[arg(long)]
+        sources: PathBuf,
+        /// The directory of source texts.
+        #[arg(long)]
+        texts: PathBuf,
+        /// The rows to write (JSONL); it must not exist.
+        #[arg(long)]
+        out: PathBuf,
+        /// The longest excerpt, in characters.
+        #[arg(long, default_value_t = ymir_core::seed::Seeding::default().chunk_chars)]
+        chunk_chars: usize,
+        /// Questions per excerpt (1 to 20).
+        #[arg(long, default_value_t = ymir_core::seed::Seeding::default().questions)]
+        questions: u32,
+        /// At most this many excerpts per source.
+        #[arg(long)]
+        max_per_source: Option<usize>,
+        /// Accept sources whose license is `unknown`.
+        #[arg(long)]
+        allow_unknown_license: bool,
+    },
+    /// Pass 2: the `Question:` lines in the teacher's usable answers to pass 1, as prompt rows
+    /// naming their source (duplicates dropped). Then: `ymirctl batch OUT --jsonl --model TEACHER
+    /// --sources FILE --out DATASET`.
+    Prompts {
+        /// Pass 1's answers (`batch --jsonl` output).
+        answers: PathBuf,
+        /// The rows to write (JSONL); it must not exist.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+fn seed(out: &mut dyn Write, cmd: SeedCmd) -> Result<()> {
+    use ymir_core::seed;
+    let (dest, text, sum, what) = match cmd {
+        SeedCmd::Questions { sources, texts, out: dest, chunk_chars, questions, max_per_source, allow_unknown_license } => {
+            let s = std::fs::read_to_string(&sources).with_context(|| format!("reading {}", sources.display()))?;
+            let s = ymir_core::dataset::Sources::parse(&s, allow_unknown_license)?;
+            let opts = seed::Seeding { chunk_chars, questions, max_per_source, ..Default::default() };
+            let (text, sum) = seed::question_rows(&s, &texts, &opts)?;
+            (dest, text, sum, "question rows")
+        }
+        SeedCmd::Prompts { answers, out: dest } => {
+            let a = std::fs::read_to_string(&answers).with_context(|| format!("reading {}", answers.display()))?;
+            let (text, sum) = seed::prompts_from_answers(&a)?;
+            (dest, text, sum, "prompt rows")
+        }
+    };
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)
+        .with_context(|| format!("creating {} (it must not exist)", dest.display()))?;
+    f.write_all(text.as_bytes())?;
+    let per = sum.per_source.iter().map(|(s, n)| format!("{s} {n}")).collect::<Vec<_>>().join(", ");
+    writeln!(out, "Wrote {} {what} to {} ({per}).", sum.rows, dest.display())?;
+    if sum.skipped > 0 || sum.duplicates > 0 {
+        writeln!(out, "Skipped {} answers (not usable or no source) and {} duplicate questions.", sum.skipped, sum.duplicates)?;
     }
     Ok(())
 }
