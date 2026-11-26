@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-26
+
 ### Added
 
 - `ymirctl engines install vllm`: vLLM and Ray in a managed venv (`<home>/engines/vllm`), with `uv` when it is on PATH
@@ -30,6 +32,7 @@ All notable changes to Ymir are listed here. The format follows
   `MediaLimits` across nodes (images per request, per-image token cost or patch, edge, audio length, request bytes), from the
   engine or `limits = { ... }` on a `[model.local]`; nothing is defaulted. `[bridge] max_request_bytes` sets the OpenAI
   bridge's body limit (a 413 names it). `ymirctl status` shows both. Weirdnet: agent 0.5.7, backends 0.4.8, openai 0.2.4.
+- M7 vLLM with Ray groups (vllm-ray, private-link only), ymirctl engines install vllm (a managed vLLM nightly that runs Inkling 2 Mini, plus Ray), and video limits in catalog/1.
 
 ### Changed
 

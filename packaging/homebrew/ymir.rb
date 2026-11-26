@@ -3,7 +3,7 @@
 class Ymir < Formula
   desc "Private cloud of LLM models on your own machines (node daemon and CLI)"
   homepage "https://github.com/WeirdBrains/ymir"
-  version "0.21.0"
+  version "0.22.0"
   license all_of: ["BSD-3-Clause", "MIT"] # Ymir; the bundled llama.cpp
 
   on_arm do
