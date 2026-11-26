@@ -287,7 +287,8 @@ impl Daemon {
                     // added to the supervisor in memory. An upload is also recorded and, unless the
                     // uploader says `--no-persist`, saved in node.toml (/ymir/uploads/1).
                     let store = crate::models::store(cfg.models_dir(), &paths.state());
-                    let policy = weirdnet_backends::models::WritePolicy::default().with_keep_free(cfg.model.keep_free());
+                    let policy =
+                        weirdnet_backends::models::WritePolicy::default().with_keep_free(cfg.model.keep_free()).with_uploads(cfg.model.upload);
                     let (server, svc) = remote::serve_models(
                         net,
                         sup.clone(),

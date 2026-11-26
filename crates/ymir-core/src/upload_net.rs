@@ -369,6 +369,9 @@ pub fn explain_refusal(label: &str, e: &RemoteError) -> Option<String> {
         refusal::WRONG_ARCH | refusal::NO_BASE | refusal::NOT_ADAPTER => "the adapter has to be made for that base model on that node",
         refusal::WRONG_ENGINE => "that node's engine can't serve this format",
         refusal::CHECKSUM => "the bytes arrived changed; the parts were dropped, so send it again",
+        refusal::NOT_ALLOWED if detail.contains("uploads are off") => {
+            "that node has `[model] upload = false`; pick another node or turn uploads on there"
+        }
         refusal::NOT_ALLOWED => "only the owner's linked devices may upload (`ymirctl pool link`)",
         _ => "",
     };
