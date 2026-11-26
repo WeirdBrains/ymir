@@ -3,6 +3,18 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 03:35 EST: model nodes on the job board, ymird holds it (branch `feature/jobboard`)
+
+- weirdnet-sync 0.8.4 (Cargo.toml, Cargo.lock, release.toml `[[requires]]`): per-type keys for service devices (0.8.3) and type-scoped sealed records (0.8.4). On 0.8.3 alone m10 failed: the model node's grant lacked `ymir.pool` (refused `type-not-granted`, fixed here) and a cert-only inference node could not open sealed `ymir.context` records (fixed in weirdnet-sync 0.8.4).
+- [membership.rs](crates/ymir-core/src/membership.rs): `TRAIN_TYPE` (`ymir.train`, unsealed); `ServiceRole::Model` grants `["ymir.pool", "ymir.train"]`; a cert-only device syncs the pool and every type in its grant; full devices serve `ymir.train`; the sync pass pulls it with peers that hold it; `enable_train_voter(_with)` (model role and `ymir.train` in the grant; limits from the job policy; terms in `voter.cbor`).
+- [daemon.rs](crates/ymir-core/src/daemon.rs): the model role's voter at network start; `Network.jobs`, a `BoardJobStore` with hint-addressed leases, for the control socket and `/ymir/train-status/1`.
+- [train_jobs_ctl.rs](crates/ymir-core/src/train_jobs_ctl.rs): `ControlRequest::Jobs { call }` / `ControlResponse.job`; `ControlJobStore` (the `JobStore` over the socket; claims only as the daemon's own peer id, renewing in ymird); `cli_ctx` for `ymirctl train` (board when ymird is up on Weirdnet, else the file store). `TrainStatus::read_with` in [train_net.rs](crates/ymir-core/src/train_net.rs).
+- Tests: [tests/train_isolation.rs](crates/ymir-testkit/tests/train_isolation.rs) (a cert-only model node syncs, votes on and claims a job the seed holder posted; no epoch key and no `ymir.context` key; its context pull fails; a sealed context entry handed to it does not open), [tests/train_daemon.rs](crates/ymir-testkit/tests/train_daemon.rs) (two ymirds on 127.0.0.1: post on the holder, claim, renew, checkpoint and finish on the cert-only model node over the control socket, `train status` lists it; ~64 s, mostly the voter's 60 s restart grace).
+
+**Checks:** see the merge entry for the full run and CI.
+
+**Not done:** datasets and checkpoints stay in the writing node's `LocalBlobs`, so another node resumes a board job only if it has those files; blob transfer over Weirdnet is the follow-up after 0.18.0. Already linked cert-only model nodes keep their old roster-only grant until re-linked from a seed holder. No live nodes were touched.
+
 ## 2026-11-26 01:45 EST: training jobs on the synced job board (branch `feature/jobboard`)
 
 - [crates/ymir-core/src/train_board.rs](crates/ymir-core/src/train_board.rs): `BoardJobStore`, Ymir's `JobStore` over `weirdnet-agent` 0.5.6's `JobBoard<TrainJob>` (records, policies, checkpoint pointers and claim errors mapped; digests as plain hex; live claims kept by job id, renewing themselves).

@@ -15,8 +15,24 @@ All notable changes to Ymir are listed here. The format follows
   `ymir_core::train_board::BoardJobStore`, the `JobStore` over `weirdnet-agent`'s `JobBoard<TrainJob>`
   (job type `ymir.train`, claims as majority-vote leases among the devices with the model role). A claim
   waits up to 30 s for the voters to answer (`CLAIM_QUORUM_WAIT`, a job just posted reaches them first).
-  Model nodes don't use it yet: their grant has no sync types, so the board waits for weirdnet-sync's
-  per-type keys.
+  On Weirdnet `ymird` holds the board, and `ymirctl train run --job`, `train resume`, `train jobs`,
+  `train job pause|unpause|cancel` and `train status` use it through the control socket
+  (`ControlRequest::Jobs`, `train_jobs_ctl::ControlJobStore`); off Weirdnet, or with no `ymird` running,
+  they keep the node's file store. `/ymir/train-status/1` lists the board's jobs too.
+- Model nodes work the board: their service grant is `["ymir.pool", "ymir.train"]` (it was roster only),
+  and a model node with that grant votes on `ymir.train/` claims (`Membership::enable_train_voter`;
+  terms kept in `voter.cbor`, written before each grant; after a start it grants nothing for one claim
+  time, 60 s by default). A cert-only model node holds the key for the training jobs only, never the
+  epoch key: it cannot open conversations (`ymir.context`). Re-link existing cert-only model nodes
+  (`ymirctl pool add --service ... model` from a seed holder) to give them the new grant.
+- The sync pass pulls `ymir.train` with every device that holds it (full devices, and service devices
+  granted it); a cert-only device syncs every type in its grant.
+
+### Known limits
+
+- A job's dataset and checkpoints stay in the store of the node that wrote them (`LocalBlobs`): the
+  board carries the job and its checkpoint pointer to every device, but another node can only resume
+  the job if it already has those files. Moving them over Weirdnet is the next step.
 
 ### Changed
 
@@ -25,7 +41,10 @@ All notable changes to Ymir are listed here. The format follows
   released promptly.
 - `JobStore::claim`, `finish`, `fail` and `release` are async (the board asks the voters); checkpoints and
   renewals stay as they were. `ClaimError::NoQuorum`.
-- weirdnet-agent 0.5.6 (feature `jobs`) and weirdnet-sync 0.8.2.
+- weirdnet-agent 0.5.6 (feature `jobs`) and weirdnet-sync 0.8.4: per-type keys for service devices
+  (0.8.3) and type-scoped sealed records (0.8.4), so a cert-only inference node still seals and opens
+  `ymir.context`. Since 0.8.3 a peer refuses a service device's sync for any type outside its grant
+  (`type-not-granted`), so the model node's grant lists `ymir.pool` too.
 
 ## [0.16.0] - 2026-11-25
 
