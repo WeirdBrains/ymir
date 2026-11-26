@@ -444,7 +444,9 @@ async fn on_the_synced_board_a_run_that_loses_its_lease_stops_and_writes_nothing
         })
     };
     let mut lost = false;
-    let e = train_job::start(&n.paths, &cfg, &c, &spec(&data, 30), board_policy(), &mut never(), &mut |u| match u {
+    // Long enough that the run is never done before the takeover, however slow the machine (a
+    // run that loses its lease stops there, so the test is no slower for it).
+    let e = train_job::start(&n.paths, &cfg, &c, &spec(&data, 300), board_policy(), &mut never(), &mut |u| match u {
         JobUpdate::Posted { job } => tx.send(job).unwrap(),
         JobUpdate::Lost => lost = true,
         _ => {}
