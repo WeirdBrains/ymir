@@ -2,6 +2,16 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 10:30 EST: M9 FreeBSD service and packages (merged `wip/freebsd`)
+
+- [service.rs](crates/ymir-core/src/service.rs): `Os::FreeBsd`. `service install --system --run-as USER` writes `/usr/local/etc/rc.d/ymird` (rc.subr; `daemon(8) -r -R 5 -u USER` runs `ymird --home DIR`, output to `state/logs/ymird.log`), runs `sysrc ymird_enable=YES` and `service ymird restart`; stop/start/status go through `service ymird`; uninstall stops it, `sysrc -x ymird_enable` and removes the script. User scope is refused (FreeBSD has no per-user services). The system node folder defaults to `/var/db/ymir`. Unit test checks the script with `sh -n`.
+- [scripts/package.py](scripts/package.py): `--target x86_64-unknown-freebsd` (or aarch64) writes `ymir-V-TRIPLE.tar.gz`, and with `pkg` on the host a `ymir-V-TRIPLE.pkg` (`pkg create`, message pointing at `misc/llama-cpp`). No bundled engine for FreeBSD.
+- [.github/workflows/freebsd.yml](.github/workflows/freebsd.yml): FreeBSD 14.2 VM (cross-platform-actions 0.29.0): build, test `ymir-core` lib and `ymirctl`, package, `pkg add`, then the rc.d service as user `ymir` through a chat with the mock engine, stop (no engine left), uninstall, `pkg delete`. Runs on dispatch and on pushes to main that touch those files.
+
+**Checks:** fmt, clippy `-D warnings`, `ymir-core` lib (188) and `ymirctl` tests on the box; `package.py` with fake binaries (tar.gz made, pkg skipped: no `pkg` on Linux). A FreeBSD build cannot be cross-checked from Linux (aws-lc-sys needs a FreeBSD sysroot), so the VM job is the first real FreeBSD build. Docs: CHANGELOG, DESIGN BSD gap, README, site docs.
+
+**Next:** the FreeBSD job's first run; then FreeBSD in the Release workflow and `release.toml` platforms. OpenBSD, GhostBSD and DragonFly not started.
+
 ## 2026-11-26 10:25 EST: v0.20.0 released
 
 **Release:** [v0.20.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.20.0) (release commit 7cec694 on 1a934ac, the `--no-ff` merges of `docs/bragi-status-0.15` ddb2210, `feature/push-wake` 77d35dc and `feature/m6-placement` 1a934ac; Release run 45838670704, green): M6 `ymirctl move` (also the `ymir_move_model` MCP tool), placement with replica counts under the `ymir.scheduler` lease (`[inference.placement]`), and push wake-ups of Bragi devices from seed holders. 42 files on GitHub: leak scan 31 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.20.0` EXIT 0); `weirdnet_release.py assets 0.20.0` ok. Arch recipes f9bf1cd on main; TAUR ymir-bin and ymir-cuda-bin 0.20.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched.

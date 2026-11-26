@@ -506,7 +506,7 @@ should serve from boot, use <code>--system</code>.</p>
 <h3 id="system-service">A machine service (<code>--system</code>)</h3>
 <p>With <code>--system</code>, run as root (<code>sudo</code>) or from an elevated prompt on Windows, <code>ymirctl service</code>
 manages the machine's service instead. Its node folder defaults to <code>/var/lib/ymir</code> (Linux),
-<code>/Library/Application Support/Ymir</code> (macOS) or <code>%ProgramData%\Ymir</code> (Windows); pass
+<code>/Library/Application Support/Ymir</code> (macOS), <code>/var/db/ymir</code> (FreeBSD) or <code>%ProgramData%\Ymir</code> (Windows); pass
 <code>--home</code> for another.</p>
 <ul>
 <li><strong>Linux:</strong> a system unit, <code>/etc/systemd/system/ymird.service</code>, with <code>User=</code> set to
@@ -518,6 +518,11 @@ own virtual account <code>NT SERVICE\ymird</code> (no password). The node folder
 Administrators and that account only. Stopping it (<code>service stop --system</code>, <code>sc stop ymird</code> or the
 Services app) shuts <code>ymird</code> and its engines down cleanly; after a crash it restarts in 60 seconds. The
 Windows installer registers the same service.</li>
+<li><strong>FreeBSD:</strong> an rc.d script, <code>/usr/local/etc/rc.d/ymird</code>, that runs <code>ymird</code> as
+<code>--run-as USER</code> under <code>daemon(8)</code> (restarted 5 seconds after it exits; output in
+<code>state/logs/ymird.log</code>), enabled with <code>sysrc ymird_enable=YES</code>. FreeBSD has no per-user services, so
+there it is <code>--system</code> only. There is no bundled llama.cpp for FreeBSD: <code>pkg install llama-cpp</code> and give
+<code>ymirctl setup --llama-server /usr/local/bin/llama-server</code>.</li>
 </ul>
 <pre><code># Linux or macOS
 sudo ymirctl --home /var/lib/ymir setup --download --yes

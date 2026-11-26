@@ -6,6 +6,19 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- FreeBSD (M9 BSD packages): `ymirctl service install --system --run-as USER` writes an rc.d script
+  (`/usr/local/etc/rc.d/ymird`): `daemon(8)` runs `ymird` as that account, restarts it 5 s after it exits and writes its
+  output to `state/logs/ymird.log`; `sysrc ymird_enable=YES` and `service ymird restart` start it, `service stop` and
+  `uninstall` stop it, unset `ymird_enable` and remove the script. FreeBSD has no per-user services, so user scope is
+  refused there; the system node folder defaults to `/var/db/ymir`.
+- `scripts/package.py --target x86_64-unknown-freebsd` (or aarch64) writes `ymir-VERSION-TRIPLE.tar.gz` and, on a FreeBSD
+  host, `ymir-VERSION-TRIPLE.pkg` (`pkg create`; its message names the `misc/llama-cpp` port, since there is no bundled
+  engine for FreeBSD).
+- `.github/workflows/freebsd.yml`: a FreeBSD 14.2 VM builds and tests `ymird` and `ymirctl`, packages them, installs the
+  pkg, and runs the rc.d service through a chat with the mock engine, a stop (no engine left) and an uninstall.
+
 ## [0.20.0] - 2026-11-26
 
 ### Added

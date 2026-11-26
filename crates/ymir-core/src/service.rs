@@ -1,4 +1,4 @@
-//! Runs `ymird` as a background service on Linux, macOS and Windows.
+//! Runs `ymird` as a background service on Linux, macOS, Windows and FreeBSD.
 //!
 //! User level by default (no root, no admin):
 //! - Linux: a systemd user unit (`~/.config/systemd/user/ymird.service`).
@@ -10,6 +10,10 @@
 //! `--system` (root or an elevated prompt) installs a machine service instead: a systemd system
 //! unit with `User=`, a launchd daemon with `UserName`, or a Windows service running as its own
 //! virtual account `NT SERVICE\ymird` (the WiX installer registers the same service).
+//!
+//! FreeBSD has no per-user services, so there it is `--system` only: an `rc.d` script
+//! (`/usr/local/etc/rc.d/ymird`) that runs `ymird` as `--run-as` under `daemon(8)`, which restarts
+//! it after a crash, enabled with `sysrc ymird_enable=YES`.
 //!
 //! Everything here is a [`Plan`] (files to write, commands to run) built for an explicit [`Os`],
 //! so the units, plists, task XML and command lines are tested on every OS.
@@ -31,12 +35,15 @@ pub const WINDOWS_ACCOUNT: &str = r"NT SERVICE\ymird";
 /// What `--system` with `--unit-dir` writes on Windows: the `sc.exe` commands, to run elevated.
 pub const WINDOWS_SCRIPT: &str = "ymird-service.cmd";
 const DESCRIPTION: &str = "Ymir node (model, inference and app roles)";
+/// The FreeBSD rc.d script (and service name).
+pub const RC_SCRIPT: &str = "ymird";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Linux,
     Macos,
     Windows,
+    FreeBsd,
 }
 
 impl Os {
@@ -46,6 +53,8 @@ impl Os {
             Os::Macos
         } else if cfg!(windows) {
             Os::Windows
+        } else if cfg!(target_os = "freebsd") {
+            Os::FreeBsd
         } else {
             Os::Linux
         }
@@ -255,6 +264,49 @@ pub fn launchd_plist(spec: &ServiceSpec) -> String {
     )
 }
 
+/// Quotes an argument for `sh` (the rc.d script).
+fn sh_quote(a: &str) -> String {
+    if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "/._-=:+,@%".contains(c)) {
+        a.to_string()
+    } else {
+        format!("'{}'", a.replace('\'', r"'\''"))
+    }
+}
+
+/// The FreeBSD rc.d script (system scope): `daemon(8)` runs `ymird` as `run_as`, restarts it 5 s
+/// after it exits and writes its output to the node's log; `service ymird stop` stops both.
+pub fn rcd_script(spec: &ServiceSpec) -> String {
+    let user = spec.run_as.as_deref().unwrap_or("ymir");
+    let cmd = command_for(Os::FreeBsd, spec).iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+    format!(
+        "#!/bin/sh\n\
+# Written by `ymirctl service install --system`. {DESCRIPTION}.\n\
+#\n\
+# PROVIDE: {RC_SCRIPT}\n\
+# REQUIRE: LOGIN NETWORKING\n\
+# KEYWORD: shutdown\n\
+#\n\
+# Add ymird_enable=\"YES\" to /etc/rc.conf (sysrc ymird_enable=YES) to start it at boot.\n\
+\n\
+. /etc/rc.subr\n\
+\n\
+name=\"{RC_SCRIPT}\"\n\
+rcvar=\"ymird_enable\"\n\
+load_rc_config $name\n\
+: ${{ymird_enable:=\"NO\"}}\n\
+\n\
+pidfile=\"/var/run/${{name}}.pid\"\n\
+procname=\"/usr/sbin/daemon\"\n\
+command=\"/usr/sbin/daemon\"\n\
+command_args=\"-r -R 5 -P ${{pidfile}} -o {} -u {} -- /usr/bin/env YMIR_LOG=info {}\"\n\
+\n\
+run_rc_command \"$1\"\n",
+        sh_quote(&s(&spec.log_file(Os::FreeBsd))),
+        sh_quote(user),
+        cmd.replace('"', "\\\""),
+    )
+}
+
 /// The Task Scheduler definition (user level, Windows): at `user`'s logon, run `ymird` through
 /// `conhost.exe --headless` so no console window opens, never time out, restart after a failure,
 /// and keep running on battery.
@@ -388,6 +440,9 @@ impl Target {
             Some(d) => Some(d.to_path_buf()),
             None => default_dir(os, scope, home),
         };
+        if os == Os::FreeBsd && scope == Scope::User && !custom {
+            bail!("FreeBSD has no per-user services: install it with --system --run-as USER (an rc.d script)");
+        }
         if dir.is_none() && !(os == Os::Windows && scope == Scope::System) {
             bail!("no service directory for this OS and user; pass --unit-dir");
         }
@@ -401,6 +456,7 @@ impl Target {
             (Os::Windows, Scope::User) => TASK_FILE,
             (Os::Windows, Scope::System) if self.custom => WINDOWS_SCRIPT,
             (Os::Windows, Scope::System) => return None,
+            (Os::FreeBsd, _) => RC_SCRIPT,
         };
         self.dir.as_ref().map(|d| join(self.os, d, name))
     }
@@ -429,11 +485,13 @@ pub fn default_dir(os: Os, scope: Scope, home: &Path) -> Option<PathBuf> {
         (Os::Macos, Scope::System) => Some("/Library/LaunchDaemons".into()),
         (Os::Windows, Scope::User) => Some(join(os, home, "state")),
         (Os::Windows, Scope::System) => None,
+        (Os::FreeBsd, Scope::User) => None,
+        (Os::FreeBsd, Scope::System) => Some("/usr/local/etc/rc.d".into()),
     }
 }
 
 /// The default node directory for a system service: `%ProgramData%\Ymir`,
-/// `/Library/Application Support/Ymir` or `/var/lib/ymir`.
+/// `/Library/Application Support/Ymir`, `/var/lib/ymir` or (FreeBSD) `/var/db/ymir`.
 pub fn system_home(os: Os) -> PathBuf {
     match os {
         Os::Windows => {
@@ -442,6 +500,7 @@ pub fn system_home(os: Os) -> PathBuf {
         }
         Os::Macos => "/Library/Application Support/Ymir".into(),
         Os::Linux => "/var/lib/ymir".into(),
+        Os::FreeBsd => "/var/db/ymir".into(),
     }
 }
 
@@ -526,6 +585,8 @@ pub fn install_plan(spec: &ServiceSpec, t: &Target, host: &Host, start: bool) ->
     match (t.os, spec.scope) {
         (Os::Linux, _) => p.files.push((file.clone().unwrap(), systemd_unit(spec).into_bytes())),
         (Os::Macos, _) => p.files.push((file.clone().unwrap(), launchd_plist(spec).into_bytes())),
+        (Os::FreeBsd, Scope::User) => bail!("FreeBSD has no per-user services: install it with --system --run-as USER (an rc.d script)"),
+        (Os::FreeBsd, Scope::System) => p.files.push((file.clone().unwrap(), rcd_script(spec).into_bytes())),
         (Os::Windows, Scope::User) => {
             if host.windows_user.is_empty() {
                 bail!("can't tell the current Windows user (USERNAME is not set)");
@@ -567,6 +628,13 @@ pub fn install_plan(spec: &ServiceSpec, t: &Target, host: &Host, start: bool) ->
                 p.steps.push(Step::run(&["launchctl", "bootstrap", &t.launchd_domain(), &s(file.as_ref().unwrap())]));
             }
         }
+        Os::FreeBsd => {
+            p.steps.push(Step::run(&["chmod", "555", &s(file.as_ref().unwrap())]));
+            if start {
+                p.steps.push(Step::run(&["sysrc", "ymird_enable=YES"]));
+                p.steps.push(Step::run(&["service", RC_SCRIPT, "restart"]));
+            }
+        }
         Os::Windows if spec.scope == Scope::User => {
             p.steps.push(Step::run(&["schtasks", "/Create", "/TN", TASK_NAME, "/XML", &s(file.as_ref().unwrap()), "/F"]));
             if start {
@@ -599,6 +667,7 @@ pub fn start_plan(t: &Target) -> Plan {
         (Os::Macos, _) => vec![Step::run(&["launchctl", "bootstrap", &t.launchd_domain(), &t.file().map(|f| s(&f)).unwrap_or_default()])],
         (Os::Windows, Scope::User) => vec![Step::run(&["schtasks", "/Run", "/TN", TASK_NAME])],
         (Os::Windows, Scope::System) => vec![Step::run(&["sc.exe", "start", WINDOWS_SERVICE])],
+        (Os::FreeBsd, _) => vec![Step::run(&["service", RC_SCRIPT, "start"])],
     };
     Plan { steps, ..Default::default() }
 }
@@ -612,6 +681,7 @@ pub fn stop_plan(t: &Target) -> Plan {
         (Os::Macos, _) => vec![Step::try_run(&["launchctl", "bootout", &format!("{}/{LAUNCHD_LABEL}", t.launchd_domain())])],
         (Os::Windows, Scope::User) => vec![Step::try_run(&["schtasks", "/End", "/TN", TASK_NAME])],
         (Os::Windows, Scope::System) => vec![Step::try_run(&["sc.exe", "stop", WINDOWS_SERVICE])],
+        (Os::FreeBsd, _) => vec![Step::try_run(&["service", RC_SCRIPT, "stop"])],
     };
     Plan { steps, ..Default::default() }
 }
@@ -637,6 +707,10 @@ pub fn uninstall_plan(t: &Target) -> Plan {
         (Os::Windows, Scope::System) => {
             p.steps.extend(stop_plan(t).steps);
             p.steps.push(Step::try_run(&["sc.exe", "delete", WINDOWS_SERVICE]));
+        }
+        (Os::FreeBsd, _) => {
+            p.steps.extend(stop_plan(t).steps);
+            p.steps.push(Step::try_run(&["sysrc", "-x", "ymird_enable"]));
         }
     }
     p
@@ -777,6 +851,10 @@ pub fn status(t: &Target) -> Vec<String> {
             Some(o) if o.status.success() => log.push(format!("service {WINDOWS_SERVICE}: {}", sc_state(&String::from_utf8_lossy(&o.stdout)))),
             _ => log.push(format!("service {WINDOWS_SERVICE}: not registered")),
         },
+        (Os::FreeBsd, _) => match query(&["service", RC_SCRIPT, "status"]) {
+            Some(o) => log.push(format!("rc.d: {}", String::from_utf8_lossy(&o.stdout).trim())),
+            None => log.push("rc.d: `service` is not available".into()),
+        },
     }
     log
 }
@@ -908,6 +986,55 @@ mod tests {
         let p = install_plan(&d, &sys, &host(), true).unwrap();
         assert!(lines(&p).contains(&"launchctl bootstrap system /Library/LaunchDaemons/com.weirdbrains.ymird.plist".to_string()), "{p:?}");
         assert!(lines(&p)[0].starts_with("chown -R _ymir "));
+    }
+
+    #[test]
+    fn freebsd_rc_script_and_commands() {
+        let mut d = ServiceSpec::user("/usr/local/bin/ymird", "/var/db/ymir node");
+        d.scope = Scope::System;
+        let t = target(Os::FreeBsd, Scope::System);
+        assert_eq!(t.file(), Some(PathBuf::from("/usr/local/etc/rc.d/ymird")));
+        assert!(install_plan(&d, &t, &host(), true).is_err(), "an rc.d service needs --run-as");
+        d.run_as = Some("ymir".into());
+        let rc = rcd_script(&d);
+        assert!(rc.starts_with("#!/bin/sh\n") && rc.contains("# PROVIDE: ymird\n") && rc.contains("rcvar=\"ymird_enable\"\n"), "{rc}");
+        assert!(
+            rc.contains(
+                "command_args=\"-r -R 5 -P ${pidfile} -o '/var/db/ymir node/state/logs/ymird.log' -u ymir -- /usr/bin/env YMIR_LOG=info /usr/local/bin/ymird --home '/var/db/ymir node'\"\n"
+            ),
+            "{rc}"
+        );
+        assert!(rc.ends_with("run_rc_command \"$1\"\n"));
+        // It parses as sh.
+        #[cfg(unix)]
+        {
+            let f = std::env::temp_dir().join(format!("ymird-rc-{}", std::process::id()));
+            std::fs::write(&f, &rc).unwrap();
+            let ok = Command::new("sh").arg("-n").arg(&f).status().unwrap().success();
+            std::fs::remove_file(&f).unwrap();
+            assert!(ok, "sh -n refused the script:\n{rc}");
+        }
+        let p = install_plan(&d, &t, &host(), true).unwrap();
+        assert_eq!(p.files[0].0, PathBuf::from("/usr/local/etc/rc.d/ymird"));
+        assert_eq!(
+            lines(&p),
+            vec![
+                "chown -R ymir \"/var/db/ymir node\"".to_string(),
+                "chmod 555 /usr/local/etc/rc.d/ymird".into(),
+                "sysrc ymird_enable=YES".into(),
+                "service ymird restart".into()
+            ]
+        );
+        assert_eq!(lines(&start_plan(&t)), vec!["service ymird start"]);
+        assert_eq!(lines(&stop_plan(&t)), vec!["service ymird stop"]);
+        let u = uninstall_plan(&t);
+        assert_eq!(lines(&u), vec!["service ymird stop", "sysrc -x ymird_enable"]);
+        assert_eq!(u.remove, vec![PathBuf::from("/usr/local/etc/rc.d/ymird")]);
+        // No per-user services there.
+        assert!(install_plan(&spec(), &target(Os::FreeBsd, Scope::User), &host(), true).is_err());
+        assert_eq!(system_home(Os::FreeBsd), PathBuf::from("/var/db/ymir"));
+        // Quoting a single quote for sh.
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
     }
 
     #[test]

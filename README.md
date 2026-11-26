@@ -69,7 +69,7 @@ ymirctl mcp                                  # MCP server for Cursor, Claude Des
 ymirctl bench                                # compare every model on the pool: speed and quality, saved as JSON and Markdown
 ymirctl bridge token                         # API key for Jan: base URL http://127.0.0.1:8484/v1
 ymirctl service install                      # or `setup --service`: systemd user unit, launchd agent or Windows logon task
-ymirctl service stop / start / status        # --system: a system unit, launchd daemon or the Windows service
+ymirctl service stop / start / status        # --system: a system unit, launchd daemon, the Windows service or a FreeBSD rc.d script
 ```
 
 The bridge serves `/v1/models`, `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`.
