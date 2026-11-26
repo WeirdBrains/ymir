@@ -37,6 +37,11 @@ pub const SYNC_TYPE: &str = "ymir.pool";
 /// only the user's own devices can read it.
 pub const CONTEXT_TYPE: &str = "ymir.context";
 
+/// Bragi's wake cards (B4, weirdnet-push): sealed records between the user's full devices only.
+/// No service grant ever lists this type, so a cert-only node can neither hold their key nor
+/// receive them (see [`ServiceRole::types`] and [`Membership::service_bundle`]).
+pub const WAKE_TYPE: &str = "bragi.wake";
+
 /// The role a service grant gives an inference node (`ymir.inference`).
 pub const ROLE_INFERENCE: &str = "ymir.inference";
 
@@ -152,6 +157,20 @@ pub struct Membership {
     /// Held across [`Membership::save`]: the sync loop, the control socket and link flows all
     /// save, and two saves at once must not interleave (an older snapshot written last).
     saving: Mutex<()>,
+    /// When each full device's wake cards were last pulled ([`WAKE_TYPE`]): every
+    /// [`WAKE_PULL_EVERY`], since each type pulled is a sync session of its own.
+    wake_pulled: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+/// How often a sync pass pulls a full device's wake cards.
+pub const WAKE_PULL_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Bragi's wake cards, on a full device only (a cert-only node holds no key for them).
+fn configure_wake(st: &mut SyncState) -> Result<()> {
+    if !st.is_service() {
+        st.configure(WAKE_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("wake records: {e}"))?;
+    }
+    Ok(())
 }
 
 fn now_ms() -> i64 {
@@ -333,12 +352,14 @@ impl Membership {
     fn wrap(dir: &Path, node_key: Keypair, mut st: SyncState) -> Result<Self> {
         ensure_dir(dir)?;
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
+        configure_wake(&mut st)?;
         Ok(Self {
             dir: dir.to_path_buf(),
             node_key,
             state: Arc::new(Mutex::new(st)),
             context_sync: std::sync::atomic::AtomicBool::new(false),
             saving: Mutex::new(()),
+            wake_pulled: Mutex::default(),
         })
     }
 
@@ -403,6 +424,7 @@ impl Membership {
             voter: None,
         };
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
+        configure_wake(&mut st)?;
         load_log(dir, &mut st);
         st.publish_device_key(now_ms()).map_err(|e| anyhow!("device key: {e}"))?;
         st.refresh_keys();
@@ -412,6 +434,7 @@ impl Membership {
             state: Arc::new(Mutex::new(st)),
             context_sync: std::sync::atomic::AtomicBool::new(false),
             saving: Mutex::new(()),
+            wake_pulled: Mutex::default(),
         })
     }
 
@@ -564,7 +587,12 @@ impl Membership {
             if st.is_service() {
                 bail!("this node is linked cert-only and holds no seed; link devices from one that does");
             }
-            st.service_bundle(peer, &role.roles(), &role.types(), now_ms()).map_err(|e| anyhow!("the service grant: {e}"))?
+            let types = role.types();
+            // Wake cards stay between full devices: a grant that lists them is a bug.
+            if types.iter().any(|t| t == WAKE_TYPE) {
+                bail!("a service grant must never list {WAKE_TYPE}");
+            }
+            st.service_bundle(peer, &role.roles(), &types, now_ms()).map_err(|e| anyhow!("the service grant: {e}"))?
         };
         self.save()?;
         b.to_bytes().map_err(|e| anyhow!("the sync bundle: {e}"))
@@ -616,6 +644,21 @@ impl Membership {
         };
         let me = st.our_cert.peer_id.clone();
         holds(&me) && st.types.iter().any(|t| t == TRAIN_TYPE) && holds(peer)
+    }
+
+    /// Whether a pass should pull `peer`'s wake cards: both ends are full devices (no service
+    /// grant lists [`WAKE_TYPE`]) and the last pull is [`WAKE_PULL_EVERY`] old.
+    fn wake_pull_due(&self, peer: &str) -> bool {
+        let full = {
+            let st = self.lock();
+            !st.is_service() && st.roster.grant_of(peer).is_none_or(|g| g.class != DeviceClass::Service)
+        };
+        full && self.wake_pulled.lock().unwrap_or_else(|e| e.into_inner()).get(peer).is_none_or(|t| t.elapsed() >= WAKE_PULL_EVERY)
+    }
+
+    /// The next sync pass pulls every full device's wake cards again.
+    pub fn refresh_wake_cards(&self) {
+        self.wake_pulled.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// `peer`'s class and roles as its user-signed grant states them, if it has one.
@@ -676,6 +719,15 @@ impl Membership {
                     tracing::debug!(peer = %cert.peer_id, applied = out.applied, "context pass: {e}");
                 }
             }
+            if out.error.is_none() && self.wake_pull_due(&cert.peer_id) {
+                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, WAKE_TYPE);
+                match &out.error {
+                    None => {
+                        self.wake_pulled.lock().unwrap_or_else(|e| e.into_inner()).insert(cert.peer_id.clone(), std::time::Instant::now());
+                    }
+                    Some(e) => tracing::debug!(peer = %cert.peer_id, applied = out.applied, "wake cards pass: {e}"),
+                }
+            }
             if out.error.is_none() && self.syncs_jobs_with(&cert.peer_id) {
                 let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, TRAIN_TYPE);
                 if let Some(e) = &out.error {
@@ -694,6 +746,13 @@ impl Membership {
 mod tests {
     use super::*;
     use weirdnet_sync::CallerCheck;
+
+    #[test]
+    fn no_service_grant_lists_the_wake_cards() {
+        for role in [ServiceRole::Inference, ServiceRole::Model] {
+            assert!(!role.types().iter().any(|t| t == WAKE_TYPE), "{role:?} would hold Bragi's wake cards");
+        }
+    }
 
     #[test]
     fn concurrent_saves_do_not_trip_over_each_other() {

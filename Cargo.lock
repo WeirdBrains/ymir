@@ -4602,7 +4602,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5478,6 +5478,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "weirdnet-push"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96f335b3941fc348172a266a5ad5f210c8fbf590863f70ce58a856b4c43fa8a3"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.21",
+ "weirdnet-keys",
+ "zeroize",
+]
+
+[[package]]
 name = "weirdnet-rules"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5922,6 +5941,7 @@ dependencies = [
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",
+ "weirdnet-push",
  "weirdnet-semcache",
  "weirdnet-sync",
  "weirdnet-update",
@@ -5953,6 +5973,7 @@ dependencies = [
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",
+ "weirdnet-push",
  "weirdnet-sync",
  "weirdnet-update",
  "ymir-core",

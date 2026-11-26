@@ -32,6 +32,8 @@ weirdnet-net = "=0.8.3"
 weirdnet-openai = "0.2.3"
 weirdnet-semcache = "0.2.1"
 weirdnet-sync = "0.8.4"
+# Push wake-ups (M9): sealed wakes to Bragi devices through their relay (/weirdnet/wake/1).
+weirdnet-push = { version = "0.1.1", default-features = false, features = ["relay-wake"] }
 weirdnet-alerts = { version = "0.2.2", features = ["backends"] }
 weirdnet-rules = "=0.1.1"
 weirdnet-update = { version = "0.2.2", features = ["wire"] }
