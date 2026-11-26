@@ -350,6 +350,8 @@ mod tests {
         assert!(Accel::parse("tpu").is_err());
     }
 
+    // Unix paths in the expected commands (vLLM runs on Linux).
+    #[cfg(unix)]
     #[test]
     fn with_uv_one_venv_and_one_install_of_vllm_and_ray() {
         let v = Path::new("/h/engines/vllm");
@@ -359,6 +361,8 @@ mod tests {
         assert_eq!(p.steps[1].to_string(), "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --torch-backend=auto vllm==0.11.0 ray");
     }
 
+    // Unix paths in the expected commands (vLLM runs on Linux).
+    #[cfg(unix)]
     #[test]
     fn without_uv_python3_venv_and_pip() {
         let v = Path::new("/h/engines/vllm");
@@ -389,6 +393,8 @@ mod tests {
         assert_eq!(plan(v, &o, &fake(&["uv", "nvidia-smi"])).unwrap().accel, Accel::Rocm, "the override wins");
     }
 
+    // Unix paths in the expected commands (vLLM runs on Linux).
+    #[cfg(unix)]
     #[test]
     fn upgrade_keeps_the_venv_and_reinstall_clears_it() {
         let v = Path::new("/h/engines/vllm");
