@@ -571,7 +571,10 @@ impl ControlHandler {
                     return ControlResponse::err("this node is not on Weirdnet, so it has no synced training job board");
                 };
                 let mut resp = ControlResponse::ok("");
-                resp.job = Some(crate::train_jobs_ctl::serve(store.as_ref(), self.blobs.as_deref().map(|b| b as &dyn crate::train_job::BlobFetch), me, call).await);
+                resp.job = Some(
+                    crate::train_jobs_ctl::serve(store.as_ref(), self.blobs.as_deref().map(|b| b as &dyn crate::train_job::BlobFetch), me, call)
+                        .await,
+                );
                 resp
             }
             ControlRequest::TrainStatus { node } => {

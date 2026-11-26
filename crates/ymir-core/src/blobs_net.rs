@@ -90,7 +90,9 @@ impl BlobsService {
             _ => caller,
         };
         if let Err(e) = self.auth.authorize(&caller) {
-            return ch.send_cbor(&BlobMsg::Refused { message: format!("refused: only the owner's linked devices fetch training files here ({e})") }).await;
+            return ch
+                .send_cbor(&BlobMsg::Refused { message: format!("refused: only the owner's linked devices fetch training files here ({e})") })
+                .await;
         }
         let Some((dir, manifest_name)) = self.blobs.bundle(&ask.root) else { return ch.send_cbor(&BlobMsg::Missing).await };
         let manifest = match tokio::fs::read(dir.join(&manifest_name)).await {
@@ -107,7 +109,8 @@ impl BlobsService {
             let mut file = tokio::fs::File::open(dir.join(&f.path)).await.map_err(|e| RemoteError::Failed { message: format!("{}: {e}", f.path) })?;
             let mut left = f.bytes;
             while left > 0 {
-                let n = file.read(&mut buf[..CHUNK.min(left as usize)]).await.map_err(|e| RemoteError::Failed { message: format!("{}: {e}", f.path) })?;
+                let n =
+                    file.read(&mut buf[..CHUNK.min(left as usize)]).await.map_err(|e| RemoteError::Failed { message: format!("{}: {e}", f.path) })?;
                 if n == 0 {
                     return Err(RemoteError::Failed { message: format!("{} is shorter than its manifest says", f.path) });
                 }
@@ -256,5 +259,140 @@ pub fn staging_dir(store: &Path, root: &str) -> PathBuf {
 impl crate::train_job::BlobFetch for BlobsClient {
     async fn ensure(&self, root: &str, holders: &[String]) -> Result<Option<String>> {
         BlobsClient::ensure(self, root, holders).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weirdnet_agent::remote::MemoryDialer;
+
+    struct Allow(bool);
+    impl Authorize for Allow {
+        fn authorize(&self, _: &Caller) -> Result<(), RemoteError> {
+            if self.0 { Ok(()) } else { Err(RemoteError::Failed { message: "not linked".into() }) }
+        }
+    }
+
+    /// A bundle of two files (one in a subfolder, one over a chunk) in a fresh store.
+    fn bundle(dir: &Path) -> (Arc<LocalBlobs>, String, Vec<u8>) {
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        let big: Vec<u8> = (0..CHUNK * 2 + 17).map(|i| (i % 251) as u8).collect();
+        std::fs::write(src.join("model.gguf"), &big).unwrap();
+        std::fs::write(src.join("sub/opt.bin"), b"opt").unwrap();
+        let mut files = Vec::new();
+        for p in ["model.gguf", "sub/opt.bin"] {
+            let (sha256, bytes) = train::hash_file(&src.join(p)).unwrap();
+            files.push(CheckpointFile { path: p.into(), sha256, bytes });
+        }
+        std::fs::write(src.join("m.json"), serde_json::to_vec(&serde_json::json!({ "files": files })).unwrap()).unwrap();
+        let store = Arc::new(LocalBlobs::open(dir.join("store")).unwrap());
+        let root = store.put(&src, "m.json", &files).unwrap();
+        (store, root, big)
+    }
+
+    fn serving(d: &MemoryDialer, node: &str, svc: Arc<BlobsService>) {
+        d.route(node, move |ch, _| {
+            let svc = svc.clone();
+            tokio::spawn(async move {
+                let _ = svc.serve(ch, Caller::new("asker")).await;
+            });
+        });
+    }
+
+    /// A holder that sends `root`'s real manifest, then `mess` instead of the files.
+    fn lying(d: &MemoryDialer, node: &str, manifest: Vec<u8>, mess: Vec<BlobMsg>) {
+        d.route(node, move |mut ch, _| {
+            let (manifest, mess) = (manifest.clone(), mess.clone());
+            tokio::spawn(async move {
+                let _ = ch.recv_cbor::<BlobAsk>().await;
+                let _ = ch.send_cbor(&BlobMsg::Bundle { manifest_name: "m.json".into(), manifest: ByteBuf::from(manifest) }).await;
+                for m in mess {
+                    let _ = ch.send_cbor(&m).await;
+                }
+            });
+        });
+    }
+
+    fn no_staging_left(dir: &Path) -> bool {
+        !std::fs::read_dir(dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".fetch-"))
+    }
+
+    #[tokio::test]
+    async fn a_bundle_is_fetched_from_the_first_holder_that_sends_it_whole() {
+        let t = tempfile::tempdir().unwrap();
+        let (theirs, root, big) = bundle(&t.path().join("a"));
+        let manifest = std::fs::read(t.path().join("a/src/m.json")).unwrap();
+        let d = MemoryDialer::new();
+        serving(&d, "good", Arc::new(BlobsService::new(theirs, Arc::new(Allow(true)))));
+        // "liar" sends a file that doesn't match its hash; "gone" is unreachable.
+        let bad = vec![BlobMsg::Chunk { data: ByteBuf::from(vec![0u8; big.len()]) }];
+        lying(&d, "liar", manifest, bad);
+        let mine = Arc::new(LocalBlobs::open(t.path().join("b")).unwrap());
+        let c = BlobsClient::new(Arc::new(d), None, mine.clone(), "me".into());
+        let holders = ["me", "gone", "liar", "good"].map(String::from);
+        assert_eq!(c.ensure(&root, &holders).await.unwrap().as_deref(), Some("good"));
+        assert!(mine.has(&root));
+        let out = t.path().join("out");
+        mine.fetch(&root, &out).unwrap();
+        assert_eq!(std::fs::read(out.join("model.gguf")).unwrap(), big);
+        assert_eq!(std::fs::read(out.join("sub/opt.bin")).unwrap(), b"opt");
+        assert!(no_staging_left(&t.path().join("b")));
+        // Here already: no fetch.
+        assert_eq!(c.ensure(&root, &[]).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn nothing_a_holder_gets_wrong_enters_the_store() {
+        let t = tempfile::tempdir().unwrap();
+        let (_, root, big) = bundle(&t.path().join("a"));
+        let manifest = std::fs::read(t.path().join("a/src/m.json")).unwrap();
+        let n = big.len();
+        let cases: Vec<(&str, Vec<u8>, Vec<BlobMsg>, &str)> = vec![
+            (
+                "flipped",
+                manifest.clone(),
+                vec![BlobMsg::Chunk {
+                    data: ByteBuf::from({
+                        let mut b = big.clone();
+                        b[5] ^= 1;
+                        b
+                    }),
+                }],
+                "hash",
+            ),
+            ("long", manifest.clone(), vec![BlobMsg::Chunk { data: ByteBuf::from(vec![0u8; n + 1]) }], "longer"),
+            ("short", manifest.clone(), vec![BlobMsg::Chunk { data: ByteBuf::from(big[..10].to_vec()) }, BlobMsg::Done], "unexpected"),
+            ("other", b"{\"files\":[]}".to_vec(), vec![BlobMsg::Done], "doesn't hash"),
+        ];
+        for (name, m, mess, want) in cases {
+            let d = MemoryDialer::new();
+            lying(&d, name, m, mess);
+            let mine = Arc::new(LocalBlobs::open(t.path().join(name)).unwrap());
+            let c = BlobsClient::new(Arc::new(d), None, mine.clone(), "me".into());
+            let e = c.fetch_from(name, &root).await.unwrap_err();
+            assert!(format!("{e:#}").contains(want), "{name}: {e:#}");
+            assert!(!mine.has(&root), "{name}");
+            assert!(no_staging_left(&t.path().join(name)), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_holder_refuses_devices_it_does_not_know_and_paths_out_of_the_bundle() {
+        let t = tempfile::tempdir().unwrap();
+        let (theirs, root, _) = bundle(&t.path().join("a"));
+        let d = MemoryDialer::new();
+        serving(&d, "strict", Arc::new(BlobsService::new(theirs.clone(), Arc::new(Allow(false)))));
+        serving(&d, "open", Arc::new(BlobsService::new(theirs, Arc::new(Allow(true)))));
+        let c = BlobsClient::new(Arc::new(d), None, Arc::new(LocalBlobs::open(t.path().join("b")).unwrap()), "me".into());
+        let e = c.fetch_from("strict", &root).await.unwrap_err();
+        assert!(format!("{e:#}").contains("refused"), "{e:#}");
+        let e = c.fetch_from("open", &"00".repeat(32)).await.unwrap_err();
+        assert!(format!("{e:#}").contains("doesn't hold"), "{e:#}");
+        assert!(c.fetch_from("open", "../../etc").await.is_err());
+        // A manifest that lists a path out of the bundle is refused before anything is written.
+        let e = listed("m.json", br#"{"files":[{"path":"../x","sha256":"","bytes":0}]}"#).unwrap_err();
+        assert!(format!("{e:#}").contains("not a file path"), "{e:#}");
     }
 }

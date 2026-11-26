@@ -105,7 +105,7 @@ async fn a_job_resumes_on_another_machine_with_its_files_fetched_over_weirdnet()
     let app_h = home(base, "app", false, &[], &[])?;
     let holder = Membership::create(&app_h.paths.pool(), "app")?;
     let user = holder.user_keypair()?;
-    let mut service = |name: &str| -> Result<(Keypair, String, _, _)> {
+    let service = |name: &str| -> Result<(Keypair, String, _, _)> {
         let key = Keypair::generate_ed25519();
         let peer = key.public().to_peer_id().to_string();
         let cert = Roster::self_certify(&WEIRDNET, &user, &peer, name, 1)?;

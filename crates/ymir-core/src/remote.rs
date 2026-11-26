@@ -290,7 +290,11 @@ pub fn blobs_client(node: &Arc<SyncNode>, m: &Membership, hints: &Hints, blobs: 
 }
 
 /// Serves `/ymir/blobs/1` on `node`: this node's training bundles, for the user's linked devices.
-pub fn serve_blobs(node: &Arc<SyncNode>, m: &Membership, blobs: Arc<crate::train_job::LocalBlobs>) -> Result<crate::blobs_net::BlobsServer, RemoteError> {
+pub fn serve_blobs(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    blobs: Arc<crate::train_job::LocalBlobs>,
+) -> Result<crate::blobs_net::BlobsServer, RemoteError> {
     crate::blobs_net::BlobsServer::start(node, Arc::new(crate::blobs_net::BlobsService::new(blobs, roster_auth(m))))
 }
 

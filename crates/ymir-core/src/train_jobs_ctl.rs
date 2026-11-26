@@ -151,14 +151,28 @@ impl From<WireClaimError> for ClaimError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum JobReply {
-    Me { peer: String },
+    Me {
+        peer: String,
+    },
     Done,
-    Job { job: Option<Box<JobRecord<TrainJob>>> },
-    Jobs { jobs: Vec<JobRecord<TrainJob>> },
-    Claimed { claim: WireClaim },
-    Refused { error: WireClaimError },
-    Renewed { held: bool },
-    Error { message: String },
+    Job {
+        job: Option<Box<JobRecord<TrainJob>>>,
+    },
+    Jobs {
+        jobs: Vec<JobRecord<TrainJob>>,
+    },
+    Claimed {
+        claim: WireClaim,
+    },
+    Refused {
+        error: WireClaimError,
+    },
+    Renewed {
+        held: bool,
+    },
+    Error {
+        message: String,
+    },
     Fetched {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<String>,
