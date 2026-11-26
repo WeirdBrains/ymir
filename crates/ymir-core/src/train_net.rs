@@ -100,6 +100,10 @@ impl TrainLine {
             Update::Started { run, adapter, .. } => TrainLine::Started { node: node.to_string(), run, adapter },
             Update::Reserved { in_ymird } => TrainLine::Reserved { in_ymird },
             Update::Event(stage, event) => TrainLine::Step { stage, event },
+            Update::Checkpoint { info, .. } => TrainLine::Step {
+                stage: Stage::Train,
+                event: Event::Log { message: format!("checkpoint {} kept (epoch {}, step {}, root {})", info.dir, info.epoch, info.step, info.root) },
+            },
         }
     }
 }
@@ -193,6 +197,7 @@ impl TrainService {
                     allow_unknown_license: req.allow_unknown_license,
                     keep_full: req.keep_full,
                     force: req.force,
+                    ..Default::default()
                 };
                 train::run(&self.paths, &self.cfg, &spec, cancel, on).await
             }
