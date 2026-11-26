@@ -332,25 +332,25 @@ impl ModelsHub {
         let total: u64 = op.upload.files.iter().map(|f| f.size).sum();
         let disks = join_all(targets.iter().map(|t| self.client.disk(&t.peer))).await;
         let mut why = Vec::new();
-        let mut best: Option<(Target, u64)> = None;
+        let mut fits: Vec<(Target, u64)> = Vec::new();
         for (t, d) in targets.iter().zip(disks) {
             match d {
                 Ok(d) if d.free.saturating_sub(d.keep_free) < total => why.push(no_room(t, &d, total)),
-                Ok(d) => {
-                    let room = d.free.saturating_sub(d.keep_free);
-                    if best.as_ref().is_none_or(|(_, r)| room > *r) {
-                        best = Some((t.clone(), room));
-                    }
-                }
+                Ok(d) => fits.push((t.clone(), d.free.saturating_sub(d.keep_free))),
                 Err(e) => why.push(format!("{}: {}", t.label, explain(t, &e))),
             }
         }
-        let Some((t, room)) = best else {
-            return Err(format!("no model node has room for it: {}", why.join("; ")));
-        };
-        let chosen = Chosen { node: t.clone(), model: op.upload.id.clone(), size: total, usable_bytes: room };
-        let outcome = self.upload(&t, op, tx).await;
-        Ok(ModelsDone { nodes: vec![NodeResult { node: t, outcome }], chosen: Some(chosen) })
+        // Most room first; a node with `[model] upload = false` refuses before anything is sent,
+        // so the next one is tried.
+        fits.sort_by_key(|f| std::cmp::Reverse(f.1));
+        for (t, room) in fits {
+            let chosen = Chosen { node: t.clone(), model: op.upload.id.clone(), size: total, usable_bytes: room };
+            match self.upload(&t, op.clone(), tx).await {
+                Outcome::Failed { message } if message.contains(crate::upload_net::UPLOADS_OFF) => why.push(message),
+                outcome => return Ok(ModelsDone { nodes: vec![NodeResult { node: t, outcome }], chosen: Some(chosen) }),
+            }
+        }
+        Err(format!("no model node has room for it and takes uploads: {}", why.join("; ")))
     }
 
     /// U6: sends the files once, to the stage, and has the other targets copy them from it node to

@@ -212,6 +212,12 @@ pub struct ModelSection {
     /// (`/ymir/uploads/1`). `false` turns both protocols off.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub remote_manage: bool,
+    /// Take model uploads from the owner's linked devices (`ymirctl models upload --node`,
+    /// `/ymir/uploads/1` and models/1 uploads). `false` refuses every upload (`not-allowed`, "uploads
+    /// are off on this node") while pulls, listing and removals keep working; `remote_manage = false`
+    /// turns all of it off instead. Uploads placed on this machine itself are not affected.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub upload: bool,
     /// Free space an upload must leave on the models directory's filesystem, such as `50GiB`.
     /// Unset: the larger of 10% of the filesystem and 20 GiB. Set: exactly this much.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +278,7 @@ impl Default for ModelSection {
             private_link: None,
             callers: Vec::new(),
             remote_manage: true,
+            upload: true,
             upload_keep_free: None,
             upload_engine: None,
             llamacpp: managed(),

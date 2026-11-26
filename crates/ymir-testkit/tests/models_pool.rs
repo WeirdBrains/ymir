@@ -215,6 +215,9 @@ async fn the_pool_searches_pulls_serves_and_removes_models_over_weirdnet() -> Re
     // `tiny` has almost no model memory, so nothing fits there.
     let toml = std::fs::read_to_string(tiny_h.paths.config())?.replace("[model]\n", "[model]\nmemory_budget = \"1KiB\"\n");
     std::fs::write(tiny_h.paths.config(), toml)?;
+    // `big` takes no uploads (U10); pulls, listing and removals still work there.
+    let toml = std::fs::read_to_string(big_h.paths.config())?.replace("[model]\n", "[model]\nupload = false\n");
+    std::fs::write(big_h.paths.config(), toml)?;
     let big_toml_before = std::fs::read_to_string(big_h.paths.config())?;
 
     let big = start(&big_h).await?;
@@ -253,6 +256,15 @@ async fn the_pool_searches_pulls_serves_and_removes_models_over_weirdnet() -> Re
     assert!(out.lines().any(|l| l.contains("m-Q8_0") && l.contains("not served")), "{out}");
     let status = ctl(&big_h.home, &["status"]).await?;
     assert!(status.contains("m-Q4_0"), "the node's own status lists the new model: {status}");
+
+    // An upload to big is refused with what to do; the pulls above went through.
+    let file = root.join("Up-Q4_0.gguf");
+    std::fs::write(&file, gguf(4000))?;
+    let mut buf = Vec::new();
+    let sent = ctl_with(&ctl_h.home, &["models", "upload", &file.display().to_string(), "--node", "big"], &mut buf, "").await;
+    let out = String::from_utf8(buf)?;
+    assert!(sent.is_err() && out.contains("big refused the upload (not-allowed)") && out.contains("[model] upload = false"), "{out}");
+    assert!(!root.join("big-models/up-q4_0").exists());
 
     // Only a node that fits is asked to take a model it cannot hold.
     let err = format!("{:#}", ctl(&ctl_h.home, &["models", "pull", "o/n", "--node", "tiny"]).await.unwrap_err());

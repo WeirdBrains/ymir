@@ -43,9 +43,22 @@ version = "0.4.7"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 
-[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D)
+[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D); feature jobs: JobBoard (P3b)
 crate = "weirdnet-agent"
-version = "0.5.4"
+version = "0.5.6"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # streams released when dropped (U10); pinned with weirdnet-backends
+crate = "weirdnet-net"
+version = "0.8.3"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+
+[[requires]]                    # the synced job board's log and leases (P3b), per-type keys for model nodes' ymir.train grant
+crate = "weirdnet-sync"
+version = "0.8.3"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
