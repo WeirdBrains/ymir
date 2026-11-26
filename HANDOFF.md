@@ -2,7 +2,7 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
-## 2026-11-26 13:45 EST: video milestone 1, context and media limits in catalog/1 (merged `feature/video-upload`, LF-43)
+## 2026-11-26 15:10 EST: video milestone 1, context and media limits in catalog/1 (merged `feature/video-upload`, LF-43)
 
 Michael (11-26): "Let's do the video uploads". Bragi samples clips into frames sized from the limits Ymir reports and refuses when they are missing (Bragi merged the same day), so Ymir's part is milestone 1 of [docs/design/video.md](docs/design/video.md): report limits, never invent them. Weirdnet Lead published weirdnet-agent 0.5.7 (`MediaLimits`, `CatalogModel::limits`), weirdnet-backends 0.4.8 (`Capabilities::limits`, `ModelLaunch::limits`, `ModelStatus::limits`) and weirdnet-openai 0.2.4 (`Bridge::with_max_request_bytes`, 413 with `x-weirdnet-max-request-bytes`, `/v1/models` `weirdnet.limits`) for this; Cargo.toml and release.toml `[[requires]]` bumped.
 
@@ -15,6 +15,12 @@ Michael (11-26): "Let's do the video uploads". Bragi samples clips into frames s
 **Checks:** on alien-blue, after merging main v0.21.0: `cargo fmt --all --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --no-fail-fast` 61 suites, 410 passed, 1 failed, 7 ignored. The failure was `m5` `an_inference_node_dying_mid_answer_is_resumed_with_the_full_context` (`refused: no-epoch-key` while warming up) with the box at load 60 to 97 from other work; `m5` alone then passed 4/4. The run before had `conversations_sync_and_any_inference_node_answers_from_them` fail the same way once and pass alone; the same m5 load flake as on 10:45. The new catalog tests pass. `release_requires` caught release.toml still asking for agent 0.5.6 and backends 0.4.7; both are bumped.
 
 **Next:** transcription route (milestone 2); the remaining Weirdnet asks (`weirdnet-media`, a video part and modality, a transcription call, `weirdnet-mcp` content blocks, an ffmpeg recipe).
+
+## 2026-11-26 15:05 EST: v0.21.0 released
+
+**Release:** [v0.21.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.21.0) (release commit 6f087b3 on 5e2b602; Release run 45870102685, green, the first with the FreeBSD job): M6 semantic answer cache (`weirdnet-semcache` 0.2.2), one sync session per device (`weirdnet-sync` 0.8.5 `pull_types_shared`), M9 FreeBSD rc.d service and `x86_64-unknown-freebsd` `.tar.gz` and `.pkg` (helpers 0.4.1 FreeBSD `[[platforms]]`). 44 files on GitHub: leak scan 33 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.21.0` EXIT 0; no FreeBSD update bundle, FreeBSD is GitHub-only); `weirdnet_release.py assets 0.21.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 614d11b on main; TAUR ymir-bin and ymir-cuda-bin 0.21.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched. `pub.sh`'s download ran at ~0.5 MB/s on alien-blue for most of the afternoon, so the publish took about 2 h.
+
+**Next:** M7 vLLM with Ray groups waits on Michael (GPU hardware; Ray has no auth). M9: OpenBSD (opted out in `release.toml`), GhostBSD and DragonFly not started; a FreeBSD self-update bundle and aarch64 FreeBSD are not built. M6: pool-mode semantic cache, Redis backend, persisting entries.
 
 ## 2026-11-26 10:45 EST: M6 semantic answer cache; one sync session per device (merged `feature/semcache`)
 
