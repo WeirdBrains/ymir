@@ -5,32 +5,18 @@
 //! back-off, and a takeover once the holder's lease lapsed. The same scenario runs on
 //! `FileJobStore` for comparison.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use weirdnet_agent::jobs::{JobPolicy as BoardPolicy, SyncHandle};
-use weirdnet_net::{Keypair, Multiaddr, Node};
-use weirdnet_sync::{DeviceClass, Leases, Roster, SyncState};
-use ymir_core::train::Hyper;
-use ymir_core::train_board::BoardJobStore;
-use ymir_core::train_job::{CheckpointRef, ClaimError, FileJobStore, JOB_KIND, JOB_ROLE, JobPolicy, JobRecord, JobState, JobStore, Needs, TrainJob};
+#[path = "common/board.rs"]
+mod board;
 
-type SyncNode = Node<Vec<u8>, Vec<u8>>;
-type Book = Arc<Mutex<HashMap<String, Vec<Multiaddr>>>>;
+use board::{Dev, devices, isolate, now, sync_all};
+use ymir_core::train::Hyper;
+use ymir_core::train_job::{CheckpointRef, ClaimError, FileJobStore, JOB_KIND, JOB_ROLE, JobPolicy, JobRecord, JobState, JobStore, Needs, TrainJob};
 
 const CLAIM_MS: u64 = 1_500;
 const TAKEOVER_MS: u64 = 1_000;
 const BACKOFF_MS: u64 = 500;
-
-struct Dev {
-    st: Arc<Mutex<SyncState>>,
-    node: Arc<SyncNode>,
-    peer: String,
-    /// Where this device's leases dial the others; emptied to cut it off.
-    book: Book,
-    store: BoardJobStore,
-}
 
 fn policy() -> JobPolicy {
     JobPolicy {
@@ -41,102 +27,6 @@ fn policy() -> JobPolicy {
         retry_backoff_ms: BACKOFF_MS,
         candidates: Vec::new(),
         role: JOB_ROLE.into(),
-    }
-}
-
-fn voter_policy() -> BoardPolicy {
-    BoardPolicy::for_role(JOB_ROLE).with_claim(Duration::from_millis(CLAIM_MS)).with_takeover_after(Duration::from_millis(TAKEOVER_MS))
-}
-
-/// `n` linked full devices of one user, each granted the model role and the job type, with a
-/// voter, on memory nodes that know each other's addresses.
-fn devices(labels: &[&str]) -> Vec<Dev> {
-    // The identity seed is the user key's secret (a test seed).
-    let seed = [7u8; 32];
-    let user = Keypair::ed25519_from_bytes(seed).unwrap();
-    let made: Vec<(Arc<Mutex<SyncState>>, Keypair)> = labels
-        .iter()
-        .map(|l| {
-            let k = Keypair::generate_ed25519();
-            let peer = k.public().to_peer_id().to_string();
-            let cert = Roster::self_certify(&weirdnet_net::WEIRDNET, &user, &peer, l, 1).unwrap();
-            let st = SyncState::new(seed.to_vec(), user.public(), cert, Some(&k), vec![JOB_KIND.to_string()]).unwrap();
-            (Arc::new(Mutex::new(st)), k)
-        })
-        .collect();
-    let certs: Vec<_> = made.iter().map(|(s, _)| s.lock().unwrap().our_cert.clone()).collect();
-    let chains: Vec<_> = made.iter().map(|(s, _)| s.lock().unwrap().roster.chain.clone()).collect();
-    // Newer than the grant each state holds for itself from its creation.
-    let at = now() as i64 + 60_000;
-    for (s, _) in &made {
-        let mut st = s.lock().unwrap();
-        for c in &certs {
-            st.roster.upsert(c.clone());
-        }
-        for ch in &chains {
-            st.roster.chain.merge(ch);
-        }
-        for c in &certs {
-            st.grant(&c.peer_id, DeviceClass::Full, &[JOB_ROLE.to_string()], &[JOB_KIND.to_string()], at).unwrap();
-        }
-        st.set_voter(Some(voter_policy().voter(JOB_KIND)));
-    }
-    let nodes: Vec<(Arc<Mutex<SyncState>>, Arc<SyncNode>)> = made
-        .into_iter()
-        .map(|(s, k)| {
-            let node = weirdnet_sync::start_node(k, weirdnet_sync::node_config(true), s.clone()).unwrap();
-            (s, Arc::new(node))
-        })
-        .collect();
-    let all: HashMap<String, Vec<Multiaddr>> =
-        nodes.iter().map(|(_, n)| (n.peer_id().to_string(), n.reachable_addrs().into_iter().map(|a| a.parse().unwrap()).collect())).collect();
-    nodes
-        .into_iter()
-        .map(|(st, node)| {
-            let peer = node.peer_id().to_string();
-            let book: Book = Arc::new(Mutex::new(all.clone()));
-            let b = book.clone();
-            let leases = Leases::new(node.clone(), st.clone()).with_addrs(move |p| b.lock().unwrap().get(p).cloned().unwrap_or_default());
-            let store = BoardJobStore::open(&SyncHandle::from_leases(leases), peer.clone()).unwrap();
-            Dev { st, node, peer, book, store }
-        })
-        .collect()
-}
-
-/// Takes device `i` off the network. Pausing its node alone is not enough (a paused node still
-/// dials out to the addresses it remembers), so every node pauses and all but `i` listen again on
-/// fresh memory addresses, which only the others learn.
-fn isolate(devs: &[Dev], i: usize) {
-    devs[i].book.lock().unwrap().clear();
-    for d in devs {
-        d.node.pause().unwrap();
-    }
-    let rest: Vec<&Dev> = devs.iter().enumerate().filter(|(k, _)| *k != i).map(|(_, d)| d).collect();
-    for d in &rest {
-        d.node.resume().unwrap();
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while rest.iter().any(|d| d.node.reachable_addrs().is_empty()) {
-        assert!(std::time::Instant::now() < deadline, "the nodes listen again");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let fresh: HashMap<String, Vec<Multiaddr>> =
-        rest.iter().map(|d| (d.peer.clone(), d.node.reachable_addrs().into_iter().map(|a| a.parse().unwrap()).collect())).collect();
-    for d in &rest {
-        *d.book.lock().unwrap() = fresh.clone();
-    }
-}
-
-/// One pull of the job records from every reachable device by every device.
-fn sync_all(devs: &[Dev]) {
-    for a in devs {
-        for b in devs {
-            if a.peer == b.peer || a.book.lock().unwrap().is_empty() || b.book.lock().unwrap().is_empty() {
-                continue;
-            }
-            let addrs: Vec<Multiaddr> = b.node.reachable_addrs().into_iter().map(|s| s.parse().unwrap()).collect();
-            let _ = weirdnet_sync::pull_from(&mut a.st.lock().unwrap(), &a.node, b.node.peer_id(), &addrs, JOB_KIND);
-        }
     }
 }
 
@@ -180,10 +70,6 @@ fn cp(seq: u64, holder: &str) -> CheckpointRef {
     CheckpointRef { seq, step: seq * 10, root: format!("{:02x}", seq).repeat(32), bytes: 1_000 + seq, holders: vec![holder.to_string()] }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
-}
-
 /// Waits until `f` holds on `dev`'s view, syncing in between.
 async fn until(devs: &[Dev], dev: usize, what: &str, f: impl Fn(&JobRecord<TrainJob>) -> bool, id: &str) -> JobRecord<TrainJob> {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -214,7 +100,7 @@ async fn claim_when_ready(devs: &[Dev], dev: usize, id: &str) -> ymir_core::trai
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_board_job_moves_between_devices_and_resumes_from_its_checkpoint() {
-    let devs = devices(&["a", "b", "c"]);
+    let devs = devices(&["a", "b", "c"], CLAIM_MS, TAKEOVER_MS);
     let (a, b) = (&devs[0], &devs[1]);
     a.store.post(job("j1", &a.peer)).unwrap();
     assert!(a.store.post(job("j1", &b.peer)).is_err(), "a device posts only its own jobs");
@@ -256,7 +142,7 @@ async fn a_board_job_moves_between_devices_and_resumes_from_its_checkpoint() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lapsed_board_claim_is_taken_over_after_the_wait() {
-    let devs = devices(&["a", "b", "c"]);
+    let devs = devices(&["a", "b", "c"], CLAIM_MS, TAKEOVER_MS);
     let (a, b) = (&devs[0], &devs[1]);
     a.store.post(job("j2", &a.peer)).unwrap();
     let ca = claim_when_ready(&devs, 0, "j2").await;

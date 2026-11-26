@@ -128,6 +128,7 @@ fn claim_error(e: JobError, id: &str, now_ms: u64) -> ClaimError {
         JobError::Ineligible => ClaimError::NotCandidate,
         JobError::NotYet { retry_in } => ClaimError::TooSoon { until_ms: now_ms + ms(retry_in) },
         JobError::Held { holder, retry_in } => ClaimError::Held { holder, until_ms: now_ms + ms(retry_in) },
+        JobError::NoQuorum { reached, needed } => ClaimError::NoQuorum { reached, needed },
         other => ClaimError::Store(anyhow!("claiming job {id}: {other}")),
     }
 }

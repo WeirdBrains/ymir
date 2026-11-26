@@ -30,6 +30,8 @@ use crate::{NodeConfig, Paths};
 pub const JOB_KIND: &str = "ymir.train";
 /// The grant role a device needs to claim (and vote on) training jobs.
 pub const JOB_ROLE: &str = "ymir.model";
+/// How long a claim waits for the voters to answer (a job just posted syncs to them first).
+pub const CLAIM_QUORUM_WAIT: Duration = Duration::from_secs(30);
 /// A dataset bundle's index format.
 pub const DATASET_FORMAT: &str = "ymir-train-dataset/1";
 
@@ -197,10 +199,22 @@ pub struct Claim {
 pub enum ClaimError {
     NoJob,
     NotClaimable(JobState),
-    Held { holder: String, until_ms: u64 },
-    TooSoon { until_ms: u64 },
+    Held {
+        holder: String,
+        until_ms: u64,
+    },
+    TooSoon {
+        until_ms: u64,
+    },
     NotCandidate,
-    OutOfAttempts { attempts: u32 },
+    OutOfAttempts {
+        attempts: u32,
+    },
+    /// The synced board's voters didn't answer (or hadn't synced the job yet): worth retrying.
+    NoQuorum {
+        reached: usize,
+        needed: usize,
+    },
     Store(anyhow::Error),
 }
 
@@ -213,6 +227,7 @@ impl std::fmt::Display for ClaimError {
             ClaimError::TooSoon { until_ms } => write!(f, "the job may be claimed again from {until_ms} ms"),
             ClaimError::NotCandidate => write!(f, "this device is not one of the job's candidates"),
             ClaimError::OutOfAttempts { attempts } => write!(f, "the job has used its {attempts} attempts"),
+            ClaimError::NoQuorum { reached, needed } => write!(f, "no quorum among the voters ({reached} of {needed} grants)"),
             ClaimError::Store(e) => write!(f, "{e:#}"),
         }
     }
@@ -842,7 +857,14 @@ pub async fn resume(
     let job = ctx.store.get(id)?.with_context(|| format!("no job {id}"))?;
     let (_, version) = train::check_trainer(&cfg.train).await?;
     check_resumable(&job, cfg, &ctx.me, &version)?;
-    let claim = ctx.store.claim(id, &ctx.me, train::train_now()).await.map_err(|e| anyhow::anyhow!("claiming job {id}: {e}"))?;
+    // On the synced board a job just posted may not have reached the voters yet.
+    let deadline = std::time::Instant::now() + CLAIM_QUORUM_WAIT;
+    let claim = loop {
+        match ctx.store.claim(id, &ctx.me, train::train_now()).await {
+            Err(ClaimError::NoQuorum { .. }) if std::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(250)).await,
+            r => break r.map_err(|e| anyhow::anyhow!("claiming job {id}: {e}"))?,
+        }
+    };
     let job = ctx.store.get(id)?.context("the job went away")?;
     on(JobUpdate::Claimed { job: id.to_string(), term: claim.term, attempt: job.attempts });
     let p = &job.payload;

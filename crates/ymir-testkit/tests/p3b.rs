@@ -11,8 +11,11 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::json;
 use ymir_core::train::{self, Hyper, RunSpec};
-use ymir_core::train_job::{self, Ctx, FileJobStore, JobPolicy, JobState, JobUpdate, LocalBlobs};
+use ymir_core::train_job::{self, BlobStore, Ctx, FileJobStore, JobPolicy, JobState, JobUpdate, LocalBlobs};
 use ymir_core::{NodeConfig, Paths};
+
+#[path = "common/board.rs"]
+mod board;
 
 const MOCK: &str = env!("CARGO_BIN_EXE_ymir-mock-engine");
 const TRAINER: &str = env!("CARGO_BIN_EXE_ymir-mock-trainer");
@@ -272,5 +275,76 @@ async fn ymirctl_runs_lists_and_resumes_a_job() -> Result<()> {
     let out = ctl(&home, &["train", "resume", &id]).await?;
     assert!(out.contains("Carrying on after epoch 1") && out.contains("Done: 4 steps"), "{out}");
     assert!(ctl(&home, &["train", "jobs"]).await?.contains("done"));
+    Ok(())
+}
+
+/// The first scenario on the synced board (`BoardJobStore`): three linked devices with voters;
+/// gpu1 (device a) loses its GPU after epoch 1, and gpu2 (device b) carries the job on from that
+/// checkpoint. The blobs stay on a shared folder (moving the bytes is the blob store's job).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_the_synced_board_a_lost_job_is_carried_on_by_another_device_from_its_checkpoint() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let shared = tmp.path().join("shared");
+    let data = dataset(tmp.path())?;
+    let devs = Arc::new(board::devices(&["gpu1", "gpu2", "gpu3"], 2_000, 0));
+    let _sync = board::keep_syncing(devs.clone());
+    let blobs: Arc<LocalBlobs> = Arc::new(LocalBlobs::open(shared.join("blobs"))?);
+    let on = |i: usize| Ctx { store: devs[i].store.clone(), blobs: blobs.clone(), me: devs[i].peer.clone() };
+    let policy = JobPolicy { role: train_job::JOB_ROLE.into(), ..quick() };
+
+    let n1 = Node::new(tmp.path(), "gpu1")?;
+    let cfg1 = n1.config("gpu1", "r1", false, &[("YMIR_MOCK_TRAINER_DIE_AFTER_EPOCH", "1")])?;
+    let c1 = on(0);
+    let mut seen = Vec::new();
+    let err = train_job::start(&n1.paths, &cfg1, &c1, &spec(&data, 3), policy, &mut never(), &mut |u| seen.push(u)).await.unwrap_err();
+    assert!(format!("{err:#}").contains("GPU went away"), "{err:#}");
+    let id = seen.iter().find_map(|u| if let JobUpdate::Posted { job } = u { Some(job.clone()) } else { None }).expect("posted");
+    assert!(seen.iter().any(|u| matches!(u, JobUpdate::Claimed { attempt: 1, .. })), "{seen:?}");
+    assert!(seen.iter().any(|u| matches!(u, JobUpdate::Published { seq: 1, .. })), "{seen:?}");
+
+    // gpu2 sees the failed attempt and epoch 1's checkpoint through sync.
+    let c2 = on(1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let job = loop {
+        board::sync_all(&devs);
+        if let Some(j) = c2.store.get(&id)?
+            && j.state == JobState::Queued
+            && j.checkpoint.is_some()
+        {
+            break j;
+        }
+        assert!(std::time::Instant::now() < deadline, "the job on gpu2: {:?}", c2.store.get(&id)?);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(job.owner, devs[0].peer);
+    assert_eq!(job.attempts, 1);
+    let ckpt = job.checkpoint.clone().unwrap();
+    assert_eq!((ckpt.seq, ckpt.step, ckpt.holders.clone()), (1, 2, vec![devs[0].peer.clone()]));
+    assert!(blobs.has(&ckpt.root) && blobs.has(&job.payload.dataset_root));
+
+    let n2 = Node::new(tmp.path(), "gpu2")?;
+    let cfg2 = n2.config("gpu2", "r1", true, &[])?;
+    let mut seen2 = Vec::new();
+    let record = train_job::resume(&n2.paths, &cfg2, &c2, &id, false, false, &mut never(), &mut |u| seen2.push(u)).await?;
+    assert!(seen2.iter().any(|u| matches!(u, JobUpdate::Resuming { epoch: 1, .. })), "{seen2:?}");
+    assert_eq!(record.resumed_from.as_deref(), Some(ckpt.root.as_str()));
+    assert_eq!(record.steps, 6);
+    assert!(record.checkpoints.iter().map(|c| c.epoch).eq([2, 3]), "{:?}", record.checkpoints);
+
+    // Done everywhere, with gpu2's result and the last checkpoint.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        board::sync_all(&devs);
+        if let Some(j) = c1.store.get(&id)?
+            && j.state == JobState::Done
+        {
+            assert_eq!(j.attempts, 2);
+            assert_eq!(j.result.as_ref().and_then(|r| r["node"].as_str()), Some("gpu2"));
+            assert_eq!(j.checkpoint.map(|c| c.seq), Some(3));
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "done on gpu1: {:?}", c1.store.get(&id)?);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     Ok(())
 }
