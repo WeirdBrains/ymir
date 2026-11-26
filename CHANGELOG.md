@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-26
+
 ### Added
 
 - Limits for video clients (LF-43): catalog/1 entries carry `context`, the window one request can count on (smallest
@@ -31,6 +33,7 @@ All notable changes to Ymir are listed here. The format follows
   and replay a stored answer for the same model, weights, system prompt and sampling when they mean the same; hits
   are served by `semantic-cache`. `cache: bypass` and `refresh` apply. `[inference.cache]` is now validated (mode,
   threshold, ttl, entries).
+- FreeBSD x86_64 tar.gz and pkg on the GitHub release (M9), the M6 semantic answer cache, and one sync session per device (weirdnet-sync 0.8.5).
 
 ### Changed
 

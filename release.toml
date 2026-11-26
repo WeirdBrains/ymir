@@ -1,5 +1,5 @@
 # Ymir release config for weirdnet-project-helpers (scripts/weirdnet_release.py, vendored; never edit it here).
-helpers = "0.4.0"
+helpers = "0.4.1"
 project = "ymir"
 require_message = true
 next = [
@@ -123,8 +123,7 @@ files = [
   "dist/ymir-cuda-{version}-*-pc-windows-msvc.zip",
   "dist/ymir-{version}-*.msi",
   "dist/YmirSetup-{version}.exe",
-  # FreeBSD (M9), from the Release workflow's VM job. Not a [[platforms]] entry yet: the shared
-  # release script (weirdnet-project-helpers 0.4.0) knows no `freebsd` OS; asked of the Weirdnet lead.
+  # FreeBSD (M9), from the Release workflow's VM job (x86_64 only).
   "dist/ymir-{version}-x86_64-unknown-freebsd.tar.gz",
   "dist/ymir-{version}-x86_64-unknown-freebsd.pkg",
 ]
@@ -171,6 +170,18 @@ arch = ["x86_64", "aarch64"]
 formats = ["zip", "exe", "exe-wix"]  # exe-wix: YmirSetup (WiX 7 bundle) around ymir-VERSION-ARCH.msi
 channels = ["github"]
 assets = ["ymir-{version}-*-pc-windows-msvc.zip", "ymir-cuda-{version}-x86_64-pc-windows-msvc.zip", "YmirSetup-{version}.exe"]
+
+[[platforms]]
+os = "freebsd"
+arch = ["x86_64"]
+arch_note = "built in a FreeBSD VM on GitHub's x86_64 runners; no aarch64 FreeBSD runner"
+formats = ["tar.gz", "pkg"]
+channels = ["github"]
+assets = ["ymir-{version}-x86_64-unknown-freebsd.tar.gz", "ymir-{version}-x86_64-unknown-freebsd.pkg"]
+
+[[platforms]]
+os = "openbsd"
+opt_out = "not built yet: no OpenBSD CI runner or VM job (FreeBSD comes first, M9)"
 
 [[platforms]]
 os = "android"
