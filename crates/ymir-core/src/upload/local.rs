@@ -22,13 +22,7 @@ pub struct Placed {
 
 /// The models, adapters and projectors in `store`, as a node's models/1 lists them (not served).
 pub fn entries(store: &ModelStore) -> Vec<StoredEntry> {
-    // `StoredEntry` is non-exhaustive and has no public constructor, so it is built from its
-    // serialized form (the fields left out are the served state, `None` here).
-    let entry = |v: serde_json::Value| serde_json::from_value::<StoredEntry>(v).ok();
-    let models = store.list().into_iter().chain(store.dir_models()).filter_map(|m| entry(serde_json::json!({ "model": m })));
-    let adapters = store.adapters().into_iter().filter_map(|a| entry(serde_json::json!({ "adapter": a })));
-    let projectors = store.projectors().into_iter().filter_map(|p| entry(serde_json::json!({ "projector": p })));
-    models.chain(adapters).chain(projectors).collect()
+    StoredEntry::list(store)
 }
 
 /// Places `upload` (made from the file or directory `local`) in `models_dir`. `room` is that

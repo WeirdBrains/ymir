@@ -3,6 +3,16 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 01:10 EST: model-upload U10: `[model] upload = false` on weirdnet-backends 0.4.7 (branch `feature/upload-switch`)
+
+**What changed:** weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (919204a, the bump alone, which `feature/jobboard` builds on). `[model] upload` (default on; `false` passes `WritePolicy::with_uploads(false)`, so uploads are refused with `not-allowed` while pulls, listing and removals work). The refusal reads "that node has `[model] upload = false`" (`upload_net::UPLOADS_OFF`); `--node auto` tries the nodes with room from the most room down and passes over one with uploads off. `upload::local::entries` uses `StoredEntry::list` (no more serde). `/ymir/uploads/1` takes 16 streams (was 64). Docs: CHANGELOG, the plan ("U10"), DESIGN, the site's ymirctl page.
+
+**Checks:** fmt; clippy `--workspace --all-targets -D warnings`; `ymir-core` unit tests (`upload_net`, including the setting's round trip); `models_pool.rs` (a node with `upload = false` searches, pulls, serves and removes, and refuses an upload with the hint), `models_upload.rs` (`--node auto` passes over that node), `models_upload_formats.rs`, `models_upload_pool.rs`, `rollouts_net.rs`; the full workspace in CI.
+
+**Not tested:** across real machines.
+
+**Next:** merge when CI, macOS and Pages are green; v0.17.0 with `feature/jobboard` (agreed with the training lead).
+
 ## 2026-11-26 00:43 EST: v0.16.0 released
 
 **Release:** [v0.16.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.16.0) (release commit 9c6c86b on 149dfe9; Release run 45758480177, green). It folds in what would have been 0.15.5: model-upload U9 (directories and projectors without `--node`, `--node auto`, `--rollout --inference`), resumable training jobs (P3b), the teacher license from the Hub or the pool catalog, `train seed questions|prompts` and training status over `/ymir/train-status/1`. The cut ran its checks (fmt, clippy `-D warnings`, `cargo test --workspace --locked`) before pushing. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles (`com.weirdbrains.ymir-stable-16000`) with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.16.0-1; their recipes are on this branch (`chore/release-0.16.0`).

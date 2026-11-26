@@ -6,6 +6,18 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `[model] upload = false`: the node refuses uploads (`not-allowed`, "uploads are off on this node") while pulls,
+  listing and removals keep working (model-upload U10, weirdnet-backends 0.4.7 `WritePolicy::with_uploads`).
+  `ymirctl models upload` says that node has uploads off, and `--node auto` passes over it to the next node with room.
+
+### Changed
+
+- weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. Local placement lists the store with `StoredEntry::list` instead of
+  building entries from JSON; `/ymir/uploads/1` takes 16 streams at once (was 64), since dropped streams are now
+  released promptly.
+
 ## [0.16.0] - 2026-11-25
 
 ### Added

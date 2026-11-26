@@ -791,7 +791,7 @@ over models/1 (`ModelsClient::upload`: 48 KiB chunks, checked on the node, resum
 at least `[model] upload_keep_free` left free there, by default the same 10 percent or 20 GiB), the node serves it,
 and over Ymir's `/ymir/uploads/1` (`ymir_core::upload_net`) it records the revision for the pool
 (`NodeService::set_model_info`, and its origin and license with `set_model_origin`) and adds the entry to its own node.toml, unless `--no-persist`. Any linked device may
-upload; refusals name their reason (`exists`, `no-space`, `wrong-arch` and so on).
+upload; refusals name their reason (`exists`, `no-space`, `wrong-arch` and so on). `[model] upload = false` on a node refuses uploads (`not-allowed`) and keeps pulls, listing and removals (U10).
 
 With `--node all` or `--node A,B` (slice U6) it goes to a pool: each target's free space is read first (a node
 without room after `upload_keep_free` is left out), the file is sent once, to the node with the most room or
