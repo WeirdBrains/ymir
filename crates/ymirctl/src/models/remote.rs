@@ -34,14 +34,11 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
 
 /// `ymirctl models upload FILE --node X`: checked and hashed here, sent by this machine's ymird.
 async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::upload::UploadArgs) -> Result<()> {
-    if node == "auto" {
-        bail!("an upload goes to named nodes: --node NAME, --node A,B or --node all");
-    }
     let pool = node == "all" || node.contains(',');
     let mut op = super::upload::remote_op(out, a)?;
     let version = match &a.rollout.rollout {
         Some(name) => {
-            let n = super::upload_rollout::next_version(paths, name).await?;
+            let n = super::upload_rollout::next_version(paths, name, a.rollout.inference.as_deref()).await?;
             if a.name.is_none() {
                 op.upload.id = super::upload_rollout::versioned_id(&op.upload.id, n);
                 op.upload.provenance.id = op.upload.id.clone();
@@ -59,10 +56,15 @@ async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::uploa
             "Sending it once, to {}, and the others copy it from there (Ctrl-C stops; sending it again resumes)...",
             a.stage.as_deref().unwrap_or("the node with the most room")
         )?;
+    } else if node == "auto" {
+        writeln!(out, "Sending it to the model node with the most room (Ctrl-C stops; sending it again resumes)...")?;
     } else {
         writeln!(out, "Sending it to {node} (Ctrl-C stops; sending it again resumes)...")?;
     }
     let done = ask(paths, out, node, ModelsOp::Upload(Box::new(op))).await?;
+    if let Some(c) = &done.chosen {
+        writeln!(out, "Chose {}: {} free after what it keeps free.", c.node.label, gib(c.usable_bytes))?;
+    }
     let mut failed = 0;
     for NodeResult { node, outcome } in &done.nodes {
         let label = node.label.as_str();
@@ -88,7 +90,7 @@ async fn upload(paths: &Paths, out: &mut dyn Write, node: &str, a: &super::uploa
             && done.nodes.iter().any(|r| {
                 matches!(&r.outcome, Outcome::Uploaded { report } if report.pulled.as_ref().is_some_and(|p| p.change == Some(weirdnet_backends::AdapterChange::NextLoad)))
             });
-        super::upload_rollout::join(paths, out, &a.rollout, n, &id, waits).await?;
+        super::upload_rollout::join(paths, out, &a.rollout, n, &id, waits, persist).await?;
     }
     Ok(())
 }

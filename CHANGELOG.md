@@ -6,6 +6,15 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ymirctl models upload DIR|PROJECTOR` without `--node` (model-upload U9): on a machine that serves models (the model role) a directory of safetensors or MLX weights, a PEFT adapter or a GGUF vision projector is placed in this machine's models directory with its provenance and saved in node.toml, as a node does with an upload (it serves after a restart); on a machine that serves none it goes to the other model node with the most room after what it keeps free. `--node auto` picks that node for any upload.
+- `ymirctl models upload ... --rollout NAME --inference NODE`: the upload joins that inference node's rollout over Weirdnet (`/ymir/rollouts/1`), saved in its node.toml unless `--no-persist`, instead of this machine's.
+
+### Changed
+
+- `--projector-for` no longer needs `--node`. `ymir_core::upload_net::save_entry` (node.toml saving, shared by `/ymir/uploads/1` and local uploads), `ymir_core::upload::local::place` and `is_outgoing_only`.
+
 ## [0.15.4] - 2026-11-25
 
 ### Added

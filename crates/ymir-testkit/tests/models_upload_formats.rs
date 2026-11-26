@@ -247,9 +247,29 @@ async fn directories_adapters_and_projectors_are_uploaded_and_saved() -> Result<
     let b = cfg.model.local.iter().find(|m| m.id == "base").unwrap();
     let p = b.mmproj.as_deref().expect("mmproj saved on base");
     assert_eq!(std::fs::read(root.join("gpu-models").join(p))?, std::fs::read(&mm)?);
-    // Without --node, a projector or a directory is not taken on this machine.
-    let err = format!("{:#}", ctl(&gpu_h.home, &["models", "upload", &st_s]).await.unwrap_err());
-    assert!(err.contains("--node"), "{err}");
+    // U9: without --node, on a machine that serves models, a directory is placed here and saved
+    // in this node.toml (it serves after a restart); the same projector again is already there.
+    let out = ctl(&gpu_h.home, &["models", "upload", &st_s, "--name", "tune-local", "--license", "mit"]).await?;
+    assert!(out.contains("Placed `tune-local`") && out.contains("Restart ymird to serve it"), "{out}");
+    let here = root.join("gpu-models/safetensors/tune-local");
+    assert_eq!(std::fs::read(here.join("model.safetensors"))?, std::fs::read(st.join("model.safetensors"))?);
+    assert_eq!(upload::read_provenance(&here).and_then(|p| p.license).as_deref(), Some("mit"));
+    let cfg = NodeConfig::load(&gpu_h.paths.config())?;
+    let m = cfg.model.local.iter().find(|m| m.id == "tune-local").expect("saved in this node.toml");
+    assert_eq!(m.backend.as_deref(), Some("vllm"));
+    let out = ctl(&gpu_h.home, &["models", "upload", &mm_s, "--projector-for", "base"]).await?;
+    assert!(out.contains("nothing was copied") && out.contains("already has"), "{out}");
+    // From a machine that serves no models it goes to the model node with the most room.
+    // (Both have the same disk here, so either may be chosen; only the vLLM one takes it.)
+    let mut buf = Vec::new();
+    let sent = ctl_with(&lap_h.home, &["models", "upload", &st_s, "--name", "tune-auto", "--no-persist"], &mut buf, "").await;
+    let out = String::from_utf8(buf)?;
+    assert!(out.contains("Sending it to the model node with the most room"), "{out}");
+    if out.contains("Chose vl") {
+        assert!(sent.is_ok() && root.join("vl-models/safetensors/tune-auto/model.safetensors").is_file(), "{out}");
+    } else {
+        assert!(out.contains("Chose gpu"), "{out}");
+    }
 
     lap.shutdown().await;
     vl.shutdown().await;

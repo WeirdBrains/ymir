@@ -201,6 +201,20 @@ impl Outgoing {
     }
 }
 
+/// Whether `path` is a GGUF vision projector (mmproj), by its header.
+pub fn is_projector(path: &Path) -> bool {
+    let Ok(f) = File::open(path) else { return false };
+    read_header(std::io::BufReader::new(f)).is_ok_and(|h| {
+        matches!(h.kind, GgufKind::Projector) || h.architecture.eq_ignore_ascii_case("clip") || h.architecture.eq_ignore_ascii_case("mmproj")
+    })
+}
+
+/// Whether `path` goes only through [`inspect_outgoing`]: a directory or a vision projector
+/// (U9: placed with [`local::place`] on a machine that serves models, else sent to a node).
+pub fn is_outgoing_only(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) || is_projector(path)
+}
+
 /// Reads, checks and hashes what an upload to a node sends: a GGUF file as [`inspect`] takes it, a
 /// GGUF vision projector, or a directory (not a symlink) that `weirdnet-model` reads as safetensors
 /// or MLX weights, or as a PEFT LoRA adapter. It refuses pickles, code and symlinks inside.
@@ -223,11 +237,8 @@ pub fn inspect_outgoing(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Resu
             (k, _) => bail!("{name} reads as a {}, which is not sent as a directory", kind_name(k)),
         };
     }
-    let header = read_header(std::io::BufReader::new(File::open(path)?)).ok();
-    let projector = header.as_ref().is_some_and(|h| {
-        matches!(h.kind, GgufKind::Projector) || h.architecture.eq_ignore_ascii_case("clip") || h.architecture.eq_ignore_ascii_case("mmproj")
-    });
-    if !projector {
+    File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    if !is_projector(path) {
         let item = inspect_with(path, progress)?;
         return Ok(Outgoing { path: path.to_path_buf(), name: item.file_name, artifact: item.artifact });
     }
@@ -473,6 +484,8 @@ pub fn check_adapter_base(adapter: &Inspected, base_file: &Path) -> Result<GgufH
     }
     Ok(base)
 }
+
+pub mod local;
 
 #[cfg(test)]
 mod tests;

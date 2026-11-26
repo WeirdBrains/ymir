@@ -218,6 +218,16 @@ pub fn apply(rollouts: &mut Vec<Rollout>, cmd: &RolloutCmd) -> Result<String> {
     Ok(said.join("\n"))
 }
 
+/// The rollouts live on the inference node `node`, through this machine's ymird and `/ymir/rollouts/1`.
+pub async fn remote_list(paths: &Paths, node: &str) -> Result<Vec<Rollout>> {
+    let req = ControlRequest::RemoteRollouts { node: node.to_string(), request: ymir_core::rollouts_net::Request::list() };
+    let r = control::request(&paths.socket(), &req).await.context("asking this machine's ymird (is it running? `ymirctl service start`)")?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    Ok(r.remote_rollouts.context("ymird answered without the rollouts")?.rollouts)
+}
+
 /// `ymirctl models rollout ... --inference NODE`: the same on another inference node, through
 /// this machine's ymird and `/ymir/rollouts/1`. `persist`: that node saves it in its node.toml.
 pub async fn run_remote(paths: &Paths, out: &mut dyn Write, node: &str, cmd: RolloutCmd, persist: bool) -> Result<()> {

@@ -165,7 +165,7 @@ impl ModelsHub {
     pub async fn run(&self, spec: &str, op: ModelsOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsDone, String> {
         if let ModelsOp::Upload(up) = op {
             let t = match spec {
-                "auto" => return Err("an upload goes to named nodes: --node NAME, --node A,B or --node all".into()),
+                "auto" => return self.upload_auto(*up, tx).await,
                 "all" => return self.upload_pool(None, *up, tx).await,
                 list if list.contains(',') => return self.upload_pool(Some(list), *up, tx).await,
                 name => self.resolve(name)?,
@@ -317,6 +317,40 @@ impl ModelsHub {
         };
         self.register(t, &op, &mut report).await;
         Outcome::Uploaded { report: Box::new(report) }
+    }
+
+    /// U9: `--node auto` for an upload: the other model node with the most room after what it
+    /// keeps free (10% of its disk or 20 GiB, whichever is more), when one has room for it.
+    async fn upload_auto(&self, op: UploadOp, tx: &UnboundedSender<ModelsLine>) -> Result<ModelsDone, String> {
+        if op.stage.is_some() {
+            return Err("--stage goes with several targets (--node A,B or --node all)".into());
+        }
+        let targets: Vec<Target> = self.model_nodes().await.into_iter().filter(|t| !t.local).collect();
+        if targets.is_empty() {
+            return Err("no other model nodes found among your devices (is ymird running on them, with the model role on?)".into());
+        }
+        let total: u64 = op.upload.files.iter().map(|f| f.size).sum();
+        let disks = join_all(targets.iter().map(|t| self.client.disk(&t.peer))).await;
+        let mut why = Vec::new();
+        let mut best: Option<(Target, u64)> = None;
+        for (t, d) in targets.iter().zip(disks) {
+            match d {
+                Ok(d) if d.free.saturating_sub(d.keep_free) < total => why.push(no_room(t, &d, total)),
+                Ok(d) => {
+                    let room = d.free.saturating_sub(d.keep_free);
+                    if best.as_ref().is_none_or(|(_, r)| room > *r) {
+                        best = Some((t.clone(), room));
+                    }
+                }
+                Err(e) => why.push(format!("{}: {}", t.label, explain(t, &e))),
+            }
+        }
+        let Some((t, room)) = best else {
+            return Err(format!("no model node has room for it: {}", why.join("; ")));
+        };
+        let chosen = Chosen { node: t.clone(), model: op.upload.id.clone(), size: total, usable_bytes: room };
+        let outcome = self.upload(&t, op, tx).await;
+        Ok(ModelsDone { nodes: vec![NodeResult { node: t, outcome }], chosen: Some(chosen) })
     }
 
     /// U6: sends the files once, to the stage, and has the other targets copy them from it node to
