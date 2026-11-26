@@ -142,7 +142,19 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
         TrainCmd::Seed(c) => seed(out, c),
         TrainCmd::Status { node, json } => {
             let status = match node {
-                None => ymir_core::train_net::TrainStatus::read(paths, &crate::load_cfg(paths)?),
+                None => {
+                    // The synced board through ymird when it is up on Weirdnet, else the file store.
+                    let cfg = crate::load_cfg(paths)?;
+                    let board = match cfg.network.enabled {
+                        true => ymir_core::train_jobs_ctl::ControlJobStore::connect(paths.socket()).await.map(|(s, _)| s),
+                        false => None,
+                    };
+                    let paths = paths.clone();
+                    tokio::task::spawn_blocking(move || {
+                        ymir_core::train_net::TrainStatus::read_with(&paths, &cfg, board.as_ref().map(|b| b as &dyn ymir_core::train_job::JobStore))
+                    })
+                    .await?
+                }
                 Some(node) => {
                     let r = control::request(&paths.socket(), &ControlRequest::TrainStatus { node }).await?;
                     if !r.ok {

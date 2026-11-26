@@ -327,8 +327,14 @@ impl Daemon {
                     let server =
                         remote::serve_uploads(&net.node, &net.membership, uploads).map_err(|e| anyhow!("serving uploads on Weirdnet: {e}"))?;
                     serving.push(Box::new(server));
-                    let server = remote::serve_train_status(&net.node, &net.membership, paths.clone(), cfg.clone())
-                        .map_err(|e| anyhow!("serving training status on Weirdnet: {e}"))?;
+                    let server = remote::serve_train_status(
+                        &net.node,
+                        &net.membership,
+                        paths.clone(),
+                        cfg.clone(),
+                        net.jobs.clone().map(|j| j as Arc<dyn crate::train_job::JobStore>),
+                    )
+                    .map_err(|e| anyhow!("serving training status on Weirdnet: {e}"))?;
                     serving.push(Box::new(server));
                     models_service = Some(svc);
                 }
