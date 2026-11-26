@@ -204,7 +204,7 @@ async fn a_run_that_loses_its_lease_stops_and_writes_nothing_more() -> Result<()
     let taker = std::thread::spawn(move || {
         let id = rx.recv().unwrap();
         std::thread::sleep(Duration::from_millis(400));
-        thief.store.claim(&id, "gpu2", u64::MAX / 2).map(|c| c.term)
+        futures::executor::block_on(thief.store.claim(&id, "gpu2", u64::MAX / 2)).map(|c| c.term)
     });
     let mut lost = false;
     let e = train_job::start(&n.paths, &cfg, &c, &spec(&data, 30), quick(), &mut never(), &mut |u| match u {
