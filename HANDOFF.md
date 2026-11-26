@@ -19,6 +19,25 @@ A running log of finished work, newest first. Each entry says what changed, the 
 - Tests: `dataset.rs` (pool-catalog license, both seed passes through the mock pool), unit tests in `seed.rs`,
   `dataset.rs`, `models/hub.rs`. Built on `feature/p3b-resume`.
 
+## 2026-11-25 22:02 EST: model-upload U9: directories and projectors without --node, `--node auto`, rollouts on another inference node (branch `feature/upload-auto-node`)
+
+Michael asked at 9:33 PM ET for `ymirctl models upload` of folders and vision projectors without `--node`, with the node picked automatically (this machine if it serves models, else the pool node with room after 10% or 20 GiB free), and for the `--rollout --inference` gap to be closed.
+
+**What changed**
+- `ymirctl models upload DIR|PROJECTOR` without `--node`: with the model role here, placed in this machine's models directory (`ymir_core::upload::local::place`: staged beside the store, hash-checked, moved in with its provenance, keeping `[model] upload_keep_free` free as the node does) and saved in node.toml by the code `/ymir/uploads/1` uses (`upload_net::save_entry`, split out of `UploadsService`); it serves after a restart. Without the model role it goes to `--node auto`. `--projector-for` no longer needs `--node`.
+- `--node auto` for uploads (`ModelsHub::upload_auto`): the other model node with the most room after what it keeps free; none with room is an error with each node's numbers. The choice is printed.
+- `--rollout NAME --inference NODE` (`RolloutArgs::inference`): version number, incumbent, add and share all on that inference node over `/ymir/rollouts/1`, saved there unless `--no-persist`.
+- `/ymir/uploads/1` accepts 64 streams at once (was 8): a finished stream can stay counted for a while, and nine uploads in a row hit the limit in the tests.
+- Docs: CHANGELOG, the plan ("U9 as built"), the site's ymirctl page.
+
+**Checks:** `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` (CHECKS). End to end: `models_upload_formats.rs` (a directory placed and saved on a model node without `--node`; the same projector again already there; from a machine without the model role, sent to the node with the most room), `models_upload.rs` (`--node auto`), `models_upload_pool.rs` (`--node auto --stage` refused), `rollouts_net.rs` (an upload joins `support` on `inf` as `support@2` at 20%, saved there and not here).
+
+**Not tested:** across real machines; MLX directories (macOS nodes).
+
+**Not built:** `[model] upload = false` (uploads off, everything else on): `WritePolicy` in weirdnet-backends 0.4.5 has no switch for uploads alone (its `auth` also covers pulls and removals, `max_upload = 0` would read as `too-big`), so this needs a small Weirdnet request; `--serve` as a flag (uploads always serve; `--store-only` would be the useful opposite). `--node auto` does not look at engines: a directory sent to a llama.cpp node is refused there as before.
+
+**Next:** merge after CI; release 0.16.0.
+
 ## 2026-11-25 21:50 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
 
 **What changed:** trainer interface 2 (`train --checkpoint-dir DIR` writes `epoch-NNNN/` with `checkpoint.json`, `ymir-train-checkpoint/1`; `--resume CKPT`), spoken by the mock trainer and `scripts/trainer.py` (one `llama-finetune --epochs 1` per epoch: the pinned build saves weights only at the end and has no optimizer state, so AdamW restarts each epoch; no shuffle and a constant learning rate keep the data order and schedule the same). `ymir_core::train_job`: the job record, lease with fencing term, attempts, back-off and checkpoint pointer as the `JobStore` trait asked of `weirdnet-agent` 0.6.0, with `FileJobStore` and `LocalBlobs` standing in on one node; `start`/`resume` drive a run under a claim (renew, publish checkpoints, finish, fail with or without retry, pause on Ctrl-C, stop on a lost lease) after `check_resumable` (trainer build, base revision, `--from`, adapter id, `[train] resume`). `ymirctl train run --job`, `train jobs`, `train resume JOB`, `train job pause|unpause|cancel JOB`. Docs: [training.md](docs/design/training.md) (P3b), [DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), site.

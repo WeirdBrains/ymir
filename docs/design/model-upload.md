@@ -471,7 +471,7 @@ unlinked device refused, a pickle refused, and a rollout version arriving at wei
   `checksum`, `not-allowed`). A duplicate upload in progress answers `Busy`.
 - **One node.** `--node all` and `auto` are refused for uploads (pools are U6); `--node` naming this device says to
   run it without `--node`.
-- **Not built from the plan:** `--node auto`, `--serve` as a flag (it always serves) and `[model] upload = false`.
+- **Not built from the plan:** `--serve` as a flag (it always serves) and `[model] upload = false`. (`--node auto` came in U9.)
 - **Tests:** `crates/ymir-testkit/tests/models_upload.rs` runs three real daemons on 127.0.0.1 (a laptop and two
   model nodes, one keeping more space free than it has): a model sent, placed with provenance (`uploaded_by` the
   laptop) and saved; the same files again; other files under the id; a cut-off upload resumed; an adapter with and
@@ -709,6 +709,36 @@ in `weirdnet-backends` 0.4.5, placement hooks (`ModelsService::on_placed`, `with
   server); the merged catalog across two nodes, one of which knows; end to end, an upload to another node shows
   `upload`/its license in the inference node's catalog and the node's configured file shows `hub`;
   `ymirctl models` lines.
+
+## U9: directories and projectors without --node; rollouts on another inference node (built 2026-11-25)
+
+Michael asked on 2026-11-25 (9:33 PM ET) for `ymirctl models upload` of folders and vision projectors without
+`--node`, the node picked automatically, and for the `--rollout --inference` gap to be closed.
+
+### U9 as built
+
+- **Without `--node`**, a directory (safetensors, MLX, PEFT) or a GGUF projector (`upload::is_outgoing_only`):
+  - on a machine with the model role, it is checked and hashed as for a node (`remote_op`), copied into a staging
+    directory beside the store, checked again and moved into place with its provenance
+    (`upload::local::place`, `ModelStore::import_files`), then saved in node.toml by the same code as
+    `/ymir/uploads/1` (`upload_net::save_entry`): a vLLM or MLX `[[model.local]]`, a projector as its model's
+    `mmproj`, a PEFT adapter on its base. It serves after a restart. The same files again are "already there";
+    `--no-persist` leaves node.toml alone. Free space keeps the larger of 10% and 20 GiB.
+  - on a machine without the model role it goes to `--node auto`.
+- **`--node auto`** for an upload (`ModelsHub::upload_auto`): the other model node with the most free space after
+  what it keeps free (`[model] upload_keep_free`), among those with room for it; none with room is an error that
+  lists each node's numbers. The choice is printed (`Chose NODE: N GiB free after what it keeps free`). It does
+  not look at engines: a directory sent to a llama.cpp node is refused there as before.
+- **`--rollout NAME --inference NODE`**: the next version number, the incumbent for `--eval`, the add at weight 0
+  and the share come from and go to that inference node over `/ymir/rollouts/1`
+  (`rollout::remote_list`, `rollout::run_remote`), saved in its node.toml unless `--no-persist`.
+- `StoredEntry` has no public constructor in `weirdnet-backends` 0.4.5, so `upload::local::entries` builds it from
+  its serialized form; a constructor (or `ModelStore`-side listing) would be a small Weirdnet request.
+- **Tests:** end to end (`models_upload_formats.rs`): a directory placed and saved on a model node without
+  `--node`, the same projector again already there, and a directory from a machine without the model role sent to
+  the node with the most room; `models_upload.rs`: `--node auto` picks the only other model node;
+  `rollouts_net.rs`: an upload with `--rollout support --inference inf --canary 20` becomes `support@2` with 20% on
+  inf, saved there and not on this machine.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 

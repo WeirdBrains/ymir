@@ -244,6 +244,14 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::Upload(a) => a.node.clone(),
         ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } => None,
     };
+    // U9: a directory or projector from a machine that serves no models goes to the model node
+    // with the most room.
+    let node = match &cmd {
+        ModelsCmd::Upload(a) if node.is_none() && upload::goes_to_pool(NodeConfig::load(&paths.config()).ok().as_ref(), a) => {
+            Some("auto".to_string())
+        }
+        _ => node,
+    };
     if let Some(node) = node {
         return remote::run(paths, out, input, &node, cmd).await;
     }

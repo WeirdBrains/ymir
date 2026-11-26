@@ -29,8 +29,12 @@ async fn ctl_with(home: &Path, args: &[&str], out: &mut dyn Write, input: &str) 
 
 async fn ctl(home: &Path, args: &[&str]) -> Result<String> {
     let mut out = Vec::new();
-    ctl_with(home, args, &mut out, "").await?;
-    Ok(String::from_utf8(out)?)
+    let r = ctl_with(home, args, &mut out, "").await;
+    let text = String::from_utf8(out)?;
+    match r {
+        Ok(()) => Ok(text),
+        Err(e) => Err(e.context(text)),
+    }
 }
 
 /// A daemon's home in `root/name`.
@@ -193,11 +197,16 @@ async fn models_and_adapters_are_uploaded_to_another_node_and_saved_there() -> R
     std::fs::write(&model, gguf(300_000, "llama"))?;
     let model_s = model.display().to_string();
 
-    // Not to this device, and not to `auto`.
+    // Not to this device; `auto` is the other model node with the most room (U9), here gpu.
     let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "lap"]).await.unwrap_err());
     assert!(err.contains("is this device"), "{err}");
-    let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "auto"]).await.unwrap_err());
-    assert!(err.contains("an upload goes to named nodes"), "{err}");
+    let other = files.join("Auto-Q4_0.gguf");
+    std::fs::write(&other, gguf(200_000, "llama"))?;
+    let other_s = other.display().to_string();
+    let mut buf = Vec::new();
+    let sent = ctl_with(&lap_h.home, &["models", "upload", &other_s, "--node", "auto", "--name", "auto-pick", "--no-persist"], &mut buf, "").await;
+    let out = String::from_utf8(buf)?;
+    assert!(sent.is_ok() && out.contains("Chose gpu") && out.contains("gpu: stored `auto-pick`"), "{out} {sent:?}");
 
     // A model: sent, placed with its provenance, saved in gpu's node.toml.
     let out = ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "gpu", "--license", "mit"]).await?;

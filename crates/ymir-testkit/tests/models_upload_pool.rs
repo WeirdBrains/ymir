@@ -181,8 +181,9 @@ async fn a_pool_upload_is_sent_once_and_copied_node_to_node() -> Result<()> {
     std::fs::write(&model, gguf(2 << 20, "llama"))?;
     let model_s = model.display().to_string();
 
-    let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "auto"]).await.unwrap_err());
-    assert!(err.contains("an upload goes to named nodes"), "{err}");
+    // `--node auto` is one node (U9): --stage goes with several.
+    let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "auto", "--stage", "a"]).await.unwrap_err());
+    assert!(err.contains("--stage goes with several targets"), "{err}");
     let err = format!("{:#}", ctl(&lap_h.home, &["models", "upload", &model_s, "--node", "a,b", "--stage", "full"]).await.unwrap_err());
     assert!(err.contains("--stage full is not one of the targets"), "{err}");
 

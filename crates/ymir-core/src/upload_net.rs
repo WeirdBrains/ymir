@@ -177,7 +177,7 @@ impl UploadsService {
             return Ok(out);
         }
         let _held = self.edit.lock().await;
-        match self.save(req, entry) {
+        match save_entry(&self.config, &self.models_dir, self.accelerated, req, entry) {
             Ok(Saved::Entry(toml)) => out.saved = Some(toml),
             Ok(Saved::Already) => out.note = Some(format!("node.toml already has `{}` at this revision", req.id)),
             Ok(Saved::Not(why)) => out.note = Some(format!("node.toml was not changed: {why}")),
@@ -185,88 +185,98 @@ impl UploadsService {
         }
         Ok(out)
     }
-
-    fn save(&self, req: &Register, entry: &StoredEntry) -> Result<Saved> {
-        let text = std::fs::read_to_string(&self.config).with_context(|| format!("reading {}", self.config.display()))?;
-        let cfg: NodeConfig = toml::from_str(&text).with_context(|| format!("parsing {}", self.config.display()))?;
-        let id = req.id.as_str();
-        let same = |r: &Option<String>| r.as_deref() == Some(req.revision.as_str());
-        if let Some(m) = cfg.model.local.iter().find(|m| m.id == id) {
-            return Ok(if same(&m.revision) { Saved::Already } else { Saved::Not(format!("it already has a model `{id}`")) });
-        }
-        if let Some(a) = cfg.model.local.iter().flat_map(|m| m.lora.iter()).find(|a| a.id == id) {
-            return Ok(if same(&a.revision) { Saved::Already } else { Saved::Not(format!("it already has an adapter `{id}`")) });
-        }
-        if let Some(m) = &entry.model {
-            let store = weirdnet_model::ModelStore::new(&self.models_dir);
-            let (backend, file) = match m.layout {
-                // vLLM takes a path as given (a relative one reads as a Hub id), so it is absolute.
-                ModelLayout::Safetensors => ("vllm", store.model_dir(m.layout, &m.id)?.to_string_lossy().into_owned()),
-                ModelLayout::Mlx => ("mlx", self.relative(&store.model_dir(m.layout, &m.id)?)),
-                _ => ("llamacpp", m.files.first().with_context(|| format!("`{id}` has no files"))?.clone()),
-            };
-            let role = req.role.clone().unwrap_or_else(|| if cfg.main_model().is_some() { "chat".into() } else { "main".into() });
-            let mut local = config_edit::local_model(id, backend, &role, &file, None, self.accelerated);
-            local.revision = Some(req.revision.clone());
-            let stanza = config_edit::stanza(&local);
-            config_edit::append_model(&self.config, id, &stanza, "# Uploaded over Weirdnet (`ymirctl models upload --node`).")?;
-            return Ok(Saved::Entry(stanza));
-        }
-        if let Some(p) = &entry.projector {
-            let model = req.projector_for.clone().or(p.for_model.clone()).or(entry.base.clone()).context("the projector's model is not known")?;
-            let Some(b) = cfg.model.local.iter().find(|m| m.id == model) else {
-                return Ok(Saved::Not(format!("it has no [[model.local]] `{model}` to give the projector to")));
-            };
-            let file = self.relative(&p.path);
-            if b.mmproj.as_deref() == Some(file.as_str()) {
-                return Ok(Saved::Already);
-            }
-            let new = config_edit::set_mmproj(&text, &model, &file)?;
-            let check: NodeConfig = toml::from_str(&new).context("the new entry does not parse")?;
-            check.validate()?;
-            config_edit::save(&self.config, &text, &new)?;
-            let was = b.mmproj.as_deref().map(|m| format!(" (it was `{m}`)")).unwrap_or_default();
-            return Ok(Saved::Entry(format!("mmproj = \"{file}\" on `{model}`{was}")));
-        }
-        let Some(a) = &entry.adapter else {
-            return Ok(Saved::Not("only models, LoRA adapters and projectors are saved there".into()));
-        };
-        let base = req.adapter_for.clone().or(entry.base.clone()).context("the adapter's base is not known")?;
-        let Some(b) = cfg.model.local.iter().find(|m| m.id == base) else {
-            return Ok(Saved::Not(format!("it has no [[model.local]] `{base}` to add the adapter to")));
-        };
-        let trained = entry.provenance().and_then(|p| p.base.as_ref()).and_then(|pb| pb.revision.clone());
-        if let (Some(t), Some(here)) = (&trained, &b.revision)
-            && t != here
-        {
-            return Ok(Saved::Not(format!("the adapter was trained on revision {t} of `{base}`, which is revision {here} here")));
-        }
-        let la = LocalAdapter {
-            id: id.to_string(),
-            file: self.relative(&a.path),
-            scale: None,
-            revision: Some(req.revision.clone()),
-            base_revision: b.revision.clone().or(trained),
-            base_quant: b.quant.clone(),
-        };
-        let new = config_edit::add_adapter(&text, &base, &la)?;
-        let check: NodeConfig = toml::from_str(&new).context("the new entry does not parse")?;
-        check.validate()?;
-        config_edit::save(&self.config, &text, &new)?;
-        let row = toml::to_string(&la).unwrap_or_default();
-        Ok(Saved::Entry(format!("[[model.local.lora]] on `{base}`\n{row}")))
-    }
-
-    /// `path` relative to the models directory when it is inside it.
-    fn relative(&self, path: &Path) -> String {
-        let p = if path.is_absolute() { path.to_path_buf() } else { self.models_dir.join(path) };
-        p.strip_prefix(&self.models_dir).unwrap_or(&p).to_string_lossy().into_owned()
-    }
 }
 
-enum Saved {
+/// Saves an uploaded entry in node.toml at `config` (`models_dir`: the store it is in;
+/// `accelerated`: whether a model entry offloads to a GPU): a `[[model.local]]` for a model, the
+/// `mmproj` of its model for a projector, a `[[model.local.lora]]` for an adapter. Used by
+/// [`UploadsService`] and by `ymirctl models upload` on this machine.
+pub fn save_entry(config: &Path, models_dir: &Path, accelerated: bool, req: &Register, entry: &StoredEntry) -> Result<Saved> {
+    let relative = |path: &Path| relative_to(models_dir, path);
+    let text = std::fs::read_to_string(config).with_context(|| format!("reading {}", config.display()))?;
+    let cfg: NodeConfig = toml::from_str(&text).with_context(|| format!("parsing {}", config.display()))?;
+    let id = req.id.as_str();
+    let same = |r: &Option<String>| r.as_deref() == Some(req.revision.as_str());
+    if let Some(m) = cfg.model.local.iter().find(|m| m.id == id) {
+        return Ok(if same(&m.revision) { Saved::Already } else { Saved::Not(format!("it already has a model `{id}`")) });
+    }
+    if let Some(a) = cfg.model.local.iter().flat_map(|m| m.lora.iter()).find(|a| a.id == id) {
+        return Ok(if same(&a.revision) { Saved::Already } else { Saved::Not(format!("it already has an adapter `{id}`")) });
+    }
+    if let Some(m) = &entry.model {
+        let store = weirdnet_model::ModelStore::new(models_dir);
+        let (backend, file) = match m.layout {
+            // vLLM takes a path as given (a relative one reads as a Hub id), so it is absolute.
+            ModelLayout::Safetensors => ("vllm", store.model_dir(m.layout, &m.id)?.to_string_lossy().into_owned()),
+            ModelLayout::Mlx => ("mlx", relative(&store.model_dir(m.layout, &m.id)?)),
+            _ => ("llamacpp", m.files.first().with_context(|| format!("`{id}` has no files"))?.clone()),
+        };
+        let role = req.role.clone().unwrap_or_else(|| if cfg.main_model().is_some() { "chat".into() } else { "main".into() });
+        let mut local = config_edit::local_model(id, backend, &role, &file, None, accelerated);
+        local.revision = Some(req.revision.clone());
+        let stanza = config_edit::stanza(&local);
+        config_edit::append_model(config, id, &stanza, "# Uploaded over Weirdnet (`ymirctl models upload --node`).")?;
+        return Ok(Saved::Entry(stanza));
+    }
+    if let Some(p) = &entry.projector {
+        let model = req.projector_for.clone().or(p.for_model.clone()).or(entry.base.clone()).context("the projector's model is not known")?;
+        let Some(b) = cfg.model.local.iter().find(|m| m.id == model) else {
+            return Ok(Saved::Not(format!("it has no [[model.local]] `{model}` to give the projector to")));
+        };
+        let file = relative(&p.path);
+        if b.mmproj.as_deref() == Some(file.as_str()) {
+            return Ok(Saved::Already);
+        }
+        let new = config_edit::set_mmproj(&text, &model, &file)?;
+        let check: NodeConfig = toml::from_str(&new).context("the new entry does not parse")?;
+        check.validate()?;
+        config_edit::save(config, &text, &new)?;
+        let was = b.mmproj.as_deref().map(|m| format!(" (it was `{m}`)")).unwrap_or_default();
+        return Ok(Saved::Entry(format!("mmproj = \"{file}\" on `{model}`{was}")));
+    }
+    let Some(a) = &entry.adapter else {
+        return Ok(Saved::Not("only models, LoRA adapters and projectors are saved there".into()));
+    };
+    let base = req.adapter_for.clone().or(entry.base.clone()).context("the adapter's base is not known")?;
+    let Some(b) = cfg.model.local.iter().find(|m| m.id == base) else {
+        return Ok(Saved::Not(format!("it has no [[model.local]] `{base}` to add the adapter to")));
+    };
+    let trained = entry.provenance().and_then(|p| p.base.as_ref()).and_then(|pb| pb.revision.clone());
+    if let (Some(t), Some(here)) = (&trained, &b.revision)
+        && t != here
+    {
+        return Ok(Saved::Not(format!("the adapter was trained on revision {t} of `{base}`, which is revision {here} here")));
+    }
+    let la = LocalAdapter {
+        id: id.to_string(),
+        file: relative(&a.path),
+        scale: None,
+        revision: Some(req.revision.clone()),
+        base_revision: b.revision.clone().or(trained),
+        base_quant: b.quant.clone(),
+    };
+    let new = config_edit::add_adapter(&text, &base, &la)?;
+    let check: NodeConfig = toml::from_str(&new).context("the new entry does not parse")?;
+    check.validate()?;
+    config_edit::save(config, &text, &new)?;
+    let row = toml::to_string(&la).unwrap_or_default();
+    Ok(Saved::Entry(format!("[[model.local.lora]] on `{base}`\n{row}")))
+}
+
+/// `path` relative to the models directory when it is inside it.
+fn relative_to(models_dir: &Path, path: &Path) -> String {
+    let p = if path.is_absolute() { path.to_path_buf() } else { models_dir.join(path) };
+    p.strip_prefix(models_dir).unwrap_or(&p).to_string_lossy().into_owned()
+}
+
+/// What [`save_entry`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Saved {
+    /// The entry added, as TOML (or the projector line).
     Entry(String),
+    /// node.toml already had it at this revision.
     Already,
+    /// Not changed, and why.
     Not(String),
 }
 
@@ -277,7 +287,9 @@ pub struct UploadsServer {
 impl UploadsServer {
     pub fn start<Q: Message, R: Message>(node: &Arc<Node<Q, R>>, service: Arc<UploadsService>) -> Result<Self, RemoteError> {
         let mut limits = stream_limits();
-        limits.max_streams = 8;
+        // One small request per upload; a finished stream can stay counted for a while after both
+        // sides are done, so several uploads in a row (a pool, a rollout) need room.
+        limits.max_streams = 64;
         let mut incoming = node.accept_streams(UPLOADS_PROTOCOL, limits).map_err(|e| RemoteError::Failed { message: e.to_string() })?;
         let task = tokio::spawn(async move {
             while let Some(stream) = futures::StreamExt::next(&mut incoming).await {

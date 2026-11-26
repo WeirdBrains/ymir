@@ -18,16 +18,18 @@ use ymir_core::NodeConfig;
 use ymir_core::config::LocalAdapter;
 use ymir_core::train::{self, AdapterRecord, RunRecord, RunStatus};
 use ymir_core::upload::{self, ArtifactKind, ImportSpec, ProvenanceBase};
+use ymir_core::upload_net::{Register, Saved, save_entry};
 
 use super::plan::{self, id_for_file};
 use super::{Ctx, DirArgs, Meter, adapters, gib, hub, local};
 
 #[derive(Args, Debug)]
 pub struct UploadArgs {
-    /// The GGUF file: a model, or a LoRA adapter (with --adapter-for). With --node also a
-    /// directory of safetensors or MLX weights, a PEFT adapter directory (with --adapter-for), or a
-    /// GGUF vision projector (with --projector-for). With --from-run it may be left out when the
-    /// run's adapter is in this node's models directory.
+    /// The GGUF file: a model, or a LoRA adapter (with --adapter-for); or a directory of
+    /// safetensors or MLX weights, a PEFT adapter directory (with --adapter-for), or a GGUF vision
+    /// projector (with --projector-for). Without --node a directory or projector is placed here
+    /// when this machine serves models, else sent to the model node with the most room. With
+    /// --from-run it may be left out when the run's adapter is in this node's models directory.
     #[arg(required_unless_present = "from_run")]
     pub file: Option<PathBuf>,
     /// A `ymirctl train run` directory (with its run.json): the adapter it made, with the run's
@@ -42,9 +44,9 @@ pub struct UploadArgs {
     /// LoRA, vLLM for a PEFT adapter).
     #[arg(long, value_name = "BASE")]
     pub adapter_for: Option<String>,
-    /// With --node: it is a vision projector (mmproj GGUF) for this model, which the node serves
-    /// on llama.cpp; it is saved as that model's `mmproj`.
-    #[arg(long, value_name = "MODEL", requires = "node", conflicts_with = "adapter_for")]
+    /// It is a vision projector (mmproj GGUF) for this model, which the node serves on
+    /// llama.cpp; it is saved as that model's `mmproj`.
+    #[arg(long, value_name = "MODEL", conflicts_with = "adapter_for")]
     pub projector_for: Option<String>,
     /// The license the weights are under (an SPDX id such as apache-2.0, or the license's name),
     /// recorded in provenance.json. Optional.
@@ -63,7 +65,8 @@ pub struct UploadArgs {
     /// Send it to this model node over Weirdnet (a device name or peer id) instead of this
     /// machine. Needs a running ymird here, linked to your devices; an interrupted upload resumes.
     /// Several nodes: `--node A,B` or `--node all` (every model node but this one) sends the files
-    /// once and the others copy them from that node.
+    /// once and the others copy them from that node. `--node auto`: the other model node with the
+    /// most room after what it keeps free.
     #[arg(long)]
     pub node: Option<String>,
     /// With several nodes: the one the files are sent to, the others copying from it (default:
@@ -214,6 +217,53 @@ fn read_run(dir: &Path) -> Result<(RunRecord, AdapterRecord)> {
     Ok((record, adapter))
 }
 
+/// Without --node: whether the upload goes to the model node with the most room (`--node auto`)
+/// instead of this machine: a directory or vision projector when this machine serves no models.
+pub fn goes_to_pool(cfg: Option<&NodeConfig>, a: &UploadArgs) -> bool {
+    a.node.is_none() && !cfg.is_some_and(|c| c.roles.model) && a.file.as_deref().is_some_and(upload::is_outgoing_only)
+}
+
+/// A directory or vision projector placed in this machine's models directory (U9), as a node
+/// places an upload: checked and hashed, copied in with its provenance, then saved in node.toml.
+fn run_outgoing(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Option<(u64, u64)>) -> Result<()> {
+    let op = remote_op(out, a)?;
+    let local = op.local.first().context("no file to upload")?;
+    let id = op.upload.id.clone();
+    let total = op.upload.files.iter().map(|f| f.size).sum();
+    let mut meter = Meter { out: &mut *out, total, tty: ctx.tty, last: 0 };
+    // What this node keeps free for uploads ([model] upload_keep_free), as `/ymir/uploads/1` does.
+    let room = disk.map(|(free, size)| (free, ctx.cfg.as_ref().map_or_else(|| upload::keep_free(size), |c| c.model.keep_free().of(size))));
+    let placed = upload::local::place(ctx.dir(), &op.upload, local, room, &mut |done, _| meter.tick(&id, done))?;
+    if ctx.tty {
+        writeln!(out)?;
+    }
+    if placed.already {
+        writeln!(out, "Already in the models directory with the same contents; nothing was copied.")?;
+    }
+    writeln!(out, "Placed `{id}` in {} (revision {}).", ctx.dir().display(), placed.revision)?;
+    if a.no_register {
+        return Ok(writeln!(out, "node.toml was not changed (--no-persist).")?);
+    }
+    if ctx.cfg.is_none() {
+        return Ok(writeln!(out, "No node.toml at {}, so nothing was registered (run `ymirctl setup` first).", ctx.config.display())?);
+    }
+    let req = Register {
+        cert: None,
+        id: id.clone(),
+        revision: placed.revision.clone(),
+        adapter_for: op.upload.adapter_for.clone(),
+        projector_for: op.upload.projector_for.clone(),
+        persist: true,
+        role: a.role.clone(),
+    };
+    match save_entry(&ctx.config, ctx.dir(), plan::capacity(&ctx.hw).accelerated, &req, &placed.entry)? {
+        Saved::Entry(entry) => writeln!(out, "Added to {}:\n{entry}\nRestart ymird to serve it.", ctx.config.display())?,
+        Saved::Already => writeln!(out, "node.toml already has `{id}` at this revision.")?,
+        Saved::Not(why) => writeln!(out, "node.toml was not changed: {why}")?,
+    }
+    Ok(())
+}
+
 pub fn run(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs) -> Result<()> {
     let disk = existing(ctx.dir()).and_then(hub::disk_space);
     run_with(ctx, out, a, disk)
@@ -223,6 +273,9 @@ pub fn run(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs) -> Result<()> {
 pub(super) fn run_with(ctx: &Ctx, out: &mut dyn Write, a: &UploadArgs, disk: Option<(u64, u64)>) -> Result<()> {
     if a.rollout.rollout.is_some() {
         bail!("--rollout goes with --node: the upload joins the rollout on this machine's inference role after the node serves it");
+    }
+    if a.file.as_deref().is_some_and(upload::is_outgoing_only) {
+        return run_outgoing(ctx, out, a, disk);
     }
     let license = upload::check_license(a.license.as_deref())?;
     // Registered by default when there is a node.toml to add it to (m3talsmith, 2026-11-24).

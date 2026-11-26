@@ -146,7 +146,14 @@ async fn another_inference_nodes_rollouts_change_by_its_rules() -> Result<()> {
     let first = Membership::create(&lap_h.paths.pool(), "lap")?;
     let lap_peer = first.peer_id().to_string();
     // inf takes rollout changes from lap only.
-    let inf_h = home(root, "inf", "inference,model", &[], &["base", "cand"], &format!("[inference]\nrollout_callers = [\"{lap_peer}\"]\n"))?;
+    let inf_h = home(
+        root,
+        "inf",
+        "inference,model",
+        &[],
+        &["base", "cand"],
+        &format!("upload_keep_free = \"0\"\n[inference]\nrollout_callers = [\"{lap_peer}\"]\n"),
+    )?;
     let other_h = home(root, "other", "inference", &[], &[], "")?;
     prelink(&first, &inf_h, "inf");
     prelink(&first, &other_h, "other");
@@ -213,6 +220,17 @@ async fn another_inference_nodes_rollouts_change_by_its_rules() -> Result<()> {
     run(&lap_h, &["retire", "support@2"]).await?;
     assert_eq!(weight(&live(&inf_h).await?, "support", 2), None);
     assert_eq!(weight(&NodeConfig::load(&inf_h.paths.config())?.inference.rollout, "support", 2), None);
+
+    // An upload joins inf's rollout with --inference: the next version there (2, as 2 was
+    // retired), with the share asked for, saved in inf's node.toml.
+    let file = root.join("tune.gguf");
+    std::fs::write(&file, gguf(4000, "llama"))?;
+    let f = file.display().to_string();
+    let out = ctl(&lap_h.home, &["models", "upload", &f, "--node", "inf", "--rollout", "support", "--inference", "inf", "--canary", "20"]).await?;
+    assert!(out.contains("As `tune-r2`, version support@2.") && out.contains("support@2 now gets 20.0%"), "{out}");
+    assert_eq!(weight(&live(&inf_h).await?, "support", 2), Some(20));
+    assert_eq!(weight(&NodeConfig::load(&inf_h.paths.config())?.inference.rollout, "support", 2), Some(20));
+    assert!(lap_h.paths.config().exists() && NodeConfig::load(&lap_h.paths.config())?.inference.rollout.is_empty(), "not on this machine");
 
     // A linked device not in rollout_callers is refused.
     let err = format!("{:#}", run(&other_h, &["list"]).await.unwrap_err());
