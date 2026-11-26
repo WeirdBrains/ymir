@@ -37,9 +37,9 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), and U8's origins (set_model_origin, placement hooks)
+[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), U8's origins (set_model_origin, placement hooks), U10's WritePolicy::uploads and StoredEntry constructors
 crate = "weirdnet-backends"
-version = "0.4.5"
+version = "0.4.7"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 
