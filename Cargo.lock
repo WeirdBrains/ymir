@@ -4602,7 +4602,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5510,9 +5510,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-semcache"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "931d31e8df68f4dbaf3b0e694a4178784699048bc0f07411f361736a1f22bb75"
+checksum = "0090c6a5b86c89f202fdadccd29d9ac2639e0fc6f3c49998e0ba6eef44592339"
 dependencies = [
  "serde",
  "sha2 0.10.9",
@@ -5521,9 +5521,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-sync"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c58c379a85dd02d629f675aac1d349db472266025dd7ef98c9d6b5c239e0340"
+checksum = "b6919d89ebe595683d01cb92b8e401ab402768aa08cbed4393bc33c27fd2bd55"
 dependencies = [
  "blake3",
  "cbor4ii",

@@ -56,9 +56,16 @@ version = "0.8.3"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 
-[[requires]]                    # the synced job board's log and leases (P3b), per-type keys (0.8.3) and type-scoped sealed records for cert-only inference nodes (0.8.4)
+[[requires]]                    # the synced job board's log and leases (P3b), per-type keys (0.8.3) and type-scoped sealed records for cert-only inference nodes (0.8.4), one session for every type (pull_types_shared, 0.8.5)
 crate = "weirdnet-sync"
-version = "0.8.4"
+version = "0.8.5"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # the semantic answer cache (SemanticCache, M6)
+crate = "weirdnet-semcache"
+version = "0.2.2"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
