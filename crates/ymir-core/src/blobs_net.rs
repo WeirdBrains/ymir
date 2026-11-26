@@ -33,6 +33,17 @@ pub const BLOBS_PROTOCOL: &str = "/ymir/blobs/1";
 /// File bytes per message (under the stream's 64 KiB frame).
 const CHUNK: usize = 48 * 1024;
 
+/// A holder that sends nothing for this long is given up on (the next one is tried).
+const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The next message, or an error once the holder stalls.
+async fn next(ch: &mut Channel) -> Result<Option<BlobMsg>> {
+    match tokio::time::timeout(STALL, ch.recv_cbor::<BlobMsg>()).await {
+        Ok(r) => r.map_err(|e| anyhow!("{e}")),
+        Err(_) => bail!("the holder sent nothing for {} s", STALL.as_secs()),
+    }
+}
+
 /// The largest manifest a holder may send.
 const MAX_MANIFEST: usize = 4 << 20;
 
@@ -190,7 +201,7 @@ impl BlobsClient {
     async fn fetch_from(&self, peer: &str, root: &str) -> Result<()> {
         let mut ch = self.dialer.open(peer, BLOBS_PROTOCOL).await.map_err(|e| anyhow!("{e}"))?;
         ch.send_cbor(&BlobAsk { cert: self.cert.clone().map(ByteBuf::from), root: root.to_string() }).await.map_err(|e| anyhow!("{e}"))?;
-        let (manifest_name, manifest) = match ch.recv_cbor::<BlobMsg>().await.map_err(|e| anyhow!("{e}"))? {
+        let (manifest_name, manifest) = match next(&mut ch).await? {
             Some(BlobMsg::Bundle { manifest_name, manifest }) => (manifest_name, manifest.into_vec()),
             Some(BlobMsg::Missing) => bail!("it doesn't hold it"),
             Some(BlobMsg::Refused { message }) => bail!("{message}"),
@@ -222,7 +233,7 @@ async fn receive(ch: &mut Channel, staging: &Path, manifest_name: &str, manifest
         let mut out = std::fs::File::create(&path).with_context(|| format!("writing {}", path.display()))?;
         let (mut got, mut sha) = (0u64, Sha256::new());
         while got < f.bytes {
-            match ch.recv_cbor::<BlobMsg>().await.map_err(|e| anyhow!("{e}"))? {
+            match next(ch).await? {
                 Some(BlobMsg::Chunk { data }) => {
                     got += data.len() as u64;
                     if got > f.bytes {
@@ -240,7 +251,7 @@ async fn receive(ch: &mut Channel, staging: &Path, manifest_name: &str, manifest
             bail!("{} doesn't match its hash", f.path);
         }
     }
-    match ch.recv_cbor::<BlobMsg>().await.map_err(|e| anyhow!("{e}"))? {
+    match next(ch).await? {
         Some(BlobMsg::Done) => {}
         other => bail!("expected the end of the bundle, got {other:?}"),
     }
