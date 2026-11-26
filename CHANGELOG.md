@@ -6,6 +6,20 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- M6, moving a model between nodes: `ymirctl move MODEL --to NODE [--from NODE] [--grace 60]` loads the model on
+  the target (which needs its own copy), sends new requests there at once, lets the old node finish the answers
+  it is streaming (at most the grace time) and then unloads it there. A target without a copy, a model loaded
+  nowhere else, the same node twice and a failed load on the target are refused, with the old node left as it
+  was (`Coordinator::move_model`, `ControlRequest::Move`).
+- The MCP tool `ymir_move_model` does the same, marked MUTATES THE POOL and only with `confirm: true`
+  (`grace` capped at 600 s); `--read-only` hides it.
+- Tests: `crates/ymir-core/tests/move_model.rs` (fake nodes) and `crates/ymir-testkit/tests/m6_move.rs`
+  (separate daemons over Weirdnet: a slow answer streaming from the old node finishes whole, the move waits
+  for it, new answers come from the new node, refusals change nothing, and the MCP tool moves it back). The
+  daemon-test helpers that `m6.rs` had are now shared in `tests/common/pool.rs`.
+
 ## [0.19.0] - 2026-11-26
 
 ### Added

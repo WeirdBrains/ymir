@@ -194,6 +194,12 @@ ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --c
 ymirctl load qwen3.6-35b-a3b --node server-a</code></pre>
 <h3 id="unload"><code>ymirctl unload MODEL</code></h3>
 <p>Unloads a model everywhere it is loaded, freeing its memory.</p>
+<h3 id="move"><code>ymirctl move MODEL --to NODE [--from NODE] [--grace 60]</code></h3>
+<p>Moves a loaded model to another model node without cutting anyone off: it loads on <code>--to</code> (which needs its
+own copy of the model; <code>ymirctl models pull MODEL --node NODE</code>), new requests go there at once, and the old node
+unloads it once the answers it is streaming finish (at most <code>--grace</code> seconds). If the load on the new node
+fails, nothing changes on the old one.</p>
+<pre><code>ymirctl move qwen3.6-35b-a3b --to server-b</code></pre>
 <h3 id="nodes"><code>ymirctl nodes</code></h3>
 <p>Lists the model nodes the pool routes to: serving or draining, how many of their models are ready, and requests in flight.</p>
 <h3 id="drain"><code>ymirctl drain NODE [--resume]</code></h3>
@@ -435,8 +441,8 @@ parts), <code>ymir_complete</code>, <code>ymir_embed</code>, <code>ymir_service_
 <p>Resources (read-only, for clients that show them): <code>ymir://status</code>, <code>ymir://nodes</code>,
 <code>ymir://models</code> and <code>ymir://models/local</code>.</p>
 <p>Changing, marked <strong>MUTATES</strong> in their description, with <code>readOnlyHint: false</code>, and doing nothing unless
-the call says <code>confirm: true</code>: <code>ymir_load_model</code>, <code>ymir_unload_model</code> and
-<code>ymir_pull_model</code> (without <code>confirm</code> it only shows what would be downloaded). <code>ymir_remove_model</code>
+the call says <code>confirm: true</code>: <code>ymir_load_model</code>, <code>ymir_unload_model</code>,
+<code>ymir_move_model</code> (as <code>ymirctl move</code>) and <code>ymir_pull_model</code> (without <code>confirm</code> it only shows what would be downloaded). <code>ymir_remove_model</code>
 deletes downloaded files and needs <code>--allow-remove</code> as well as <code>confirm</code>. No tool edits
 <code>node.toml</code>. <code>ymirctl bench</code> is not a tool yet.</p>
 <h3 id="mcp-clients">Add it to your tools</h3>

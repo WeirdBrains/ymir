@@ -944,7 +944,7 @@ resources come from the published `weirdnet-mcp` 0.6 crate (features `stdio-serv
   backends, so the client side adds nothing a local `ymirctl` could not do.
 - **Tools.** Read: `ymir_status`, `ymir_nodes`, `ymir_devices`, `ymir_models`, `ymir_chat`, `ymir_complete`, `ymir_embed`,
   `ymir_service_status`, `ymir_models_search`, `ymir_models_local`. Mutating: `ymir_load_model`, `ymir_unload_model`,
-  `ymir_pull_model`, and (only with `--allow-remove`) `ymir_remove_model`. `--read-only` hides all four.
+  `ymir_move_model`, `ymir_pull_model`, and (only with `--allow-remove`) `ymir_remove_model`. `--read-only` hides all five.
 - **Safety.** Mutating tools say `MUTATES THE POOL` (or `DELETES FILES`) in their description, carry `readOnlyHint: false`
   (`destructiveHint: true` for unload and remove) and refuse unless the arguments hold `confirm: true` (a string `"true"` does
   not count). Pull and remove without it return a preview. Nothing edits `node.toml` (`--register` is not exposed). Media files

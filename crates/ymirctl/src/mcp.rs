@@ -6,7 +6,7 @@
 //! - Read tools: status, model nodes, linked devices, the pool's models, chat (text, images and
 //!   audio, through the local bridge or straight over Weirdnet), completions, embeddings, service
 //!   status, Hugging Face model search and the model files on this node.
-//! - Mutating tools (load, unload, pull) are marked "MUTATES THE POOL" in their description, carry
+//! - Mutating tools (load, unload, move, pull) are marked "MUTATES THE POOL" in their description, carry
 //!   `readOnlyHint: false` and do nothing without `confirm: true`. Deleting model files
 //!   (`ymir_remove_model`) is not offered unless the server starts with `--allow-remove`.
 //!   `--read-only` hides every mutating tool.
@@ -247,6 +247,14 @@ const LOAD_PARAMS: &[Param] = &[
 
 const UNLOAD_PARAMS: &[Param] = &[p_model("The model id."), CONFIRM];
 
+const MOVE_PARAMS: &[Param] = &[
+    p_model("The model id (see ymir_models)."),
+    Param::required("to", T::String, "The model node to move it to (see ymir_nodes); it needs its own copy of the model."),
+    Param::optional("from", T::String, "The node to move it from. Default: where it is loaded."),
+    Param::optional("grace", T::Integer, "Seconds to let the old node finish what it has before it unloads (default 60, at most 600)."),
+    CONFIRM,
+];
+
 const PULL_PARAMS: &[Param] = &[
     Param::required("repo", T::String, "The Hugging Face repo, `owner/name` (see ymir_models_search)."),
     Param::optional("quant", T::String, "The quant to take, such as Q4_K_M (default: the best that fits this node)."),
@@ -346,6 +354,14 @@ const MUTATING_TOOLS: &[ToolSpec] = &[
         UNLOAD_PARAMS,
         false,
         true,
+        false,
+    ),
+    spec(
+        "ymir_move_model",
+        "MUTATES THE POOL (needs confirm=true): move a loaded model to another model node. It loads there, new requests go there, and the old node unloads it once what it has finishes (at most `grace` seconds). Uses the new node's memory.",
+        MOVE_PARAMS,
+        false,
+        false,
         false,
     ),
     spec(
@@ -581,6 +597,16 @@ impl YmirTools {
             "ymir_unload_model" => {
                 confirmed(args, &format!("unloading {}", str_arg(args, "model").unwrap_or("a model")))?;
                 let req = ControlRequest::Unload { model: req_str(args, "model")?.to_string() };
+                Ok(json!({"message": self.control(req).await?.message.unwrap_or_default()}))
+            }
+            "ymir_move_model" => {
+                confirmed(args, &format!("moving {} loads it on another node and", str_arg(args, "model").unwrap_or("a model")))?;
+                let req = ControlRequest::Move {
+                    model: req_str(args, "model")?.to_string(),
+                    to: req_str(args, "to")?.to_string(),
+                    from: str_arg(args, "from").map(str::to_string),
+                    grace_secs: args["grace"].as_u64().map_or(60, |g| g.min(600)),
+                };
                 Ok(json!({"message": self.control(req).await?.message.unwrap_or_default()}))
             }
             "ymir_pull_model" => self.pull(args).await,
@@ -914,7 +940,7 @@ mod tests {
             assert!(t.params.iter().all(|p| p.name != "confirm"), "{}", t.name);
             assert!(!t.description.contains("MUTATES"), "{}", t.name);
         }
-        assert_eq!(mutating_tools(), ["ymir_load_model", "ymir_unload_model", "ymir_pull_model", "ymir_remove_model"]);
+        assert_eq!(mutating_tools(), ["ymir_load_model", "ymir_unload_model", "ymir_move_model", "ymir_pull_model", "ymir_remove_model"]);
     }
 
     #[test]
