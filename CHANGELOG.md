@@ -8,6 +8,11 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Added
 
+- `ymirctl engines install vllm`: vLLM and Ray in a managed venv (`<home>/engines/vllm`), with `uv` when it is on PATH
+  (else `python3 -m venv` and pip, Python 3.10 to 3.13), for CUDA, ROCm or CPU (detected, or `--accel`; ROCm and CPU need
+  `--index-url`), `--version`, `--dry-run`, `--reinstall`. It checks that `vllm` and `ray` run and records what it installed.
+  `ymirctl engines status`, `upgrade vllm`, `uninstall vllm` (only a venv it made). `ymird` finds both programs with the
+  default `vllm = "auto"` / `ray = "auto"`, so no `PATH` or `node.toml` change is needed.
 - M7 vLLM with Ray groups: `[[inference.split]] backend = "vllm-ray"`. The leader runs `ray start --head` on its private link,
   waits until every member's `ray start --address` has joined (`ray status`), then runs `vllm serve
   --distributed-executor-backend ray` on loopback, with `--tensor-parallel-size` and `--pipeline-parallel-size` from the plan

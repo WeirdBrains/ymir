@@ -56,6 +56,7 @@ pub mod upload;
 pub mod upload_net;
 pub mod vision;
 pub mod vllm;
+pub mod vllm_install;
 pub mod wake;
 
 pub use config::NodeConfig;

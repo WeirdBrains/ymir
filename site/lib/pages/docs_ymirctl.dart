@@ -229,7 +229,10 @@ ymirctl drain server-a --resume</code></pre>
 
 <h2 id="split">Split models</h2>
 <p>A model too big for one machine can be served by a group of nodes over a private link. The model must be marked
-<code>split</code> in the pool policy first (see the <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md">design document</a>).</p>
+<code>split</code> in the pool policy first (see the <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md">design document</a>).
+The backend is <code>llamacpp-rpc</code> (GGUF, <code>rpc-server</code> workers) or <code>vllm-ray</code> (vLLM on a Ray cluster over the
+private link; Linux, with <a href="#engines"><code>ymirctl engines install vllm</code></a> on each member). Ray has no authentication, so
+Ymir refuses a Ray process that listens anywhere but the private link or loopback; see the design document's security notes.</p>
 <ul>
 <li><code>ymirctl group up MODEL</code>: plan and start the group for MODEL.</li>
 <li><code>ymirctl group down MODEL</code>: stop it; its members return to normal placement.</li>
@@ -237,6 +240,30 @@ ymirctl drain server-a --resume</code></pre>
 </ul>
 <pre><code>ymirctl group up big-model-70b
 ymirctl group status</code></pre>
+
+<h2 id="engines">Engines: vLLM and Ray</h2>
+<p><code>ymirctl engines install vllm</code> installs vLLM and Ray into a venv under Ymir's engines folder
+(<code>engines/vllm</code>), with <code>uv</code> when it is on <code>PATH</code>, else <code>python3 -m venv</code> and pip
+(Python 3.10 to 3.13). <code>ymird</code> finds both there on its own (<code>[model] vllm = "auto"</code> and
+<code>ray = "auto"</code>, the defaults), so single-node vLLM models and <code>vllm-ray</code> split models need no
+<code>PATH</code> or <code>node.toml</code> change. Restart <code>ymird</code> afterwards. vLLM runs on Linux.</p>
+<table>
+<thead><tr><th>Command or flag</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>ymirctl engines install vllm</code></td><td>Make the venv and install vLLM and Ray, then check that <code>vllm --version</code> and <code>ray --version</code> run.</td></tr>
+<tr><td><code>--version V</code></td><td>A vLLM version, such as <code>0.11.0</code> (default: the newest).</td></tr>
+<tr><td><code>--accel auto|cuda|rocm|cpu</code></td><td>The accelerator; <code>auto</code> looks for <code>nvidia-smi</code>, then <code>rocminfo</code> or <code>/opt/rocm</code>, else CPU.</td></tr>
+<tr><td><code>--index-url URL</code></td><td>A vLLM wheel index. ROCm and CPU need one, because PyPI's vLLM wheels are CUDA builds (or use a container image: <code>vllm = "image:..."</code>).</td></tr>
+<tr><td><code>--uv PATH</code>, <code>--python PATH</code></td><td>Which <code>uv</code>, or which Python for <code>-m venv</code> and pip instead of <code>uv</code>.</td></tr>
+<tr><td><code>--reinstall</code>, <code>--dry-run</code>, <code>--force</code></td><td>Make the venv afresh; print the commands without running them; install on an OS other than Linux.</td></tr>
+<tr><td><code>ymirctl engines upgrade vllm</code></td><td>Upgrade the managed vLLM and Ray (same flags).</td></tr>
+<tr><td><code>ymirctl engines status</code></td><td>Which <code>vllm</code> and <code>ray</code> <code>ymird</code> would use (managed, <code>node.toml</code> or <code>PATH</code>) and their versions.</td></tr>
+<tr><td><code>ymirctl engines uninstall vllm</code></td><td>Remove the managed venv. It removes only a venv this command made.</td></tr>
+</tbody>
+</table>
+<pre><code>ymirctl engines install vllm --dry-run
+ymirctl engines install vllm
+ymirctl engines status</code></pre>
 
 <h2 id="chat">Chat, conversations and batches</h2>
 <h3 id="chat-cmd"><code>ymirctl chat PROMPT...</code></h3>

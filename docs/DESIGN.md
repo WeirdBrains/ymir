@@ -2584,6 +2584,18 @@ serve_port = 18090
 context = 32768
 ```
 
+**Installing vLLM and Ray.** `ymirctl engines install vllm`
+([`vllm_install.rs`](../crates/ymir-core/src/vllm_install.rs), [`engines.rs`](../crates/ymirctl/src/engines.rs)) makes a venv at
+`<home>/engines/vllm` and installs `vllm` (or `vllm==VERSION`) and `ray` in it. It uses `uv venv --python 3.12` and
+`uv pip install --torch-backend=auto` when `uv` is on `PATH`, else `python3 -m venv` and pip, refusing a Python outside 3.10 to
+3.13. It detects the accelerator (`nvidia-smi`: CUDA; `rocminfo` or `/opt/rocm`: ROCm; else CPU) unless `--accel` says. PyPI's
+vLLM wheels are CUDA builds, so ROCm and CPU need `--index-url` (or a container image). It checks that `vllm --version` and
+`ray --version` run and writes `ymir-install.json`. `upgrade` keeps the venv and passes `--upgrade`, `--reinstall` clears it,
+`--dry-run` prints the commands, and `uninstall` removes the venv only when that record is there. `[model] vllm = "auto"` and
+`ray = "auto"` (the defaults) use the venv's programs before `PATH`, so nothing else is edited. Tests use fake `uv` and
+`python3` that leave stub programs ([`tests/engines.rs`](../crates/ymirctl/tests/engines.rs)); nothing is downloaded in tests or
+CI.
+
 **Lifecycle.** The coordinator sends `GroupUp` (worker kind `ray`) to every member at once, since the
 head is the one waiting. The plan carries every member's link, `ray.port` and the sizing (`vllm.tp`,
 `vllm.pp`).

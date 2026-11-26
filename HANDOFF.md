@@ -2,7 +2,19 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
-## 2026-11-26 16:30 EST: M7 vLLM with Ray groups (on main, mocks only)
+## 2026-11-26 16:30 EST: `ymirctl engines install vllm` (on main)
+
+Michael (11-26): "Also, make installing vLLM easy with Ymir". Built on the dev box; no live node touched.
+
+- [vllm_install.rs](crates/ymir-core/src/vllm_install.rs) and [engines.rs](crates/ymirctl/src/engines.rs): `ymirctl engines install|upgrade|status|uninstall vllm`. It makes a venv at `<home>/engines/vllm` (uv `venv --python 3.12` plus `pip install --torch-backend=auto|cpu`, else `python3 -m venv` plus pip, refusing Python outside 3.10 to 3.13) and installs `vllm[==V] ray`. The accelerator is detected (nvidia-smi, rocminfo or /opt/rocm, else CPU) or set with `--accel`; ROCm and CPU need `--index-url`, since PyPI's vLLM wheels are CUDA builds. Flags: `--version`, `--uv`, `--python`, `--reinstall`, `--force` (non-Linux), `--dry-run`. After installing it checks `vllm --version` and `ray --version` and writes `ymir-install.json`. Uninstall removes the venv only when that record is there.
+- Discovery was wired in 04ef62d: `vllm = "auto"` and `ray = "auto"` use `engines/vllm/bin/` before `PATH`. `ymirctl setup` now points at the installer when vLLM is missing.
+- Docs: README, site ymirctl docs (`#engines`, and the group section names `vllm-ray`), DESIGN, CHANGELOG.
+
+**Checks:** [tests/engines.rs](crates/ymirctl/tests/engines.rs) 2/2 (fake `uv` and `python3`: dry run makes nothing; install, record, discovery by `resolve_vllm`/`resolve_ray`/`worker_config`, explicit settings win, status, upgrade without a new venv, uninstall, a foreign dir left alone, Python 3.8 refused, CPU without an index refused), 8 unit tests, fmt, clippy `-D warnings`, workspace tests (63 suites green), link check.
+
+**Not tested:** a real install (it downloads PyTorch; not run in tests or CI), the ROCm and CPU wheel indexes.
+
+## 2026-11-26 16:14 EST: M7 vLLM with Ray groups (on main, mocks only)
 
 Michael (11-26): "Let's start on the Ray groups then!" Built on the dev box only; m1, m2 and starbase not touched.
 

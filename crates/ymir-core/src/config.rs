@@ -1150,7 +1150,7 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
 
 /// `auto` or `managed` uses a container image when `[model] vllm = "image:..."` or a local
 /// vLLM model sets `image` and is not wrapped.
-fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+pub fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
     let setting = model.vllm.trim();
     if setting == "off" {
         return None;

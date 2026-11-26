@@ -5,6 +5,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 pub mod bench;
+pub mod engines;
 pub mod eval;
 pub mod mcp;
 pub mod mcp_servers;
@@ -127,6 +128,12 @@ pub enum Cmd {
     },
     /// Detect the hardware, pick a backend and models that fit, and write node.toml.
     Setup(SetupArgs),
+    /// Engines Ymir manages: `engines install vllm` puts vLLM and Ray in a venv ymird finds on its
+    /// own; `status`, `upgrade`, `uninstall`.
+    Engines {
+        #[command(subcommand)]
+        cmd: engines::EnginesCmd,
+    },
     /// Self-update: pin the org root, stage a signed bundle, start with rollback.
     Update {
         #[command(subcommand)]
@@ -503,6 +510,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
     match cli.cmd {
         Cmd::Hw { json } => hw(out, json),
         Cmd::Setup(args) => setup_cmd(&paths, args, out, input).await,
+        Cmd::Engines { cmd } => engines::run(&paths, cmd, out),
         Cmd::Status { json } => status(&paths, out, json).await,
         Cmd::Models { cmd: None } => models(&paths, out).await,
         Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd).await,
@@ -679,7 +687,9 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     }
     match &p.vllm {
         Some(v) => writeln!(out, "vLLM: {}", v.display())?,
-        None if p.hardware.vllm_supported() => writeln!(out, "vLLM: not installed (optional; GGUF models use llama.cpp)")?,
+        None if p.hardware.vllm_supported() => {
+            writeln!(out, "vLLM: not installed (optional; GGUF models use llama.cpp; `ymirctl engines install vllm` adds vLLM and Ray)")?
+        }
         None => {}
     }
     writeln!(out, "Models:")?;
