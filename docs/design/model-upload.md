@@ -732,13 +732,33 @@ Michael asked on 2026-11-25 (9:33 PM ET) for `ymirctl models upload` of folders 
 - **`--rollout NAME --inference NODE`**: the next version number, the incumbent for `--eval`, the add at weight 0
   and the share come from and go to that inference node over `/ymir/rollouts/1`
   (`rollout::remote_list`, `rollout::run_remote`), saved in its node.toml unless `--no-persist`.
-- `StoredEntry` has no public constructor in `weirdnet-backends` 0.4.5, so `upload::local::entries` builds it from
-  its serialized form; a constructor (or `ModelStore`-side listing) would be a small Weirdnet request.
+- `upload::local::entries` lists the store with `StoredEntry::list` (weirdnet-backends 0.4.7, U10); 0.4.5 had no
+  public constructor, so U9 built entries from their serialized form.
 - **Tests:** end to end (`models_upload_formats.rs`): a directory placed and saved on a model node without
   `--node`, the same projector again already there, and a directory from a machine without the model role sent to
   the node with the most room; `models_upload.rs`: `--node auto` picks the only other model node;
   `rollouts_net.rs`: an upload with `--rollout support --inference inf --canary 20` becomes `support@2` with 20% on
   inf, saved there and not on this machine.
+
+## U10: uploads off, on weirdnet-backends 0.4.7 (built 2026-11-26)
+
+Asked by Michael on 2026-11-25 (the leftovers of the upload plan); waited on three small Weirdnet requests, all in
+weirdnet-backends 0.4.7 and weirdnet-net 0.8.3.
+
+- **`[model] upload = false`**: the node's `WritePolicy` gets `with_uploads(false)`, so every upload to it (models/1
+  and `/ymir/uploads/1`) is refused with `not-allowed` ("uploads are off on this node") while pulls, listing and
+  removals keep working. `remote_manage = false` still turns all of it off. Uploads placed on the machine itself
+  (U9, without `--node`) are the operator's own and are not affected. The refusal reads as "that node has
+  `[model] upload = false`" (`upload_net::UPLOADS_OFF`).
+- **`--node auto`** tries the nodes with room from the most room down, and passes over one that refuses because its
+  uploads are off (the refusal comes before anything is sent); `DiskReport` does not say whether uploads are on.
+- **`StoredEntry::list`** replaces U9's serde workaround.
+- **Streams:** `/ymir/uploads/1` takes 16 streams at once (U9 needed 64 because finished streams stayed counted;
+  weirdnet-net 0.8.3 releases them when both sides drop).
+- `--serve` for uploads is not built: an upload is always served. `--node all` is U6.
+- **Tests:** `models_pool.rs` (a node with `upload = false` pulls, serves and removes, and refuses an upload with the
+  hint), `models_upload.rs` (`--node auto` passes over that node to the next with room), unit tests for the
+  setting's round trip and the refusal hints.
 
 ## Decisions (m3talsmith, 2026-11-24 2:22 PM ET)
 

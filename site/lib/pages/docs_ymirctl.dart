@@ -153,7 +153,8 @@ restart (<code>--load</code> loads it too). That is in memory only: <code>node.t
 <li>A pull streams its progress, one line per node. <code>remove --node</code> stops serving the model and deletes its files.</li>
 <li><code>upload FILE --node NAME</code>: sends a GGUF model or LoRA adapter on this machine (<code>--adapter-for BASE</code>, or
 <code>--from-run RUN_DIR</code> for a training run's adapter) to that node. It is checked there as it arrives, resumes if it
-is cut off, must leave <code>[model] upload_keep_free</code> free (by default the larger of 10% and 20 GiB), and is served
+is cut off, must leave <code>[model] upload_keep_free</code> free (by default the larger of 10% and 20 GiB), is refused by a node
+with <code>[model] upload = false</code> (which still pulls and removes), and is served
 and saved in that node's <code>node.toml</code> unless you pass <code>--no-persist</code>. A llama.cpp adapter is used from its
 base's next start. With <code>--rollout NAME</code> it becomes the next version of that rollout here, named
 <code>ID-rN</code>, at weight 0; <code>--canary PCT</code> gives it exactly that percentage of new conversations, any of
