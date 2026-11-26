@@ -103,6 +103,30 @@ fn devices(labels: &[&str]) -> Vec<Dev> {
         .collect()
 }
 
+/// Takes device `i` off the network. Pausing its node alone is not enough (a paused node still
+/// dials out to the addresses it remembers), so every node pauses and all but `i` listen again on
+/// fresh memory addresses, which only the others learn.
+fn isolate(devs: &[Dev], i: usize) {
+    devs[i].book.lock().unwrap().clear();
+    for d in devs {
+        d.node.pause().unwrap();
+    }
+    let rest: Vec<&Dev> = devs.iter().enumerate().filter(|(k, _)| *k != i).map(|(_, d)| d).collect();
+    for d in &rest {
+        d.node.resume().unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while rest.iter().any(|d| d.node.reachable_addrs().is_empty()) {
+        assert!(std::time::Instant::now() < deadline, "the nodes listen again");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let fresh: HashMap<String, Vec<Multiaddr>> =
+        rest.iter().map(|d| (d.peer.clone(), d.node.reachable_addrs().into_iter().map(|a| a.parse().unwrap()).collect())).collect();
+    for d in &rest {
+        *d.book.lock().unwrap() = fresh.clone();
+    }
+}
+
 /// One pull of the job records from every reachable device by every device.
 fn sync_all(devs: &[Dev]) {
     for a in devs {
@@ -230,9 +254,6 @@ async fn a_board_job_moves_between_devices_and_resumes_from_its_checkpoint() {
     assert!(done.attempts <= paused.attempts + 1, "the release gave its attempt back");
 }
 
-// WIP: b is still refused as `Held` 20 s after `a` is cut off (address book emptied, node paused); to find out
-// whether a still renews through a remembered memory address or the voters keep its lease.
-#[ignore = "WIP: a cut-off holder still holds its board lease"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lapsed_board_claim_is_taken_over_after_the_wait() {
     let devs = devices(&["a", "b", "c"]);
@@ -243,8 +264,7 @@ async fn a_lapsed_board_claim_is_taken_over_after_the_wait() {
     until(&devs, 1, "the checkpoint on b", |j| j.checkpoint.is_some(), "j2").await;
 
     // a drops off the network: it can't reach a voter majority, so its lease lapses.
-    a.book.lock().unwrap().clear();
-    a.node.pause().unwrap();
+    isolate(&devs, 0);
     let t0 = std::time::Instant::now();
     let cb = claim_when_ready(&devs, 1, "j2").await;
     assert!(t0.elapsed() >= Duration::from_millis(CLAIM_MS / 2), "not before a's lease could lapse ({:?})", t0.elapsed());
