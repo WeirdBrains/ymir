@@ -20,6 +20,8 @@ pub struct Network {
     pub membership: Arc<Membership>,
     pub node: Arc<SyncNode>,
     pub hints: remote::Hints,
+    /// The synced training job board (P3b), for `ymirctl train run --job` on this box.
+    pub jobs: Option<Arc<crate::train_board::BoardJobStore>>,
 }
 
 impl Network {
@@ -44,7 +46,20 @@ impl Network {
         let node =
             tokio::task::spawn_blocking(move || weirdnet_sync::start_node(key, ncfg, state)).await?.map_err(|e| anyhow!("starting Weirdnet: {e}"))?;
         tracing::info!(peer = %node.peer_id(), user = %m.user_id(), devices = m.roster().active().count(), "Weirdnet: on");
-        Ok(Some(Self { membership: m, node: Arc::new(node), hints }))
+        let node = Arc::new(node);
+        let jobs = {
+            let hints = hints.clone();
+            let leases = weirdnet_sync::Leases::new(node.clone(), m.state())
+                .with_addrs(move |p| hints.iter().find(|(h, _)| h.to_string() == p).map(|(_, a)| a.clone()).unwrap_or_default());
+            match crate::train_board::BoardJobStore::open(&weirdnet_agent::jobs::SyncHandle::from_leases(leases), m.peer_id().to_string()) {
+                Ok(b) => Some(Arc::new(b)),
+                Err(e) => {
+                    tracing::warn!("training jobs: the synced board: {e:#}");
+                    None
+                }
+            }
+        };
+        Ok(Some(Self { membership: m, node, hints, jobs }))
     }
 
     /// Sync passes against the user's other devices every `every` (roster changes, revocations).
@@ -419,6 +434,7 @@ impl Daemon {
             network: network.as_ref().map(|n| (n.membership.clone(), n.node.clone())),
             models: network.as_ref().map(|n| Arc::new(remote::models_hub(&n.node, &n.membership, &n.hints, &ropts, &name, models_service))),
             train: network.as_ref().map(|n| Arc::new(remote::train_hub(&n.node, &n.membership, &n.hints, &ropts, &name))),
+            jobs: network.as_ref().and_then(|n| n.jobs.clone().map(|j| (j, n.membership.peer_id().to_string()))),
             context,
             pool: app_pool,
             exit: exit.clone(),

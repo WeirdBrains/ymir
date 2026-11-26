@@ -582,6 +582,18 @@ impl Membership {
         Ok(true)
     }
 
+    /// Whether the training jobs pass with `peer`: both ends hold them (a full device, or a
+    /// service device whose grant lists them). A cert-only inference node holds no key for them.
+    fn syncs_jobs_with(&self, peer: &str) -> bool {
+        let st = self.lock();
+        let holds = |p: &str| match st.roster.grant_of(p) {
+            Some(g) if g.class == DeviceClass::Service => g.types.iter().any(|t| t == TRAIN_TYPE),
+            _ => true,
+        };
+        let me = st.our_cert.peer_id.clone();
+        holds(&me) && st.types.iter().any(|t| t == TRAIN_TYPE) && holds(peer)
+    }
+
     /// `peer`'s class and roles as its user-signed grant states them, if it has one.
     pub fn grant_of(&self, peer: &str) -> Option<(DeviceClass, Vec<String>)> {
         let st = self.lock();
@@ -638,6 +650,12 @@ impl Membership {
                 let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, CONTEXT_TYPE);
                 if let Some(e) = &out.error {
                     tracing::debug!(peer = %cert.peer_id, applied = out.applied, "context pass: {e}");
+                }
+            }
+            if out.error.is_none() && self.syncs_jobs_with(&cert.peer_id) {
+                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, TRAIN_TYPE);
+                if let Some(e) = &out.error {
+                    tracing::debug!(peer = %cert.peer_id, applied = out.applied, "training jobs pass: {e}");
                 }
             }
         }

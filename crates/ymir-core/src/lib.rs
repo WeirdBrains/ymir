@@ -44,6 +44,7 @@ pub mod token;
 pub mod train;
 pub mod train_board;
 pub mod train_job;
+pub mod train_jobs_ctl;
 pub mod train_net;
 pub mod update;
 pub mod update_publish;
