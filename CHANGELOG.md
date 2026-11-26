@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-26
+
 ### Added
 
 - Push wake-ups, Ymir's side (M9, with Bragi 0.15.0's B4; `weirdnet-push` 0.1.1): a node that holds the seed syncs Bragi's wake cards (`bragi.wake`, sealed) with the user's other full devices and can wake a Bragi device so it syncs: `ymirctl pool wake` lists the devices, `ymirctl pool wake DEVICE [--connection]` sends a sealed, content-free wake through the relay the device keeps a wake connection to (Bragi's opt-in "Wake through your relay"). No service grant lists `bragi.wake`, so a cert-only inference or model node never holds the cards (`service_bundle` refuses a grant that would). Cards are pulled every 2 minutes, not every sync pass. APNs and FCM are not built.
@@ -33,6 +35,7 @@ All notable changes to Ymir are listed here. The format follows
   `placement::tests`, `m6_placement.rs` (daemons: two replicas come up, stay at two, follow a drain and settle
   back) and `m6_scheduler_lease.rs` (two cert-only inference nodes: one holder at a time, takeover with a
   higher term).
+- M6 placement and replication under the scheduler lease, ymirctl move and ymir_move_model, push wake-ups (Ymir side)
 
 ## [0.19.0] - 2026-11-26
 
