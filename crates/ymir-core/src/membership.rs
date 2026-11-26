@@ -634,6 +634,40 @@ impl Membership {
         Ok(true)
     }
 
+    /// Whether this device stands for the placement scheduler's lease
+    /// ([`crate::placement::SCHEDULER_LEASE`]): its user-signed grant has the inference role (a
+    /// cert-only inference node). A device holding the seed normally has no such grant and does
+    /// not stand.
+    pub fn scheduler_candidate(&self) -> bool {
+        let st = self.lock();
+        st.roster.has_role(&st.our_cert.peer_id, ROLE_INFERENCE)
+    }
+
+    /// How many active devices stand for (and vote on) the scheduler lease.
+    pub fn scheduler_voters(&self) -> usize {
+        weirdnet_sync::Voters::Role(ROLE_INFERENCE.to_string()).resolve(&self.lock().roster).len()
+    }
+
+    /// Votes on the scheduler lease when this device is a candidate
+    /// ([`Self::scheduler_candidate`]); terms kept in `voter.cbor` as for the training board
+    /// (a service grant has one role, so a device never needs both voters). Returns whether it votes.
+    pub fn enable_scheduler_voter(&self) -> Result<bool> {
+        use weirdnet_sync::{Voter, Voters};
+        if !self.scheduler_candidate() {
+            return Ok(false);
+        }
+        let candidates = Voters::Role(ROLE_INFERENCE.to_string());
+        let path = self.dir.join(VOTER_FILE);
+        let base = match std::fs::read(&path) {
+            Ok(b) => Voter::import(&b, candidates).map_err(|e| anyhow!("{}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Voter::new(candidates),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let voter = base.with_persist(move |b| write_private(&path, b).map_err(std::io::Error::other));
+        self.lock().set_voter(Some(voter));
+        Ok(true)
+    }
+
     /// Whether the training jobs pass with `peer`: both ends hold them (a full device, or a
     /// service device whose grant lists them). A cert-only inference node holds no key for them.
     fn syncs_jobs_with(&self, peer: &str) -> bool {

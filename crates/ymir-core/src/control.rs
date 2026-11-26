@@ -27,6 +27,16 @@ pub enum ControlRequest {
     Unload {
         model: String,
     },
+    /// Move a model to another model node (M6): load it on `to`, then unload it from `from` (or
+    /// where it is loaded) once what it has there finishes, at most `grace_secs`.
+    Move {
+        model: String,
+        to: String,
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default = "move_grace")]
+        grace_secs: u64,
+    },
     /// Stop sending a model node new requests (it finishes what it has), or resume it.
     Drain {
         node: String,
@@ -192,6 +202,10 @@ fn user() -> String {
 
 fn message() -> String {
     "message".into()
+}
+
+fn move_grace() -> u64 {
+    60
 }
 
 fn yes() -> bool {
@@ -694,6 +708,13 @@ impl ControlHandler {
                 match result {
                     Ok(on) if on.is_empty() => ControlResponse::ok(format!("{model} was not loaded")),
                     Ok(on) => ControlResponse::ok(format!("{model} unloaded on {}", on.join(", "))),
+                    Err(e) => ControlResponse::err(e.to_string()),
+                }
+            }
+            ControlRequest::Move { model, to, from, grace_secs } => {
+                let Some(c) = &self.coordinator else { return ControlResponse::err("moving a model needs the inference role") };
+                match c.move_model(&model, from.as_deref(), &to, std::time::Duration::from_secs(grace_secs)).await {
+                    Ok((from, to)) => ControlResponse::ok(format!("{model} moved from {from} to {to}")),
                     Err(e) => ControlResponse::err(e.to_string()),
                 }
             }

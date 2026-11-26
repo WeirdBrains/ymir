@@ -186,6 +186,9 @@ pub struct Coordinator {
     pub(crate) groups: Mutex<crate::group::GroupBook>,
     /// Versioned rollouts (P4b), changed live by `ymirctl models rollout`.
     rollouts: RwLock<Vec<crate::rollout::Rollout>>,
+    /// Models being moved off a node (M6, `ymirctl move`): `(node, model)` gets no new
+    /// requests while what it has finishes.
+    leaving: Mutex<HashSet<(String, String)>>,
 }
 
 /// Where a request goes.
@@ -247,6 +250,7 @@ impl Coordinator {
             fair: crate::fair::Fair::new(),
             groups: Mutex::new(crate::group::GroupBook::default()),
             rollouts: RwLock::new(opts.rollouts.clone()),
+            leaving: Mutex::new(HashSet::new()),
             opts,
         }
     }
@@ -495,7 +499,7 @@ impl Coordinator {
                     draining = true;
                     continue;
                 }
-                if exclude.contains(node.name()) {
+                if exclude.contains(node.name()) || self.is_leaving(node.name(), model) {
                     continue;
                 }
                 if s.state == ModelState::Ready {
@@ -596,6 +600,44 @@ impl Coordinator {
             .find(|s| s.id == model)
             .map(|s| crate::model_node::embeds(&s))
             .ok_or_else(|| unknown_model(model))
+    }
+
+    pub(crate) fn is_leaving(&self, node: &str, model: &str) -> bool {
+        self.leaving.lock().unwrap_or_else(|e| e.into_inner()).contains(&(node.to_string(), model.to_string()))
+    }
+
+    /// Moves `model` from one model node to another (M6): loads it on `to` (which needs its own
+    /// copy of the weights), stops routing new requests for it to the source, waits up to `grace`
+    /// for what the source has in flight for it to finish, then unloads it there. The source is
+    /// `from`, or the node where it is loaded. Returns `(from, to)`. If the load on `to` fails,
+    /// nothing changes on the source.
+    pub async fn move_model(&self, model: &str, from: Option<&str>, to: &str, grace: Duration) -> Result<(String, String), RemoteError> {
+        let target = self.node(to).ok_or_else(|| unavailable(format!("no model node `{to}`")))?;
+        if !target.status().iter().any(|s| s.id == model) {
+            return Err(bad_request(format!("{to} has no copy of {model}; pull it there first (ymirctl models pull {model} --node {to})")));
+        }
+        let source = match from {
+            Some(name) => self.node(name).ok_or_else(|| unavailable(format!("no model node `{name}`")))?,
+            None => self
+                .nodes()
+                .into_iter()
+                .find(|n| n.name() != to && n.status().iter().any(|s| s.id == model && s.state != ModelState::Unloaded))
+                .ok_or_else(|| bad_request(format!("{model} is not loaded on another node; use ymirctl load {model} --node {to}")))?,
+        };
+        if source.name() == to {
+            return Err(bad_request(format!("{model} is already on {to}")));
+        }
+        target.load(model, true).await?;
+        let key = (source.name().to_string(), model.to_string());
+        self.leaving.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone());
+        let deadline = tokio::time::Instant::now() + grace;
+        while tokio::time::Instant::now() < deadline && source.status().iter().any(|s| s.id == model && s.in_flight > 0) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let r = source.unload(model).await;
+        self.leaving.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        r?;
+        Ok((source.name().to_string(), to.to_string()))
     }
 
     /// Unloads `model` everywhere it is resident.

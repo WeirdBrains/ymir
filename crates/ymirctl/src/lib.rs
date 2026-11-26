@@ -150,6 +150,20 @@ pub enum Cmd {
     },
     /// Unload a model everywhere it is loaded.
     Unload { model: String },
+    /// Move a loaded model to another model node: it loads there (the node needs its own copy;
+    /// `ymirctl models pull`), new requests go there, and it unloads from the old node once
+    /// what it has finishes (at most --grace seconds).
+    Move {
+        model: String,
+        /// The node to move it to (see `ymirctl nodes`).
+        #[arg(long)]
+        to: String,
+        /// The node to move it from (default: where it is loaded).
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long, default_value_t = 60)]
+        grace: u64,
+    },
     /// The model nodes the pool routes to.
     Nodes,
     /// Stop sending a model node new requests; it finishes what it has. `--resume` undoes it.
@@ -501,6 +515,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Update { cmd: UpdateCmd::Check } => update_check(&paths, out).await,
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
+        Cmd::Move { model, to, from, grace } => admin(&paths, out, ControlRequest::Move { model, to, from, grace_secs: grace }).await,
         Cmd::Nodes => nodes(&paths, out).await,
         Cmd::Drain { node, resume } => admin(&paths, out, ControlRequest::Drain { node, on: !resume }).await,
         Cmd::Context { cmd } => context_cmd(&paths, out, cmd).await,

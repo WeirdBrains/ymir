@@ -91,6 +91,7 @@ fn handshake_tools_and_errors_over_stdio() {
         "ymir_models_search",
         "ymir_load_model",
         "ymir_unload_model",
+        "ymir_move_model",
         "ymir_pull_model",
     ] {
         find(t);
@@ -98,7 +99,7 @@ fn handshake_tools_and_errors_over_stdio() {
     // Removal is not offered unless the server was started with --allow-remove.
     assert!(!tools.iter().any(|t| t["name"] == "ymir_remove_model"));
     assert_eq!(find("ymir_status")["annotations"]["readOnlyHint"], true);
-    for t in ["ymir_load_model", "ymir_unload_model", "ymir_pull_model"] {
+    for t in ["ymir_load_model", "ymir_unload_model", "ymir_move_model", "ymir_pull_model"] {
         assert_eq!(find(t)["annotations"]["readOnlyHint"], false, "{t}");
         assert!(find(t)["description"].as_str().unwrap().contains("confirm=true"), "{t}");
     }
@@ -109,9 +110,11 @@ fn handshake_tools_and_errors_over_stdio() {
     assert_eq!(r["isError"], true);
     assert!(r["content"][0]["text"].as_str().unwrap().contains("not answering"), "{r}");
     // Without confirm a mutating tool does nothing, even before it needs ymird.
-    let r = c.tool("ymir_unload_model", json!({"model": "x"}));
-    assert_eq!(r["isError"], true);
-    assert!(r["content"][0]["text"].as_str().unwrap().contains("confirm=true"), "{r}");
+    for (t, args) in [("ymir_unload_model", json!({"model": "x"})), ("ymir_move_model", json!({"model": "x", "to": "y"}))] {
+        let r = c.tool(t, args);
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("confirm=true"), "{t}: {r}");
+    }
     // Unknown tools are protocol errors; unknown methods too; ping works.
     assert!(c.rpc("tools/call", json!({"name": "nope"}))["error"]["message"].as_str().unwrap().contains("unknown tool"));
     assert_eq!(c.rpc("nope/nothing", json!({}))["error"]["code"], -32601);
@@ -129,7 +132,10 @@ fn flags_choose_the_tools() {
     init(&mut c);
     let n = names(&mut c);
     assert!(n.contains(&"ymir_status".to_string()));
-    assert!(!n.iter().any(|t| ["ymir_load_model", "ymir_unload_model", "ymir_pull_model", "ymir_remove_model"].contains(&t.as_str())), "{n:?}");
+    assert!(
+        !n.iter().any(|t| ["ymir_load_model", "ymir_unload_model", "ymir_move_model", "ymir_pull_model", "ymir_remove_model"].contains(&t.as_str())),
+        "{n:?}"
+    );
     // A hidden tool is not callable either.
     assert!(c.rpc("tools/call", json!({"name": "ymir_load_model", "arguments": {"model": "x", "confirm": true}}))["error"].is_object());
     c.finish();
