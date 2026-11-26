@@ -398,6 +398,8 @@ pub struct ControlHandler {
     pub train: Option<Arc<crate::train_net::TrainHub>>,
     /// The synced training job board and this device's id on it (Weirdnet).
     pub jobs: Option<(Arc<crate::train_board::BoardJobStore>, String)>,
+    /// Fetches training bundles from the user's other devices (Weirdnet).
+    pub blobs: Option<Arc<crate::blobs_net::BlobsClient>>,
     /// Woken by [`ControlRequest::Shutdown`]; `ymird` waits on it next to its signals.
     pub exit: Arc<tokio::sync::Notify>,
 }
@@ -569,7 +571,10 @@ impl ControlHandler {
                     return ControlResponse::err("this node is not on Weirdnet, so it has no synced training job board");
                 };
                 let mut resp = ControlResponse::ok("");
-                resp.job = Some(crate::train_jobs_ctl::serve(store.as_ref(), me, call).await);
+                resp.job = Some(
+                    crate::train_jobs_ctl::serve(store.as_ref(), self.blobs.as_deref().map(|b| b as &dyn crate::train_job::BlobFetch), me, call)
+                        .await,
+                );
                 resp
             }
             ControlRequest::TrainStatus { node } => {

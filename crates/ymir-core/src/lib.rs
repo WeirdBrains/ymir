@@ -10,6 +10,7 @@ pub mod adapters;
 pub mod autoupdate;
 pub mod balance;
 pub mod batch;
+pub mod blobs_net;
 pub mod client;
 pub mod config;
 pub mod config_edit;

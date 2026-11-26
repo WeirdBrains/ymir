@@ -6,6 +6,20 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): a board job's dataset and checkpoints
+  move between the owner's devices, so another node resumes a job without a shared folder or copying files
+  by hand. Every `ymird` on Weirdnet serves its training store (`LocalBlobs`) to the owner's linked devices
+  and fetches from them (`blobs_net::BlobsClient`); `ymirctl train run --job` / `train resume` ask it to
+  (`JobCall::Fetch`), into the same store. Before a run the job's dataset is fetched from its poster (or
+  any holder of its checkpoint) and its last checkpoint from the checkpoint's holders, in order, trying the
+  next one when a holder is unreachable, refuses, stalls for 60 s or sends anything wrong.
+- A fetch trusts nothing the holder says about the files: the manifest must hash to the asked root, the file
+  list comes from the manifest, each file's size and sha256 are checked as it arrives into a staging
+  folder, and only a complete bundle enters the store. A node that fetched a checkpoint to resume adds
+  itself to the checkpoint's holders on the job (`JobStore::set_holders`, the board's `Claim::set_holders`).
+
 ## [0.18.0] - 2026-11-26
 
 ### Added

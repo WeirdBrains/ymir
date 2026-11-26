@@ -40,6 +40,17 @@ pub enum JobCall {
         at: CheckpointRef,
         now_ms: u64,
     },
+    SetHolders {
+        claim: WireClaim,
+        seq: u64,
+        holders: Vec<String>,
+        now_ms: u64,
+    },
+    /// Makes bundle `root` local to this box, from `holders` over `/ymir/blobs/1`.
+    Fetch {
+        root: String,
+        holders: Vec<String>,
+    },
     Finish {
         claim: WireClaim,
         result: serde_json::Value,
@@ -140,18 +151,36 @@ impl From<WireClaimError> for ClaimError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum JobReply {
-    Me { peer: String },
+    Me {
+        peer: String,
+    },
     Done,
-    Job { job: Option<Box<JobRecord<TrainJob>>> },
-    Jobs { jobs: Vec<JobRecord<TrainJob>> },
-    Claimed { claim: WireClaim },
-    Refused { error: WireClaimError },
-    Renewed { held: bool },
-    Error { message: String },
+    Job {
+        job: Option<Box<JobRecord<TrainJob>>>,
+    },
+    Jobs {
+        jobs: Vec<JobRecord<TrainJob>>,
+    },
+    Claimed {
+        claim: WireClaim,
+    },
+    Refused {
+        error: WireClaimError,
+    },
+    Renewed {
+        held: bool,
+    },
+    Error {
+        message: String,
+    },
+    Fetched {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+    },
 }
 
 /// Runs `call` on the daemon's board.
-pub async fn serve(store: &dyn JobStore, me: &str, call: JobCall) -> JobReply {
+pub async fn serve(store: &dyn JobStore, fetch: Option<&dyn crate::train_job::BlobFetch>, me: &str, call: JobCall) -> JobReply {
     fn done(r: Result<()>) -> JobReply {
         match r {
             Ok(()) => JobReply::Done,
@@ -172,6 +201,11 @@ pub async fn serve(store: &dyn JobStore, me: &str, call: JobCall) -> JobReply {
         JobCall::Claim { me: who, .. } => JobReply::Error { message: format!("this ymird claims as {me}, not {who}") },
         JobCall::Renew { claim, now_ms } => store.renew(&claim.into(), now_ms).map(|held| JobReply::Renewed { held }).unwrap_or_else(err),
         JobCall::Checkpoint { claim, at, now_ms } => done(store.checkpoint(&claim.into(), at, now_ms)),
+        JobCall::SetHolders { claim, seq, holders, now_ms } => done(store.set_holders(&claim.into(), seq, holders, now_ms)),
+        JobCall::Fetch { root, holders } => match fetch {
+            Some(f) => f.ensure(&root, &holders).await.map(|from| JobReply::Fetched { from }).unwrap_or_else(err),
+            None => JobReply::Error { message: "this ymird doesn't fetch training files".into() },
+        },
         JobCall::Finish { claim, result, now_ms } => done(store.finish(&claim.into(), result, now_ms).await),
         JobCall::Fail { claim, reason, retry, now_ms } => done(store.fail(&claim.into(), &reason, retry, now_ms).await),
         JobCall::Release { claim, now_ms } => done(store.release(&claim.into(), now_ms).await),
@@ -262,6 +296,9 @@ impl JobStore for ControlJobStore {
     fn checkpoint(&self, claim: &Claim, at: CheckpointRef, now_ms: u64) -> Result<()> {
         Self::done(self.call(JobCall::Checkpoint { claim: claim.into(), at, now_ms }))
     }
+    fn set_holders(&self, claim: &Claim, seq: u64, holders: Vec<String>, now_ms: u64) -> Result<()> {
+        Self::done(self.call(JobCall::SetHolders { claim: claim.into(), seq, holders, now_ms }))
+    }
     async fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()> {
         Self::done(call_async(&self.socket, JobCall::Finish { claim: claim.into(), result, now_ms }).await)
     }
@@ -288,11 +325,24 @@ pub async fn cli_ctx(paths: &crate::Paths, cfg: &crate::NodeConfig) -> Result<cr
     if cfg.network.enabled
         && let Some((store, me)) = ControlJobStore::connect(paths.socket()).await
     {
+        let store = std::sync::Arc::new(store);
         return Ok(crate::train_job::Ctx {
-            store: std::sync::Arc::new(store),
+            store: store.clone(),
+            // ymird fetches into this same folder (the node's store).
             blobs: std::sync::Arc::new(crate::train_job::LocalBlobs::for_node(paths, cfg)?),
             me,
+            fetch: Some(store),
         });
     }
     crate::train_job::Ctx::local(paths, cfg)
+}
+
+#[async_trait::async_trait]
+impl crate::train_job::BlobFetch for ControlJobStore {
+    async fn ensure(&self, root: &str, holders: &[String]) -> Result<Option<String>> {
+        match call_async(&self.socket, JobCall::Fetch { root: root.to_string(), holders: holders.to_vec() }).await? {
+            JobReply::Fetched { from } => Ok(from),
+            other => unexpected(other),
+        }
+    }
 }

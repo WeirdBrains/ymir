@@ -85,7 +85,12 @@ fn dataset(dir: &Path) -> Result<PathBuf> {
 
 /// The shared stores (the synced record's stand-in) as seen by device `me`.
 fn ctx(shared: &Path, me: &str) -> Result<Ctx> {
-    Ok(Ctx { store: Arc::new(FileJobStore::open(shared.join("jobs"))?), blobs: Arc::new(LocalBlobs::open(shared.join("blobs"))?), me: me.into() })
+    Ok(Ctx {
+        store: Arc::new(FileJobStore::open(shared.join("jobs"))?),
+        blobs: Arc::new(LocalBlobs::open(shared.join("blobs"))?),
+        me: me.into(),
+        fetch: None,
+    })
 }
 
 fn quick() -> JobPolicy {
@@ -289,7 +294,7 @@ async fn on_the_synced_board_a_lost_job_is_carried_on_by_another_device_from_its
     let devs = Arc::new(board::devices(&["gpu1", "gpu2", "gpu3"], 2_000, 0));
     let _sync = board::keep_syncing(devs.clone());
     let blobs: Arc<LocalBlobs> = Arc::new(LocalBlobs::open(shared.join("blobs"))?);
-    let on = |i: usize| Ctx { store: devs[i].store.clone(), blobs: blobs.clone(), me: devs[i].peer.clone() };
+    let on = |i: usize| Ctx { store: devs[i].store.clone(), blobs: blobs.clone(), me: devs[i].peer.clone(), fetch: None };
     let policy = JobPolicy { role: train_job::JOB_ROLE.into(), ..quick() };
 
     let n1 = Node::new(tmp.path(), "gpu1")?;
@@ -380,7 +385,12 @@ async fn on_the_synced_board_ctrl_c_pauses_a_job_and_its_owner_resumes_it() -> R
     let data = dataset(tmp.path())?;
     let devs = Arc::new(board::devices(&["gpu1", "gpu2", "gpu3"], 2_000, 0));
     let _sync = board::keep_syncing(devs.clone());
-    let c = Ctx { store: devs[0].store.clone(), blobs: Arc::new(LocalBlobs::open(tmp.path().join("shared/blobs"))?), me: devs[0].peer.clone() };
+    let c = Ctx {
+        store: devs[0].store.clone(),
+        blobs: Arc::new(LocalBlobs::open(tmp.path().join("shared/blobs"))?),
+        me: devs[0].peer.clone(),
+        fetch: None,
+    };
     let n = Node::new(tmp.path(), "gpu1")?;
     let slow = n.config("gpu1", "r1", false, &[("YMIR_MOCK_TRAINER_STEP_MS", "400")])?;
     // Ctrl-C once the run holds the GPU.
@@ -421,7 +431,12 @@ async fn on_the_synced_board_a_run_that_loses_its_lease_stops_and_writes_nothing
     let data = dataset(tmp.path())?;
     let devs = Arc::new(board::devices(&["gpu1", "gpu2", "gpu3"], 2_000, 0));
     let _sync = board::keep_syncing(devs.clone());
-    let c = Ctx { store: devs[0].store.clone(), blobs: Arc::new(LocalBlobs::open(tmp.path().join("shared/blobs"))?), me: devs[0].peer.clone() };
+    let c = Ctx {
+        store: devs[0].store.clone(),
+        blobs: Arc::new(LocalBlobs::open(tmp.path().join("shared/blobs"))?),
+        me: devs[0].peer.clone(),
+        fetch: None,
+    };
     let n = Node::new(tmp.path(), "gpu1")?;
     let cfg = n.config("gpu1", "r1", false, &[("YMIR_MOCK_TRAINER_STEP_MS", "100")])?;
     // Once gpu2 has seen the run's first checkpoint, gpu1 drops off the network and gpu2 takes

@@ -42,6 +42,7 @@ semver.workspace = true
 sha2.workspace = true
 regex.workspace = true
 hex.workspace = true
+serde_bytes.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
