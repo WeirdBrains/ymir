@@ -326,3 +326,46 @@ async fn the_teacher_license_comes_from_the_pool_catalog_when_not_given() -> Res
     daemon.shutdown().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seed_prompts_come_from_source_texts_in_two_passes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (home, daemon) = node(dir.path()).await?;
+    let sources = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks.sources.json");
+    let texts = dir.path().join("texts");
+    std::fs::create_dir_all(&texts)?;
+    let para = "A distributed hash table spreads keys over many peers. Each peer keeps a small table of others, sorted by distance, and a lookup asks ever closer peers until it reaches the key's owner. Peers that leave are replaced as others notice them gone.";
+    std::fs::write(texts.join("dht-notes.txt"), format!("{para}\n\n{para}\n\n{para}"))?;
+    let (t, q) = (texts.display().to_string(), dir.path().join("q.jsonl").display().to_string());
+    let base = ["train", "seed", "questions", "--sources", sources, "--texts", &t, "--out", &q];
+    let e = ctl(&home, &base).await.unwrap_err();
+    assert!(format!("{e:#}").contains("no text for source(s) relay-notes"), "{e:#}");
+    std::fs::write(texts.join("relay-notes.md"), format!("# Relays\n\n{para}"))?;
+    let said = ctl(&home, &[&base[..], &["--chunk-chars", "600"]].concat()).await?;
+    assert!(said.contains("Wrote 3 question rows") && said.contains("dht-notes 2, relay-notes 1"), "{said}");
+    // The rows go through the teacher like any other, sources checked.
+    let qa = dir.path().join("qa.jsonl").display().to_string();
+    let said = ctl(&home, &["batch", &q, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &qa, "--max-tokens", "64"]).await?;
+    assert!(said.contains("3 sent"), "{said}");
+    assert!(ctl(&home, &["train", "seed", "questions", "--sources", sources, "--texts", &t, "--out", &q]).await.is_err(), "overwrote");
+
+    // Pass 2 on answers that ask questions (the mock engine doesn't).
+    let answers = dir.path().join("answers.jsonl");
+    std::fs::write(
+        &answers,
+        [
+            r#"{"id": "q-dht-notes-001", "source": "dht-notes", "usable": true, "completion": "Question: How does a DHT lookup find a key?\nQuestion: What does each peer keep?"}"#,
+            r#"{"id": "q-relay-notes-001", "source": "relay-notes", "usable": true, "completion": "Question: How does a DHT lookup find a key?"}"#,
+        ]
+        .join("\n"),
+    )?;
+    let p = dir.path().join("prompts.jsonl").display().to_string();
+    let said = ctl(&home, &["train", "seed", "prompts", &answers.display().to_string(), "--out", &p]).await?;
+    assert!(said.contains("Wrote 2 prompt rows") && said.contains("1 duplicate"), "{said}");
+    let out = dir.path().join("data.jsonl").display().to_string();
+    let said = ctl(&home, &["batch", &p, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &out, "--max-tokens", "64"]).await?;
+    assert!(said.contains("2 sent"), "{said}");
+    assert!(rows(Path::new(&out)).iter().all(|r| r["source"] == "dht-notes"));
+    daemon.shutdown().await;
+    Ok(())
+}

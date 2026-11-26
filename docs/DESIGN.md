@@ -1247,7 +1247,8 @@ the job carries on without it. A subtask never gains tools the parent didn't hav
 Built 2026-11-22 (see [docs/design/training.md](design/training.md)). `ymirctl batch --jsonl` sends rows with their own
 messages, sampling and seed (`ControlRequest::BatchTasks`, `ymir_core::batch::BatchTask`) in chunks of 32, waits for the
 teacher model (no stand-in), and writes JSONL rows plus `OUT.manifest.json` (`ymir_core::dataset`): teacher, the
-operator's `--license` (required; `unknown` only with `--allow-unknown-license`), input hash, counts and the models that
+teacher's license (`--license`, else `--license-from` a Hub repo's model card, else the pool catalog's; `unknown`
+only with `--allow-unknown-license`), input hash, counts and the models that
 answered. A row is `usable` only when it answered fresh from the teacher; cache hits and stand-ins are read from the
 answer's `Meta`. `--resume` skips rows already answered and keeps the job id. `ymirctl eval` scores models on rows with
 `expect` (the bench scorers) and/or `rubric` (graded by `--judge`), at temperature 0 with a fixed seed.

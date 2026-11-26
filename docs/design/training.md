@@ -1,7 +1,7 @@
 # Training and fine-tuning around Ymir: implementation plan
 
-Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`); the Hub
-license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
+Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`, the teacher
+license from the Hub or the pool catalog, and seed prompts from sources, 2026-11-25); only a synced job record is left. P4a (LoRA adapters on a loaded
 base) is built. P2 (consented conversation export) is built on the Ymir side. P3a (one run on one node) is built and
 tested against a mock trainer; no real run has been made. P4b (versioned rollout, canary and rollback) is built and
 tested against mock models. P3b's Ymir side is built (2026-11-25: checkpoints, trainer interface 2, resumable jobs on a
@@ -54,8 +54,17 @@ wait-for-model; `usable`, `cache_hit` and `standin` per row; manifest with the o
 manifest with each source's license; `--resume`) and `ymirctl eval` (bench scorers, optional judge). The cache mode is on
 the wire (`weirdnet-agent` 0.5.1: batch generation and evals send `bypass` with `wait_for_model`, and the
 coordinator honours it), and answer-cache entries are keyed on the weights revision where a node reports one.
-Left: the teacher license read from the Hub, turning
-fetched sources into seed prompts, and the synced job record.
+Left: the synced job record.
+
+**Teacher license and seed prompts (2026-11-25).** Without `--license`, `batch --jsonl` takes the teacher's license
+from `--license-from OWNER/NAME` (the Hub repo's model card: `cardData.license`, `license_name` for `other`, else a
+`license:` tag; `license_source` `hub:OWNER/NAME`) or from the pool catalog's `weirdnet.license` for the teacher (from
+its node's provenance records; `license_source` `pool`), and still refuses when neither knows it. `--license` stays
+the operator's (`operator`). `ymirctl train seed questions --sources FILE --texts DIR --out Q.jsonl` cuts each
+source's text (`DIR/ID.txt` or `.md`, fetched by the operator) into excerpts at paragraph breaks and writes one row per
+excerpt asking the teacher for questions it answers; after `batch --jsonl` over those rows, `train seed prompts
+ANSWERS --out PROMPTS.jsonl` turns the `Question:` lines of the usable answers into stand-alone prompt rows that keep
+their source (duplicates dropped), ready for the dataset run (`ymir_core::seed`).
 
 **Scope.** A teacher model in the pool answers or labels a file of prompts; the answers become a dataset for a
 student. The same path scores a candidate model on held-out prompts, optionally with a second model as judge.
