@@ -277,6 +277,12 @@ impl FileJobStore {
         Self::open(cfg.train.work_dir(paths).join("jobs"))
     }
 
+    /// The node's store when it has one (reading creates nothing).
+    pub fn open_existing(paths: &Paths, cfg: &NodeConfig) -> Option<Self> {
+        let dir = cfg.train.work_dir(paths).join("jobs");
+        dir.is_dir().then_some(Self { dir })
+    }
+
     fn path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{}.json", train::file_safe(id)))
     }

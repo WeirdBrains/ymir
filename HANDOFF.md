@@ -3,6 +3,13 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-25 22:15 EST: training status over Weirdnet (branch `feature/train-status`)
+
+- `/ymir/train-status/1` (`ymir_core::train_net::{TrainStatus, RunSummary, JobSummary, StatusReply}`), served by every
+  model node on Weirdnet for any linked device (`remote::serve_train_status`), and `TrainHub::status`;
+  `ControlRequest::TrainStatus`; `ymirctl train status [--node X] [--json]`. For Bragi's training view.
+- Tests: `p3a_remote.rs` (status from an app-only device, of a node with and without `[train] remote`), `p3b.rs` (jobs).
+
 ## 2026-11-25 22:05 EST: teacher license lookup and seed prompts (branch `feature/teacher-license`)
 
 - `batch --jsonl` without `--license`: `--license-from OWNER/NAME` reads the Hub repo's model card

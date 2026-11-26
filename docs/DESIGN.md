@@ -820,6 +820,13 @@ node on the roster and sends the dataset, manifest and settings with its certifi
 `[train] remote = true`, to the owner's devices (`[train] callers` narrows them), runs `train::run` in process and
 streams its lines back. Closing the stream cancels the run; node.toml is never edited from the network.
 
+Every model node on Weirdnet also answers `/ymir/train-status/1` (2026-11-25), read-only, for any of the owner's
+linked devices: `TrainStatus` with `[train] remote`, its newest 50 runs (`RunSummary`: status, base, adapter id and
+revision, dataset name and license, teacher, rows, epochs, steps, loss, times, error, checkpoints) and its jobs
+(`JobSummary`: state, holder, attempts, last checkpoint). No local paths leave the node. `ymirctl train status
+[--node X] [--json]` shows it, and Bragi's training view reads it with the rollouts (`/ymir/rollouts/1`) to show runs,
+versions and canary shares.
+
 `ymirctl train run --job` (P3b, 2026-11-25) makes the run a resumable job: trainer interface 2 checkpoints after each
 epoch, and the job record (`ymir_core::train_job`: a lease with a fencing term, attempts, back-off, the last
 checkpoint's content root) lets `ymirctl train resume JOB` carry it on from there, on this node or, with `[train]
