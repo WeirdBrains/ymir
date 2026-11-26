@@ -6,11 +6,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-26
+
 ### Added
 
 - `[model] upload = false`: the node refuses uploads (`not-allowed`, "uploads are off on this node") while pulls,
   listing and removals keep working (model-upload U10, weirdnet-backends 0.4.7 `WritePolicy::with_uploads`).
   `ymirctl models upload` says that node has uploads off, and `--node auto` passes over it to the next node with room.
+- Uploads can be turned off per node ([model] upload = false); weirdnet-backends 0.4.7 and weirdnet-net 0.8.3
 
 ### Changed
 
