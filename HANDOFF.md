@@ -3,6 +3,12 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 04:05 EST: v0.17.0 released
+
+**Release:** [v0.17.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.17.0) (release commit 90f71fb on 8bfe741; Release run 45776523009, green): model-upload U10, `[model] upload = false`, on weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. The jobboard work waits for the next release. The cut ran its checks before pushing; its first try stopped on one failure of `p2.rs` (`only_marked_conversations_are_exported_and_withdrawal_is_reported`: the pool roster's directory missing) while the build machine was heavily loaded, which passed three times alone and on the second try. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the signed update bundles with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.17.0-1; their recipes are on this branch (`chore/release-0.17.0`).
+
+**Next:** v0.18.0 with the training lead's jobboard (weirdnet-sync 0.8.4).
+
 ## 2026-11-26 01:10 EST: model-upload U10: `[model] upload = false` on weirdnet-backends 0.4.7 (branch `feature/upload-switch`)
 
 **What changed:** weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (919204a, the bump alone, which `feature/jobboard` builds on). `[model] upload` (default on; `false` passes `WritePolicy::with_uploads(false)`, so uploads are refused with `not-allowed` while pulls, listing and removals work). The refusal reads "that node has `[model] upload = false`" (`upload_net::UPLOADS_OFF`); `--node auto` tries the nodes with room from the most room down and passes over one with uploads off. `upload::local::entries` uses `StoredEntry::list` (no more serde). `/ymir/uploads/1` takes 16 streams (was 64). Docs: CHANGELOG, the plan ("U10"), DESIGN, the site's ymirctl page.
