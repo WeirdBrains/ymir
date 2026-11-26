@@ -60,7 +60,9 @@ pub fn devices(labels: &[&str], claim_ms: u64, takeover_ms: u64) -> Vec<Dev> {
             BoardPolicy::for_role(JOB_ROLE)
                 .with_claim(Duration::from_millis(claim_ms))
                 .with_takeover_after(Duration::from_millis(takeover_ms))
-                .voter(JOB_KIND),
+                .voter(JOB_KIND)
+                // Grants no longer than the test's claims, so the restart grace is that short too.
+                .with_max_duration(Duration::from_millis(claim_ms)),
         ));
     }
     let nodes: Vec<(Arc<Mutex<SyncState>>, Arc<SyncNode>)> = made
@@ -117,7 +119,9 @@ pub fn sync_all(devs: &[Dev]) {
                 continue;
             }
             let addrs: Vec<Multiaddr> = b.node.reachable_addrs().into_iter().map(|s| s.parse().unwrap()).collect();
-            let _ = weirdnet_sync::pull_from(&mut a.st.lock().unwrap(), &a.node, b.node.peer_id(), &addrs, JOB_KIND);
+            // Not holding the state lock over the network: the peer's handler needs its own, and
+            // two pulls the other way round would wait on each other until they time out.
+            let _ = weirdnet_sync::pull_from_shared(&a.st, &a.node, b.node.peer_id(), &addrs, JOB_KIND);
         }
     }
 }
