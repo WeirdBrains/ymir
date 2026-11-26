@@ -42,6 +42,11 @@ pub const ROLE_INFERENCE: &str = "ymir.inference";
 
 /// The role a service grant gives a model node (`ymir.model`).
 pub const ROLE_MODEL: &str = "ymir.model";
+/// The synced training jobs (P3b): unsealed records, which a cert-only model node holds the
+/// per-type key for (weirdnet-sync 0.8.3), never the epoch key that opens `ymir.context`.
+pub const TRAIN_TYPE: &str = crate::train_job::JOB_KIND;
+/// Where a model node keeps its lease voter's terms (`Voter::export`), written before each grant.
+const VOTER_FILE: &str = "voter.cbor";
 
 /// `credential.json` on a service node: the user's public key (protobuf, hex), as
 /// `weirdnet_sync::Identity` writes it.
@@ -77,13 +82,30 @@ impl ServiceRole {
         }
     }
 
-    /// The sync types its grant lets it hold keys for (none: roster only).
+    /// The sync types its grant lets it hold keys for: an inference node the pool and context
+    /// records, a model node the pool and the training jobs (never the context). Since
+    /// weirdnet-sync 0.8.3 a device is refused (`type-not-granted`) for any type it syncs that
+    /// its grant does not list, so the pool must be here for both.
     pub fn types(self) -> Vec<String> {
         match self {
             Self::Inference => vec![SYNC_TYPE.to_string(), CONTEXT_TYPE.to_string()],
-            Self::Model => Vec::new(),
+            Self::Model => vec![SYNC_TYPE.to_string(), TRAIN_TYPE.to_string()],
         }
     }
+}
+
+/// What a cert-only device syncs: the pool and every type its grant holds keys for (the
+/// context for an inference node, the training jobs for a model node). Since weirdnet-sync
+/// 0.8.3 a peer sends only the types both sides list, so a granted type left off here never
+/// arrives.
+fn service_types(bundle: &LinkBundle) -> Vec<String> {
+    let mut types = vec![SYNC_TYPE.to_string()];
+    for t in &bundle.grant.types {
+        if !types.contains(t) {
+            types.push(t.clone());
+        }
+    }
+    types
 }
 
 /// Overwrites `path` with zeros, syncs it and deletes it. Gone is gone only as far as the
@@ -127,6 +149,9 @@ pub struct Membership {
     /// Whether sync passes also carry conversations (inference and app roles; a model-only
     /// node holds no conversation state).
     context_sync: std::sync::atomic::AtomicBool,
+    /// Held across [`Membership::save`]: the sync loop, the control socket and link flows all
+    /// save, and two saves at once must not interleave (an older snapshot written last).
+    saving: Mutex<()>,
 }
 
 fn now_ms() -> i64 {
@@ -141,7 +166,12 @@ fn user_from_seed(seed: &[u8]) -> Result<Keypair> {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    // A temporary name of its own per write: two writers of one file sharing `x.tmp` would
+    // rename it away from each other ("writing x: No such file or directory", seen in p2).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
     {
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create(true).truncate(true);
@@ -154,7 +184,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("writing {}", path.display()));
+    }
     Ok(())
 }
 
@@ -252,7 +285,7 @@ impl Membership {
             bail!("the link's certificate is not for this identity");
         }
         let bundle = LinkBundle::from_bytes(bundle).map_err(|e| anyhow!("the link's sync bundle: {e}"))?;
-        let st = SyncState::new_service(user_key, cert, &node_key, vec![SYNC_TYPE.to_string()], &bundle)
+        let st = SyncState::new_service(user_key, cert, &node_key, service_types(&bundle), &bundle)
             .map_err(|e| anyhow!("the cert-only link did not check out: {e}"))?;
         let m = Self::wrap(dir, node_key, st)?;
         m.save()?;
@@ -276,7 +309,7 @@ impl Membership {
         }
         let user_key = PublicKey::try_decode_protobuf(user_key).map_err(|e| anyhow!("user key: {e}"))?;
         let bundle = LinkBundle::from_bytes(bundle).map_err(|e| anyhow!("the link's sync bundle: {e}"))?;
-        let mut st = SyncState::new_service(user_key, cert, old.node_key(), vec![SYNC_TYPE.to_string()], &bundle)
+        let mut st = SyncState::new_service(user_key, cert, old.node_key(), service_types(&bundle), &bundle)
             .map_err(|e| anyhow!("the cert-only link did not check out: {e}"))?;
         {
             let o = old.lock();
@@ -300,7 +333,13 @@ impl Membership {
     fn wrap(dir: &Path, node_key: Keypair, mut st: SyncState) -> Result<Self> {
         ensure_dir(dir)?;
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
-        Ok(Self { dir: dir.to_path_buf(), node_key, state: Arc::new(Mutex::new(st)), context_sync: std::sync::atomic::AtomicBool::new(false) })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            node_key,
+            state: Arc::new(Mutex::new(st)),
+            context_sync: std::sync::atomic::AtomicBool::new(false),
+            saving: Mutex::new(()),
+        })
     }
 
     /// The identity stored in `dir`, if any.
@@ -351,7 +390,8 @@ impl Membership {
             our_node: weirdnet_sync::NodeId::new(our_cert.peer_id.clone()),
             our_cert,
             seed,
-            types: vec![SYNC_TYPE.to_string()],
+            // The pool, and the training jobs (P3b), served to every device granted them.
+            types: vec![SYNC_TYPE.to_string(), TRAIN_TYPE.to_string()],
             roster,
             log: weirdnet_sync::OpLog::new(),
             clock: None,
@@ -359,12 +399,20 @@ impl Membership {
             keys,
             auto_first_rotation: !service,
             records: Default::default(),
+            // A lease voter is set on model nodes for the training job board (`train_board`).
+            voter: None,
         };
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
         load_log(dir, &mut st);
         st.publish_device_key(now_ms()).map_err(|e| anyhow!("device key: {e}"))?;
         st.refresh_keys();
-        Ok(Self { dir: dir.to_path_buf(), node_key, state: Arc::new(Mutex::new(st)), context_sync: std::sync::atomic::AtomicBool::new(false) })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            node_key,
+            state: Arc::new(Mutex::new(st)),
+            context_sync: std::sync::atomic::AtomicBool::new(false),
+            saving: Mutex::new(()),
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SyncState> {
@@ -373,6 +421,7 @@ impl Membership {
 
     /// Writes the roster and keys (and, the first time, the seed or credential and the node key).
     pub fn save(&self) -> Result<()> {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
         ensure_dir(&self.dir)?;
         let (seed, user_key, roster, keys, log) = {
             let st = self.lock();
@@ -521,6 +570,54 @@ impl Membership {
         b.to_bytes().map_err(|e| anyhow!("the sync bundle: {e}"))
     }
 
+    /// Votes on the training job board's claims (`ymir.train/` leases) when this device's grant
+    /// has the model role and the training jobs: limits from Ymir's job policy, terms kept in
+    /// `voter.cbor` and written before each grant (so a restart never hands out a term twice).
+    /// Returns whether it votes.
+    pub fn enable_train_voter(&self) -> Result<bool> {
+        self.enable_train_voter_with(&crate::train_job::JobPolicy::default())
+    }
+
+    /// [`Self::enable_train_voter`] with the claim and takeover limits of `p`. After a start
+    /// the voter refuses for as long as its longest grant (the claim time), so a restart never
+    /// grants a lease another voter may still count as held.
+    pub fn enable_train_voter_with(&self, p: &crate::train_job::JobPolicy) -> Result<bool> {
+        use weirdnet_sync::{Voter, Voters};
+        let mut st = self.lock();
+        let me = st.our_cert.peer_id.clone();
+        let granted = st.roster.grant_of(&me).map(|g| g.roles.iter().any(|r| r == ROLE_MODEL) && g.types.iter().any(|t| t == TRAIN_TYPE));
+        if !granted.unwrap_or(false) {
+            st.set_voter(None);
+            return Ok(false);
+        }
+        let candidates = Voters::Role(crate::train_job::JOB_ROLE.to_string());
+        let path = self.dir.join(VOTER_FILE);
+        let base = match std::fs::read(&path) {
+            Ok(b) => Voter::import(&b, candidates).map_err(|e| anyhow!("{}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Voter::new(candidates),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let (claim, takeover) = (std::time::Duration::from_millis(p.claim_ms), std::time::Duration::from_millis(p.takeover_after_ms));
+        let voter = base
+            .with_max_duration(claim)
+            .with_limits(format!("{TRAIN_TYPE}/"), claim, takeover)
+            .with_persist(move |b| write_private(&path, b).map_err(std::io::Error::other));
+        st.set_voter(Some(voter));
+        Ok(true)
+    }
+
+    /// Whether the training jobs pass with `peer`: both ends hold them (a full device, or a
+    /// service device whose grant lists them). A cert-only inference node holds no key for them.
+    fn syncs_jobs_with(&self, peer: &str) -> bool {
+        let st = self.lock();
+        let holds = |p: &str| match st.roster.grant_of(p) {
+            Some(g) if g.class == DeviceClass::Service => g.types.iter().any(|t| t == TRAIN_TYPE),
+            _ => true,
+        };
+        let me = st.our_cert.peer_id.clone();
+        holds(&me) && st.types.iter().any(|t| t == TRAIN_TYPE) && holds(peer)
+    }
+
     /// `peer`'s class and roles as its user-signed grant states them, if it has one.
     pub fn grant_of(&self, peer: &str) -> Option<(DeviceClass, Vec<String>)> {
         let st = self.lock();
@@ -579,6 +676,12 @@ impl Membership {
                     tracing::debug!(peer = %cert.peer_id, applied = out.applied, "context pass: {e}");
                 }
             }
+            if out.error.is_none() && self.syncs_jobs_with(&cert.peer_id) {
+                let out = weirdnet_sync::pull_from_shared(&self.state, node, peer, &a, TRAIN_TYPE);
+                if let Some(e) = &out.error {
+                    tracing::debug!(peer = %cert.peer_id, applied = out.applied, "training jobs pass: {e}");
+                }
+            }
         }
         if let Err(e) = self.save() {
             tracing::warn!("saving the roster: {e}");
@@ -591,6 +694,28 @@ impl Membership {
 mod tests {
     use super::*;
     use weirdnet_sync::CallerCheck;
+
+    #[test]
+    fn concurrent_saves_do_not_trip_over_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = Arc::new(Membership::create(&tmp.path().join("a"), "box-a").unwrap());
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let m = m.clone();
+                std::thread::spawn(move || (0..40).try_for_each(|_| m.save()))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        let left: Vec<_> = std::fs::read_dir(tmp.path().join("a"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "no temporary files are left behind");
+        assert!(Membership::open(&tmp.path().join("a")).unwrap().is_some());
+    }
 
     #[test]
     fn create_open_link_and_revoke() {

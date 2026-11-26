@@ -436,11 +436,19 @@ pub struct TrainStatus {
 }
 
 impl TrainStatus {
-    /// This node's training status, from its work directory.
+    /// This node's training status, from its work directory (jobs from its file store).
     pub fn read(paths: &Paths, cfg: &NodeConfig) -> Self {
+        Self::read_with(paths, cfg, None)
+    }
+
+    /// [`Self::read`] with the jobs from `jobs` (the synced board on Weirdnet) when given.
+    pub fn read_with(paths: &Paths, cfg: &NodeConfig, jobs: Option<&dyn crate::train_job::JobStore>) -> Self {
         let runs = train::runs(paths, &cfg.train).iter().take(STATUS_RUNS).map(RunSummary::from).collect();
-        let jobs = crate::train_job::FileJobStore::open_existing(paths, cfg)
-            .and_then(|s| crate::train_job::JobStore::list(&s).ok())
+        let listed = match jobs {
+            Some(store) => store.list().ok(),
+            None => crate::train_job::FileJobStore::open_existing(paths, cfg).and_then(|s| crate::train_job::JobStore::list(&s).ok()),
+        };
+        let jobs = listed
             .unwrap_or_default()
             .into_iter()
             .map(|j| JobSummary {
@@ -471,11 +479,19 @@ pub struct TrainStatusService {
     paths: Paths,
     cfg: NodeConfig,
     auth: Arc<dyn Authorize>,
+    /// The synced job board, when this node has one: its jobs replace the file store's.
+    jobs: Option<Arc<dyn crate::train_job::JobStore>>,
 }
 
 impl TrainStatusService {
     pub fn new(paths: Paths, cfg: NodeConfig, auth: Arc<dyn Authorize>) -> Self {
-        Self { paths, cfg, auth }
+        Self { paths, cfg, auth, jobs: None }
+    }
+
+    /// Shows the jobs on `jobs` (the synced board) instead of the file store's.
+    pub fn with_jobs(mut self, jobs: Option<Arc<dyn crate::train_job::JobStore>>) -> Self {
+        self.jobs = jobs;
+        self
     }
 
     pub async fn serve(&self, mut ch: Channel, caller: Caller) -> Result<(), RemoteError> {
@@ -487,9 +503,10 @@ impl TrainStatusService {
         if let Err(e) = self.auth.authorize(&caller) {
             return ch.send(&StatusReply::Refused { message: format!("refused: only the owner's linked devices see training here ({e})") }).await;
         }
-        let (paths, cfg) = (self.paths.clone(), self.cfg.clone());
-        let status =
-            tokio::task::spawn_blocking(move || TrainStatus::read(&paths, &cfg)).await.map_err(|e| RemoteError::Failed { message: e.to_string() })?;
+        let (paths, cfg, jobs) = (self.paths.clone(), self.cfg.clone(), self.jobs.clone());
+        let status = tokio::task::spawn_blocking(move || TrainStatus::read_with(&paths, &cfg, jobs.as_deref()))
+            .await
+            .map_err(|e| RemoteError::Failed { message: e.to_string() })?;
         ch.send(&StatusReply::Status { status: Box::new(status) }).await
     }
 }

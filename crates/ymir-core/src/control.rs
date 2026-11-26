@@ -150,6 +150,11 @@ pub enum ControlRequest {
         node: String,
         request: crate::train_net::TrainOp,
     },
+    /// A call on the synced training job board this daemon holds (`ymirctl train run --job`
+    /// on Weirdnet; see [`crate::train_jobs_ctl`]).
+    Jobs {
+        call: crate::train_jobs_ctl::JobCall,
+    },
     /// Another model node's training status over Weirdnet (`ymirctl train status --node`,
     /// `/ymir/train-status/1`).
     TrainStatus {
@@ -307,6 +312,9 @@ pub struct ControlResponse {
     /// The answer to [`ControlRequest::TrainStatus`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub train_status: Option<crate::train_net::TrainStatus>,
+    /// The answer to [`ControlRequest::Jobs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::train_jobs_ctl::JobReply>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -348,6 +356,7 @@ impl ControlResponse {
             rollouts: None,
             remote_rollouts: None,
             train_status: None,
+            job: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -364,6 +373,7 @@ impl ControlResponse {
             rollouts: None,
             remote_rollouts: None,
             train_status: None,
+            job: None,
         }
     }
 }
@@ -386,6 +396,8 @@ pub struct ControlHandler {
     pub models: Option<Arc<crate::models::ModelsHub>>,
     /// Training runs on other model nodes over Weirdnet (needs a device identity).
     pub train: Option<Arc<crate::train_net::TrainHub>>,
+    /// The synced training job board and this device's id on it (Weirdnet).
+    pub jobs: Option<(Arc<crate::train_board::BoardJobStore>, String)>,
     /// Woken by [`ControlRequest::Shutdown`]; `ymird` waits on it next to its signals.
     pub exit: Arc<tokio::sync::Notify>,
 }
@@ -552,6 +564,14 @@ impl ControlHandler {
                     Err(e) => ControlResponse::err(e),
                 }
             }
+            ControlRequest::Jobs { call } => {
+                let Some((store, me)) = &self.jobs else {
+                    return ControlResponse::err("this node is not on Weirdnet, so it has no synced training job board");
+                };
+                let mut resp = ControlResponse::ok("");
+                resp.job = Some(crate::train_jobs_ctl::serve(store.as_ref(), me, call).await);
+                resp
+            }
             ControlRequest::TrainStatus { node } => {
                 let Some(hub) = &self.train else {
                     return ControlResponse::err("training status over Weirdnet needs a device identity on this node (see `ymirctl pool link`)");
@@ -623,6 +643,7 @@ impl ControlHandler {
                     rollouts: None,
                     remote_rollouts: None,
                     train_status: None,
+                    job: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),

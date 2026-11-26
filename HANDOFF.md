@@ -9,6 +9,29 @@ A running log of finished work, newest first. Each entry says what changed, the 
 
 **Next:** v0.18.0 with the training lead's jobboard (weirdnet-sync 0.8.4).
 
+## 2026-11-26 03:35 EST: model nodes on the job board, ymird holds it (branch `feature/jobboard`)
+
+- weirdnet-sync 0.8.4 (Cargo.toml, Cargo.lock, release.toml `[[requires]]`): per-type keys for service devices (0.8.3) and type-scoped sealed records (0.8.4). On 0.8.3 alone m10 failed: the model node's grant lacked `ymir.pool` (refused `type-not-granted`, fixed here) and a cert-only inference node could not open sealed `ymir.context` records (fixed in weirdnet-sync 0.8.4).
+- [membership.rs](crates/ymir-core/src/membership.rs): `TRAIN_TYPE` (`ymir.train`, unsealed); `ServiceRole::Model` grants `["ymir.pool", "ymir.train"]`; a cert-only device syncs the pool and every type in its grant; full devices serve `ymir.train`; the sync pass pulls it with peers that hold it; `enable_train_voter(_with)` (model role and `ymir.train` in the grant; limits from the job policy; terms in `voter.cbor`).
+- [daemon.rs](crates/ymir-core/src/daemon.rs): the model role's voter at network start; `Network.jobs`, a `BoardJobStore` with hint-addressed leases, for the control socket and `/ymir/train-status/1`.
+- [train_jobs_ctl.rs](crates/ymir-core/src/train_jobs_ctl.rs): `ControlRequest::Jobs { call }` / `ControlResponse.job`; `ControlJobStore` (the `JobStore` over the socket; claims only as the daemon's own peer id, renewing in ymird); `cli_ctx` for `ymirctl train` (board when ymird is up on Weirdnet, else the file store). `TrainStatus::read_with` in [train_net.rs](crates/ymir-core/src/train_net.rs).
+- Tests: [tests/train_isolation.rs](crates/ymir-testkit/tests/train_isolation.rs) (a cert-only model node syncs, votes on and claims a job the seed holder posted; no epoch key and no `ymir.context` key; its context pull fails; a sealed context entry handed to it does not open), [tests/train_daemon.rs](crates/ymir-testkit/tests/train_daemon.rs) (two ymirds on 127.0.0.1: post on the holder, claim, renew, checkpoint and finish on the cert-only model node over the control socket, `train status` lists it; ~64 s, mostly the voter's 60 s restart grace).
+
+**Checks:** workspace clippy `-D warnings`; m10 2/2, p3b 8/8, p3a_remote 2/2, train_board 3/3, train_isolation 1/1 (3 runs), train_daemon 1/1; CI 45782530375 and macOS 45782535575 green on 93414c4, Pages 45784606192 green on cc4252b (a rustdoc link fix).
+
+**Not done:** datasets and checkpoints stay in the writing node's `LocalBlobs`, so another node resumes a board job only if it has those files; blob transfer over Weirdnet is the follow-up after 0.18.0. Already linked cert-only model nodes keep their old roster-only grant until re-linked from a seed holder. No live nodes were touched.
+
+## 2026-11-26 01:45 EST: training jobs on the synced job board (branch `feature/jobboard`)
+
+- [crates/ymir-core/src/train_board.rs](crates/ymir-core/src/train_board.rs): `BoardJobStore`, Ymir's `JobStore` over `weirdnet-agent` 0.5.6's `JobBoard<TrainJob>` (records, policies, checkpoint pointers and claim errors mapped; digests as plain hex; live claims kept by job id, renewing themselves).
+- [crates/ymir-core/src/train_job.rs](crates/ymir-core/src/train_job.rs): `claim`, `finish`, `fail` and `release` are async; `ClaimError::NoQuorum`, retried for `CLAIM_QUORUM_WAIT` (30 s) when a run claims its job.
+- weirdnet-agent 0.5.6 (`jobs`), weirdnet-sync 0.8.2, on top of weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (one copy of each); `SyncState.voter` in [membership.rs](crates/ymir-core/src/membership.rs).
+- Tests: [tests/common/board.rs](crates/ymir-testkit/tests/common/board.rs), three linked devices on in-memory nodes with the model role and voters; [tests/train_board.rs](crates/ymir-testkit/tests/train_board.rs) (a claim held elsewhere, a retryable failure and its back-off, the next device resuming from the last checkpoint, release and the owner's resume, a takeover after a lapsed lease with the stale holder fenced; the same moves on `FileJobStore`); [tests/p3b.rs](crates/ymir-testkit/tests/p3b.rs) runs `train_job` with the mock trainer on the board: a job lost after an epoch carried on by another device, Ctrl-C pausing, a run that loses its lease stopping.
+
+**Checks:** workspace clippy `-D warnings`; `cargo fmt --check`; p3b 8/8 (7 s), train_board 3/3 (17 s), each three times; `train_job` unit tests 7/7; p3a_remote 2/2.
+
+**Not done:** model nodes don't use the board. Their grant is roster only (no sync types), and with weirdnet-sync 0.8.2 a grant with `ymir.train` would hand them the epoch keys that also open `ymir.context`. weirdnet-sync 0.8.3 (per-type keys) comes first; then the grant, the voter on model nodes in the daemon and `train run --job` on the board. The blobs (datasets, checkpoints) still move by the node's own store.
+
 ## 2026-11-26 01:10 EST: model-upload U10: `[model] upload = false` on weirdnet-backends 0.4.7 (branch `feature/upload-switch`)
 
 **What changed:** weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (919204a, the bump alone, which `feature/jobboard` builds on). `[model] upload` (default on; `false` passes `WritePolicy::with_uploads(false)`, so uploads are refused with `not-allowed` while pulls, listing and removals work). The refusal reads "that node has `[model] upload = false`" (`upload_net::UPLOADS_OFF`); `--node auto` tries the nodes with room from the most room down and passes over one with uploads off. `upload::local::entries` uses `StoredEntry::list` (no more serde). `/ymir/uploads/1` takes 16 streams (was 64). Docs: CHANGELOG, the plan ("U10"), DESIGN, the site's ymirctl page.

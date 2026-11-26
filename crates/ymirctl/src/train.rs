@@ -142,7 +142,19 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
         TrainCmd::Seed(c) => seed(out, c),
         TrainCmd::Status { node, json } => {
             let status = match node {
-                None => ymir_core::train_net::TrainStatus::read(paths, &crate::load_cfg(paths)?),
+                None => {
+                    // The synced board through ymird when it is up on Weirdnet, else the file store.
+                    let cfg = crate::load_cfg(paths)?;
+                    let board = match cfg.network.enabled {
+                        true => ymir_core::train_jobs_ctl::ControlJobStore::connect(paths.socket()).await.map(|(s, _)| s),
+                        false => None,
+                    };
+                    let paths = paths.clone();
+                    tokio::task::spawn_blocking(move || {
+                        ymir_core::train_net::TrainStatus::read_with(&paths, &cfg, board.as_ref().map(|b| b as &dyn ymir_core::train_job::JobStore))
+                    })
+                    .await?
+                }
                 Some(node) => {
                     let r = control::request(&paths.socket(), &ControlRequest::TrainStatus { node }).await?;
                     if !r.ok {
@@ -191,7 +203,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
         }
         TrainCmd::Jobs => {
             let cfg = crate::load_cfg(paths)?;
-            let ctx = train_job::Ctx::local(paths, &cfg)?;
+            let ctx = ymir_core::train_jobs_ctl::cli_ctx(paths, &cfg).await?;
             let jobs = ctx.store.list()?;
             if jobs.is_empty() {
                 writeln!(out, "No training jobs on this node.")?;
@@ -216,7 +228,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
         }
         TrainCmd::Resume { job, force, keep_full } => {
             let cfg = crate::load_cfg(paths)?;
-            let ctx = train_job::Ctx::local(paths, &cfg)?;
+            let ctx = ymir_core::train_jobs_ctl::cli_ctx(paths, &cfg).await?;
             let mut cancel = ctrl_c();
             let (mut on, rx) = job_printer();
             let record = pump(out, rx, train_job::resume(paths, &cfg, &ctx, &job, force, keep_full, &mut cancel, &mut on)).await?;
@@ -227,7 +239,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: TrainCmd) -> Result<()
         }
         TrainCmd::Job { action, job } => {
             let cfg = crate::load_cfg(paths)?;
-            let ctx = train_job::Ctx::local(paths, &cfg)?;
+            let ctx = ymir_core::train_jobs_ctl::cli_ctx(paths, &cfg).await?;
             match action.as_str() {
                 "pause" => ctx.store.pause(&job, &ctx.me, now_ms())?,
                 "unpause" => ctx.store.unpause(&job, &ctx.me, now_ms())?,
@@ -382,7 +394,7 @@ async fn run_cmd(paths: &Paths, out: &mut dyn Write, mut a: RunArgs) -> Result<(
         ..Default::default()
     };
     let record = if a.job {
-        let ctx = train_job::Ctx::local(paths, &cfg)?;
+        let ctx = ymir_core::train_jobs_ctl::cli_ctx(paths, &cfg).await?;
         let mut cancel = ctrl_c();
         let (mut on, rx) = job_printer();
         pump(out, rx, train_job::start(paths, &cfg, &ctx, &spec, train_job::JobPolicy::default(), &mut cancel, &mut on)).await?.1

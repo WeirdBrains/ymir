@@ -303,8 +303,9 @@ pub fn serve_train_status(
     m: &Membership,
     paths: crate::Paths,
     cfg: crate::NodeConfig,
+    jobs: Option<Arc<dyn crate::train_job::JobStore>>,
 ) -> Result<crate::train_net::TrainStatusServer, RemoteError> {
-    let service = Arc::new(crate::train_net::TrainStatusService::new(paths, cfg, roster_auth(m)));
+    let service = Arc::new(crate::train_net::TrainStatusService::new(paths, cfg, roster_auth(m)).with_jobs(jobs));
     crate::train_net::TrainStatusServer::start(node, service)
 }
 

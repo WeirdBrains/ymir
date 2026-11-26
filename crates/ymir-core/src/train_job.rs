@@ -30,6 +30,8 @@ use crate::{NodeConfig, Paths};
 pub const JOB_KIND: &str = "ymir.train";
 /// The grant role a device needs to claim (and vote on) training jobs.
 pub const JOB_ROLE: &str = "ymir.model";
+/// How long a claim waits for the voters to answer (a job just posted syncs to them first).
+pub const CLAIM_QUORUM_WAIT: Duration = Duration::from_secs(30);
 /// A dataset bundle's index format.
 pub const DATASET_FORMAT: &str = "ymir-train-dataset/1";
 
@@ -197,10 +199,22 @@ pub struct Claim {
 pub enum ClaimError {
     NoJob,
     NotClaimable(JobState),
-    Held { holder: String, until_ms: u64 },
-    TooSoon { until_ms: u64 },
+    Held {
+        holder: String,
+        until_ms: u64,
+    },
+    TooSoon {
+        until_ms: u64,
+    },
     NotCandidate,
-    OutOfAttempts { attempts: u32 },
+    OutOfAttempts {
+        attempts: u32,
+    },
+    /// The synced board's voters didn't answer (or hadn't synced the job yet): worth retrying.
+    NoQuorum {
+        reached: usize,
+        needed: usize,
+    },
     Store(anyhow::Error),
 }
 
@@ -213,6 +227,7 @@ impl std::fmt::Display for ClaimError {
             ClaimError::TooSoon { until_ms } => write!(f, "the job may be claimed again from {until_ms} ms"),
             ClaimError::NotCandidate => write!(f, "this device is not one of the job's candidates"),
             ClaimError::OutOfAttempts { attempts } => write!(f, "the job has used its {attempts} attempts"),
+            ClaimError::NoQuorum { reached, needed } => write!(f, "no quorum among the voters ({reached} of {needed} grants)"),
             ClaimError::Store(e) => write!(f, "{e:#}"),
         }
     }
@@ -220,25 +235,28 @@ impl std::fmt::Display for ClaimError {
 
 impl std::error::Error for ClaimError {}
 
-/// The job record and its lease: `weirdnet-agent` 0.6.0's `JobBoard<TrainJob>` once it ships,
-/// [`FileJobStore`] until then. Every write under a claim is fenced by its term: it fails once
-/// a later term exists.
+/// The job record and its lease: [`crate::train_board::BoardJobStore`] (`weirdnet-agent`'s
+/// synced `JobBoard<TrainJob>`) between nodes, [`FileJobStore`] on one node. Every write under a
+/// claim is fenced by its term: it fails once a later term exists. Claiming and ending a claim
+/// are async (the board asks the voters); checkpoints and renewals are not (the board's claim
+/// renews itself).
+#[async_trait::async_trait]
 pub trait JobStore: Send + Sync {
     fn post(&self, job: JobRecord<TrainJob>) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<JobRecord<TrainJob>>>;
     fn list(&self) -> Result<Vec<JobRecord<TrainJob>>>;
     /// Claims a queued or stalled job for `me`. The caller checks eligibility first
     /// ([`check_resumable`]).
-    fn claim(&self, id: &str, me: &str, now_ms: u64) -> std::result::Result<Claim, ClaimError>;
+    async fn claim(&self, id: &str, me: &str, now_ms: u64) -> std::result::Result<Claim, ClaimError>;
     /// Renews the lease; `false` once the claim is lost (lapsed and taken, or superseded).
     fn renew(&self, claim: &Claim, now_ms: u64) -> Result<bool>;
     fn checkpoint(&self, claim: &Claim, at: CheckpointRef, now_ms: u64) -> Result<()>;
-    fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()>;
+    async fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()>;
     /// A failure: `retry` puts the job back in the queue (after the back-off) while attempts
     /// are left.
-    fn fail(&self, claim: &Claim, reason: &str, retry: bool, now_ms: u64) -> Result<()>;
+    async fn fail(&self, claim: &Claim, reason: &str, retry: bool, now_ms: u64) -> Result<()>;
     /// Lets go of a claim without a failure or a spent attempt (the job is `Paused`).
-    fn release(&self, claim: &Claim, now_ms: u64) -> Result<()>;
+    async fn release(&self, claim: &Claim, now_ms: u64) -> Result<()>;
     /// Owner operations.
     fn pause(&self, id: &str, by: &str, now_ms: u64) -> Result<()>;
     fn unpause(&self, id: &str, by: &str, now_ms: u64) -> Result<()>;
@@ -350,6 +368,7 @@ fn owner_only(job: &JobRecord<TrainJob>, by: &str) -> Result<()> {
     Ok(())
 }
 
+#[async_trait::async_trait]
 impl JobStore for FileJobStore {
     fn post(&self, job: JobRecord<TrainJob>) -> Result<()> {
         if job.id.is_empty() || job.id.len() > 128 || !job.id.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:+#".contains(c)) {
@@ -379,7 +398,7 @@ impl JobStore for FileJobStore {
         Ok(v)
     }
 
-    fn claim(&self, id: &str, me: &str, now_ms: u64) -> std::result::Result<Claim, ClaimError> {
+    async fn claim(&self, id: &str, me: &str, now_ms: u64) -> std::result::Result<Claim, ClaimError> {
         let r = self.locked(|| {
             let Some(mut job) = self.read(id)? else { return Ok(Err(ClaimError::NoJob)) };
             if !job.policy.candidates.is_empty() && !job.policy.candidates.iter().any(|c| c == me) {
@@ -455,7 +474,7 @@ impl JobStore for FileJobStore {
         })
     }
 
-    fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()> {
+    async fn finish(&self, claim: &Claim, result: serde_json::Value, now_ms: u64) -> Result<()> {
         self.update(&claim.id, |job| {
             Self::fenced(job, claim)?;
             job.state = JobState::Done;
@@ -467,7 +486,7 @@ impl JobStore for FileJobStore {
         })
     }
 
-    fn fail(&self, claim: &Claim, reason: &str, retry: bool, now_ms: u64) -> Result<()> {
+    async fn fail(&self, claim: &Claim, reason: &str, retry: bool, now_ms: u64) -> Result<()> {
         self.update(&claim.id, |job| {
             Self::fenced(job, claim)?;
             job.failure = Some(reason.to_string());
@@ -486,7 +505,7 @@ impl JobStore for FileJobStore {
         })
     }
 
-    fn release(&self, claim: &Claim, now_ms: u64) -> Result<()> {
+    async fn release(&self, claim: &Claim, now_ms: u64) -> Result<()> {
         self.update(&claim.id, |job| {
             Self::fenced(job, claim)?;
             job.state = JobState::Paused;
@@ -838,7 +857,14 @@ pub async fn resume(
     let job = ctx.store.get(id)?.with_context(|| format!("no job {id}"))?;
     let (_, version) = train::check_trainer(&cfg.train).await?;
     check_resumable(&job, cfg, &ctx.me, &version)?;
-    let claim = ctx.store.claim(id, &ctx.me, train::train_now()).map_err(|e| anyhow::anyhow!("claiming job {id}: {e}"))?;
+    // On the synced board a job just posted may not have reached the voters yet.
+    let deadline = std::time::Instant::now() + CLAIM_QUORUM_WAIT;
+    let claim = loop {
+        match ctx.store.claim(id, &ctx.me, train::train_now()).await {
+            Err(ClaimError::NoQuorum { .. }) if std::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(250)).await,
+            r => break r.map_err(|e| anyhow::anyhow!("claiming job {id}: {e}"))?,
+        }
+    };
     let job = ctx.store.get(id)?.context("the job went away")?;
     on(JobUpdate::Claimed { job: id.to_string(), term: claim.term, attempt: job.attempts });
     let p = &job.payload;
@@ -866,7 +892,7 @@ pub async fn resume(
         Ok(v) => v,
         Err(e) => {
             // Fetching may work on another node (or later): retryable.
-            let _ = ctx.store.fail(&claim, &format!("{e:#}"), true, train::train_now());
+            let _ = ctx.store.fail(&claim, &format!("{e:#}"), true, train::train_now()).await;
             return Err(e);
         }
     };
@@ -981,11 +1007,11 @@ async fn drive(
         }
         (Ok(record), _) => {
             let adapter = record.adapter.clone();
-            ctx.store.finish(claim, serde_json::json!({ "node": record.node, "run": record.id, "adapter": adapter, "steps": record.steps, "final_loss": record.final_loss }), now)?;
+            ctx.store.finish(claim, serde_json::json!({ "node": record.node, "run": record.id, "adapter": adapter, "steps": record.steps, "final_loss": record.final_loss }), now).await?;
         }
         (Err(_), STOP_USER) => {
             // Ctrl-C: the job waits, paused, for `train resume`.
-            ctx.store.release(claim, now)?;
+            ctx.store.release(claim, now).await?;
         }
         (Err(e), _) => {
             // Before the run held the GPU, the job itself is wrong for this node (or anywhere):
@@ -994,7 +1020,7 @@ async fn drive(
             if let Some(p) = publish_err {
                 reason.push_str(&format!(" (and a checkpoint could not be published: {p})"));
             }
-            ctx.store.fail(claim, &reason, started, now)?;
+            ctx.store.fail(claim, &reason, started, now).await?;
         }
     }
     result
@@ -1056,100 +1082,100 @@ mod tests {
         CheckpointRef { seq, step: seq * 10, root: format!("r{seq}"), bytes: 1, holders: vec!["a".into()] }
     }
 
-    #[test]
-    fn a_claim_fences_writes_and_a_lapsed_lease_is_taken_over_after_the_wait() {
+    #[tokio::test]
+    async fn a_claim_fences_writes_and_a_lapsed_lease_is_taken_over_after_the_wait() {
         let (_t, s) = store();
         s.post(job("j1", "a")).unwrap();
         assert!(s.post(job("j1", "a")).is_err(), "ids are unique");
-        let a = s.claim("j1", "a", 100).unwrap();
+        let a = s.claim("j1", "a", 100).await.unwrap();
         assert_eq!(a.term, 1);
-        assert!(matches!(s.claim("j1", "b", 500), Err(ClaimError::Held { .. })));
+        assert!(matches!(s.claim("j1", "b", 500).await, Err(ClaimError::Held { .. })));
         s.checkpoint(&a, cp(1), 600).unwrap();
         assert!(s.renew(&a, 900).unwrap());
         // a's lease runs to 1900; b waits takeover_after past that.
-        assert!(matches!(s.claim("j1", "b", 2_000), Err(ClaimError::TooSoon { until_ms: 6_900 })));
-        let b = s.claim("j1", "b", 7_000).unwrap();
+        assert!(matches!(s.claim("j1", "b", 2_000).await, Err(ClaimError::TooSoon { until_ms: 6_900 })));
+        let b = s.claim("j1", "b", 7_000).await.unwrap();
         assert_eq!(b.term, 2);
         // a comes back: every write of its term is refused.
         assert!(!s.renew(&a, 7_100).unwrap());
         assert!(s.checkpoint(&a, cp(2), 7_100).is_err());
-        assert!(s.finish(&a, serde_json::json!({}), 7_100).is_err());
+        assert!(s.finish(&a, serde_json::json!({}), 7_100).await.is_err());
         let j = s.get("j1").unwrap().unwrap();
         assert_eq!((j.state, j.attempts, j.checkpoint.unwrap().seq), (JobState::Running, 2, 1));
-        s.finish(&b, serde_json::json!({"ok": true}), 7_200).unwrap();
+        s.finish(&b, serde_json::json!({"ok": true}), 7_200).await.unwrap();
         assert_eq!(s.get("j1").unwrap().unwrap().state, JobState::Done);
-        assert!(matches!(s.claim("j1", "a", 8_000), Err(ClaimError::NotClaimable(JobState::Done))));
+        assert!(matches!(s.claim("j1", "a", 8_000).await, Err(ClaimError::NotClaimable(JobState::Done))));
     }
 
-    #[test]
-    fn the_holder_reclaims_at_once_after_a_restart() {
+    #[tokio::test]
+    async fn the_holder_reclaims_at_once_after_a_restart() {
         let (_t, s) = store();
         s.post(job("j", "a")).unwrap();
-        let a1 = s.claim("j", "a", 0).unwrap();
-        let a2 = s.claim("j", "a", 10).unwrap();
+        let a1 = s.claim("j", "a", 0).await.unwrap();
+        let a2 = s.claim("j", "a", 10).await.unwrap();
         assert_eq!(a2.term, a1.term + 1);
         assert!(!s.renew(&a1, 20).unwrap());
     }
 
-    #[test]
-    fn retryable_failures_back_off_and_stop_at_max_attempts() {
+    #[tokio::test]
+    async fn retryable_failures_back_off_and_stop_at_max_attempts() {
         let (_t, s) = store();
         s.post(job("j", "a")).unwrap();
-        let c = s.claim("j", "a", 0).unwrap();
-        s.fail(&c, "oom", true, 100).unwrap();
+        let c = s.claim("j", "a", 0).await.unwrap();
+        s.fail(&c, "oom", true, 100).await.unwrap();
         let j = s.get("j").unwrap().unwrap();
         assert_eq!((j.state, j.not_before_ms), (JobState::Queued, 2_100));
-        assert!(matches!(s.claim("j", "b", 1_000), Err(ClaimError::TooSoon { until_ms: 2_100 })));
-        let c = s.claim("j", "b", 2_200).unwrap();
-        s.fail(&c, "oom again", true, 2_300).unwrap();
+        assert!(matches!(s.claim("j", "b", 1_000).await, Err(ClaimError::TooSoon { until_ms: 2_100 })));
+        let c = s.claim("j", "b", 2_200).await.unwrap();
+        s.fail(&c, "oom again", true, 2_300).await.unwrap();
         let j = s.get("j").unwrap().unwrap();
         assert_eq!((j.state, j.attempts, j.failure.as_deref()), (JobState::Failed, 2, Some("oom again")));
     }
 
-    #[test]
-    fn a_failure_without_retry_is_final_and_lapsed_claims_count_as_attempts() {
+    #[tokio::test]
+    async fn a_failure_without_retry_is_final_and_lapsed_claims_count_as_attempts() {
         let (_t, s) = store();
         s.post(job("j", "a")).unwrap();
-        let c = s.claim("j", "a", 0).unwrap();
-        s.fail(&c, "base mismatch", false, 1).unwrap();
+        let c = s.claim("j", "a", 0).await.unwrap();
+        s.fail(&c, "base mismatch", false, 1).await.unwrap();
         assert_eq!(s.get("j").unwrap().unwrap().state, JobState::Failed);
 
         s.post(job("k", "a")).unwrap();
-        s.claim("k", "a", 0).unwrap(); // lapses at 1000
-        s.claim("k", "b", 6_000).unwrap(); // second attempt, lapses at 7000
-        assert!(matches!(s.claim("k", "c", 20_000), Err(ClaimError::OutOfAttempts { attempts: 2 })));
+        s.claim("k", "a", 0).await.unwrap(); // lapses at 1000
+        s.claim("k", "b", 6_000).await.unwrap(); // second attempt, lapses at 7000
+        assert!(matches!(s.claim("k", "c", 20_000).await, Err(ClaimError::OutOfAttempts { attempts: 2 })));
         assert_eq!(s.get("k").unwrap().unwrap().state, JobState::Failed);
     }
 
-    #[test]
-    fn owners_pause_resume_and_cancel_and_a_release_gives_the_attempt_back() {
+    #[tokio::test]
+    async fn owners_pause_resume_and_cancel_and_a_release_gives_the_attempt_back() {
         let (_t, s) = store();
         s.post(job("j", "a")).unwrap();
-        let c = s.claim("j", "a", 0).unwrap();
-        s.release(&c, 10).unwrap();
+        let c = s.claim("j", "a", 0).await.unwrap();
+        s.release(&c, 10).await.unwrap();
         let j = s.get("j").unwrap().unwrap();
         assert_eq!((j.state, j.attempts), (JobState::Paused, 0));
-        assert!(matches!(s.claim("j", "a", 20), Err(ClaimError::NotClaimable(JobState::Paused))));
+        assert!(matches!(s.claim("j", "a", 20).await, Err(ClaimError::NotClaimable(JobState::Paused))));
         assert!(s.unpause("j", "b", 30).is_err(), "only the owner");
         s.unpause("j", "a", 30).unwrap();
-        s.claim("j", "a", 40).unwrap();
+        s.claim("j", "a", 40).await.unwrap();
         s.pause("j", "a", 50).unwrap();
         s.cancel("j", "a", 60).unwrap();
         assert_eq!(s.get("j").unwrap().unwrap().state, JobState::Cancelled);
     }
 
-    #[test]
-    fn candidates_narrow_who_may_claim() {
+    #[tokio::test]
+    async fn candidates_narrow_who_may_claim() {
         let (_t, s) = store();
         let mut j = job("j", "a");
         j.policy.candidates = vec!["b".into()];
         s.post(j).unwrap();
-        assert!(matches!(s.claim("j", "c", 0), Err(ClaimError::NotCandidate)));
-        s.claim("j", "b", 0).unwrap();
+        assert!(matches!(s.claim("j", "c", 0).await, Err(ClaimError::NotCandidate)));
+        s.claim("j", "b", 0).await.unwrap();
     }
 
-    #[test]
-    fn blobs_round_trip_and_refuse_a_changed_file() {
+    #[tokio::test]
+    async fn blobs_round_trip_and_refuse_a_changed_file() {
         let t = tempfile::tempdir().unwrap();
         let blobs = LocalBlobs::open(t.path().join("blobs")).unwrap();
         let src = t.path().join("src");
