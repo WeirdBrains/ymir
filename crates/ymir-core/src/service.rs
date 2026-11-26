@@ -1166,7 +1166,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let sp = ServiceSpec::user("/opt/ymir/bin/ymird", home.path());
-        let t = Target { os: Os::current(), scope: Scope::User, dir: Some(dir.path().into()), custom: true, uid: 501 };
+        // FreeBSD has no user scope (see `freebsd_rc_script_and_commands`); a user unit's files there
+        // are the Linux ones.
+        let os = if Os::current() == Os::FreeBsd { Os::Linux } else { Os::current() };
+        let t = Target { os, scope: Scope::User, dir: Some(dir.path().into()), custom: true, uid: 501 };
         let p = install_plan(&sp, &t, &host(), true).unwrap();
         assert!(p.steps.is_empty(), "{p:?}");
         let log = execute(&p, true).unwrap();
