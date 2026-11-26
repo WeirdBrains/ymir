@@ -246,7 +246,8 @@ pub fn hub_license(info: &serde_json::Value) -> Option<String> {
         serde_json::Value::Array(a) => a.first().and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
         _ => None,
     };
-    let tagged = || info["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).find_map(|t| t.strip_prefix("license:")).map(str::to_string);
+    let tagged =
+        || info["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).find_map(|t| t.strip_prefix("license:")).map(str::to_string);
     let l = first(&card["license"]).filter(|l| !l.is_empty()).or_else(tagged)?;
     if l.eq_ignore_ascii_case("other")
         && let Some(name) = first(&card["license_name"]).filter(|n| !n.is_empty())

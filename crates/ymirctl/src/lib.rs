@@ -1397,9 +1397,7 @@ async fn teacher_license(paths: &Paths, out: &mut dyn Write, teacher: &str, lice
         let token = ymir_core::models::find_hf_token(&paths.state()).map(|(t, _)| t).filter(|_| hub_url == weirdnet_model::store::HUB);
         let repo_s = repo.to_string();
         let l = tokio::task::spawn_blocking(move || models::hub::MlxHub::new(&hub_url, token).license(&repo_s)).await??;
-        let Some(l) = l else {
-            bail!("{repo}'s model card states no license; give it with --license (or `unknown` with --allow-unknown-license)")
-        };
+        let Some(l) = l else { bail!("{repo}'s model card states no license; give it with --license (or `unknown` with --allow-unknown-license)") };
         writeln!(out, "Teacher license: {l} (from {repo}'s model card on the Hub)")?;
         return Ok((l, format!("hub:{repo}")));
     }

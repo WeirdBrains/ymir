@@ -345,7 +345,11 @@ async fn seed_prompts_come_from_source_texts_in_two_passes() -> Result<()> {
     assert!(said.contains("Wrote 3 question rows") && said.contains("dht-notes 2, relay-notes 1"), "{said}");
     // The rows go through the teacher like any other, sources checked.
     let qa = dir.path().join("qa.jsonl").display().to_string();
-    let said = ctl(&home, &["batch", &q, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &qa, "--max-tokens", "64"]).await?;
+    let said = ctl(
+        &home,
+        &["batch", &q, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &qa, "--max-tokens", "64"],
+    )
+    .await?;
     assert!(said.contains("3 sent"), "{said}");
     assert!(ctl(&home, &["train", "seed", "questions", "--sources", sources, "--texts", &t, "--out", &q]).await.is_err(), "overwrote");
 
@@ -363,7 +367,11 @@ async fn seed_prompts_come_from_source_texts_in_two_passes() -> Result<()> {
     let said = ctl(&home, &["train", "seed", "prompts", &answers.display().to_string(), "--out", &p]).await?;
     assert!(said.contains("Wrote 2 prompt rows") && said.contains("1 duplicate"), "{said}");
     let out = dir.path().join("data.jsonl").display().to_string();
-    let said = ctl(&home, &["batch", &p, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &out, "--max-tokens", "64"]).await?;
+    let said = ctl(
+        &home,
+        &["batch", &p, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &out, "--max-tokens", "64"],
+    )
+    .await?;
     assert!(said.contains("2 sent"), "{said}");
     assert!(rows(Path::new(&out)).iter().all(|r| r["source"] == "dht-notes"));
     daemon.shutdown().await;
