@@ -92,6 +92,10 @@ pub fn devices(labels: &[&str], claim_ms: u64, takeover_ms: u64) -> Vec<Dev> {
 /// fresh memory addresses, which only the others learn.
 pub fn isolate(devs: &[Dev], i: usize) {
     devs[i].book.lock().unwrap().clear();
+    // A paused node still dials out (to the addresses it remembers), so the others must come
+    // back on addresses it has never seen: a resumed listener on `/tcp/0` can get its old port
+    // again, and then the cut-off node keeps reaching it (and renewing its lease).
+    let old: std::collections::HashSet<String> = devs.iter().flat_map(|d| d.node.reachable_addrs()).collect();
     for d in devs {
         d.node.pause().unwrap();
     }
@@ -100,8 +104,23 @@ pub fn isolate(devs: &[Dev], i: usize) {
         d.node.resume().unwrap();
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while rest.iter().any(|d| d.node.reachable_addrs().is_empty()) {
-        assert!(std::time::Instant::now() < deadline, "the nodes listen again");
+    loop {
+        let mut settled = true;
+        for d in &rest {
+            let now = d.node.reachable_addrs();
+            if now.is_empty() {
+                settled = false;
+            } else if now.iter().any(|a| old.contains(a)) {
+                // Back on a port it had: listen again elsewhere.
+                d.node.pause().unwrap();
+                d.node.resume().unwrap();
+                settled = false;
+            }
+        }
+        if settled {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the nodes listen again on new addresses");
         std::thread::sleep(Duration::from_millis(50));
     }
     let fresh: HashMap<String, Vec<Multiaddr>> =
