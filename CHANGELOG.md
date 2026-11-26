@@ -6,6 +6,21 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Resumable training jobs on the synced job board (training plan P3b, between nodes):
+  `ymir_core::train_board::BoardJobStore`, the `JobStore` over `weirdnet-agent`'s `JobBoard<TrainJob>`
+  (job type `ymir.train`, claims as majority-vote leases among the devices with the model role). A claim
+  waits up to 30 s for the voters to answer (`CLAIM_QUORUM_WAIT`, a job just posted reaches them first).
+  Model nodes don't use it yet: their grant has no sync types, so the board waits for weirdnet-sync's
+  per-type keys.
+
+### Changed
+
+- `JobStore::claim`, `finish`, `fail` and `release` are async (the board asks the voters); checkpoints and
+  renewals stay as they were. `ClaimError::NoQuorum`.
+- weirdnet-agent 0.5.6 (feature `jobs`) and weirdnet-sync 0.8.2.
+
 ## [0.16.0] - 2026-11-25
 
 ### Added

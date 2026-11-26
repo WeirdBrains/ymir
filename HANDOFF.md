@@ -3,6 +3,17 @@
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
 
+## 2026-11-26 01:45 EST: training jobs on the synced job board (branch `feature/jobboard`)
+
+- [crates/ymir-core/src/train_board.rs](crates/ymir-core/src/train_board.rs): `BoardJobStore`, Ymir's `JobStore` over `weirdnet-agent` 0.5.6's `JobBoard<TrainJob>` (records, policies, checkpoint pointers and claim errors mapped; digests as plain hex; live claims kept by job id, renewing themselves).
+- [crates/ymir-core/src/train_job.rs](crates/ymir-core/src/train_job.rs): `claim`, `finish`, `fail` and `release` are async; `ClaimError::NoQuorum`, retried for `CLAIM_QUORUM_WAIT` (30 s) when a run claims its job.
+- weirdnet-agent 0.5.6 (`jobs`), weirdnet-sync 0.8.2, on top of weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (one copy of each); `SyncState.voter` in [membership.rs](crates/ymir-core/src/membership.rs).
+- Tests: [tests/common/board.rs](crates/ymir-testkit/tests/common/board.rs), three linked devices on in-memory nodes with the model role and voters; [tests/train_board.rs](crates/ymir-testkit/tests/train_board.rs) (a claim held elsewhere, a retryable failure and its back-off, the next device resuming from the last checkpoint, release and the owner's resume, a takeover after a lapsed lease with the stale holder fenced; the same moves on `FileJobStore`); [tests/p3b.rs](crates/ymir-testkit/tests/p3b.rs) runs `train_job` with the mock trainer on the board: a job lost after an epoch carried on by another device, Ctrl-C pausing, a run that loses its lease stopping.
+
+**Checks:** workspace clippy `-D warnings`; `cargo fmt --check`; p3b 8/8 (7 s), train_board 3/3 (17 s), each three times; `train_job` unit tests 7/7; p3a_remote 2/2.
+
+**Not done:** model nodes don't use the board. Their grant is roster only (no sync types), and with weirdnet-sync 0.8.2 a grant with `ymir.train` would hand them the epoch keys that also open `ymir.context`. weirdnet-sync 0.8.3 (per-type keys) comes first; then the grant, the voter on model nodes in the daemon and `train run --job` on the board. The blobs (datasets, checkpoints) still move by the node's own store.
+
 ## 2026-11-25 22:15 EST: training status over Weirdnet (branch `feature/train-status`)
 
 - `/ymir/train-status/1` (`ymir_core::train_net::{TrainStatus, RunSummary, JobSummary, StatusReply}`), served by every
