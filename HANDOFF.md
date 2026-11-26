@@ -2,6 +2,12 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-26 18:38 EST: v0.22.0 released
+
+**Release:** [v0.22.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.22.0) (release commit 70ff1e9 on e704ad8; Release run 45905897897 green, CI, macOS, Pages and FreeBSD green on e704ad8): M7 vLLM with Ray groups (`backend = "vllm-ray"`, private link only, mocks only), `ymirctl engines install vllm` (a managed vLLM nightly that runs Inkling 2 Mini, plus Ray), and video limits in catalog/1 (LF-43). 44 files on GitHub: leak scan 33 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.22.0` EXIT 0); `weirdnet_release.py assets 0.22.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 1847744 on main; TAUR ymir-bin and ymir-cuda-bin 0.22.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched. The dev box was replaced mid-release (about 17:20 EST) and its alien-blue key had to be re-authorized; nothing was lost.
+
+**Next:** a real GPU test of `vllm-ray` and of the vLLM nightly with Inkling 2 Mini waits on Michael picking hardware. When vLLM 0.35.0 is on PyPI, the installer can drop the nightly default.
+
 ## 2026-11-26 16:59 EST: vLLM installer defaults to a nightly that runs Inkling 2 Mini (on main)
 
 Michael (11-26): "Make sure it is a version of vLLM that can run Inkling 2 mini". No live node touched.
