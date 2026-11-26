@@ -3,7 +3,7 @@
 //!
 //! The board keeps every job as signed events in the user's op log (record type
 //! [`JOB_KIND`], synced like any other record) and its claims are majority-vote leases among
-//! the devices with [`JOB_ROLE`]. This adapter maps the board's records and errors onto
+//! the devices with [`JOB_ROLE`](crate::train_job::JOB_ROLE). This adapter maps the board's records and errors onto
 //! Ymir's ([`train_job`](crate::train_job)), keeps each live [`Claim`](BoardClaim) by job id
 //! (the board's claim renews itself in the background), and leaves the times to the board:
 //! the `now_ms` arguments are not used.
