@@ -43,6 +43,11 @@ pub const CONTEXT_TYPE: &str = "ymir.context";
 /// receive them (see [`ServiceRole::types`] and [`Membership::service_bundle`]).
 pub const WAKE_TYPE: &str = "bragi.wake";
 
+/// The placement plan the `ymir.scheduler` lease holder publishes (M6, see [`crate::placement`]):
+/// sealed like the conversations, and synced between inference nodes only (a model node's grant
+/// does not list it).
+pub const PLAN_TYPE: &str = "ymir.plan";
+
 /// The role a service grant gives an inference node (`ymir.inference`).
 pub const ROLE_INFERENCE: &str = "ymir.inference";
 
@@ -94,7 +99,7 @@ impl ServiceRole {
     /// its grant does not list, so the pool must be here for both.
     pub fn types(self) -> Vec<String> {
         match self {
-            Self::Inference => vec![SYNC_TYPE.to_string(), CONTEXT_TYPE.to_string()],
+            Self::Inference => vec![SYNC_TYPE.to_string(), CONTEXT_TYPE.to_string(), PLAN_TYPE.to_string()],
             Self::Model => vec![SYNC_TYPE.to_string(), TRAIN_TYPE.to_string()],
         }
     }
@@ -353,6 +358,7 @@ impl Membership {
     fn wrap(dir: &Path, node_key: Keypair, mut st: SyncState) -> Result<Self> {
         ensure_dir(dir)?;
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
+        st.configure(PLAN_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("plan records: {e}"))?;
         configure_wake(&mut st)?;
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -425,6 +431,7 @@ impl Membership {
             voter: None,
         };
         st.configure(CONTEXT_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("context records: {e}"))?;
+        st.configure(PLAN_TYPE, RecordOptions { sealed: true, ..Default::default() }).map_err(|e| anyhow!("plan records: {e}"))?;
         configure_wake(&mut st)?;
         load_log(dir, &mut st);
         st.publish_device_key(now_ms()).map_err(|e| anyhow!("device key: {e}"))?;
@@ -490,6 +497,30 @@ impl Membership {
             r.map_err(|e| anyhow!("writing {typ}/{record_id}: {e}"))?;
         }
         self.save()
+    }
+
+    /// Publishes the placement plan `name` while holding `lease` (weirdnet-sync 0.8
+    /// `publish_plan`: refused once the lease is invalid or a newer term has published), and saves.
+    pub fn publish_plan(&self, name: &str, lease: &weirdnet_sync::LeaseHandle, body: &[u8]) -> Result<weirdnet_sync::Plan> {
+        let plan = {
+            let mut st = self.lock();
+            let mut r = st.publish_plan(now_ms() as u64, PLAN_TYPE, name, lease, body);
+            // As in `write_record`: a lone device starts the key chain itself.
+            if matches!(&r, Err(weirdnet_sync::SyncError::Refused(m)) if m == "no-epoch-key") && st.roster.active().count() == 1 {
+                st.rotate(now_ms()).map_err(|e| anyhow!("starting the key chain: {e}"))?;
+                r = st.publish_plan(now_ms() as u64, PLAN_TYPE, name, lease, body);
+            }
+            r.map_err(|e| anyhow!("publishing {PLAN_TYPE}/{name}: {e}"))?
+        };
+        self.save()?;
+        Ok(plan)
+    }
+
+    /// The newest placement plan `name` signed by a device with the inference role (the only
+    /// ones that stand for the scheduler lease, so the only ones that can publish).
+    pub fn current_plan(&self, name: &str) -> Option<weirdnet_sync::Plan> {
+        let st = self.lock();
+        st.current_plan_where(PLAN_TYPE, name, |p| st.roster.has_role(p, ROLE_INFERENCE))
     }
 
     /// The latest value of every record of `typ` this node can read, by record id.
@@ -749,6 +780,7 @@ impl Membership {
             let mut types = vec![SYNC_TYPE];
             if context {
                 types.push(CONTEXT_TYPE);
+                types.push(PLAN_TYPE);
             }
             if wake {
                 types.push(WAKE_TYPE);

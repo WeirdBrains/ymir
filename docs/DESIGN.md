@@ -1263,6 +1263,17 @@ memory and backends, and demand (EWMA requests/min and tokens/min per model).
 - Keep the stand-in and the embedding model warm on at least one node each, always.
 - Changes are rate-limited (no flapping), never evict a model with requests in flight (drain first),
   and ask the target to warm hot prefixes before traffic moves.
+- **Built (2026-11-27):** a cold request loads where it is cheapest (`placement::cold_rank`: a node already
+  loading it, then one that evicts no ready model of its swap group, the fewest other models loaded, the fewest
+  answers in flight, this device, by name; before, the first node in the list with a copy). With
+  `[inference.placement] idle_unload_secs` (at least 60) the placing node unloads, one replica per model per round,
+  a model that no request on this inference node has asked for in that long and that no node reports in flight at a
+  round; never a model with `replicas`, the main model, the stand-in or the cache's embedding model, never one with
+  answers in flight, never a LoRA adapter row or a wrapped stock server. Demand is seen per inference node (its own
+  requests plus `in_flight` in the records at each round): model-node records carry no last-request time, so
+  requests through another inference node between rounds are not seen. Not built: bin-packing by memory, the
+  fastest-backend preference, replication on queue wait and prefix warming. Tests:
+  [crates/ymir-core/tests/placement_plan.rs](../crates/ymir-core/tests/placement_plan.rs).
 
 ### Splitting batch and agent jobs
 
@@ -1675,6 +1686,7 @@ context_disk_budget = "2GiB"         # working set of synced conversations
 [inference.placement]                # optional (M6): models kept loaded on a number of model nodes
 replicas = { "qwen3.6-35b-a3b" = 2 }
 every_secs = 15                      # how often the scheduler looks
+idle_unload_secs = 1800              # optional cloud-wide swap: unload models nobody asked for in 30 min (at least 60)
 
 [inference.cache]
 mode = "local"                       # off | local | pool
@@ -2016,7 +2028,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
   device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
   nodes active-active. Moving a model between nodes, and placement with replica counts under the scheduler lease, are built
-  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). Still to do: a published placement plan with fencing, cloud-wide swap, prefix warming, and the pool-mode (shared) semantic cache. Exit
+  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). The published placement plan with holder-side fencing and cloud-wide swap are built (2026-11-27). Still to do: fencing on model nodes (a `weirdnet-backends` gap), replication on queue wait, prefix warming, and the pool-mode (shared) semantic cache. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only) and [vLLM with Ray](#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only)). llama.cpp RPC groups and vLLM-on-Ray groups are built (opt-in pool policy, private-link-only planning and binds, group up and down, teardown when a member is lost). Still to do: a `vllm-ray` run on real GPUs, and the big-mode reproduction on server-a/server-b.
@@ -2474,17 +2486,33 @@ that release, and the M6 p95 comparison is between two equally delayed runs unti
   `placement::tests` (the rules), `crates/ymir-testkit/tests/m6_placement.rs` (daemons: two replicas come up,
   stay at two, follow a drain and settle back) and `m6_scheduler_lease.rs` (two cert-only inference nodes:
   exactly one holds the lease and the other takes over with a higher term).
+- **The published plan and fencing** (built 2026-11-27, `placement::PlanBook`, `Coordinator::place_round`). After a
+  round that changed where the managed models are (or swapped one out), the lease holder publishes a
+  `PlacementPlan` (JSON: per model `want` and the sorted `nodes` serving it, plus `swapped_out`) with
+  `weirdnet-sync` 0.8 `publish_plan` under the sealed type `ymir.plan`, name `placement`, ordered by
+  `(term, version)`. Inference nodes sync it (it is in the pass with the conversations, and cert-only inference
+  grants now list it); `Membership::current_plan` counts only signers with the `ymir.inference` role. **Fencing,
+  holder side:** before a round and before each step the holder checks that its lease handle is still valid at its
+  term and that no plan of a newer term has reached it (a `FenceGuard` over the terms seen, so the refusal stays
+  after the newer plan is out of view); `publish_plan` itself refuses a stale term. A seed holder placing alone and
+  a node without Weirdnet place unfenced and publish nothing. Inference nodes linked before this change have
+  grants without `ymir.plan`: they still place under the lease, but publishing fails (logged) until relinked.
+  Tests: `placement::tests`, [crates/ymir-core/tests/placement_plan.rs](../crates/ymir-core/tests/placement_plan.rs)
+  (publish on change only, stale term and lost lease take no step, mid-round loss) and `m6_scheduler_lease.rs` (the
+  plan crosses Weirdnet; the old holder's plan is refused after the takeover).
 
 **Gaps:**
 
-- **Not built: a published placement plan, fencing, cloud-wide swap, replication on queue wait, prefix warming.**
-  The lease and the replica counts are built (above). Still to do: publishing the plan (`SyncState::publish_plan`
-  under a sealed `ymir.plan` type that cert-only inference grants would need to list), model nodes refusing a
-  stale holder's load or unload (`FenceGuard`; today a stale holder can at worst add or drop one replica for a
-  round, which the next round undoes), several seed-holding inference nodes taking part in the lease (they would
-  need an `ymir.inference` grant of their own), and warm-prefix data in the capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
+- **Not built: fencing on model nodes, replication on queue wait, prefix warming.** The plan, holder-side
+  fencing and cloud-wide swap are built (above). Model nodes cannot refuse a stale holder's load or unload:
+  `weirdnet-backends` 0.4.9 node/1 `Command::Load { model, force }` and `Unload { model }` carry no lease term, and
+  the `Authorize` hook sees the caller but not the command, so there is nowhere to run a `FenceGuard` (a
+  Weirdnet gap: a `fence: Option<(LeaseName, Term)>` on both commands, checked by `NodeService` against a persisted
+  guard). Until then a stale holder that has not yet seen the newer plan can at worst add or drop one replica for a
+  round, which the next round undoes. Also not built: several seed-holding inference nodes taking part in the lease
+  (they would need an `ymir.inference` grant of their own) and warm-prefix data in the capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
   and relays for the same reason.
-- **Not built: the pool-mode semantic cache.** Each inference node has its own semantic cache (in memory, lost on restart); entries are not sharded or shared between inference nodes, and there is no Redis backend.
+- **Not built: the pool-mode semantic cache.** Each inference node has its own semantic cache (in memory, lost on restart); entries are not sharded or shared between inference nodes, and there is no Redis backend. Sharing needs `weirdnet-semcache` to grow a pool mode (rendezvous sharding on model plus key context to a home node and a replica, and a lookup/insert protocol between inference nodes, or a storage trait the app can back with synced records); 0.2.2 has only the in-process `SemanticCache` with `snapshot`/`restore`. Caching belongs in Weirdnet crates (AGENTS.md), so Ymir does not add its own protocol for it.
 - **Batch jobs are not synced.** The submitting node runs the fan-out, so if it goes down the job stops
   (the design wants the job record synced so another node picks it up). No tasks with tools or approvals.
 - **Fairness is a cap, not a weighted share.** Devices are held to the same cap; there are no per-device

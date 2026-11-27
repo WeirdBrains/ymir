@@ -30,6 +30,15 @@ All notable changes to Ymir are listed here. The format follows
   the default nightly) and warns when it is newer than the driver's, with the way out: a newer driver, or the new
   `--vllm-cuda cuNNN`, which installs from that vLLM nightly variant's index. On driver 580 (CUDA 13.0) the default nightly's
   CUDA 13.2 kernels break Inkling 2 Mini's vision encoder ("the provided PTX was compiled with an unsupported toolchain").
+- M6 published placement plan with fencing: the `ymir.scheduler` lease holder publishes where its managed models are
+  as a signed plan (`weirdnet-sync` 0.8 `publish_plan`, sealed type `ymir.plan`, name `placement`) after each round
+  that changed it, and checks before each round and each step that its lease is valid and no newer term has published
+  (a `FenceGuard` over the terms seen). Cert-only inference grants now list `ymir.plan` (nodes linked earlier keep
+  placing but publish nothing until relinked).
+- M6 cloud-wide swap: a cold request loads its model on the cheapest node (already loading it, then no eviction in
+  its swap group, the fewest models loaded, the quietest, this device), and `[inference.placement] idle_unload_secs`
+  (at least 60) unloads models nobody asked for in that long, never below `replicas`, never the main model, the
+  stand-in or the cache's embedding model, never with answers in flight.
 
 ## [0.23.0] - 2026-11-27
 

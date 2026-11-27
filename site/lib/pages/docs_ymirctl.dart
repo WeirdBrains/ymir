@@ -205,9 +205,16 @@ fails, nothing changes on the old one.</p>
 <code>node.toml</code>. Every 15 seconds (<code>every_secs</code>) one step is taken per model: it loads on a node
 that has its own copy and the fewest models loaded, or unloads from an idle extra. A draining or reserved node
 doesn't count, a node with answers in flight is never unloaded, and models not listed are left alone. With
-several inference nodes, the one holding the scheduler lease places (inference nodes linked cert-only vote on it).</p>
+several inference nodes, the one holding the scheduler lease places (inference nodes linked cert-only vote on it)
+and publishes where it put them as a signed plan the other inference nodes sync; a holder that sees a newer
+holder's plan stops at once.</p>
+<p>A request for a model that is loaded nowhere loads it where that is cheapest: a node that evicts nothing, then the
+one with the fewest models loaded. With <code>idle_unload_secs</code> set (at least 60), a model nobody has asked
+for in that long is unloaded to free its memory; listed models stay at their count, and the main model, the
+stand-in and the cache's embedding model stay loaded.</p>
 <pre><code>[inference.placement]
-replicas = { "qwen3.6-35b-a3b" = 2 }</code></pre>
+replicas = { "qwen3.6-35b-a3b" = 2 }
+idle_unload_secs = 1800</code></pre>
 <h3 id="semantic-cache">Semantic answer cache</h3>
 <p>Every inference node replays an answer it already gave to the very same temperature-0 request. Give it an
 embedding model from the pool and it also replays answers to questions that mean the same: one user message (after

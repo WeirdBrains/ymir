@@ -204,6 +204,8 @@ pub struct Coordinator {
     leaving: Mutex<HashSet<(String, String)>>,
     /// The semantic answer cache (M6), when `[inference.cache] embedding_model` is set.
     semantic: Option<crate::semantic::Semantic>,
+    /// When each model was last asked for here (M6 cloud-wide swap).
+    demand: crate::placement::Demand,
 }
 
 /// Where a request goes.
@@ -267,6 +269,7 @@ impl Coordinator {
             rollouts: RwLock::new(opts.rollouts.clone()),
             leaving: Mutex::new(HashSet::new()),
             semantic: opts.semantic.clone().map(crate::semantic::Semantic::new),
+            demand: crate::placement::Demand::default(),
             opts,
         }
     }
@@ -294,6 +297,11 @@ impl Coordinator {
 
     pub(crate) fn node_named(&self, name: &str) -> Option<Arc<dyn ModelNode>> {
         self.node(name)
+    }
+
+    /// When each model was last asked for here (cloud-wide swap's idle unloads).
+    pub fn demand(&self) -> &crate::placement::Demand {
+        &self.demand
     }
 
     pub fn nodes(&self) -> Vec<Arc<dyn ModelNode>> {
@@ -510,14 +518,18 @@ impl Coordinator {
         needed: Modalities,
         exclude: &HashSet<String>,
     ) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+        self.demand.touch(model);
         let mut ready: Vec<(Arc<dyn ModelNode>, ModelStatus)> = Vec::new();
-        let mut fallback = None;
+        // Cloud-wide swap (M6): with no replica ready, the cheapest node for a cold load.
+        let mut fallback: Option<(Arc<dyn ModelNode>, ModelStatus)> = None;
+        let mut fallback_rank = None;
         let mut known = false;
         let mut draining = false;
         let mut reserved: Option<String> = None;
         let mut lacking = None;
         for node in self.nodes() {
-            if let Some(s) = node.status().into_iter().find(|s| s.id == model) {
+            let all = node.status();
+            if let Some(s) = all.iter().find(|s| s.id == model).cloned() {
                 known = true;
                 if crate::model_node::embeds(&s) != embedding {
                     return Err(bad_request(if crate::model_node::embeds(&s) {
@@ -545,7 +557,11 @@ impl Coordinator {
                 if s.state == ModelState::Ready {
                     ready.push((node.clone(), s.clone()));
                 }
-                fallback.get_or_insert_with(|| (node.clone(), s));
+                let rank = crate::placement::cold_rank(&s, &all, node.local(), node.name());
+                if fallback_rank.as_ref().is_none_or(|r| rank < *r) {
+                    fallback_rank = Some(rank);
+                    fallback = Some((node.clone(), s));
+                }
             }
         }
         let cands: Vec<Candidate> = ready

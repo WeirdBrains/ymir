@@ -94,27 +94,73 @@ impl Network {
     }
 }
 
-/// Whether this inference node places models now: alone with no Weirdnet; with the
-/// `ymir.scheduler` lease held, on a cert-only inference node (which also votes on it); or,
-/// on one that holds the seed, while no cert-only inference node exists to hold the lease.
-fn placement_leader(network: Option<&Network>, serving: &mut Vec<Box<dyn std::any::Any + Send + Sync>>) -> Box<dyn Fn() -> bool + Send + Sync> {
-    let Some(net) = network else { return Box::new(|| true) };
+/// Who places models from this inference node, and where its plan goes: alone with no
+/// Weirdnet; with the `ymir.scheduler` lease held, on a cert-only inference node (which also
+/// votes on it), publishing the plan under `ymir.plan`; or, on one that holds the seed, while
+/// no cert-only inference node exists to hold the lease (unfenced, unpublished).
+fn placement_book(network: Option<&Network>, serving: &mut Vec<Box<dyn std::any::Any + Send + Sync>>) -> Box<dyn crate::placement::PlanBook> {
+    use crate::placement::{Alone, Lead, PLAN_NAME, PlacementPlan, PlanBook, PublishedPlan};
+    use weirdnet_sync::Term;
+
+    struct Seed(Arc<crate::membership::Membership>);
+    impl PlanBook for Seed {
+        fn lead(&self) -> Lead {
+            if self.0.scheduler_voters() == 0 { Lead::Alone } else { Lead::No }
+        }
+        fn still_holds(&self, _: Term) -> bool {
+            false
+        }
+        fn current(&self) -> Option<PublishedPlan> {
+            read_plan(&self.0)
+        }
+        fn publish(&self, _: Term, _: &PlacementPlan) -> anyhow::Result<PublishedPlan> {
+            anyhow::bail!("a seed holder places without the lease and publishes no plan")
+        }
+    }
+
+    struct Held {
+        m: Arc<crate::membership::Membership>,
+        elector: Arc<weirdnet_sync::Elector>,
+    }
+    impl PlanBook for Held {
+        fn lead(&self) -> Lead {
+            self.elector.handle().map_or(Lead::No, |h| Lead::Held(h.term()))
+        }
+        fn still_holds(&self, term: Term) -> bool {
+            self.elector.handle().is_some_and(|h| h.term() == term && h.is_valid())
+        }
+        fn current(&self) -> Option<PublishedPlan> {
+            read_plan(&self.m)
+        }
+        fn publish(&self, term: Term, plan: &PlacementPlan) -> anyhow::Result<PublishedPlan> {
+            let h = self.elector.handle().filter(|h| h.term() == term).ok_or_else(|| anyhow::anyhow!("the lease at term {term} is gone"))?;
+            let p = self.m.publish_plan(PLAN_NAME, &h, &serde_json::to_vec(plan)?)?;
+            Ok(PublishedPlan { term: p.term, version: p.version, signer: p.signer, plan: plan.clone() })
+        }
+    }
+
+    fn read_plan(m: &crate::membership::Membership) -> Option<PublishedPlan> {
+        let p = m.current_plan(PLAN_NAME)?;
+        Some(PublishedPlan { term: p.term, version: p.version, signer: p.signer, plan: serde_json::from_slice(&p.body).unwrap_or_default() })
+    }
+
+    let Some(net) = network else { return Box::new(Alone(true)) };
     let m = net.membership.clone();
     if !m.scheduler_candidate() {
         tracing::info!("placement: this node holds the seed, so it places only while no cert-only inference node holds the scheduler lease");
-        return Box::new(move || m.scheduler_voters() == 0);
+        return Box::new(Seed(m));
     }
     if let Err(e) = m.enable_scheduler_voter() {
         tracing::warn!("placement: the scheduler lease voter: {e:#}; not placing");
-        return Box::new(|| false);
+        return Box::new(Alone(false));
     }
-    let Ok(name) = weirdnet_sync::LeaseName::new(crate::placement::SCHEDULER_LEASE) else { return Box::new(|| false) };
+    let Ok(name) = weirdnet_sync::LeaseName::new(crate::placement::SCHEDULER_LEASE) else { return Box::new(Alone(false)) };
     let hints = net.hints.clone();
     let leases = weirdnet_sync::Leases::new(net.node.clone(), m.state())
         .with_addrs(move |p| hints.iter().find(|(h, _)| h.to_string() == p).map(|(_, a)| a.clone()).unwrap_or_default());
     let elector = Arc::new(leases.elect(name, weirdnet_sync::LeaseConfig::for_role(crate::membership::ROLE_INFERENCE)));
     serving.push(Box::new(elector.clone()));
-    Box::new(move || elector.handle().is_some())
+    Box::new(Held { m, elector })
 }
 
 pub struct Daemon {
@@ -424,8 +470,8 @@ impl Daemon {
         // Placement and replication (M6): one inference node at a time keeps the listed models
         // loaded on their number of model nodes (see `placement`).
         if let (Some(c), false, true) = (&coordinator, cfg.inference.placement.is_empty(), cfg.inference.scheduler_eligible) {
-            let leads = placement_leader(network.as_ref(), &mut serving);
-            tasks.push(c.spawn_placement(cfg.inference.placement.clone(), leads));
+            let book = placement_book(network.as_ref(), &mut serving);
+            tasks.push(c.spawn_placement(cfg.inference.placement.clone(), book));
         }
 
         let mut alerter = None;

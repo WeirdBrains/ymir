@@ -44,7 +44,7 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## M6 Workload spreading (In progress)
 
-Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, the pool benchmark, and moving a model between nodes (`ymirctl move`, with the old node finishing first) and placement with replica counts (`[inference.placement]`, one inference node placing under the `ymir.scheduler` lease) are built, and so is a semantic answer cache on each inference node (`[inference.cache] embedding_model`). Next: a published placement plan with fencing, cloud-wide swap, and sharing the semantic cache across inference nodes.
+Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, the pool benchmark, and moving a model between nodes (`ymirctl move`, with the old node finishing first) and placement with replica counts (`[inference.placement]`, one inference node placing under the `ymir.scheduler` lease, its plan published as a signed `ymir.plan` and fenced by term) are built, and so are cloud-wide swap (cold loads where nothing is evicted, idle models unloaded after `idle_unload_secs`) and a semantic answer cache on each inference node (`[inference.cache] embedding_model`). Next: model nodes refusing a stale holder's loads (needs a term on node/1 `Load`/`Unload` in `weirdnet-backends`), and sharing the semantic cache across inference nodes (needs a pool mode in `weirdnet-semcache`).
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
 
