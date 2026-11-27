@@ -11,6 +11,7 @@ Michael (11-27, t82u): "We should drop support for Mac OS x86_64. Make that adju
 - **CI:** `macos.yml` no longer runs the `macos-15-intel` setup dry run.
 - **Docs:** [AGENTS.md](AGENTS.md) (supported targets), [DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` Removed, site guide/hardware pages, whitepaper table, `mlx.rs` doc comment.
 - **Checks:** `cargo fmt --check`, `weirdnet_release.py validate`, `test_engine.py` 6/6, `engine.py list`, `check_links.py`. No Rust logic changed (doc comment only), so no clippy/test run.
+- **Helpers:** vendored `release.py` 0.4.2 (`bb93629`, which refuses x86_64/universal macOS in `[[platforms]]` and `[[updates.bundles]]`); `release.toml` pins `helpers = "0.4.2"`.
 - **Signing:** alien-blue's `sign-release.sh` no longer downloads `ymir-$V-x86_64-apple-darwin.tar.gz`; its update-bundle step has no per-target list (it builds what the tag's `release.toml` `[[updates.bundles]]` lists, now 5).
 
 **Next:** v0.24.0 is the first release without an Intel Mac build.

@@ -55,7 +55,7 @@ try:
 except ImportError:  # Python < 3.11 (e.g. Ubuntu 22.04 runners): mini_toml() below
     tomllib = None
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 CONFIG = "release.toml"
 ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
@@ -1631,6 +1631,10 @@ def taur_version(taurctl, name):
 
 OSES = ["linux", "macos", "windows", "android", "ios", "freebsd", "openbsd"]
 ARCHES = ["x86_64", "aarch64", "universal"]
+# macOS is Apple Silicon only (since 0.4.2): Intel Macs (x86_64-apple-darwin) and universal
+# builds, which carry an x86_64 slice, are no longer supported.
+MAC_ARCHES = ["aarch64"]
+MAC_INTEL = re.compile(r"x86_64|x86-64|amd64|\bx64\b|\bintel\b|universal", re.I)
 FORMATS = {
     "linux": ["tar.gz", "zip", "pkg.tar.zst", "deb", "rpm", "nix", "appimage", "flatpak"],
     "macos": ["tar.gz", "zip", "dmg", "app", "pkg", "brew-formula", "brew-cask"],
@@ -1667,8 +1671,15 @@ def platform_report(cfg):
         if p.get("opt_out"):
             lines.append(f"  {os_}: opted out ({p['opt_out']})")
             continue
-        arch = p.get("arch", ["x86_64", "aarch64"])
+        arch = p.get("arch", MAC_ARCHES if os_ == "macos" else ["x86_64", "aarch64"])
         bad = [a for a in arch if a not in ARCHES]
+        if os_ == "macos":
+            intel = [a for a in arch if a in ARCHES and a not in MAC_ARCHES]
+            if intel:
+                problems.append(f"macos: arch {intel} is not supported (Apple Silicon only: use {MAC_ARCHES})")
+            intel_assets = [x for x in p.get("assets", []) if MAC_INTEL.search(x)]
+            if intel_assets:
+                problems.append(f"macos: assets {intel_assets} name an Intel or universal build (Apple Silicon only)")
         badf = [f for f in p.get("formats", []) if f not in FORMATS[os_]]
         if bad:
             problems.append(f"{os_}: unknown arch {bad} (use {ARCHES})")
@@ -1679,7 +1690,7 @@ def platform_report(cfg):
         badc = [c for c in p.get("channels", []) if c not in CHANNELS[os_]]
         if badc:
             problems.append(f"{os_}: unknown channels {badc} (use {CHANNELS[os_]})")
-        need = ("aarch64",) if os_ in ("android", "ios") else ("x86_64", "aarch64")
+        need = ("aarch64",) if os_ in ("android", "ios", "macos") else ("x86_64", "aarch64")
         missing_arch = [a for a in need if a not in arch and "universal" not in arch]
         note = f"; no {', '.join(missing_arch)}" + (f" ({p['arch_note']})" if p.get("arch_note") else "") if missing_arch else ""
         ch = p.get("channels", [])
@@ -1689,7 +1700,15 @@ def platform_report(cfg):
     for os_ in OSES:
         if plats and os_ not in seen:
             lines.append(f"  {os_}: not listed (add it, or opt out with a reason)")
+    problems += mac_bundle_problems(cfg)
     return lines, problems
+
+
+def mac_bundle_problems(cfg):
+    """[[updates.bundles]] for macOS must not be Intel (x86_64) or universal builds."""
+    return [f"[[updates.bundles]] {b.get('name')}: macos arch {b.get('arch')!r} is not supported (Apple Silicon only: use 'aarch64')"
+            for b in ((cfg.get("updates") or {}).get("bundles") or [])
+            if b.get("os") == "macos" and MAC_INTEL.search(str(b.get("arch", "")))]
 
 
 def assets(a, root):
@@ -1925,6 +1944,9 @@ def updates(a, root):
     bundles = uc.get("bundles") or []
     if not bundles:
         raise ReleaseError(f"{CONFIG} has no [[updates.bundles]]")
+    mac = mac_bundle_problems(cfg)
+    if mac:
+        raise ReleaseError("; ".join(mac))
     version = a.version.lstrip("v")
     parse_version(version)
     if is_prerelease(version) and not uc.get("prereleases"):
