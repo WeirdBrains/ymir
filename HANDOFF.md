@@ -2,6 +2,17 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 10:37 EST: M11 sharing a pool with other identities (on main)
+
+Michael (11-27, t65u/t66u): share pools with other Weirdnet identities (Morph's m3talsmith profile `5e452f1b…` vs the Ymir pool `08e2b657…`), and have the Weirdnet lead implement the crate side. Built on `weirdnet-agent` 0.5.9 (`fa038ee`). Built on the dev box with mocks; no live node touched. Design: [docs/design/pool-sharing.md](docs/design/pool-sharing.md).
+
+- **Grants** ([guests.rs](crates/ymir-core/src/guests.rs)): `GuestGrant` JSON in `ymir.pool` as `guest/<user_id>` (label, pinned `peers`, `models` allowlist, `scopes`, `expires_at`, `revoked_at`); `share`/`unshare`/`all_grants`, `policy` (a `GuestPolicy` that reads grants live), `pool_share` (a `PoolShare`).
+- **Host** ([host.rs](crates/ymir-core/src/host.rs), [remote.rs](crates/ymir-core/src/remote.rs)): `remote::guests(m)` = `SharedPoolAuth(RosterAuth).with_guests(GuestAuth(policy))`; `InferenceHost::with_guests` uses `authorize_for(Infer)`, refuses guests `Input::Context` (`guest-context`) and models outside the allowlist (`guest-model`); the catalog feed uses `scoped(Catalog)` and `CatalogFeed::rechecking()` (`LiveCatalog::recheck`). `roster_auth`/`role_auth` (models, train, tasks, wake, admin) unchanged.
+- **CLI** ([pool.rs](crates/ymirctl/src/pool.rs), [control.rs](crates/ymir-core/src/control.rs)): `ymirctl pool share|unshare|guests`, through `ymird` (`PoolShare`/`PoolUnshare` control requests) when it is on Weirdnet.
+- **Tests:** guests unit tests 7/7; [pool_sharing.rs](crates/ymir-core/tests/pool_sharing.rs) 2/2 (second identity via `connect_shared`: refused before the grant, catalog + chat after, context refused, roster-only auth refuses the guest, allowlist, peer pinning with a second guest device, unshare refuses the next chat and closes a live catalog subscription within 5 s, expiry); existing remote.rs tests; fmt, clippy `-D warnings`, link check.
+
+**Not tested:** real networks and relays; Morph/Bragi "open share link" screens (their side). **Next:** ships in v0.23.0 with video Milestone 2; then a real two-identity run over real networks.
+
 ## 2026-11-27 10:40 EST: v0.22.1 released
 
 **Release:** [v0.22.1](https://github.com/WeirdBrains/ymir/releases/tag/v0.22.1) (release commit fac5d21 on 49f61fd; Release run 46009619619 green, CI 46009618777, macOS 46009618590 and Pages 46009619015 green on fac5d21, FreeBSD 46002234634 green on 49f61fd): the M7 fixes from the first real GPU run. The `vllm-ray` listener check follows Ray's whole process tree, Ray and vLLM workers are pinned to the private link (`VLLM_HOST_IP`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`), trusted all-interface listeners are logged at info, and `ymirctl engines install vllm` picks a PyTorch CUDA build the driver can run (`--torch-backend` overrides), checks it after installing, and accepts `Inkling2LoopForConditionalGeneration`. 44 files on GitHub: leak scan 33 files, 0 hits (sums ok 32), then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.22.1` EXIT 0); `weirdnet_release.py assets 0.22.1` ok for linux, macos, windows and both FreeBSD files. Arch recipes on main; TAUR ymir-bin and ymir-cuda-bin 0.22.1-1 (dry-run first). Committed straight to main (no PRs). No live nodes touched.

@@ -454,6 +454,17 @@ links, and <code>pool link</code> prints the list it received when discovery is 
 <h3 id="pool-revoke"><code>ymirctl pool revoke PEER</code></h3>
 <p>Revokes a device everywhere the roster reaches. Use the peer id from <code>pool devices</code>. If <code>ymird</code> is
 running on Weirdnet the change goes through it.</p>
+<h3 id="pool-share"><code>ymirctl pool share USER_ID</code></h3>
+<p>Shares this pool with another Weirdnet identity (yours on another profile, or someone else's): it records a guest grant
+that syncs to every node and prints a <code>wnet-pool1:</code> token and a <code>weirdnet-pool://share/</code> link with the
+pool's inference nodes to send them. The link holds no secrets; the grant is what lets them in. Guests get the catalog and
+inference only, never your conversations, wake cards, tasks, models, uploads or training. Options: <code>--label</code>,
+<code>--peer PEER</code> (only that device of theirs, repeatable), <code>--models a,b</code>, <code>--scopes catalog,infer</code>,
+<code>--expires 7d</code>, <code>--name</code> and <code>--node</code> (another inference node for the link).</p>
+<h3 id="pool-unshare"><code>ymirctl pool unshare USER_ID</code></h3>
+<p>Stops sharing: their next request is refused and their catalog subscriptions close within seconds, on every node.</p>
+<h3 id="pool-guests"><code>ymirctl pool guests [--all]</code></h3>
+<p>Lists the identities this pool is shared with (<code>--all</code> adds revoked and expired ones).</p>
 <h3 id="pool-init"><code>ymirctl pool init --standalone</code></h3>
 <p>Starts a brand-new identity on this node, separate from the one Morph holds, for a cloud of its own. It refuses without
 <code>--standalone</code>. To join your existing devices use <code>pool link</code> instead.</p>

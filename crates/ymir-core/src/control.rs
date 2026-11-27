@@ -75,6 +75,15 @@ pub enum ControlRequest {
     PoolRevoke {
         peer: String,
     },
+    /// Share the pool with another Weirdnet identity (`ymirctl pool share`): record the guest
+    /// grant in the live, synced pool records.
+    PoolShare {
+        grant: crate::guests::GuestGrant,
+    },
+    /// Revoke a guest identity's grant (`ymirctl pool unshare`).
+    PoolUnshare {
+        user_id: String,
+    },
     /// Wake a Bragi device (peer id or label) through its relay so it syncs (`ymirctl pool
     /// wake`); `reason` is `message` or `connection`.
     PoolWake {
@@ -938,6 +947,20 @@ impl ControlHandler {
                 let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
                 match m.revoke(&peer) {
                     Ok(c) => ControlResponse::ok(format!("{} ({}) is revoked", c.label, c.peer_id)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::PoolShare { grant } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                match crate::guests::share(m, &grant) {
+                    Ok(()) => ControlResponse::ok(format!("shared with {}", grant.user_id)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::PoolUnshare { user_id } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                match crate::guests::unshare(m, &user_id, crate::train::now_ms()) {
+                    Ok(g) => ControlResponse::ok(format!("{} is no longer shared with", g.user_id)),
                     Err(e) => ControlResponse::err(format!("{e:#}")),
                 }
             }

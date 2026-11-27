@@ -6,6 +6,19 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Sharing a pool with another Weirdnet identity (`weirdnet-agent` 0.5.9 guests): `ymirctl pool share USER_ID` records a synced
+  guest grant (optional `--peer` pinning, `--models` allowlist, `--scopes`, `--expires`) and prints a `wnet-pool1:` token and a
+  `weirdnet-pool://share/` link with the pool's inference nodes; `pool unshare` revokes it on every node and `pool guests` lists
+  grants. Guests get catalog/1 and infer/2 only: `Input::Context` (conversations), wake cards, tasks, admin, models, uploads and
+  training stay on the roster check. Revocation refuses the next request, and catalog subscriptions are now re-checked every 5 s.
+  See [docs/design/pool-sharing.md](docs/design/pool-sharing.md).
+
+### Changed
+
+- `weirdnet-agent` 0.5.9.
+
 ## [0.22.1] - 2026-11-27
 
 ### Fixed

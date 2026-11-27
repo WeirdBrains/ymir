@@ -25,6 +25,7 @@ pub mod direct;
 pub mod engine;
 pub mod fair;
 pub mod group;
+pub mod guests;
 pub mod host;
 pub mod kvfit;
 pub mod mcp_servers;

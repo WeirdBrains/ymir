@@ -72,6 +72,12 @@ Servers can be linked cert-only: a node certificate and a signed service grant, 
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
 
+## M11 Sharing a pool with other identities (In progress)
+
+Built: `ymirctl pool share USER_ID` records a synced guest grant for another Weirdnet identity (optional pinned devices, model allowlist, scopes and expiry) and prints a `wnet-pool1:` / `weirdnet-pool://share/` link with the pool's inference nodes; `pool unshare` revokes it on every node at once and `pool guests` lists them. Guests get the catalog and inference only, never conversations, wake cards, tasks, admin, models or training. Tested over the in-process transport; next: a real-network run and the open-link screens in Morph and Bragi.
+
+Weirdnet crates: `weirdnet-agent`.
+
 ## P1 Data generation and evals (Done)
 
 Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests, resume, bench scorers and an optional judge). The teacher's license comes from `--license`, the Hub repo's model card (`--license-from`) or the pool catalog, and `ymirctl train seed` turns source texts into seed prompts in two passes through the teacher. Left: a job record that stays in sync across nodes.

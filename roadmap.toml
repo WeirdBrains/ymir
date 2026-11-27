@@ -89,6 +89,13 @@ summary = "Servers can be linked cert-only: a node certificate and a signed serv
 crates = ["weirdnet-sync", "weirdnet-device-link"]
 
 [[milestone]]
+id = "M11"
+title = "Sharing a pool with other identities"
+status = "in-progress"
+summary = "Built: `ymirctl pool share USER_ID` records a synced guest grant for another Weirdnet identity (optional pinned devices, model allowlist, scopes and expiry) and prints a `wnet-pool1:` / `weirdnet-pool://share/` link with the pool's inference nodes; `pool unshare` revokes it on every node at once and `pool guests` lists them. Guests get the catalog and inference only, never conversations, wake cards, tasks, admin, models or training. Tested over the in-process transport; next: a real-network run and the open-link screens in Morph and Bragi."
+crates = ["weirdnet-agent"]
+
+[[milestone]]
 id = "P1"
 title = "Data generation and evals"
 status = "done"

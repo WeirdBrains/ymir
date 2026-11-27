@@ -24,7 +24,7 @@ use weirdnet_agent::pool::{EventSink, LinkedNodes, NetDialer, Pool, PoolEvent, P
 use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Caller, Dialer, RemoteError};
-use weirdnet_agent::serve::{RosterAuth, Server, Serving};
+use weirdnet_agent::serve::{GuestAuth, GuestScope, RosterAuth, Server, Serving, SharedPoolAuth};
 use weirdnet_backends::models::{ModelsClient, ModelsServer, ModelsService};
 use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer, NodeServerOptions, NodeService, Update, Verifier};
 use weirdnet_backends::{Chunk, ChunkStream, EngineKind, ModelHost, ModelStatus, RawInferDialer, Supervisor};
@@ -32,7 +32,7 @@ use weirdnet_net::{Multiaddr, PeerId, WEIRDNET};
 
 use crate::context::ContextStore;
 use crate::coordinator::Coordinator;
-use crate::host::{ContextAccess, ContextSync, InferenceHost, LiveCatalog, catalog_feed};
+use crate::host::{ContextAccess, ContextSync, Guests, InferenceHost, LiveCatalog, catalog_feed};
 use crate::membership::{Membership, SyncNode};
 use crate::model_node::{BoxFuture, Embedded, ModelNode};
 use crate::models::{Directory, ModelsHub, Target};
@@ -62,8 +62,20 @@ pub fn role_auth(m: &Membership, allow: &[String]) -> Arc<dyn Authorize> {
     })
 }
 
+/// The inference role's callers: the user's linked devices (the roster), and guests of other
+/// Weirdnet identities the pool is shared with ([`crate::guests`]), read live from the synced
+/// grants. Only catalog/1 and infer/2 (infer/1) take this; every other protocol stays on
+/// [`roster_auth`].
+pub fn guests(m: &Arc<Membership>) -> Guests {
+    let roster = Arc::new(RosterAuth::new(&WEIRDNET, m.user_key(), m.roster_view()));
+    let grants = crate::guests::grant_view(m);
+    let guest_auth = Arc::new(GuestAuth::new(&WEIRDNET, &m.user_key(), crate::guests::policy(grants.clone())));
+    Guests { auth: Arc::new(SharedPoolAuth::new(roster).with_guests(guest_auth)), grants }
+}
+
 /// Serves the inference role on `node`: infer/1, infer/2 and catalog/1 to the user's linked
-/// devices, announced as an inference node. Dropping the server stops serving.
+/// devices and the guests the pool is shared with, announced as an inference node. Dropping the
+/// server stops serving.
 pub fn serve(
     node: &Arc<SyncNode>,
     coord: Arc<Coordinator>,
@@ -73,9 +85,10 @@ pub fn serve(
     admission: Admission,
 ) -> Result<(Server, Arc<LiveCatalog>), RemoteError> {
     let auth = roster_auth(m);
-    let feed = catalog_feed(coord.clone(), auth.clone(), Duration::from_secs(1));
+    let guests = guests(m);
+    let feed = catalog_feed(coord.clone(), guests.auth.scoped(GuestScope::Catalog), Duration::from_secs(1));
     let access = store.map(|store| ContextAccess { store, sync: Some(ContextSync { membership: m.clone(), node: Arc::downgrade(node), hints }) });
-    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth).with_context(access));
+    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth).with_context(access).with_guests(Some(guests)));
     let server = Server::start(node, Serving { infer: Some((host, admission)), catalog: Some(feed.clone()), announce: true })?;
     Ok((server, feed))
 }

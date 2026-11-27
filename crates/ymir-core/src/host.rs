@@ -17,7 +17,9 @@ use weirdnet_backends::error::engine_error;
 
 use crate::context::ContextStore;
 use crate::coordinator::{Coordinator, Prepared, Sink};
+use crate::guests::{GrantView, GuestGrant};
 use crate::membership::{Membership, SyncNode};
+use weirdnet_agent::serve::{CallerIdentity, GuestScope, SharedPoolAuth};
 
 /// Everyone: for this box's own bridge, in process.
 pub struct AllowAll;
@@ -75,11 +77,37 @@ pub struct InferenceHost {
     coord: Arc<Coordinator>,
     auth: Arc<dyn Authorize>,
     context: Option<ContextAccess>,
+    guests: Option<Guests>,
+}
+
+/// Guests of a shared pool (see [`crate::guests`]): who they are, and their live grants.
+#[derive(Clone)]
+pub struct Guests {
+    pub auth: Arc<SharedPoolAuth>,
+    pub grants: GrantView,
+}
+
+impl Guests {
+    /// `Some(grant)` for a guest caller, `None` for one of the user's own devices.
+    fn grant_of(&self, caller: &Caller) -> Result<Option<GuestGrant>, RemoteError> {
+        match self.auth.identify(caller, GuestScope::Infer)? {
+            CallerIdentity::Guest(g) => (self.grants)(&g.user_id).map(Some).ok_or_else(|| RemoteError::refused("not-shared")),
+            _ => Ok(None),
+        }
+    }
 }
 
 impl InferenceHost {
     pub fn new(coord: Arc<Coordinator>, auth: Arc<dyn Authorize>) -> Self {
-        Self { coord, auth, context: None }
+        Self { coord, auth, context: None, guests: None }
+    }
+
+    /// Also answers guests of a shared pool: `guests.auth` decides who gets in (it replaces the
+    /// roster check given to [`new`](Self::new)), and guests never get `Input::Context` or a model
+    /// outside their grant's allowlist.
+    pub fn with_guests(mut self, guests: Option<Guests>) -> Self {
+        self.guests = guests;
+        self
     }
 
     /// Answers `ContextRef` requests from `context` and writes each answer back to it.
@@ -91,10 +119,19 @@ impl InferenceHost {
 
 impl InferHost for InferenceHost {
     fn authorize(&self, caller: &Caller) -> Result<(), RemoteError> {
-        self.auth.authorize(caller)
+        match &self.guests {
+            Some(g) => g.auth.authorize_for(caller, GuestScope::Infer),
+            None => self.auth.authorize(caller),
+        }
     }
 
-    fn open(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+    fn open(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+            && !grant.allows_model(model.unwrap_or_default())
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
         Ok(Arc::new(TurnBackend { coord: self.coord.clone(), model: model.map(str::to_string) }))
     }
 
@@ -102,9 +139,22 @@ impl InferHost for InferenceHost {
         if matches!(request.input, v2::Input::Context(_)) && self.context.is_none() {
             return Err(RemoteError::BadRequest { message: "this node holds no conversations".into() });
         }
+        let grant = match &self.guests {
+            Some(g) => g.grant_of(caller)?,
+            None => None,
+        };
+        // A guest never reads the owner's conversations (ymir.context).
+        if grant.is_some() && matches!(request.input, v2::Input::Context(_)) {
+            return Err(RemoteError::refused("guest-context"));
+        }
         // A device's batch work is capped, so it can't crowd out the others (interactive is not).
         let hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&caller.peer)?) };
         let prepared = self.coord.prepare(request)?;
+        if let Some(grant) = &grant
+            && !(grant.allows_model(&prepared.model) || request.model.as_deref().is_some_and(|m| grant.allows_model(m)))
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
         Ok(Arc::new(RoutedBackend {
             _hold: hold,
             coord: self.coord.clone(),
@@ -116,8 +166,14 @@ impl InferHost for InferenceHost {
         }))
     }
 
-    fn open_embed(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
+    fn open_embed(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
         let model = self.coord.resolve_embedding(model)?;
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+            && !grant.allows_model(&model)
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
         Ok(Arc::new(Embedder { coord: self.coord.clone(), model }))
     }
 }
@@ -317,11 +373,16 @@ impl catalog::CatalogHost for LiveCatalog {
         self.refresh();
         catalog::CatalogHost::watch(&self.feed, caller)
     }
+
+    fn recheck(&self, caller: &Caller) -> Result<(), RemoteError> {
+        catalog::CatalogHost::recheck(&self.feed, caller)
+    }
 }
 
 /// A [`LiveCatalog`]; its refresh task stops with its last holder.
 pub fn catalog_feed(coord: Arc<Coordinator>, auth: Arc<dyn Authorize>, every: Duration) -> Arc<LiveCatalog> {
-    let live = Arc::new(LiveCatalog { coord, feed: CatalogFeed::new(auth), last: Mutex::new(Vec::new()) });
+    // Re-checked subscriptions: a revoked device or guest stops following within RECHECK_EVERY.
+    let live = Arc::new(LiveCatalog { coord, feed: CatalogFeed::new(auth).rechecking(), last: Mutex::new(Vec::new()) });
     live.refresh();
     let weak = Arc::downgrade(&live);
     tokio::spawn(async move {

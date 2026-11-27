@@ -1574,6 +1574,14 @@ All crates set `license = "BSD-3-Clause"`.
   in-process path.
 - **Revocation:** unlinking a device in the roster cuts it off everywhere as soon as peers see the
   update, and rotates the sync key so it can't read new context.
+- **Guests (built 2026-11-27, `weirdnet-agent` 0.5.9):** the pool can be shared with another Weirdnet
+  identity through a synced guest grant (`ymirctl pool share USER_ID`, record `guest/<user_id>` in
+  `ymir.pool`) and a `PoolShare` link that holds dial info only. A guest device presents its own
+  certificate and user key; inference nodes verify it with `GuestAuth` and read the grant live on
+  every request. Guests get catalog/1 and infer/2 only: no `Input::Context`, wake cards, `task/1`,
+  admin, models, uploads or training, which stay on `RosterAuth`. Optional peer pinning, model
+  allowlist and expiry; `pool unshare` refuses the next request and ends catalog subscriptions within
+  5 s. See [docs/design/pool-sharing.md](design/pool-sharing.md).
 
 ### Root seed on service nodes
 
@@ -2011,6 +2019,8 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   without the root seed; `ymirctl pool cert-only` moves an existing node and wipes its seed copy; a node
   can be revoked without rotating the root identity. Bragi links a server cert-only with
   `bragi-tui link CODE --server inference|model` (Bragi v0.5.0).
+- **M11 Sharing a pool with other identities** (built 2026-11-27, in-process tests only; see
+  [docs/design/pool-sharing.md](design/pool-sharing.md)).
 
 ## M1 status (built 2026-11-19)
 
