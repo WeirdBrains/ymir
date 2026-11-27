@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-27
+
 ### Added
 
 - Sharing a pool with another Weirdnet identity (`weirdnet-agent` 0.5.9 guests): `ymirctl pool share USER_ID` records a synced
@@ -25,6 +27,7 @@ All notable changes to Ymir are listed here. The format follows
   load (llama-server `/props`, vLLM `max_model_len`) is the context per request in catalog/1 and `ymirctl status`
   (`context N per request (measured)`). The operator's `[model.local] limits` still win field by field; unknown fields stay absent.
 - `ymirctl status` shows `transcribes (speech to text)`; `ymirctl pool models` and the status JSON show purpose `transcribe`.
+- Cross-identity pool sharing (M11: ymirctl pool share/unshare/guests, weirdnet-agent 0.5.9 guests) and video milestone 2 (transcription role and route over infer/2, limits measured at load).
 
 ### Changed
 
