@@ -333,7 +333,9 @@ pub struct LocalModel {
     pub revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_group: Option<String>,
-    /// `main`, `standin` or `embedding`; default `chat`.
+    /// `main`, `standin`, `embedding` or `transcribe` (speech to text: Voxtral through llama.cpp
+    /// with its audio projector, Whisper through vLLM; served over infer/2 `Transcribe` and
+    /// published with catalog/1 purpose `transcribe`); default `chat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// GGUF path (absolute, or relative to `models_dir`), an MLX weights directory (likewise) or
@@ -442,6 +444,11 @@ impl ModelSection {
 impl LocalModel {
     pub fn is_embedding(&self) -> bool {
         self.role.as_deref() == Some("embedding")
+    }
+
+    /// Whether it has the transcription role (`role = "transcribe"`, video design milestone 2).
+    pub fn is_transcriber(&self) -> bool {
+        self.role.as_deref() == Some("transcribe")
     }
 }
 
@@ -758,6 +765,9 @@ impl NodeConfig {
             if m.backend.as_deref() == Some("mlx") && m.is_embedding() && !EngineKind::Mlx.capabilities().embeddings {
                 bail!("model `{}`: MLX-LM's server has no embeddings endpoint; use backend = \"llamacpp\" for embedding models", m.id);
             }
+            if m.backend.as_deref() == Some("mlx") && m.is_transcriber() {
+                bail!("model `{}`: role = \"transcribe\" needs backend llamacpp (with an audio projector) or vllm, not mlx", m.id);
+            }
             if let Some(t) = &m.idle_ttl {
                 parse_duration(t).with_context(|| format!("model `{}`: idle_ttl", m.id))?;
             }
@@ -904,7 +914,11 @@ impl NodeConfig {
 
     /// The main chat model: the first with `role = "main"`, else the first chat model.
     pub fn main_model(&self) -> Option<&LocalModel> {
-        self.model.local.iter().find(|m| m.role.as_deref() == Some("main")).or_else(|| self.model.local.iter().find(|m| !m.is_embedding()))
+        self.model
+            .local
+            .iter()
+            .find(|m| m.role.as_deref() == Some("main"))
+            .or_else(|| self.model.local.iter().find(|m| !m.is_embedding() && !m.is_transcriber()))
     }
 
     /// The cold-start stand-in: `inference.standin`, else the model with `role = "standin"`.
@@ -1050,6 +1064,7 @@ impl NodeConfig {
                 l.limits = m.limits;
                 l.swap_group.clone_from(&m.swap_group);
                 l.embedding = m.is_embedding();
+                l = l.with_transcribe(m.is_transcriber());
                 l.extra_args.clone_from(&m.args);
                 // A context flag in `args` is what the engine would run with (it comes last), so it
                 // is the context: one flag on the command line, and the same number advertised.
@@ -1450,6 +1465,14 @@ mod tests {
         assert!(bad(&|c| c.model.local[0].lora[0].scale = Some(f32::INFINITY)).contains("finite"));
         assert!(bad(&|c| c.model.local[0].backend = Some("mlx".into())).contains("llamacpp or vllm"));
         assert!(bad(&|c| c.model.local[0].role = Some("embedding".into())).contains("embedding"));
+        assert!(
+            bad(&|c| {
+                c.model.local[0].lora.clear();
+                c.model.local[0].backend = Some("mlx".into());
+                c.model.local[0].role = Some("transcribe".into());
+            })
+            .contains("transcribe")
+        );
         assert!(bad(&|c| c.model.local[0].wrap = Some("http://127.0.0.1:9000".into())).contains("wrapped"));
         assert!(bad(&|c| c.model.local[0].lora[0].file = String::new()).contains("file is required"));
     }

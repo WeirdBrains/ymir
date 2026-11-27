@@ -68,6 +68,9 @@ pub struct CatalogRow {
     /// The nodes (among `nodes`) that are draining: they finish what they have and take no more.
     pub draining: Vec<String>,
     pub embedding: bool,
+    /// Speech to text: at least one node's copy has the transcription role and can serve it
+    /// (catalog/1 purpose `transcribe`, video design milestone 2).
+    pub transcribe: bool,
     /// The inputs beyond text that at least one node's copy takes (images, audio).
     pub inputs: Modalities,
     /// For a LoRA adapter: the base model it runs on (as the first node that has it says).
@@ -77,7 +80,8 @@ pub struct CatalogRow {
     pub origin: Option<String>,
     pub license: Option<String>,
     /// The context window a request can count on wherever it is routed: the smallest
-    /// [`request_context`](crate::model_node::request_context) of the nodes that have it. `None`
+    /// [`status_context`](crate::model_node::status_context) of the nodes that have it (what the
+    /// engine measured at load, else the configured context per slot). `None`
     /// when any of them doesn't say, since the request may go there; never a guess.
     pub context: Option<u32>,
     /// Media and request limits: the strictest of each limit across the nodes that have it
@@ -335,6 +339,7 @@ impl Coordinator {
                     nodes: Vec::new(),
                     draining: Vec::new(),
                     embedding: crate::model_node::embeds(&s),
+                    transcribe: false,
                     inputs: Modalities::TEXT,
                     base: s.base.clone(),
                     origin: None,
@@ -343,7 +348,8 @@ impl Coordinator {
                     limits: weirdnet_agent::MediaLimits::UNKNOWN,
                 });
                 row.limits = row.limits.tightest(s.limits());
-                match crate::model_node::request_context(s.engine, s.context, s.slots) {
+                row.transcribe |= crate::model_node::transcribes(&s);
+                match crate::model_node::status_context(&s) {
                     Some(c) if !unknown_context.contains(&s.id) => row.context = Some(row.context.map_or(c, |r| r.min(c))),
                     _ => {
                         unknown_context.insert(s.id.clone());
@@ -468,7 +474,13 @@ impl Coordinator {
                 } else {
                     AgentState::Loadable
                 };
-                let purpose = if m.embedding { Purpose::Embedding } else { Purpose::Chat };
+                let purpose = if m.embedding {
+                    Purpose::Embedding
+                } else if m.transcribe {
+                    Purpose::Transcribe
+                } else {
+                    Purpose::Chat
+                };
                 let ready = states.iter().filter(|s| ***s == ModelState::Ready).count() as u32;
                 let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready).with_inputs(m.inputs);
                 if let Some(ctx) = m.context {
@@ -479,7 +491,7 @@ impl Coordinator {
                     c = c.with_base(base);
                 }
                 (c.origin, c.license) = (m.origin.clone(), m.license.clone());
-                if !m.embedding {
+                if !m.embedding && !m.transcribe {
                     c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
                 }
                 c
@@ -1041,6 +1053,86 @@ impl Coordinator {
     }
 
     /// The embedding model a request means (`None`/`default`: the first one in the catalog).
+    /// The speech-to-text model for a transcription request (video design, milestone 2): a named
+    /// one must transcribe somewhere in the pool (else a 400 that says so); with none named, the
+    /// warmest transcriber ([`AgentCatalog::route_transcribe`]), or a 400 when the pool has none.
+    pub fn resolve_transcriber(&self, model: Option<&str>) -> Result<String, RemoteError> {
+        let catalog = AgentCatalog::new(0, self.agent_catalog());
+        let model = model.filter(|m| !matches!(*m, "default" | "ymir"));
+        if let Some(m) = model
+            && catalog.find(m).is_none()
+        {
+            return Err(unknown_model(m));
+        }
+        catalog.route_transcribe(model)
+    }
+
+    /// Transcribes with `model`, loading it first if it is cold. Returns the transcript, the
+    /// engine's token counts and the node that answered. A node that fails is skipped for another
+    /// that transcribes with the model. Nothing is cached (the audio and the transcript are
+    /// content) and nothing of either is logged.
+    pub async fn transcribe(
+        &self,
+        model: &str,
+        request: &weirdnet_agent::remote::infer::v2::TranscribeRequest,
+    ) -> Result<(crate::model_node::Transcribed, String), RemoteError> {
+        let mut tried: HashSet<String> = HashSet::new();
+        loop {
+            let (node, status) = self.pick_transcriber(model, &tried)?;
+            let attempt = async {
+                if status.state != ModelState::Ready {
+                    tracing::info!(model = %model, node = node.name(), "cold start: loading");
+                    node.load(model, false).await?;
+                }
+                node.transcribe(model, request).await
+            }
+            .await;
+            let err = match attempt {
+                Ok(t) => return Ok((t, node.name().to_string())),
+                Err(e) => e,
+            };
+            if !retryable(&err) {
+                return Err(err);
+            }
+            tried.insert(node.name().to_string());
+            if self.pick_transcriber(model, &tried).is_err() {
+                return Err(err);
+            }
+            tracing::warn!(model = %model, node = node.name(), "{err}; trying another node");
+        }
+    }
+
+    /// A node whose copy of `model` transcribes: a ready one first, else one that can load it.
+    /// Draining and reserved nodes and those in `exclude` are skipped.
+    fn pick_transcriber(&self, model: &str, exclude: &HashSet<String>) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+        let mut known = false;
+        let mut fallback = None;
+        for node in self.nodes() {
+            let Some(s) = node.status().into_iter().find(|s| s.id == model) else { continue };
+            known = true;
+            if !crate::model_node::transcribes(&s)
+                || node.draining()
+                || node.reserved().is_some()
+                || exclude.contains(node.name())
+                || self.is_leaving(node.name(), model)
+            {
+                continue;
+            }
+            if s.state == ModelState::Ready {
+                return Ok((node, s));
+            }
+            fallback.get_or_insert((node, s));
+        }
+        match fallback {
+            Some(f) => Ok(f),
+            None if !known => Err(unknown_model(model)),
+            None if exclude.is_empty() => Err(bad_request(format!(
+                "model `{model}` does not transcribe audio on any node that takes requests; pick one whose catalog purpose is `transcribe`"
+            ))),
+            None => Err(unavailable(format!("no other node transcribes with {model}"))),
+        }
+    }
+
     pub fn resolve_embedding(&self, model: Option<&str>) -> Result<String, RemoteError> {
         match model {
             None | Some("default") | Some("ymir") => self

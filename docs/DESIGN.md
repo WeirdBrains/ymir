@@ -653,6 +653,15 @@ a field nobody reports stays absent. `[bridge] max_request_bytes` sets the OpenA
 with each model's `weirdnet.limits`); unset keeps the crate default. `ymirctl status` shows
 `limits: ...` or `media limits not reported`.
 
+**Transcription and measured limits (video milestone 2, built 2026-11-27, mocks only).** A `[[model.local]]` with
+`role = "transcribe"` is a speech-to-text model (Voxtral on llama.cpp with its audio projector, Whisper on vLLM). Its catalog/1
+purpose is `transcribe`; infer/2 `Transcribe` (`weirdnet-agent` 0.5.9) goes through the inference role, which picks the model
+with `Catalog::route_transcribe` and a node whose copy transcribes, with the same admission as chat and failover between nodes.
+A pool without one, or a named model that doesn't transcribe, gets a 400. Transcripts are content: not cached, not logged.
+ymird keeps limits measured at load in the models dir (`weirdnet-backends` 0.4.9 `set_limits_store`), and the context the
+engine reports at load (llama-server `/props`, vLLM `max_model_len`) is what catalog/1 and `ymirctl status` report as the
+context per request. The bridge has no `/v1/audio/transcriptions` yet. See [docs/design/video.md](design/video.md#milestone-2-what-was-built-2026-11-27-mocks-only).
+
 ### Model sizing
 
 `weirdnet-model`'s catalog grows from Gemma 4 only to a tiered catalog with per-quant memory

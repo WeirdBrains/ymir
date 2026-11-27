@@ -588,6 +588,18 @@ impl ModelNode for RemoteModelNode {
             Ok((e.vectors, e.usage.map_or(0, |u| u.prompt_tokens)))
         })
     }
+
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::TranscribeRequest,
+    ) -> BoxFuture<'a, Result<crate::model_node::Transcribed, RemoteError>> {
+        Box::pin(async move {
+            self.permitted()?;
+            let t = self.pool.transcribe(request.clone().with_model(model), &CancelToken::new()).await?;
+            Ok((t.transcript, t.usage))
+        })
+    }
 }
 
 type PoolTask = tokio::task::JoinHandle<Result<weirdnet_agent::pool::Answer, weirdnet_agent::pool::Interrupted>>;

@@ -211,6 +211,13 @@ impl Daemon {
             launches.extend(cfg.split_launches(&key));
             let sup = Supervisor::new(engines, launches.clone(), SupervisorOptions { log_dir: Some(paths.logs()), ..Default::default() });
             supervisor = Some(sup.clone());
+            // Limits measured at load (GGUF and projector headers) are kept next to the model files,
+            // so a model not loaded since a restart still reports its image and audio figures
+            // (video design, milestone 1/2). Reading them back touches the disk: off the runtime.
+            {
+                let (sup, store) = (sup.clone(), weirdnet_model::ModelStore::new(cfg.models_dir()));
+                tokio::task::spawn_blocking(move || sup.set_limits_store(Some(store))).await.ok();
+            }
             // A training run (or an operator) holds this node's GPU: start no model until it ends.
             if let Some(lock) = crate::train::held(&paths) {
                 sup.reserve(&lock.holder).await.map_err(|e| anyhow!("reserving for {}: {e}", lock.holder))?;

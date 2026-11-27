@@ -2,6 +2,20 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 11:17 EST: video milestone 2, transcription role and route, measured limits (on main)
+
+Michael (11-27, t68u): "Keep going on Ymir roadmap". Built on the dev box with mocks (branch `video-m2` off `fac5d21`), rebased onto M11 pool sharing (`790a734`) and committed straight to main; no live node touched. Details in [video.md](docs/design/video.md#milestone-2-what-was-built-2026-11-27-mocks-only).
+
+- **Crates:** `weirdnet-agent` 0.5.9 (also what `pool-sharing` needs), `weirdnet-backends` 0.4.9, `weirdnet-model` 0.5.4.
+- **Config** ([config.rs](crates/ymir-core/src/config.rs)): `role = "transcribe"` → `ModelLaunch::with_transcribe`; MLX refused; never the main model.
+- **Route** ([host.rs](crates/ymir-core/src/host.rs) `open_transcribe`, [coordinator.rs](crates/ymir-core/src/coordinator.rs) `resolve_transcriber`/`transcribe`/`pick_transcriber`, [model_node.rs](crates/ymir-core/src/model_node.rs) `ModelNode::transcribe`, [remote.rs](crates/ymir-core/src/remote.rs)): catalog purpose `transcribe`, 400 without a transcriber, failover, no cache, no content in logs.
+- **Measured limits** ([daemon.rs](crates/ymir-core/src/daemon.rs)): `set_limits_store(models dir)`; `context_tokens` preferred for catalog/1 `context` and `ymirctl status` (`(measured)`); status JSON gains `context_tokens` and purpose `transcribe`.
+- **Mock engine:** `/props` n_ctx, vLLM `max_model_len`, `/v1/audio/transcriptions`.
+- **Tests:** [transcribe.rs](crates/ymir-testkit/tests/transcribe.rs) 2/2, config validation; fmt, clippy `-D warnings`, workspace tests, link check.
+- **Not done:** bridge `/v1/audio/transcriptions` (needs `weirdnet-openai`), `ymirctl transcribe`, a real Voxtral/Whisper run.
+
+**Next:** ships in v0.23.0 with M11 pool sharing; then a real Voxtral or Whisper run, and the bridge `/v1/audio/transcriptions` once `weirdnet-openai` has it.
+
 ## 2026-11-27 10:37 EST: M11 sharing a pool with other identities (on main)
 
 Michael (11-27, t65u/t66u): share pools with other Weirdnet identities (Morph's m3talsmith profile `5e452f1b…` vs the Ymir pool `08e2b657…`), and have the Weirdnet lead implement the crate side. Built on `weirdnet-agent` 0.5.9 (`fa038ee`). Built on the dev box with mocks; no live node touched. Design: [docs/design/pool-sharing.md](docs/design/pool-sharing.md).

@@ -999,10 +999,15 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
             if !media.is_empty() {
                 extra.push_str(&format!(", takes {}", media.join(" and ")));
             }
+            if c.transcribe {
+                extra.push_str(", transcribes (speech to text)");
+            }
         }
         if m.capabilities.is_none_or(|c| c.chat) && m.base.is_none() {
-            match ymir_core::model_node::request_context(m.engine, m.context, m.slots) {
-                Some(c) => extra.push_str(&format!(", context {c} per request")),
+            let measured = if m.context_tokens.is_some_and(|c| c > 0) { " (measured)" } else { "" };
+            let ctx = m.context_tokens.filter(|c| *c > 0).or_else(|| ymir_core::model_node::request_context(m.engine, m.context, m.slots));
+            match ctx {
+                Some(c) => extra.push_str(&format!(", context {c} per request{measured}")),
                 None => extra.push_str(", context not reported"),
             }
             match m.capabilities.and_then(|c| ymir_core::model_node::limits_line(&c.limits)) {

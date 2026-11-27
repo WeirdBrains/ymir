@@ -3819,6 +3819,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -5334,12 +5335,13 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.4.8"
+version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "110a836bfc668aeb769eb4e0e6507bea5bcbbd44b2def216fdd7bb3f402c1f78"
+checksum = "b3fd7e6a242d35f0054286a2ddb7d459e6f8179fa0f7671add20b49507ff2542"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "futures",
  "getrandom 0.3.4",
  "libc",
@@ -5419,10 +5421,11 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-model"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4750fdc0b5125596bfab08f0460c2cbab50b0a28e6f62a7d391e3365e89b9002"
+checksum = "42b843a8e21a5f89cd596bc72c9af4c923b1cbe2e7b32424999177e231f9605e"
 dependencies = [
+ "async-trait",
  "dirs",
  "fs4",
  "minijinja",
@@ -5433,6 +5436,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "ureq",
+ "weirdnet-agent",
 ]
 
 [[package]]
@@ -5976,6 +5980,7 @@ dependencies = [
  "weirdnet-net",
  "weirdnet-openai",
  "weirdnet-push",
+ "weirdnet-semcache",
  "weirdnet-sync",
  "weirdnet-update",
  "ymir-core",

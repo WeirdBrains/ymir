@@ -268,6 +268,10 @@ pub struct NodeModel {
     /// The concurrent sequences it is set to run, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<u32>,
+    /// The context per request the engine reported when the model last loaded (llama-server
+    /// `/props`, vLLM `max_model_len`; `weirdnet-backends` 0.4.9), when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
     /// The weights' revision the node reports (node.toml's `revision`, or an upload's), which
     /// keys the answer cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -636,7 +640,13 @@ impl ControlHandler {
                     .flat_map(|n| {
                         n.status().into_iter().map(|s| NodeModel {
                             revision: n.revision(&s.id),
-                            purpose: if crate::model_node::embeds(&s) { "embedding".into() } else { "chat".into() },
+                            purpose: if crate::model_node::embeds(&s) {
+                                "embedding".into()
+                            } else if crate::model_node::transcribes(&s) {
+                                "transcribe".into()
+                            } else {
+                                "chat".into()
+                            },
                             node: n.name().to_string(),
                             id: s.id,
                             engine: s.engine,
@@ -651,6 +661,7 @@ impl ControlHandler {
                             base: s.base,
                             context: s.context,
                             slots: s.slots,
+                            context_tokens: s.context_tokens,
                         })
                     })
                     .collect();

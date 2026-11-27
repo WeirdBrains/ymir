@@ -14,10 +14,21 @@ All notable changes to Ymir are listed here. The format follows
   grants. Guests get catalog/1 and infer/2 only: `Input::Context` (conversations), wake cards, tasks, admin, models, uploads and
   training stay on the roster check. Revocation refuses the next request, and catalog subscriptions are now re-checked every 5 s.
   See [docs/design/pool-sharing.md](docs/design/pool-sharing.md).
+- Video milestone 2 (transcription role and route, measured limits): a `[[model.local]]` with `role = "transcribe"` (Voxtral
+  through llama.cpp with its audio projector, Whisper through vLLM) is published in catalog/1 with purpose `transcribe` and
+  served over infer/2 `Transcribe` (`weirdnet-agent` 0.5.9 `Pool::transcribe`). The inference role routes it
+  (`Catalog::route_transcribe`) to a model node whose copy transcribes, loading it if cold and failing over between nodes;
+  a pool without a transcriber, or a named model that doesn't transcribe, gets a 400. A transcriber is never the main chat
+  model or a stand-in target, MLX is refused for it, and transcripts and audio are neither cached nor logged.
+- Limits measured at load (`weirdnet-backends` 0.4.9): ymird keeps measured limits in the models dir
+  (`Supervisor::set_limits_store`), so GGUF and projector figures survive a restart, and the context the engine reports at
+  load (llama-server `/props`, vLLM `max_model_len`) is the context per request in catalog/1 and `ymirctl status`
+  (`context N per request (measured)`). The operator's `[model.local] limits` still win field by field; unknown fields stay absent.
+- `ymirctl status` shows `transcribes (speech to text)`; `ymirctl pool models` and the status JSON show purpose `transcribe`.
 
 ### Changed
 
-- `weirdnet-agent` 0.5.9.
+- `weirdnet-agent` 0.5.9, `weirdnet-backends` 0.4.9, `weirdnet-model` 0.5.4.
 
 ## [0.22.1] - 2026-11-27
 

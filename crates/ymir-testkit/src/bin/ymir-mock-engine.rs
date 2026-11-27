@@ -14,6 +14,12 @@
 //! `ymir-mock-ray` head) how many nodes it has and exits unless there are
 //! `--pipeline-parallel-size` of them, like vLLM failing to place its workers.
 //!
+//! Context and transcription (video milestone 2): `/props` reports `--ctx-size` split over
+//! `--parallel` as llama-server's `default_generation_settings.n_ctx`, and `/v1/models` reports
+//! `--max-model-len` as vLLM's `max_model_len`, each only when given. `/v1/audio/transcriptions`
+//! answers vLLM-style: "heard N bytes" (N: the multipart body's size), with one segment when
+//! `verbose_json` is asked for.
+//!
 //! LoRA: `--lora FILE` (repeatable) as llama-server takes it; a chat body's `"lora": [{"id": i,
 //! "scale": s}]` applies file `i`, and the answer reads "Hello from `<alias>` with `<file stem>` at
 //! `<s>`!". An id past the list is refused like llama-server's "invalid adapter id".
@@ -36,6 +42,10 @@ struct Mock {
     ready_at: Instant,
     /// `--lora` files, in order (llama-server's adapter ids are their positions).
     loras: Vec<String>,
+    /// llama-server's context per slot (`--ctx-size` over `--parallel`), when given.
+    n_ctx: Option<u64>,
+    /// vLLM's `--max-model-len`, when given.
+    max_model_len: Option<u64>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -66,6 +76,11 @@ async fn main() {
         vision,
         ready_at: Instant::now() + Duration::from_millis(load_ms),
         loras,
+        n_ctx: flag("--ctx-size").or_else(|| flag("-c")).and_then(|c| c.parse::<u64>().ok()).map(|c| {
+            let slots = flag("--parallel").or_else(|| flag("-np")).and_then(|p| p.parse::<u64>().ok()).unwrap_or(1).max(1);
+            c / slots
+        }),
+        max_model_len: flag("--max-model-len").and_then(|c| c.parse().ok()),
     });
     let app = Router::new()
         .route("/health", get(health))
@@ -73,6 +88,8 @@ async fn main() {
         .route("/v1/chat/completions", post(chat))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/props", get(props))
+        .route("/v1/audio/transcriptions", post(transcriptions))
         .with_state(st);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await.expect("bind");
     // With `--port 0` the OS picks the port; tests read it from this line.
@@ -100,7 +117,32 @@ async fn models(State(st): State<Arc<Mock>>, headers: HeaderMap) -> Response {
     if !authorized(&st, &headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response();
     }
-    axum::Json(json!({"object": "list", "data": [{"id": st.alias, "object": "model"}]})).into_response()
+    let mut model = json!({"id": st.alias, "object": "model"});
+    if let Some(n) = st.max_model_len {
+        model["max_model_len"] = json!(n);
+    }
+    axum::Json(json!({"object": "list", "data": [model]})).into_response()
+}
+
+async fn props(State(st): State<Arc<Mock>>) -> Response {
+    match st.n_ctx {
+        Some(n) => axum::Json(json!({"default_generation_settings": {"n_ctx": n}})).into_response(),
+        None => axum::Json(json!({})).into_response(),
+    }
+}
+
+/// vLLM's `/v1/audio/transcriptions`, canned: the text names the body's size, never its content.
+async fn transcriptions(State(st): State<Arc<Mock>>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    if !authorized(&st, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"message": "Invalid API Key"}}))).into_response();
+    }
+    let raw = String::from_utf8_lossy(&body);
+    let text = format!("heard {} bytes", body.len());
+    if raw.contains("verbose_json") {
+        return axum::Json(json!({"text": text, "language": "en", "duration": 1.5, "segments": [{"start": 0.0, "end": 1.5, "text": text}]}))
+            .into_response();
+    }
+    axum::Json(json!({"text": text})).into_response()
 }
 
 fn sse(events: Vec<Value>) -> Response {

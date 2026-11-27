@@ -19,6 +19,22 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Embedding vectors in input order, and the prompt tokens used.
 pub type Embedded = (Vec<Vec<f32>>, u64);
 
+/// A transcript and the token counts the engine reported, if any.
+pub type Transcribed = (weirdnet_agent::remote::infer::v2::Transcript, Option<weirdnet_agent::remote::infer::v2::Usage>);
+
+/// Whether a model has the transcription role here and its engine can serve it
+/// (`weirdnet-backends` 0.4.9 `Capabilities::transcribe`); records from older nodes say no.
+pub fn transcribes(s: &ModelStatus) -> bool {
+    s.capabilities.is_some_and(|c| c.transcribe)
+}
+
+/// The context one request gets: what the engine reported at load (`weirdnet-backends` 0.4.9
+/// `ModelStatus::context_tokens`, llama-server `/props` or vLLM `max_model_len`), else the
+/// configured context split over the slots ([`request_context`]); `None` when neither is known.
+pub fn status_context(s: &ModelStatus) -> Option<u32> {
+    s.context_tokens.filter(|c| *c > 0).or_else(|| request_context(s.engine, s.context, s.slots))
+}
+
 /// What an inference node asks of a model node. [`LocalModelNode`] answers in process;
 /// [`crate::remote::RemoteModelNode`] speaks `/weirdnet-backends/node/1` (capability records,
 /// `Load`, `Unload`) and raw `/weirdnet-agent/infer/2` to a model node on another device.
@@ -86,6 +102,16 @@ pub trait ModelNode: Send + Sync {
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>>;
     /// Embeds `input` with loaded embedding `model`.
     fn embed<'a>(&'a self, model: &'a str, input: &'a [String]) -> BoxFuture<'a, Result<Embedded, RemoteError>>;
+    /// Transcribes `request.audio` with loaded speech-to-text `model` (video design, milestone 2).
+    /// The audio and the transcript are content: never logged, never cached.
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::TranscribeRequest,
+    ) -> BoxFuture<'a, Result<Transcribed, RemoteError>> {
+        let _ = (model, request);
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node serves no transcription".into() }) })
+    }
     /// The weights revision of `model` here (a Hub commit, a file hash, a fine-tune id), when
     /// known. The answer cache keys on it, so new weights under the same id don't replay old answers.
     fn revision(&self, _model: &str) -> Option<String> {
@@ -290,6 +316,17 @@ impl ModelNode for LocalModelNode {
             p.touch(model);
         }
         Box::pin(self.supervisor.embed(model, input))
+    }
+
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::TranscribeRequest,
+    ) -> BoxFuture<'a, Result<Transcribed, RemoteError>> {
+        if let Some(p) = self.planner() {
+            p.touch(model);
+        }
+        Box::pin(self.supervisor.transcribe(model, request))
     }
 
     fn draining(&self) -> bool {

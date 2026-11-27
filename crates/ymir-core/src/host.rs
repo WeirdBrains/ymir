@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use weirdnet_agent::pool::Pool;
 use weirdnet_agent::remote::catalog::{self, CatalogFeed};
-use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Output, Usage};
+use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Output, TranscribeBackend, TranscribeRequest, Transcript, Usage};
 use weirdnet_agent::remote::infer::{self, Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Caller, MemoryDialer, RemoteError};
 use weirdnet_agent::{CancelToken, DeltaSink, Message, ModelBackend, ModelError, ModelTurn, ToolCall, ToolSpec};
@@ -175,6 +175,52 @@ impl InferHost for InferenceHost {
             return Err(RemoteError::refused("guest-model"));
         }
         Ok(Arc::new(Embedder { coord: self.coord.clone(), model }))
+    }
+
+    /// Speech to text (video design, milestone 2): routed to a model node whose copy of the
+    /// model transcribes ([`Coordinator::resolve_transcriber`]); a 400 when the pool has none or
+    /// the named model doesn't transcribe. The caller was admitted by [`Self::authorize`]; a guest
+    /// of a shared pool only gets a transcriber in its grant's allowlist, as for chat and embeddings.
+    fn open_transcribe(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn TranscribeBackend>, RemoteError> {
+        let model = self.coord.resolve_transcriber(model)?;
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+            && !grant.allows_model(&model)
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
+        Ok(Arc::new(Transcriber { coord: self.coord.clone(), model, caller: caller.clone() }))
+    }
+}
+
+/// One transcription, on the model [`InferHost::open_transcribe`] picked. Neither the audio nor
+/// the transcript is cached or logged: they are content.
+struct Transcriber {
+    coord: Arc<Coordinator>,
+    model: String,
+    caller: Caller,
+}
+
+#[async_trait]
+impl TranscribeBackend for Transcriber {
+    fn name(&self) -> String {
+        self.model.clone()
+    }
+
+    async fn transcribe(&self, request: &TranscribeRequest, cancel: &CancelToken) -> Result<Transcript, RemoteError> {
+        Ok(self.transcribe_counted(request, cancel).await?.0)
+    }
+
+    async fn transcribe_counted(&self, request: &TranscribeRequest, cancel: &CancelToken) -> Result<(Transcript, Option<Usage>), RemoteError> {
+        // A device's batch work is capped, as for chat, so it can't crowd out the others.
+        let _hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&self.caller.peer)?) };
+        let run = self.coord.transcribe(&self.model, request);
+        let ((transcript, usage), node) = tokio::select! {
+            _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
+            r = run => r?,
+        };
+        tracing::debug!(model = %self.model, node = %node, bytes = request.audio.len(), "transcribed");
+        Ok((transcript, usage))
     }
 }
 

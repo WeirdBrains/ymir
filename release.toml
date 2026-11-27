@@ -37,13 +37,13 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), U8's origins (set_model_origin, placement hooks), U10's WritePolicy::uploads and StoredEntry constructors; Capabilities::limits (LF-43)
+[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), U8's origins (set_model_origin, placement hooks), U10's WritePolicy::uploads and StoredEntry constructors; Capabilities::limits (LF-43); measured limits, set_limits_store, Supervisor::transcribe (video M2)
 crate = "weirdnet-backends"
-version = "0.4.8"
+version = "0.4.9"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 
-[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D); feature jobs: JobBoard (P3b); MediaLimits, CatalogModel::limits (LF-43); guests: GuestAuth, SharedPoolAuth, PoolShare, connect_shared (M11)
+[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D); feature jobs: JobBoard (P3b); MediaLimits, CatalogModel::limits (LF-43); guests: GuestAuth, SharedPoolAuth, PoolShare, connect_shared (M11); Purpose::Transcribe, infer/2 Transcribe (video M2)
 crate = "weirdnet-agent"
 version = "0.5.9"
 manifest = "Cargo.toml"
@@ -70,9 +70,9 @@ manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
 
-[[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads
+[[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads; limits::measure and ModelStore::record_limits (video M2)
 crate = "weirdnet-model"
-version = "0.5.3"
+version = "0.5.4"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
