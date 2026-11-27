@@ -1,4 +1,4 @@
-//! Cross-identity pool sharing (weirdnet-agent 0.5.9 guests), in one process: a pool owner's
+//! Cross-identity pool sharing (weirdnet-agent 0.5.9 guests; speech refusals from 0.5.11), in one process: a pool owner's
 //! inference node and a device of a second, separate Weirdnet identity that joins with a share
 //! link and its own certificate (`connect_shared`). A fake model node stands in for the engines;
 //! nothing touches the real network.
@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::json;
 use weirdnet_agent::pool::{Answer, NoEvents, Pool, PoolShare, connect_shared, encode_credential, share_dialer};
 use weirdnet_agent::remote::RemoteError;
-use weirdnet_agent::remote::infer::v2::{ContextRef, Request, Usage};
+use weirdnet_agent::remote::infer::v2::{ContextRef, Request, SpeakRequest, Usage, Voice};
 use weirdnet_agent::remote::{Caller, Dialer, catalog};
 use weirdnet_agent::{CancelToken, Message};
 use weirdnet_backends::{Chunk, ChunkStream, ModelStatus};
@@ -159,6 +159,14 @@ async fn a_second_identity_uses_a_shared_pool_until_unshared() {
     // Never the owner's conversations.
     let ctx = Request::context(ContextRef::new("c1", None)).with_model("small");
     assert!(refused(answer(&pool, ctx).await, "guest-context"));
+
+    // Speech: a guest never clones a voice through a share link, consent or not; a preset gets
+    // the plain answer that no model here speaks yet.
+    let clone = SpeakRequest::text("hi").with_voice(Voice::clone_from(vec![1; 64], "wav", None, true));
+    let r = pool.speak(clone, &CancelToken::new()).await.map(|s| s.model);
+    assert!(matches!(&r, Err(RemoteError::Refused { message }) if message.contains("guest-clone")), "{r:?}");
+    let r = pool.speak(SpeakRequest::text("hi").with_voice(Voice::preset("vivian")), &CancelToken::new()).await.map(|s| s.model);
+    assert!(matches!(&r, Err(e) if e.to_string().contains("speaks yet")), "{r:?}");
 
     // Everything outside catalog/infer stays on the roster check (models, train, tasks, wake, admin).
     let caller = Caller { peer: guest.peer(), cert_bytes: Some(encode_credential(&guest.m.user_key(), &guest.m.our_cert())) };

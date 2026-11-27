@@ -9,7 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use weirdnet_agent::pool::Pool;
 use weirdnet_agent::remote::catalog::{self, CatalogFeed};
-use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Output, TranscribeBackend, TranscribeRequest, Transcript, Usage};
+use weirdnet_agent::remote::infer::v2::{
+    self, EmbedBackend, Finish, InferBackend, Output, SpeakBackend, SpeakRequest, TranscribeBackend, TranscribeRequest, Transcript, Usage,
+};
 use weirdnet_agent::remote::infer::{self, Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Caller, MemoryDialer, RemoteError};
 use weirdnet_agent::{CancelToken, DeltaSink, Message, ModelBackend, ModelError, ModelTurn, ToolCall, ToolSpec};
@@ -190,6 +192,38 @@ impl InferHost for InferenceHost {
             return Err(RemoteError::refused("guest-model"));
         }
         Ok(Arc::new(Transcriber { coord: self.coord.clone(), model, caller: caller.clone() }))
+    }
+
+    /// Speech out (infer/2 `Speak`, `weirdnet-agent` 0.5.11). The guest rules come first, so they
+    /// hold whatever serves speech: a guest of a shared pool never clones a voice (`guest-clone`;
+    /// a per-grant `clone` switch is designed, not built) and only names a speaker in its grant's
+    /// allowlist (`guest-model`). Then: no model node serves speech until `weirdnet-backends`
+    /// 0.4.10 brings `role = "speak"` launches, so this is `Unsupported` (the pool tries the next
+    /// node) with what is missing, never a stand-in voice. Nothing here logs the text or the clip.
+    fn open_speak(&self, caller: &Caller, request: &SpeakRequest) -> Result<Arc<dyn SpeakBackend>, RemoteError> {
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+        {
+            if request.clones() {
+                return Err(RemoteError::refused("guest-clone"));
+            }
+            if let Some(m) = request.model.as_deref()
+                && !grant.allows_model(m)
+            {
+                return Err(RemoteError::refused("guest-model"));
+            }
+        }
+        Err(speech_unsupported(request.model.as_deref()))
+    }
+}
+
+/// Why this inference node has no speaker yet (see [`InferenceHost::open_speak`]).
+pub fn speech_unsupported(model: Option<&str>) -> RemoteError {
+    let what = model.map_or("a speaking model".to_string(), |m| format!("`{m}`"));
+    RemoteError::Unsupported {
+        message: format!(
+            "no model in this pool speaks yet: {what} needs a `role = \"speak\"` model node (llama-server or vLLM-Omni), which comes with weirdnet-backends 0.4.10"
+        ),
     }
 }
 

@@ -5293,9 +5293,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.5.9"
+version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00c6d3b6d75b9c36a3cfa1bfb65e701bc9ef4814bafba295eb5093a092e2bdab"
+checksum = "f4570b4a0c4e44f89f8dbee73786a762899fe00870aa24b825f0a87701db3a3f"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5972,7 +5972,9 @@ name = "ymir-testkit"
 version = "0.23.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures",
  "hex",
