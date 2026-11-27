@@ -52,12 +52,13 @@ fn main() {
                 }
             }
             if has("--mock-worker-bind-any") {
-                use std::os::unix::process::CommandExt;
-                let mut w = std::process::Command::new(&args[0])
-                    .args(["__child", "--listen-any", &(port + 2).to_string()])
-                    .process_group(0)
-                    .spawn()
-                    .expect("worker");
+                let mut w = std::process::Command::new(&args[0]);
+                w.args(["__child", "--listen-any", &(port + 2).to_string()]);
+                // A process group of its own, as the raylet starts Ray's workers (Unix; the
+                // `vllm-ray` tests run on Linux only).
+                #[cfg(unix)]
+                std::os::unix::process::CommandExt::process_group(&mut w, 0);
+                let mut w = w.spawn().expect("worker");
                 eprintln!("mock ray: worker {}", w.id());
                 std::thread::spawn(move || w.wait());
             }
