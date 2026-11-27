@@ -2,7 +2,8 @@
 //! dir. Today that is vLLM with Ray (`engines install vllm`, see
 //! [`ymir_core::vllm_install`]): `ymird` finds the venv's `vllm` and `ray` on its own (`[model]
 //! vllm = "auto"`, `ray = "auto"`), so nothing else needs editing. Restart `ymird` after an
-//! install so it picks them up.
+//! install so it picks them up. And vLLM-Omni, for speech (`engines install vllm-omni`, see
+//! [`ymir_core::vllm_omni_install`]), in a venv of its own that nothing serves from yet.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use ymir_core::Paths;
 use ymir_core::vllm_install::{self, Accel, Options, Probe, System};
+use ymir_core::vllm_omni_install as omni;
 
 #[derive(Subcommand, Debug)]
 pub enum EnginesCmd {
@@ -32,6 +34,9 @@ pub enum EnginesCmd {
 pub enum Engine {
     /// vLLM with Ray (for `vllm-ray` split models).
     Vllm,
+    /// vLLM-Omni (speech, for Qwen3-TTS and VoxCPM2), with the vLLM release it needs, in
+    /// `<home>/engines/vllm-omni`.
+    VllmOmni,
 }
 
 #[derive(Args, Debug)]
@@ -39,7 +44,8 @@ pub struct InstallArgs {
     #[arg(value_enum)]
     pub engine: Engine,
     /// A vLLM release from PyPI, such as 0.34.0. Default: vLLM's nightly, which has Inkling 2
-    /// Mini (no release has it yet; 0.35.0 will).
+    /// Mini (no release has it yet; 0.35.0 will). For vllm-omni: its release (vLLM is pinned to
+    /// the same), default 0.34.0.
     #[arg(long)]
     pub version: Option<String>,
     /// auto (nvidia-smi: cuda; rocminfo or /opt/rocm: rocm; else cpu), cuda, rocm or cpu.
@@ -81,8 +87,19 @@ pub fn run_with(paths: &Paths, cmd: EnginesCmd, out: &mut dyn Write, probe: &dyn
     let venv = ymir_core::vllm::venv(&paths.engines());
     match cmd {
         EnginesCmd::Status => status(paths, out),
+        EnginesCmd::Install(a) if a.engine == Engine::VllmOmni => install_omni(&omni::venv(&paths.engines()), a, false, out, probe),
+        EnginesCmd::Upgrade(a) if a.engine == Engine::VllmOmni => install_omni(&omni::venv(&paths.engines()), a, true, out, probe),
         EnginesCmd::Install(a) => install(&venv, a, false, out, probe),
         EnginesCmd::Upgrade(a) => install(&venv, a, true, out, probe),
+        EnginesCmd::Uninstall { engine: Engine::VllmOmni } => {
+            let venv = omni::venv(&paths.engines());
+            if omni::uninstall(&venv)? {
+                writeln!(out, "removed {}", venv.display())?;
+            } else {
+                writeln!(out, "no managed vLLM-Omni at {}", venv.display())?;
+            }
+            Ok(())
+        }
         EnginesCmd::Uninstall { engine: Engine::Vllm } => {
             if vllm_install::uninstall(&venv)? {
                 writeln!(out, "removed {}", venv.display())?;
@@ -96,7 +113,6 @@ pub fn run_with(paths: &Paths, cmd: EnginesCmd, out: &mut dyn Write, probe: &dyn
 }
 
 fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn Write, probe: &dyn Probe) -> Result<()> {
-    let Engine::Vllm = a.engine;
     let o = Options {
         version: a.version,
         accel: Accel::parse(&a.accel)?,
@@ -164,6 +180,69 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
     Ok(())
 }
 
+fn install_omni(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn Write, probe: &dyn Probe) -> Result<()> {
+    let o = omni::Options {
+        version: a.version,
+        accel: Accel::parse(&a.accel)?,
+        index_url: a.index_url,
+        uv: a.uv,
+        python: a.python,
+        upgrade,
+        reinstall: a.reinstall,
+        force: a.force,
+        torch_backend: a.torch_backend,
+    };
+    if upgrade && omni::read_record(venv).is_none() {
+        anyhow::bail!("no managed vLLM-Omni at {}; run `ymirctl engines install vllm-omni` first", venv.display());
+    }
+    let plan = omni::plan(venv, &o, probe)?;
+    writeln!(
+        out,
+        "vLLM-Omni {} and vLLM {} for {} into {} (with {})",
+        plan.version,
+        plan.version,
+        plan.accel.name(),
+        plan.venv.display(),
+        plan.installer
+    )?;
+    if plan.accel == Accel::Cuda {
+        let driver = plan.driver_cuda.map_or("unknown (nvidia-smi gave none; not checked)".into(), |(a, b)| format!("CUDA {a}.{b}"));
+        let torch = plan.torch_backend.clone().unwrap_or_else(|| "PyPI's (CUDA 13.0 build)".into());
+        writeln!(out, "GPU driver: {driver}; PyTorch: {torch}")?;
+        if let Some((a, b)) = plan.vllm_cuda {
+            writeln!(out, "vLLM's kernels: CUDA {a}.{b} builds")?;
+        }
+        if let Some(w) = plan.cuda_warning() {
+            writeln!(out, "warning: {w}")?;
+        }
+    }
+    if a.dry_run {
+        for s in &plan.steps {
+            writeln!(out, "  {s}")?;
+        }
+        writeln!(
+            out,
+            "  then check `vllm --version`, `import vllm_omni` and that PyTorch's CUDA is not newer than the driver's (dry run: nothing ran)"
+        )?;
+        return Ok(());
+    }
+    let mut lines = Vec::new();
+    let rec = omni::install(&plan, &o, &mut |l| lines.push(l.to_string()))?;
+    for l in lines {
+        writeln!(out, "  ran {l}")?;
+    }
+    writeln!(out, "installed vLLM-Omni {} and vLLM {} ({})", rec.omni, rec.vllm, rec.accel.name())?;
+    match (&rec.torch, &rec.torch_cuda) {
+        (Some(t), Some(c)) => writeln!(out, "PyTorch {t} (CUDA {c}; the driver runs {})", rec.driver_cuda.as_deref().unwrap_or("?"))?,
+        _ => writeln!(out, "PyTorch: could not read its version (`import torch` failed?)")?,
+    }
+    if let Some(w) = rec.vllm_mismatch() {
+        writeln!(out, "warning: {w}")?;
+    }
+    writeln!(out, "nothing serves from it yet: speech models arrive with the Weirdnet vLLM-Omni engine (docs/design/audio.md)")?;
+    Ok(())
+}
+
 fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     let model = ymir_core::NodeConfig::load(&paths.config()).map(|c| c.model).unwrap_or_default();
     let venv = ymir_core::vllm::venv(&paths.engines());
@@ -199,5 +278,22 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     };
     show(out, "vllm", &model.vllm, ymir_core::config::resolve_vllm(&model, paths))?;
     show(out, "ray", &model.ray, ymir_core::config::resolve_ray(&model, paths))?;
+    let ov = omni::venv(&paths.engines());
+    match omni::read_record(&ov) {
+        Some(r) => writeln!(
+            out,
+            "vllm-omni: {} (vLLM-Omni {}, vLLM {}, {}, by {}{})",
+            ov.display(),
+            r.omni,
+            r.vllm,
+            r.accel.name(),
+            r.installer,
+            match (&r.torch, &r.torch_cuda) {
+                (Some(t), Some(c)) => format!(", PyTorch {t} CUDA {c}, driver CUDA {}", r.driver_cuda.as_deref().unwrap_or("?")),
+                _ => String::new(),
+            }
+        )?,
+        None => writeln!(out, "vllm-omni: none (`ymirctl engines install vllm-omni`)")?,
+    }
     Ok(())
 }

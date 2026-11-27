@@ -191,3 +191,61 @@ fn install_with_python_venv_and_pip_needs_a_python_vllm_supports() {
     let e = engines(&home, &["install", "vllm", "--accel", "cpu", "--reinstall", "--dry-run"], &probe).unwrap_err().to_string();
     assert!(e.contains("--index-url"), "{e}");
 }
+
+/// `uv` for vLLM-Omni: the venv's python answers `import vllm_omni` (its version), PyTorch's
+/// CUDA (bin/torch_cuda, default 13.0); `vllm` prints the pinned release.
+fn fake_omni_uv(dir: &Path) -> PathBuf {
+    let uv = dir.join("uv-omni");
+    std::fs::write(
+        &uv,
+        r#"#!/bin/sh
+echo "$0 $*" >> "$(dirname "$0")/omni-calls.log"
+if [ "$1" = venv ]; then for a; do d="$a"; done; mkdir -p "$d/bin"; exit 0; fi
+if [ "$1" = pip ]; then
+  b="$(dirname "$4")"
+  for a; do case "$a" in vllm-omni==*) v="${a#vllm-omni==}" ;; esac; done
+  printf '#!/bin/sh\necho %s\n' "$v" > "$b/vllm"
+  printf '#!/bin/sh\ncase "$2" in *torch.version*) echo "torch 2.14.0 $(cat "$(dirname "$0")/torch_cuda" 2>/dev/null || echo 13.0)" ;; *vllm-omni*) echo %s ;; *) exit 1 ;; esac\n' "$v" > "$b/python"
+  chmod +x "$b/vllm" "$b/python"; exit 0
+fi
+exit 2
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+    uv
+}
+
+#[test]
+fn vllm_omni_installs_in_its_own_venv_with_the_driver_checks() {
+    let d = tempfile::tempdir().unwrap();
+    let (home, tools) = (d.path().join("home"), d.path().join("tools"));
+    std::fs::create_dir_all(&tools).unwrap();
+    let probe = Linux { uv: Some(fake_omni_uv(&tools)) };
+    let paths = Paths::new(&home);
+    let venv = paths.engines().join("vllm-omni");
+
+    let o = engines(&home, &["install", "vllm-omni", "--dry-run"], &probe).unwrap();
+    assert!(o.contains("vLLM-Omni 0.34.0 and vLLM 0.34.0 for cuda") && o.contains("vllm==0.34.0 vllm-omni==0.34.0"), "{o}");
+    assert!(o.contains("GPU driver: CUDA 13.0") && o.contains("vLLM's kernels: CUDA 13.0 builds") && !o.contains("warning"), "{o}");
+    assert!(o.contains("dry run") && !venv.exists() && !tools.join("omni-calls.log").exists(), "{o}");
+    assert!(engines(&home, &["upgrade", "vllm-omni"], &probe).unwrap_err().to_string().contains("install vllm-omni` first"));
+
+    let o = engines(&home, &["install", "vllm-omni", "--version", "0.32.0"], &probe).unwrap();
+    assert!(o.contains("installed vLLM-Omni 0.32.0 and vLLM 0.32.0 (cuda)") && o.contains("PyTorch 2.14.0 (CUDA 13.0"), "{o}");
+    let rec = ymir_core::vllm_omni_install::read_record(&venv).unwrap();
+    assert_eq!((rec.omni.as_str(), rec.vllm_cuda.as_deref(), rec.requested.as_deref()), ("0.32.0", Some("13.0"), Some("0.32.0")));
+    assert!(!paths.engines().join("vllm").exists(), "the vLLM venv is untouched");
+    let s = engines(&home, &["status"], &probe).unwrap();
+    assert!(s.contains("vllm-omni: ") && s.contains("vLLM-Omni 0.32.0"), "{s}");
+
+    // PyTorch built for a newer CUDA than the driver fails the install, and keeps the record.
+    std::fs::write(venv.join("bin/torch_cuda"), "13.2").unwrap();
+    let e = engines(&home, &["upgrade", "vllm-omni"], &probe).unwrap_err().to_string();
+    assert!(e.contains("CUDA 13.2 build") && e.contains("runs CUDA 13.0"), "{e}");
+
+    assert!(engines(&home, &["uninstall", "vllm-omni"], &probe).unwrap().contains("removed"));
+    assert!(!venv.exists());
+    std::fs::create_dir_all(&venv).unwrap();
+    assert!(engines(&home, &["uninstall", "vllm-omni"], &probe).unwrap_err().to_string().contains("not removing"));
+}
