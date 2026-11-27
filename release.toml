@@ -77,6 +77,13 @@ manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
 
+[[requires]]                    # the loopback bridge: /v1/audio/speech and /v1/audio/transcriptions, /v1/models weirdnet.speech and weirdnet.inputs, chat video_url parts (0.2.5, on weirdnet-agent 0.5.11)
+crate = "weirdnet-openai"
+version = "0.2.5"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
 [[requires]]                    # WAV and PCM, 16 kHz normalization, silence-aware transcription plans, realign, SRT/VTT and the hardened ffmpeg runner (audio milestones 1 to 4); TextPlan for speech later
 crate = "weirdnet-media"
 version = "0.1.0"

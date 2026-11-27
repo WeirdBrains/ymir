@@ -1,148 +1,35 @@
 //! Speech out: `ymirctl speak` and MCP `ymir_speak` through ymird's control socket.
 //!
-//! A mock speaker (an [`InferHost`] whose `open_speak` hands out a [`SpeakBackend`] making a
-//! tone per voice, 10 ms per character) is served over weirdnet-agent's own `v2::serve` and
-//! `catalog::serve` on an in-memory dialer, so `Pool::speak` runs exactly as it does across the
-//! mesh. A control handler with that pool serves a real socket. Long text is planned to the
+//! A mock speaker (`common/speech.rs`: an `InferHost` whose `open_speak` hands out a
+//! `SpeakBackend` making a tone per voice, 10 ms per character) is served over weirdnet-agent's
+//! own `v2::serve` and `catalog::serve` on an in-memory dialer, so `Pool::speak` runs exactly as
+//! it does across the mesh. A control handler with that pool serves a real socket. Long text is planned to the
 //! model's `max_input_chars`, sent piece by piece with one model, voice and seed, and stitched;
 //! a script goes one turn at a time with that speaker's voice; MP3 goes out as WAV and is
 //! encoded here with ffmpeg (skipped without it). Nothing here touches the network or a model.
 
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
+#[path = "common/speech.rs"]
+mod speech;
+
 use base64::Engine as _;
 use clap::Parser;
 use serde_json::{Value, json};
-use weirdnet_agent::CancelToken;
-use weirdnet_agent::ModelBackend;
-use weirdnet_agent::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose};
-use weirdnet_agent::remote::infer::v2::{self, AudioHeader, AudioStream, SpeakBackend, SpeakInput, SpeakRequest, Usage, Voice};
-use weirdnet_agent::remote::infer::{self, InferHost};
-use weirdnet_agent::remote::pool::Pool;
-use weirdnet_agent::remote::{Caller, MemoryDialer, RemoteError};
-use weirdnet_agent::speech::{AudioFormat, CloneMode, SpeechProfile};
+use speech::{MAX_CHARS, MS_PER_CHAR, RATE, Seen};
+use weirdnet_agent::remote::infer::v2::{SpeakInput, SpeakRequest, Voice};
+use weirdnet_agent::speech::AudioFormat;
 use weirdnet_media::pcm::{Pcm, decode_wav, encode_wav};
 use ymir_core::Paths;
 use ymir_core::control::{self, ControlHandler};
-use ymir_core::host::AllowAll;
 use ymirctl::speak::{Chunking, Options, OutFormat, Text};
 
-const RATE: u32 = 24_000;
-const MS_PER_CHAR: u64 = 10;
-const MAX_CHARS: u32 = 120;
-
-/// What the speaker was asked, in order.
-type Seen = Arc<Mutex<Vec<SpeakRequest>>>;
-
-struct Speaker {
-    profile: SpeechProfile,
-    seen: Seen,
-}
-
-fn freq(voice: Option<&Voice>) -> f32 {
-    match voice {
-        Some(Voice::Preset { name }) if name == "ryan" => 330.0,
-        Some(Voice::Preset { .. }) => 220.0,
-        Some(Voice::Design { .. }) => 440.0,
-        Some(Voice::Clone { .. }) => 550.0,
-        _ => 110.0,
-    }
-}
-
-#[async_trait]
-impl SpeakBackend for Speaker {
-    fn name(&self) -> String {
-        "mock-tts".into()
-    }
-
-    async fn speak(&self, request: &SpeakRequest, _: &CancelToken) -> Result<AudioStream, RemoteError> {
-        self.profile.covers(&request.needs()).map_err(|m| RemoteError::BadRequest { message: m })?;
-        self.seen.lock().unwrap().push(request.clone());
-        let (chars, voice) = match &request.input {
-            SpeakInput::Text(t) | SpeakInput::Raw(t) => (t.chars().count(), request.voice.as_ref()),
-            SpeakInput::Script(turns) => {
-                let first = turns.first().map(|t| t.speaker).unwrap_or(0);
-                let v = request.voices.iter().find(|v| v.speaker == first).map(|v| &v.voice).or(request.voice.as_ref());
-                (turns.iter().map(|t| t.text.chars().count()).sum(), v)
-            }
-            _ => return Err(RemoteError::BadRequest { message: "an input this mock doesn't know".into() }),
-        };
-        let ms = chars as u64 * MS_PER_CHAR;
-        let n = (u64::from(RATE) * ms / 1000) as usize;
-        let f = freq(voice);
-        let samples = (0..n).map(|i| ((i as f32 * f * std::f32::consts::TAU / RATE as f32).sin() * 8_000.0) as i16).collect();
-        let pcm = Pcm::new(RATE, 1, samples);
-        let usage = Some(Usage::speech(chars as u64, ms));
-        Ok(match request.format.unwrap_or_default() {
-            AudioFormat::Pcm16 => {
-                let raw = pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-                AudioStream::from_file(AudioHeader::new(AudioFormat::Pcm16).with_sample_rate(RATE).with_channels(1), raw, usage)
-            }
-            AudioFormat::Wav => {
-                AudioStream::from_file(AudioHeader::new(AudioFormat::Wav).with_sample_rate(RATE).with_channels(1), encode_wav(&pcm), usage)
-            }
-            other => return Err(RemoteError::BadRequest { message: format!("mock-tts makes wav and pcm16, not {}", other.as_str()) }),
-        })
-    }
-}
-
-struct Host {
-    speaker: Arc<Speaker>,
-}
-
-impl InferHost for Host {
-    fn authorize(&self, _: &Caller) -> Result<(), RemoteError> {
-        Ok(())
-    }
-    fn open(&self, _: &Caller, _: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
-        Err(RemoteError::unavailable("no chat here"))
-    }
-    fn open_speak(&self, _: &Caller, request: &SpeakRequest) -> Result<Arc<dyn SpeakBackend>, RemoteError> {
-        match request.model.as_deref() {
-            None | Some("mock-tts") => Ok(self.speaker.clone()),
-            Some(m) => Err(RemoteError::Unsupported { message: format!("{m} does not speak here") }),
-        }
-    }
-}
-
-fn profile() -> SpeechProfile {
-    SpeechProfile::new()
-        .with_presets(vec!["vivian".into(), "ryan".into()])
-        .with_design(true)
-        .with_instructions(true)
-        .with_clone(CloneMode::AudioAndText)
-        .with_script_speakers(2)
-        .with_max_voices(2)
-        .with_speed(true)
-        .with_formats(vec![AudioFormat::Wav, AudioFormat::Pcm16])
-        .with_sample_rate(RATE)
-        .with_max_input_chars(MAX_CHARS)
-}
-
-/// The control socket under `home`, over a pool of one node with the mock speaker.
+/// The control socket under `home`, over the mock pool.
 async fn node(home: &Path) -> Seen {
-    let seen = Seen::default();
-    let host: Arc<dyn InferHost> = Arc::new(Host { speaker: Arc::new(Speaker { profile: profile(), seen: seen.clone() }) });
-    let feed = Arc::new(CatalogFeed::new(Arc::new(AllowAll)));
-    feed.publish(vec![CatalogModel::new("mock-tts", Purpose::Speak, ModelState::Warm).with_speech(profile())]);
-    let admission = ymir_core::host::admission(2, 4);
-    let dialer = MemoryDialer::new();
-    dialer.route("tts", move |ch, protocol| {
-        let (host, feed, admission) = (host.clone(), feed.clone(), admission.clone());
-        tokio::spawn(async move {
-            let caller = Caller::new("tts");
-            let _ = match protocol.as_str() {
-                v2::PROTOCOL => v2::serve(ch, caller, host.as_ref(), &admission).await,
-                infer::PROTOCOL => infer::serve(ch, &caller, host.as_ref(), &admission).await,
-                catalog::PROTOCOL => catalog::serve(ch, caller, feed.as_ref()).await,
-                other => Err(RemoteError::Unsupported { message: format!("{other} is not served here") }),
-            };
-        });
-    });
-    let pool = Arc::new(Pool::new(Arc::new(dialer), vec!["tts".to_string()]));
+    let (pool, seen) = speech::pool();
+    let pool = Arc::new(pool);
     let handler = Arc::new(ControlHandler {
         node: "tts".into(),
         roles: vec!["app".into()],

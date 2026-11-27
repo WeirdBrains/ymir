@@ -324,7 +324,15 @@ option to bind it to a LAN, tailnet or public address. Remote use always goes ov
 that machine's own bridge or Bragi.
 
 - Endpoints: `/v1/models`, `/v1/chat/completions` with SSE, `/v1/completions`, `/v1/embeddings`,
-  translated to `weirdnet-agent` pool calls to inference nodes.
+  and (`weirdnet-openai` 0.2.5) `POST /v1/audio/speech` and `POST /v1/audio/transcriptions`, translated to
+  `weirdnet-agent` pool calls to inference nodes. The routes are the crate's own. ymird only binds it
+  (`daemon::bind_bridge`: `[app.bridge] port`, and `max_request_bytes`, which bounds every body, audio uploads
+  and `data:` reference clips included, with a 413 naming the limit in `x-weirdnet-max-request-bytes`) and hands it
+  the app role's pool. Speech is checked with `Catalog::route_speak` first (a voice, format or length the model lacks
+  is a 400 that names what it has). The bridge doesn't split long text or convert formats the way `ymirctl speak`
+  does. `stream_format: "audio"` streams the bytes, and `"sse"` is a 400. Transcriptions take a multipart `file` and
+  answer json, verbose_json, text, srt or vtt. `/v1/models` adds `weirdnet.speech` (the profile) and
+  `weirdnet.inputs`. Until `weirdnet-backends` 0.4.10, no node speaks, so `/v1/audio/speech` is a 400.
 - It runs inside `ymird` (app role) or alone (`ymirctl bridge`) on a laptop that runs no other role.
 - A local token, generated at setup, kept in the OS keyring (not a file) and shown by `ymirctl bridge
   token`, is required on **every** endpoint, `/v1/models` and `/metrics` included. It guards against

@@ -66,6 +66,11 @@ All notable changes to Ymir are listed here. The format follows
 - MCP `ymir_speak` (mutating, so it is hidden under `--read-only`). `out` needs `confirm=true` and must be under
   `--root`. A reference clip is a path under `--root` or base64, never a URL or `data:`, and needs `consent`. It returns
   the path or base64 audio, plus the duration and usage.
+- `weirdnet-openai` 0.2.5 (`release.toml` requires it). The loopback bridge now serves `POST /v1/audio/speech`
+  (OpenAI fields plus `weirdnet` extensions: design, `data:` reference clips with consent, scripts, seed, language;
+  `stream_format: "audio"`) and `POST /v1/audio/transcriptions` (multipart; json, verbose_json, text, srt, vtt).
+  `/v1/models` lists `weirdnet.speech` and `weirdnet.inputs`. `[app.bridge] max_request_bytes` bounds audio bodies
+  too, with a 413. Speech answers 400 until a speak node exists (`weirdnet-backends` 0.4.10).
 - `ymirctl engines install vllm-omni`: vLLM-Omni and its matching vLLM release in a managed venv
   (`<home>/engines/vllm-omni`), with the same driver CUDA checks as `engines install vllm`. Nothing serves from it yet.
 

@@ -363,7 +363,7 @@ The spec as written:
 - Tests with the in-process mock engine (both flavors): each adapter's body for each `Voice`, refusals for each
   missing feature, no `http(s)://` or `file://` ever sent, stream chunking, `/props` voices read.
 
-### `weirdnet-openai` (0.2.5)
+### `weirdnet-openai` (0.2.5, published)
 
 - `POST /v1/audio/speech` and `POST /v1/audio/transcriptions` as in "Bridge" above, over `Pool::speak` /
   `Pool::speak_stream` and `Pool::transcribe`; the 413 with `x-weirdnet-max-request-bytes`; `/v1/models` with
@@ -486,6 +486,28 @@ sampling of [video.md](video.md) joins it.
     the TTY refusal, and MCP `ymir_speak` with its refusals.
   - `ymir-core/tests/pool_sharing.rs`: a real guest identity's clone is refused, and a preset gets the "speaks yet"
     answer.
+
+### What was built (2026-11-27, on `weirdnet-openai` 0.2.5)
+
+- **9 (bridge, Ymir side).** Bumped to `weirdnet-openai` 0.2.5 (also a `[[requires]]` in `release.toml`). The
+  crate mounts `/v1/audio/speech` and `/v1/audio/transcriptions` itself, so Ymir changes no routes.
+  - ymird binds the bridge through `daemon::bind_bridge`, so tests bind exactly what ymird binds.
+  - `[app.bridge] max_request_bytes` (32 MiB unset) bounds audio bodies too, and the 413 carries
+    `x-weirdnet-max-request-bytes`.
+  - Departures from the spec above:
+    - The bridge splits no long text and converts no format: over `max_input_chars`, or a format the model doesn't
+      make, is a 400.
+    - Per-speaker `voices` in the speech body isn't wired yet.
+    - `stream_format: "sse"` is a 400.
+- **Tests.**
+  - `ymir-testkit/tests/bridge_audio.rs`, against the bridge ymird binds over the mock pool (`common/speech.rs`,
+    shared with `speak_cli.rs`):
+    - speech: headers, PCM, streaming, a clone from `data:` and a script;
+    - seven 400s and the 413;
+    - transcriptions as json, verbose_json and srt, plus 400s and the 413;
+    - `/v1/models` `weirdnet.speech`.
+  - Against a real ymird with the mock vLLM transcriber: `/v1/models`, a transcription through `InferenceHost`, the
+    speech 400 (nothing speaks yet), and the 413.
 
 ## Not in this design
 

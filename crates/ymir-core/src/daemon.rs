@@ -523,13 +523,7 @@ impl Daemon {
             let pool = Arc::new(pool);
             app_pool = Some(pool.clone());
             let token = crate::token::load_or_create(&paths)?;
-            let bridge = weirdnet_openai::Bridge::bind(weirdnet_openai::BridgeOptions::new(cfg.app.bridge.port, token))
-                .await
-                .with_context(|| format!("binding the bridge on 127.0.0.1:{}", cfg.app.bridge.port))?;
-            let bridge = match cfg.app.bridge.max_request_bytes {
-                Some(n) => bridge.with_max_request_bytes(usize::try_from(n).unwrap_or(usize::MAX)),
-                None => bridge,
-            };
+            let bridge = bind_bridge(&cfg.app.bridge, token).await?;
             let addr = bridge.local_addr()?;
             bridge_addr = Some(addr);
             let mut rx = stop_rx.clone();
@@ -629,4 +623,19 @@ fn preflight_vllm(cfg: &NodeConfig, engines: &[weirdnet_backends::EngineConfig],
         anyhow::bail!("{}", crate::vllm::inkling_unsupported_message(None));
     };
     crate::vllm::ensure_inkling(&eng.program, false)
+}
+
+/// The app role's loopback OpenAI bridge (`weirdnet-openai`), bound but not serving: `[app.bridge]`
+/// `port` on 127.0.0.1 and `max_request_bytes` (the crate's 32 MiB when unset), which bounds every
+/// body, `/v1/audio/speech` (a `data:` reference clip included) and `/v1/audio/transcriptions`
+/// uploads too. Its routes are the crate's: `/v1/models`, chat, completions, embeddings,
+/// `/v1/audio/speech` and `/v1/audio/transcriptions` (0.2.5), all over the pool it serves.
+pub async fn bind_bridge(section: &crate::config::BridgeSection, token: String) -> Result<weirdnet_openai::Bridge> {
+    let bridge = weirdnet_openai::Bridge::bind(weirdnet_openai::BridgeOptions::new(section.port, token))
+        .await
+        .with_context(|| format!("binding the bridge on 127.0.0.1:{}", section.port))?;
+    Ok(match section.max_request_bytes {
+        Some(n) => bridge.with_max_request_bytes(usize::try_from(n).unwrap_or(usize::MAX)),
+        None => bridge,
+    })
 }
