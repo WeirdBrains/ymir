@@ -5420,6 +5420,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "weirdnet-media"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7ef239fd9d63ccc767bd2987b07e39b9892e27ad83dc839118de93fe16708a2"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "weirdnet-model"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5957,17 +5968,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ymir-media"
-version = "0.23.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "ymir-testkit"
 version = "0.23.0"
 dependencies = [
@@ -5989,6 +5989,7 @@ dependencies = [
  "weirdnet-alerts",
  "weirdnet-backends",
  "weirdnet-mcp",
+ "weirdnet-media",
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",
@@ -5997,7 +5998,6 @@ dependencies = [
  "weirdnet-sync",
  "weirdnet-update",
  "ymir-core",
- "ymir-media",
  "ymirctl",
 ]
 
@@ -6029,13 +6029,13 @@ dependencies = [
  "weirdnet-backends",
  "weirdnet-device-link",
  "weirdnet-mcp",
+ "weirdnet-media",
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-sync",
  "weirdnet-update",
  "windows-sys 0.61.2",
  "ymir-core",
- "ymir-media",
  "zeroize",
 ]
 

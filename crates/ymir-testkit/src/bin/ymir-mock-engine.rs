@@ -227,8 +227,9 @@ async fn speech(State(st): State<Arc<Mock>>, headers: HeaderMap, body: axum::bod
     let ms = ((words * 60.0).max(200.0) / speed).round() as u32;
     let rate = st.rate;
     let n = (u64::from(rate) * u64::from(ms) / 1000) as usize;
-    let samples: Vec<f32> = (0..n).map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.3).collect();
-    let mut wav = ymir_media::wav::encode_pcm16(&ymir_media::Pcm::new(rate, 1, samples));
+    let samples: Vec<i16> =
+        (0..n).map(|i| ((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.3 * f32::from(i16::MAX)) as i16).collect();
+    let mut wav = weirdnet_media::pcm::encode_wav(&weirdnet_media::pcm::Pcm::new(rate, 1, samples));
     let stream = req["stream_format"].as_str() == Some("audio") || (!st.omni && req["stream"].as_bool() == Some(true));
     let content_type = if pcm { format!("audio/pcm;rate={rate};encoding=signed-int;bits=16") } else { "audio/wav".to_string() };
     let mut resp = axum::http::Response::builder().header("content-type", content_type);

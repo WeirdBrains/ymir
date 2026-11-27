@@ -665,7 +665,7 @@ context per request. The bridge has no `/v1/audio/transcriptions` yet. See [docs
 VoxCPM2, Fish Audio Drama 3 on llama-server or vLLM-Omni) with catalog/1 purpose `speak` and a reported speech profile
 (preset voices, voice design, cloning, multi-speaker scripts, formats, limits; absent when unknown), infer/2 `Speak`,
 `ymirctl speak`/`transcribe`, the bridge's `/v1/audio/speech` and `/v1/audio/transcriptions`, and client-side long-form
-synthesis and long-audio chunking through the interim `ymir-media` crate. Speech is content: not cached, not logged. See
+synthesis and long-audio chunking through `weirdnet-media`. Speech is content: not cached, not logged. See
 [docs/design/audio.md](design/audio.md).
 
 **Transcription from the CLI and MCP, and the interim media crate (audio milestones 1 to 6, built 2026-11-27, mocks only).**
@@ -681,14 +681,11 @@ quietest 30 ms frame near each limit, transcribes the chunks in order with the p
 the segments back onto the clip's timeline; it refuses when catalog/1 has no `audio_max_seconds` (naming the setting). Off by
 default. Transcripts are not logged. MCP `ymir_transcribe` (a read tool, so it stays under `--read-only`) takes `path` or
 base64 `audio`: a path is checked by extension before it is opened, never a URL or `data:`, and, with `ymirctl mcp --root DIR`
-(repeatable), must resolve (links followed) inside one of the roots. The media code is the interim
-[`ymir-media`](../crates/ymir-media) crate, written to the Weirdnet crate spec in [docs/design/audio.md](design/audio.md) with
-no Ymir types, so it can be replaced by `weirdnet-media`: WAV probe and decode (8 to 32-bit integer, float, extensible;
-hostile headers refused), windowed-sinc resampling, silence-aware chunk planning, segment re-alignment, PCM stitching with an
-equal-power crossfade, `TextPlan` (sentence and speaker-turn splitting for long speech, CJK-aware), SRT/VTT, and a hardened
-`ffmpeg::Runner`: input demuxer sniffed from magic bytes against an allowlist (no ffprobe), `-protocol_whitelist file,pipe`,
-`-f` forced, the input in a private temp dir, the first audio stream only, metadata dropped, a cleared environment, memory,
-CPU-time and file-size rlimits, a best-effort user and network namespace on Linux, a timeout and an output cap. `FakeRunner`
+(repeatable), must resolve (links followed) inside one of the roots. The media code is [`weirdnet-media`](https://crates.io/crates/weirdnet-media) 0.1.0, published from the
+Weirdnet crate spec in [docs/design/audio.md](design/audio.md): `audio::normalize_pcm` (WAV decoded and resampled in Rust,
+anything else through its hardened `ffmpeg::Runner`, which needs ffprobe beside ffmpeg), `transcribe::plan` (cuts at
+silences within `audio_max_seconds` and the request size), `prompt_from`, `realign`, and `subtitles`. ymirctl only sniffs
+magic bytes itself to refuse non-media early and to name a file sent with `--no-normalize`. `FakeRunner`
 stands in for tests. The testkit mock engine serves `/v1/audio/speech` in two flavors: llama-server (`/tts` too, WAV and PCM
 only, `/props` voices, cloning with `speaker_ref_b64`) and vLLM-Omni (`--omni`: `/v1/audio/voices`, `x-audio-sample-rate`,
 `ref_audio` only as a `data:` URL), with a sine tone of a length set by the word count. `ymirctl engines install vllm-omni`
@@ -1553,6 +1550,7 @@ hardware, not hard-coded per host).
 | `weirdnet-storage` 0.1.0 | encrypted local databases (context replicas, cache, metrics) |
 | `weirdnet-push` 0.1.0 | sealed 96-byte wake payloads, `ReplayGuard`, and the `server` feature's APNs and FCM senders, embedded in the inference node |
 | `weirdnet-rules` 0.1.0 | the rule engine under `weirdnet-alerts` |
+| `weirdnet-media` 0.1.0 | WAV and PCM, 16 kHz normalization, silence-aware transcription plans and re-alignment, SRT/VTT, the long-text speech plan and the hardened ffmpeg runner (audio milestones) |
 | `weirdnet-schemes`, `weirdnetctl` | registering `weirdnet-ymir://` and `weirdnet-bragi://` |
 | `weirdnet-update` | signed update metadata for `ymird` self-update (decision 14) |
 | `weirdnet-mcp` 0.4.0 (on agent =0.3.0; 0.5.0 comes with agent 0.4.0) | optional `ymirctl mcp` tools (status, load, chat) |

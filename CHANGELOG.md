@@ -49,9 +49,8 @@ All notable changes to Ymir are listed here. The format follows
   text, JSON, SRT or VTT, with `--language`, `--prompt`, `--model`, `--timestamps` and `--out`. `--chunk auto` splits long clips
   at silences to the model's catalog/1 `audio_max_seconds` and re-aligns the timestamps; it refuses when the limit is not
   reported.
-- `ymir-media`, an interim crate with no Ymir types, to be replaced by `weirdnet-media`. It has WAV probe/decode, resampling,
-  silence-aware chunking, transcript re-alignment, PCM stitching with crossfade, a long-text plan for speech, SRT/VTT, and a
-  hardened ffmpeg runner with a fake for tests.
+- `weirdnet-media` 0.1.0 (new dependency, in `release.toml`) does the media work: WAV decoding and 16 kHz mono
+  normalization, ffmpeg through its hardened runner for other formats, silence-aware chunk plans, re-alignment and SRT/VTT.
 - MCP `ymir_transcribe` (read-only; allowed under `--read-only`). It takes a path or base64 audio, never a URL. `ymirctl mcp --root DIR`
   limits the paths it may read.
 - Testkit mock engine `/v1/audio/speech` in llama-server and vLLM-Omni flavors (`/props` voices, `/v1/audio/voices`,

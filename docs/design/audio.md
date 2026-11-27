@@ -178,9 +178,8 @@ single response is fine; hours of narration go through the long-form plan below.
 
 ## Audio processing
 
-All of it lives in one place: the interim crate `ymir-media` now (generic, no Ymir types, marked "to be extracted into
-weirdnet-media", as `ymir-alerts` is), `weirdnet-media` once the Weirdnet lead extracts it. Clients use it; a node uses
-it only for the opt-in server-side paths.
+All of it lives in one place: `weirdnet-media` (0.1.0, published 2026-11-27 from the spec below; Ymir never had to keep
+the interim `ymir-media` it had started). Clients use it; a node uses it only for the opt-in server-side paths.
 
 ### Long-transcript synthesis (narration, podcasts)
 
@@ -215,7 +214,7 @@ it only for the opt-in server-side paths.
 
 ### Hardened ffmpeg
 
-The same stance as [video.md](video.md#server-side-expansion-opt-in-later), "Server-side expansion", as code in `ymir-media::ffmpeg`:
+The same stance as [video.md](video.md#server-side-expansion-opt-in-later), "Server-side expansion", as code in `weirdnet-media::ffmpeg`:
 
 - Ymir opens the input file itself (after the roots check) and feeds it on `pipe:0`; ffmpeg gets `-nostdin -hide_banner
   -loglevel error -protocol_whitelist file,pipe`, an allowlisted demuxer (`wav`, `mp3`, `flac`, `ogg`, `mov,mp4,m4a`,
@@ -369,7 +368,7 @@ field `#[serde(default, skip_serializing_if = ...)]` and absent in records from 
   entry need an explicit acceptance argument.
 - Detection from GGUF metadata (architecture and the mmproj's TTS heads) so a hand-placed file gets the right profile.
 
-### `weirdnet-media` (new; Ymir's interim `ymir-media` until then)
+### `weirdnet-media` (0.1.0, published)
 
 `probe` (WAV in Rust, others through ffprobe), `pcm` (decode WAV, resample to 16 kHz mono, crossfade, concatenate,
 write WAV), `vad::silence_cuts`, `transcribe::plan` and `realign`, `speak::TextPlan` (paragraph/sentence/clause, script
@@ -384,7 +383,7 @@ sampling of [video.md](video.md) joins it.
   clone or script goes only to a model that does it; the 400s name the gap; failover before audio, `Failed` after;
   guests: allowlist, `guests = false`, `clone` grant; not cached; no text, audio or reference bytes in the logs (a log
   capture asserts it).
-- `ymir-media` units: WAV header fuzz, resampling length, silence cuts on generated tones, plan determinism, crossfade
+- `weirdnet-media`'s own units (in that crate): WAV header fuzz, resampling length, silence cuts on generated tones, plan determinism, crossfade
   continuity, segment re-alignment, SRT/VTT.
 - Hostile files through the ffmpeg runner (`#[ignore]` without ffmpeg): a text file named `.wav`, a truncated MP3, a
   `concat` playlist, an HLS `.m3u8`, an MP4 pointing at a URL, a zip bomb–sized FLAC; all fail closed within the limits.
@@ -399,7 +398,7 @@ sampling of [video.md](video.md) joins it.
 
 1. `ymirctl transcribe`: `ControlRequest::Transcribe` through the inference role (`InferenceHost` / `Pool::transcribe`
    on `weirdnet-agent` 0.5.9), text/JSON/SRT/VTT output from `Transcript::segments`.
-2. `ymir-media` (interim, "to be extracted into weirdnet-media"): WAV probe, resample to 16 kHz mono, silence-aware
+2. Media processing (first planned as an interim `ymir-media`, now `weirdnet-media` 0.1.0): WAV probe, resample to 16 kHz mono, silence-aware
    chunking, segment re-alignment, PCM stitching and crossfade, the text plan, SRT/VTT, and the hardened ffmpeg runner
    with its fake. No Ymir types.
 3. Long-audio transcription in ymirctl (`--chunk auto`), using catalog/1 `audio_max_seconds` and refusing when absent.
@@ -426,12 +425,14 @@ sampling of [video.md](video.md) joins it.
   `ControlRequest::Transcribe` carries the audio as raw bytes after its JSON line (`bytes`, at most 31 MiB), not a path,
   so ymird never opens a client's file; `TranscribeTarget` reads the transcriber and its catalog/1 limits. `--chunk auto`
   refuses without a reported `audio_max_seconds` and names `limits = { audio_max_seconds = N }`.
-- **2.** `crates/ymir-media` (no Ymir types). One deviation: ffmpeg's input format is sniffed from magic bytes against the
-  allowlist and forced with `-f`, rather than probed with ffprobe, so no second tool parses the input.
+- **2.** `weirdnet-media` 0.1.0 from crates.io (also a `[[requires]]` in `release.toml`). An interim `ymir-media` was
+  written first and removed in the same branch once 0.1.0 was published. ymirctl keeps a small magic-byte check of its
+  own, only to refuse non-media early and to name the format of a file sent with `--no-normalize`; ffmpeg needs ffprobe
+  next to it (`Runner::locate`).
 - **4.** MCP `ymir_transcribe` (read tool). "Allowed roots" are new: `ymirctl mcp --root DIR`, applied to this tool's
   `path`; without a root any file the user can read is allowed after the extension check. Chat media is unchanged.
 - **5.** The mock's `/v1/audio/speech` in both flavors. It encodes WAV and PCM only (it refuses mp3, flac and opus with each
-  flavor's error), which is enough for the client tests; ffmpeg does real encoding.
+  flavor's error), which is enough for the client tests; `weirdnet-media::audio::encode` does real encoding.
 - **6.** `ymirctl engines install vllm-omni` in its own venv (`<home>/engines/vllm-omni`), vLLM and vLLM-Omni pinned to one
   release. It has the PyTorch-versus-driver check and warns when vLLM's wheel is newer than the driver. The `--vllm-cuda`
   nightly variants on the unmerged M7 pass 2 branch do not apply, because vLLM-Omni needs a release.

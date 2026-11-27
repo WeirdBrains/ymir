@@ -31,7 +31,7 @@ test = false
 
 [dependencies]
 axum.workspace = true
-ymir-media.workspace = true
+weirdnet-media.workspace = true
 futures.workspace = true
 hex.workspace = true
 sha2.workspace = true
@@ -61,7 +61,7 @@ weirdnet-alerts.workspace = true
 ymirctl.workspace = true
 ymir-core.workspace = true
 weirdnet-semcache.workspace = true
-ymir-media.workspace = true
+weirdnet-media.workspace = true
 
 [lints]
 workspace = true

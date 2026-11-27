@@ -5,7 +5,6 @@ members = [
     "crates/ymird",
     "crates/ymirctl",
     "crates/ymir-testkit",
-    "crates/ymir-media",
 ]
 
 [workspace.package]
@@ -23,12 +22,12 @@ async-trait = "0.1"
 ymir-core = { path = "crates/ymir-core", version = "0.23.0" }
 ymird = { path = "crates/ymird", version = "0.23.0" }
 ymirctl = { path = "crates/ymirctl", version = "0.23.0" }
-ymir-media = { path = "crates/ymir-media", version = "0.23.0" }
 
 # Published Weirdnet crates, used as they are.
 weirdnet-agent = { version = "0.5.9", features = ["pool", "serve", "jobs"] }
 weirdnet-backends = { version = "=0.4.9", features = ["node"] }
 weirdnet-device-link = "0.4.2"
+weirdnet-media = "0.1.0"
 weirdnet-model = { version = "0.5.4", default-features = false }
 weirdnet-net = "=0.8.3"
 weirdnet-openai = "0.2.4"

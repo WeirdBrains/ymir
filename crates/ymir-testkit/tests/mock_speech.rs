@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use ymir_media::wav;
+use weirdnet_media::probe::wav_header;
 
 const MOCK: &str = env!("CARGO_BIN_EXE_ymir-mock-engine");
 
@@ -63,8 +63,8 @@ async fn llama_server_flavor() {
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["content-type"], "audio/wav");
     let b = r.bytes().await.unwrap();
-    let i = wav::probe(&b).unwrap();
-    assert_eq!((i.sample_rate, i.channels, i.bits, i.duration_ms()), (24_000, 1, 16, 300));
+    let i = wav_header(&b, None).unwrap();
+    assert_eq!((i.sample_rate, i.channels, i.bits_per_sample, i.duration_ms()), (24_000, 1, 16, 300));
     assert!(!b.windows(5).any(|w| w == b"three"));
 
     // Raw PCM, speed, and /tts.
@@ -76,7 +76,7 @@ async fn llama_server_flavor() {
     let r = speak(&e, "/v1/audio/speech", json!({"input": "a b c d e f g h i j", "stream_format": "audio"})).await;
     let b = r.bytes().await.unwrap();
     assert_eq!(&b[4..8], &u32::MAX.to_le_bytes());
-    assert_eq!(wav::probe(&b).unwrap().duration_ms(), 600);
+    assert_eq!(wav_header(&b, None).unwrap().duration_ms(), 600);
 
     // Refusals name the problem, never the text.
     let m = error(speak(&e, "/v1/audio/speech", json!({"input": "secret words", "voice": "alloy"})).await).await;
@@ -93,7 +93,7 @@ async fn llama_server_cloning_and_no_voices() {
     assert!(props.get("voices").is_none(), "no voices reported when the model has none");
     let r =
         speak(&e, "/v1/audio/speech", json!({"input": "(A calm narrator)Hello.", "speaker_ref_b64": "UklGRg==", "speaker_ref_text": "ref"})).await;
-    assert_eq!(wav::probe(&r.bytes().await.unwrap()).unwrap().sample_rate, 48_000);
+    assert_eq!(wav_header(&r.bytes().await.unwrap(), None).unwrap().sample_rate, 48_000);
     assert!(error(speak(&e, "/v1/audio/speech", json!({"input": "x", "voice": "any"})).await).await.contains("no predefined voices"));
 }
 
@@ -108,7 +108,7 @@ async fn vllm_omni_flavor() {
     assert_eq!(r.headers()["x-audio-sample-rate"], "24000");
     assert_eq!(r.headers()["x-audio-channels"], "1");
     assert_eq!(r.headers()["x-audio-duration-seconds"], "0.200");
-    assert_eq!(wav::probe(&r.bytes().await.unwrap()).unwrap().duration_ms(), 200);
+    assert_eq!(wav_header(&r.bytes().await.unwrap(), None).unwrap().duration_ms(), 200);
 
     let r = speak(&e, "/v1/audio/speech", json!({"input": "x", "response_format": "pcm", "stream": true, "stream_format": "audio"})).await;
     assert!(r.headers().get("x-audio-duration-seconds").is_none(), "a stream can't know its length");

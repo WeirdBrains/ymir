@@ -39,7 +39,7 @@ base64 = "0.22"
 tempfile.workspace = true
 async-trait.workspace = true
 ymir-core.workspace = true
-ymir-media.workspace = true
+weirdnet-media.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

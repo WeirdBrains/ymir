@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use weirdnet_agent::MediaLimits;
 use weirdnet_backends::{EngineConfig, Supervisor, SupervisorOptions};
+use weirdnet_media::pcm::{Pcm, encode_wav};
 use weirdnet_semcache::NoCache;
 use ymir_core::config::LocalModel;
 use ymir_core::control::{self, ControlHandler, ControlRequest, TranscribeJob};
 use ymir_core::{Coordinator, LocalModelNode, ModelNode, NodeConfig, Paths};
-use ymir_media::{Pcm, wav};
 use ymirctl::transcribe::{Chunking, Options};
 
 const MOCK: &str = env!("CARGO_BIN_EXE_ymir-mock-engine");
@@ -100,12 +100,12 @@ fn speech(rate: u32, channels: u16, ms: u32) -> Vec<u8> {
     let on = rate as usize * 17 / 10;
     let mut s = Vec::with_capacity(n * usize::from(channels));
     for i in 0..n {
-        let v = if i % period < on { (i as f32 * 0.07).sin() * 0.5 } else { 0.0 };
+        let v = if i % period < on { ((i as f32 * 0.07).sin() * 16_000.0) as i16 } else { 0 };
         for _ in 0..channels {
             s.push(v);
         }
     }
-    wav::encode_pcm16(&Pcm::new(rate, channels, s))
+    encode_wav(&Pcm::new(rate, channels, s))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -134,9 +134,9 @@ async fn transcribe_through_the_control_socket() {
     let o = ymirctl::transcribe::transcribe(&socket, &opts, clip.clone(), None, &mut |_| {}).await.unwrap();
     assert_eq!(o.model, "whisper");
     assert_eq!(o.chunks, 1);
-    assert!(o.joined.text.starts_with("heard "), "{}", o.joined.text);
-    assert_eq!(o.joined.segments.len(), 1);
-    assert_eq!(o.joined.segments[0].end_ms, 1_500, "the engine's timing");
+    assert!(o.transcript.text.starts_with("heard "), "{}", o.transcript.text);
+    assert_eq!(o.transcript.segments.len(), 1);
+    assert_eq!(o.transcript.segments[0].end_ms, 1_500, "the engine's timing");
     assert_eq!(o.nodes, vec!["stt".to_string()]);
 
     // Long audio, chunked at silences to 30 s: 75 s is three requests, segments on the clip's timeline.
@@ -147,13 +147,13 @@ async fn transcribe_through_the_control_socket() {
     assert_eq!(o.chunks, 3);
     assert_eq!(lines.len(), 3);
     assert!(lines[0].starts_with("chunk 1 of 3"));
-    assert_eq!(o.joined.segments.len(), 3);
-    assert_eq!(o.joined.segments[0].start_ms, 0);
-    for w in o.joined.segments.windows(2) {
-        assert!(w[1].start_ms >= 24_000 + w[0].start_ms && w[1].start_ms - w[0].start_ms <= 30_000, "{:?}", o.joined.segments);
+    assert_eq!(o.transcript.segments.len(), 3);
+    assert_eq!(o.transcript.segments[0].start_ms, 0);
+    for w in o.transcript.segments.windows(2) {
+        assert!(w[1].start_ms >= 24_000 + w[0].start_ms && w[1].start_ms - w[0].start_ms <= 30_000, "{:?}", o.transcript.segments);
     }
-    assert_eq!(o.joined.duration_ms, 75_000);
-    assert_eq!(o.joined.text.matches("heard").count(), 3);
+    assert_eq!(o.duration_ms, 75_000);
+    assert_eq!(o.transcript.text.matches("heard").count(), 3);
 
     // The CLI: a file to SRT on stdout.
     let file = home.path().join("talk.wav");
@@ -214,7 +214,7 @@ async fn chunking_needs_a_reported_length() {
     let o = ymirctl::transcribe::transcribe(&socket, &Options { normalize: true, ..Default::default() }, speech(16_000, 1, 1_000), None, &mut |_| {})
         .await
         .unwrap();
-    assert!(o.joined.text.starts_with("heard "));
-    assert!(o.joined.segments.iter().all(|s| s.coarse), "no timing asked for: one coarse segment");
+    assert!(o.transcript.text.starts_with("heard "));
+    assert!(o.transcript.segments.iter().all(|s| s.coarse), "no timing asked for: one coarse segment");
     sup.unload("whisper").await.ok();
 }
