@@ -5908,7 +5908,7 @@ checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
 
 [[package]]
 name = "ymir-core"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5951,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "ymir-testkit"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5983,7 +5983,7 @@ dependencies = [
 
 [[package]]
 name = "ymirctl"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6020,7 +6020,7 @@ dependencies = [
 
 [[package]]
 name = "ymird"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "clap",

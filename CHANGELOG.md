@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-27
+
 ### Fixed
 
 - `vllm-ray` listener check: Ymir now checks every process under the Ray and vLLM processes it starts, the members of their
@@ -25,6 +27,7 @@ All notable changes to Ymir are listed here. The format follows
 - The installer's Inkling 2 Mini check also accepts `Inkling2LoopForConditionalGeneration`.
 - The installer runs `uv` and pip from the engines dir, so a `uv.toml` the service user cannot read in the caller's working
   directory (`sudo -u llm` from a home) no longer stops it.
+- Vllm-ray fixes from the first real GPU run: the listener check follows Ray's whole process tree, Ray and vLLM workers are pinned to the private link, and ymirctl engines install vllm picks a PyTorch CUDA build the driver can run.
 
 ## [0.22.0] - 2026-11-26
 
