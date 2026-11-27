@@ -661,6 +661,13 @@ ymird keeps limits measured at load in the models dir (`weirdnet-backends` 0.4.9
 engine reports at load (llama-server `/props`, vLLM `max_model_len`) is what catalog/1 and `ymirctl status` report as the
 context per request. The bridge has no `/v1/audio/transcriptions` yet. See [docs/design/video.md](design/video.md#milestone-2-what-was-built-2026-11-27-mocks-only).
 
+**Speech out and audio processing (designed 2026-11-27, not built).** A `role = "speak"` model (Qwen3-TTS, Kokoro-82M,
+VoxCPM2, Fish Audio Drama 3 on llama-server or vLLM-Omni) with catalog/1 purpose `speak` and a reported speech profile
+(preset voices, voice design, cloning, multi-speaker scripts, formats, limits; absent when unknown), infer/2 `Speak`,
+`ymirctl speak`/`transcribe`, the bridge's `/v1/audio/speech` and `/v1/audio/transcriptions`, and client-side long-form
+synthesis and long-audio chunking through the interim `ymir-media` crate. Speech is content: not cached, not logged. See
+[docs/design/audio.md](design/audio.md).
+
 ### Model sizing
 
 `weirdnet-model`'s catalog grows from Gemma 4 only to a tiered catalog with per-quant memory
