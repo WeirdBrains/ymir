@@ -421,7 +421,6 @@ mod tests {
         assert!(e.contains("192.168.1.5:6381"), "another specific address is still refused: {e}");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_tree_follows_children_into_other_groups() {
         // (pid, ppid, pgrp): `ray start` 100 leads group 100; raylet 101 is in it; a worker 200
@@ -441,9 +440,11 @@ mod tests {
         assert!(env.contains(&("NCCL_SOCKET_IFNAME".into(), "=enp1s0f1np1".into())));
         assert!(env.contains(&("GLOO_SOCKET_IFNAME".into(), "enp1s0f1np1".into())));
         assert_eq!(link_env(ip, None).len(), 1);
-        assert_eq!(iface_of("127.0.0.1".parse().unwrap()).as_deref(), Some("lo"));
+        // `lo` on Linux, `lo0` on the BSDs and macOS.
+        assert!(iface_of("127.0.0.1".parse().unwrap()).is_some_and(|i| i.starts_with("lo")));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn finds_the_listeners_of_a_process_group() {
         use std::os::unix::process::CommandExt;
