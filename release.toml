@@ -63,9 +63,9 @@ manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
 
-[[requires]]                    # the semantic answer cache (SemanticCache, M6)
+[[requires]]                    # the semantic answer cache (SemanticCache, M6) and its pool mode (PooledSemanticCache, the `pool` feature, 0.2.3)
 crate = "weirdnet-semcache"
-version = "0.2.2"
+version = "0.2.3"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"

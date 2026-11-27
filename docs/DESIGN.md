@@ -1409,6 +1409,31 @@ node.toml unless `--no-persist`. Any of the owner's linked devices may, narrowed
   `entries` (default 1024, least recently used first). A hit answers as `served_by = "semantic-cache"`.
   `cache: bypass` neither reads nor stores, `refresh` stores without reading. Tests:
   [crates/ymir-core/tests/semantic.rs](../crates/ymir-core/tests/semantic.rs).
+- **Built (2026-11-27, pool mode):** `[inference.cache] mode = "pool"` shares the semantic cache between the pool's
+  inference nodes with `weirdnet-semcache` 0.2.3's `PooledSemanticCache` (feature `pool`), wired in
+  [crates/ymir-core/src/semcache_net.rs](../crates/ymir-core/src/semcache_net.rs). Each entry lives on its scope's home
+  node and one replica (`ShardRing`, rendezvous hashing on the whole scope: model, revisions, embedding model, context
+  hash). Each sharing node serves its shards (`cache.host()`) on `/weirdnet-semcache/shared/1` with
+  `weirdnet_semcache::pool::serve`, behind the roster (`RosterAuth`, peer id checked against the roster, which admits
+  cert-only devices by their grant) narrowed to the current members, so app devices and model nodes are refused. It
+  announces the app `ymir-semcache-pool-<16 hex of SHA-256 of the embedding model id>`; every 10 s the active roster
+  devices that announce it, plus this node, become the ring (`set_nodes`), so nodes with another embedding model never
+  share, and a revoked or stopped one drops out. A lookup goes L1 (256 entries, 5 min), then the home (this node's
+  own shard when it is the home), then the replica if the home is unreachable, each bounded at 150 ms; a node that
+  failed is skipped for 10 s; with no owner answering it is a miss (`Miss { degraded: true }`) and the request goes to a
+  model. A store runs in the background (home bounded at 2 s, replica after it), so an answer is never held up.
+  Alone (no other member) everything stays in process with no network call; `mode = "local"` (the default) never
+  attaches the pool at all. Cert-only inference links need nothing new: the protocol is a stream, not a sync type,
+  and the roster admits them. `ymirctl status` shows the cache: mode, entries held here, members, unreachable members
+  and the pool counters (L1, own-shard and peer hits, misses and degraded misses, errors, timeouts).
+  Not shared: the exact cache (`with_exact`), and entries are not moved when members change (a joining node starts
+  empty for its shards; `ask_replica_on_miss` stays off). Tests:
+  [crates/ymir-core/tests/semantic_pool.rs](../crates/ymir-core/tests/semantic_pool.rs) (three coordinators over the
+  wire encoding: replay on another node from the home then L1, replica write, scope removal everywhere, replica
+  fallback with the home cut off, a quick degraded miss with both owners cut off, no calls when alone) and
+  [crates/ymir-testkit/tests/m6_semcache_pool.rs](../crates/ymir-testkit/tests/m6_semcache_pool.rs) (three cert-only
+  inference nodes over Weirdnet find each other, share an entry, refuse the seed holder as a non-member, and keep
+  answering quickly with the home stopped).
 
 ### Fairness and priorities
 
@@ -1689,7 +1714,7 @@ every_secs = 15                      # how often the scheduler looks
 idle_unload_secs = 1800              # optional cloud-wide swap: unload models nobody asked for in 30 min (at least 60)
 
 [inference.cache]
-mode = "local"                       # off | local | pool
+mode = "local"                       # off | local | pool (pool: shared between inference nodes, weirdnet-semcache 0.2.3)
 backend = "embedded"                 # embedded | redis
 redis_url = "redis://127.0.0.1:6379" # used only when backend = "redis"
 threshold = 0.12                     # cosine distance for a semantic hit
@@ -2028,7 +2053,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
   device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
   nodes active-active. Moving a model between nodes, and placement with replica counts under the scheduler lease, are built
-  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). The published placement plan with holder-side fencing and cloud-wide swap are built (2026-11-27). Still to do: fencing on model nodes (a `weirdnet-backends` gap), replication on queue wait, prefix warming, and the pool-mode (shared) semantic cache. Exit
+  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). The published placement plan with holder-side fencing and cloud-wide swap are built (2026-11-27). The pool-mode (shared) semantic cache is built (`weirdnet-semcache` 0.2.3, 2026-11-27). Still to do: fencing on model nodes (a `weirdnet-backends` gap), replication on queue wait and prefix warming. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only) and [vLLM with Ray](#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only)). llama.cpp RPC groups and vLLM-on-Ray groups are built (opt-in pool policy, private-link-only planning and binds, group up and down, teardown when a member is lost). Still to do: a `vllm-ray` run on real GPUs, and the big-mode reproduction on server-a/server-b.
@@ -2074,7 +2099,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - The quickstart ran on one NVIDIA PC (the dev box, NVIDIA GPU, with a CPU llama.cpp build). Not yet run
   on a Spark, a Mac or a CPU-only box. `ymirctl setup` does not install or start a user service; it
   prints the `ymird` command.
-- The semantic cache is per inference node and in memory (see [Shared semantic cache](#shared-semantic-cache)); pool mode and Redis are not built.
+- The semantic cache is in memory (see [Shared semantic cache](#shared-semantic-cache)); pool mode shares it between inference nodes, but entries are lost on restart and Redis is not built.
 
 **Stubbed or not yet built:**
 
@@ -2512,7 +2537,7 @@ that release, and the M6 p95 comparison is between two equally delayed runs unti
   round, which the next round undoes. Also not built: several seed-holding inference nodes taking part in the lease
   (they would need an `ymir.inference` grant of their own) and warm-prefix data in the capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
   and relays for the same reason.
-- **Not built: the pool-mode semantic cache.** Each inference node has its own semantic cache (in memory, lost on restart); entries are not sharded or shared between inference nodes, and there is no Redis backend. Sharing needs `weirdnet-semcache` to grow a pool mode (rendezvous sharding on model plus key context to a home node and a replica, and a lookup/insert protocol between inference nodes, or a storage trait the app can back with synced records); 0.2.2 has only the in-process `SemanticCache` with `snapshot`/`restore`. Caching belongs in Weirdnet crates (AGENTS.md), so Ymir does not add its own protocol for it.
+- **The semantic cache: pool mode built, not persisted.** `mode = "pool"` shares it (see [Shared semantic cache](#shared-semantic-cache)); entries are still in memory and lost on restart, are not moved when members change, the exact cache is not shared, and there is no Redis backend.
 - **Batch jobs are not synced.** The submitting node runs the fan-out, so if it goes down the job stops
   (the design wants the job record synced so another node picks it up). No tasks with tools or approvals.
 - **Fairness is a cap, not a weighted share.** Devices are held to the same cap; there are no per-device

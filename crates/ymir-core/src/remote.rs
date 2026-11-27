@@ -107,6 +107,11 @@ impl Default for RemoteOptions {
     }
 }
 
+/// A dialer over `node` that knows `hints`' addresses.
+pub fn net_dialer(node: &Arc<SyncNode>, hints: &[(PeerId, Vec<Multiaddr>)]) -> NetDialer<Vec<u8>, Vec<u8>> {
+    dialer(node, hints)
+}
+
 fn dialer(node: &Arc<SyncNode>, hints: &[(PeerId, Vec<Multiaddr>)]) -> NetDialer<Vec<u8>, Vec<u8>> {
     let d = NetDialer::new(node.clone());
     for (peer, addrs) in hints {
@@ -161,7 +166,14 @@ pub fn serve_model(
 /// Whether `peer` announces [`MODEL_NODE_APP`]: connects to it first if needed and waits up to `wait`
 /// to learn what it announces.
 pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec<Multiaddr>, wait: Duration) -> bool {
+    announces(node, peer, addrs, wait, MODEL_NODE_APP).await
+}
+
+/// Whether `peer` announces `app`: connects to it first if needed and waits up to `wait` for
+/// its apps.
+pub async fn announces(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec<Multiaddr>, wait: Duration, app: &str) -> bool {
     let n = node.clone();
+    let app = app.to_string();
     tokio::task::spawn_blocking(move || {
         let mut apps = n.peer_apps(peer);
         if apps.is_none() {
@@ -172,7 +184,7 @@ pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec
                 apps = n.peer_apps(peer);
             }
         }
-        apps.is_some_and(|a| a.iter().any(|a| a == MODEL_NODE_APP))
+        apps.is_some_and(|a| a.contains(&app))
     })
     .await
     .unwrap_or(false)

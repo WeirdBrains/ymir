@@ -1030,6 +1030,9 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
     if !s.alerts.is_empty() {
         writeln!(out, "Alerts: {}", s.alerts.join(", "))?;
     }
+    if let Some(c) = &s.cache {
+        write_cache(out, c)?;
+    }
     match &s.network {
         Some(n) => {
             let linked = n.devices.iter().filter(|d| d.active && !d.me).count();
@@ -1039,6 +1042,25 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
             }
         }
         None => writeln!(out, "Weirdnet: off (link with `ymirctl pool link`)")?,
+    }
+    Ok(())
+}
+
+fn write_cache(out: &mut dyn Write, c: &ymir_core::semantic::CacheStatus) -> Result<()> {
+    write!(out, "Semantic cache: {} ({}), {} entries here", c.mode, c.embedding_model, c.entries)?;
+    if c.mode == "pool" {
+        write!(out, ", {} member{}", c.members.len(), if c.members.len() == 1 { "" } else { "s" })?;
+        if !c.down.is_empty() {
+            write!(out, ", {} unreachable", c.down.len())?;
+        }
+    }
+    writeln!(out)?;
+    if let Some(st) = &c.stats {
+        writeln!(
+            out,
+            "  hits: {} local copy, {} own shards, {} other nodes; {} misses ({} degraded); {} errors, {} timeouts",
+            st.l1_hits, st.shard_hits, st.peer_hits, st.misses, st.degraded, st.peer_errors, st.timeouts
+        )?;
     }
     Ok(())
 }

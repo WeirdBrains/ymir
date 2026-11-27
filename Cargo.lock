@@ -5515,12 +5515,14 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-semcache"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0090c6a5b86c89f202fdadccd29d9ac2639e0fc6f3c49998e0ba6eef44592339"
+checksum = "248f3d86c8e2a3668ca41e92f01df28fd19757bd1760921693b627f0f09074d6"
 dependencies = [
+ "async-trait",
  "serde",
  "sha2 0.10.9",
+ "tokio",
  "weirdnet-agent",
 ]
 

@@ -42,6 +42,7 @@ pub mod rollout_edit;
 pub mod rollouts_net;
 pub mod seed;
 pub mod semantic;
+pub mod semcache_net;
 pub mod service;
 pub mod setup;
 pub mod tasks;

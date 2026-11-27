@@ -297,6 +297,9 @@ pub struct StatusReport {
     /// This device on Weirdnet, once it has an identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkStatus>,
+    /// The semantic answer cache, when it is on (M6; pool mode shows its members and counters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::semantic::CacheStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -705,6 +708,7 @@ impl ControlHandler {
                         nodes,
                         alerts: self.alerter.as_ref().map(|a| a.failing()).unwrap_or_default(),
                         network: self.network_status(),
+                        cache: self.coordinator.as_ref().and_then(|c| c.semantic()).map(|s| s.status()),
                     }),
                 }
             }

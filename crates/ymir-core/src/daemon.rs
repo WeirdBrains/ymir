@@ -351,6 +351,17 @@ impl Daemon {
                         .map_err(|e| anyhow!("serving agent tasks on Weirdnet: {e}"))?;
                     tasks.push(t);
                 }
+                // Pool mode for the semantic cache (M6): shared with the other inference nodes
+                // that embed with the same model.
+                if let Some(sem) = c.semantic().filter(|s| s.opts.pool) {
+                    match crate::semcache_net::start(sem, &net.node, &net.membership, &net.hints, ropts.find_wait) {
+                        Ok(p) => {
+                            serving.push(Box::new(p));
+                            tracing::info!(embedding = %sem.opts.embedding_model, "semantic cache: shared with the pool's inference nodes");
+                        }
+                        Err(e) => tracing::warn!("semantic cache: pool mode off, staying local: {e}"),
+                    }
+                }
                 let d = remote::discover_model_nodes(
                     c.clone(),
                     net.node.clone(),

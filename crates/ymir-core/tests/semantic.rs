@@ -94,7 +94,13 @@ fn setup(threshold_similarity: f32) -> (Arc<Node>, Coordinator) {
         revision: Mutex::new(Some("r1".into())),
     });
     let opts = CoordinatorOptions {
-        semantic: Some(SemanticOptions { embedding_model: "embed".into(), similarity: threshold_similarity, ttl: None, max_entries: 64 }),
+        semantic: Some(SemanticOptions {
+            embedding_model: "embed".into(),
+            similarity: threshold_similarity,
+            ttl: None,
+            max_entries: 64,
+            pool: false,
+        }),
         ..Default::default()
     };
     let nodes: Vec<Arc<dyn ModelNode>> = vec![node.clone()];

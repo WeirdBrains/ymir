@@ -1045,7 +1045,7 @@ impl Coordinator {
         };
         let scope = sem.scope(&p.model, rev.as_deref(), embed_rev.as_deref(), &c.context);
         if req.cache.may_read()
-            && let Some((hit, score)) = sem.lookup(&scope, &embedding)
+            && let Some((hit, score)) = sem.lookup(&scope, &embedding).await
         {
             tracing::debug!(model = %p.model, score, "semantic cache hit");
             let mut f = replay(hit, out);
@@ -1061,6 +1061,12 @@ impl Coordinator {
             .into_iter()
             .find(|n| !n.draining() && n.status().iter().any(|s| s.id == model && s.state == ModelState::Ready && crate::model_node::embeds(s)))
             .map(|n| n.revision(model))
+    }
+
+    /// The semantic cache, when `[inference.cache] embedding_model` is set (for `ymird` to
+    /// attach pool mode).
+    pub fn semantic(&self) -> Option<&crate::semantic::Semantic> {
+        self.semantic.as_ref()
     }
 
     /// Entries in the semantic cache (0 when it is off).

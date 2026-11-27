@@ -39,6 +39,15 @@ All notable changes to Ymir are listed here. The format follows
   its swap group, the fewest models loaded, the quietest, this device), and `[inference.placement] idle_unload_secs`
   (at least 60) unloads models nobody asked for in that long, never below `replicas`, never the main model, the
   stand-in or the cache's embedding model, never with answers in flight.
+- M6 pool-mode semantic cache: `[inference.cache] mode = "pool"` shares the semantic cache between the pool's
+  inference nodes (`weirdnet-semcache` 0.2.3 `PooledSemanticCache`): each serves its shards on
+  `/weirdnet-semcache/shared/1` to the other members only (roster, then membership), members are the roster devices
+  announcing the same embedding model, lookups go L1 → home → replica with 150 ms bounds and an outage is a miss, and
+  stores run in the background. `ymirctl status` shows the cache's mode, entries, members and counters.
+
+### Changed
+
+- `weirdnet-semcache` 0.2.3 with the `pool` feature (was 0.2.2).
 
 ## [0.23.0] - 2026-11-27
 

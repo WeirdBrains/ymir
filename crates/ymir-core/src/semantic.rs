@@ -8,12 +8,18 @@
 //! system prompt, sampling, seed, response format, adapter scale) goes into the scope with the
 //! model, its weights' revision and the embedding model, so answers never cross them.
 
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use weirdnet_agent::model::{Content, ContentPart, Message, Role};
 use weirdnet_agent::remote::infer::v2::{Input, Request};
+use weirdnet_semcache::pool::{PoolLookup, PoolStats, PooledSemanticCache};
 use weirdnet_semcache::{CachedAnswer, Lookup, SemanticCache, SemanticConfig, scope_key};
+
+/// The pool-mode cache over this node's shards (M6, `weirdnet-semcache` 0.2.3).
+pub type Pooled = PooledSemanticCache<CachedAnswer>;
 
 /// `[inference.cache]` settings for the semantic layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +31,9 @@ pub struct SemanticOptions {
     pub similarity: f32,
     pub ttl: Option<Duration>,
     pub max_entries: usize,
+    /// `[inference.cache] mode = "pool"`: share the cache with the pool's other inference nodes
+    /// (attached by `ymird` once Weirdnet is up; without it the cache stays local).
+    pub pool: bool,
 }
 
 /// A prompt the semantic cache may answer: the text to embed and the context it is scoped by.
@@ -45,7 +54,58 @@ pub struct Pending {
 
 pub struct Semantic {
     pub opts: SemanticOptions,
-    cache: SemanticCache<CachedAnswer>,
+    /// The entries this node holds: all of them in local mode, its shards in pool mode.
+    shard: Arc<SemanticCache<CachedAnswer>>,
+    /// Pool mode, once attached ([`Self::attach_pool`]).
+    pool: OnceLock<Arc<Pooled>>,
+    /// Pool-mode stores running in the background ([`Self::settle`]).
+    writes: Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+/// The semantic cache in `ymirctl status`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheStatus {
+    /// `local`, or `pool` once shared.
+    pub mode: String,
+    pub embedding_model: String,
+    /// Entries this node holds (its shards in pool mode).
+    pub entries: usize,
+    /// Pool mode: the inference nodes sharing it, this one included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// Pool mode: members skipped for now after a failure or timeout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub down: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<PoolCounters>,
+}
+
+/// `weirdnet-semcache`'s [`PoolStats`], as Ymir reports them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolCounters {
+    pub l1_hits: u64,
+    pub shard_hits: u64,
+    pub peer_hits: u64,
+    pub misses: u64,
+    pub degraded: u64,
+    pub peer_errors: u64,
+    pub timeouts: u64,
+    pub skipped: u64,
+}
+
+impl From<PoolStats> for PoolCounters {
+    fn from(s: PoolStats) -> Self {
+        Self {
+            l1_hits: s.l1_hits,
+            shard_hits: s.shard_hits,
+            peer_hits: s.peer_hits,
+            misses: s.misses,
+            degraded: s.degraded,
+            peer_errors: s.peer_errors,
+            timeouts: s.timeouts,
+            skipped: s.skipped,
+        }
+    }
 }
 
 impl Semantic {
@@ -54,7 +114,27 @@ impl Semantic {
         if let Some(ttl) = opts.ttl {
             config = config.with_ttl(ttl);
         }
-        Self { cache: SemanticCache::with_config(config), opts }
+        Self {
+            shard: Arc::new(SemanticCache::with_config(config)),
+            pool: OnceLock::new(),
+            writes: Arc::new(tokio::sync::watch::Sender::new(0)),
+            opts,
+        }
+    }
+
+    /// The entries this node holds, for [`Pooled::new`] (pool mode keeps its shards there).
+    pub fn shard(&self) -> &Arc<SemanticCache<CachedAnswer>> {
+        &self.shard
+    }
+
+    /// Shares the cache through `pool` from now on (built over [`Self::shard`]). Once only;
+    /// `false` when a pool was already attached.
+    pub fn attach_pool(&self, pool: Arc<Pooled>) -> bool {
+        self.pool.set(pool).is_ok()
+    }
+
+    pub fn pool(&self) -> Option<&Arc<Pooled>> {
+        self.pool.get()
     }
 
     /// The scope for `model` at `revision`, embedded with `embed_revision` of the embedding model.
@@ -62,9 +142,28 @@ impl Semantic {
         scope_key(&[model, revision.unwrap_or(""), &self.opts.embedding_model, embed_revision.unwrap_or(""), context])
     }
 
-    pub fn lookup(&self, scope: &str, embedding: &[f32]) -> Option<(CachedAnswer, f32)> {
-        match self.cache.lookup(scope, embedding) {
-            Ok(Lookup::Hit { value, score, .. }) => Some((value, score)),
+    /// The most similar stored answer. In pool mode: L1, then the scope's home, then its
+    /// replica if the home is unreachable, each bounded (150 ms); an outage is a miss.
+    pub async fn lookup(&self, scope: &str, embedding: &[f32]) -> Option<(CachedAnswer, f32)> {
+        let Some(pool) = self.pool.get() else {
+            return match self.shard.lookup(scope, embedding) {
+                Ok(Lookup::Hit { value, score, .. }) => Some((value, score)),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::debug!("semantic cache lookup: {e}");
+                    None
+                }
+            };
+        };
+        match pool.lookup(scope, embedding).await {
+            Ok(PoolLookup::Hit { value, score, from }) => {
+                tracing::debug!(?from, score, "pool semantic cache hit");
+                Some((value, score))
+            }
+            Ok(PoolLookup::Miss { degraded: true, .. }) => {
+                tracing::debug!("pool semantic cache: an owner was unreachable; answering from a model");
+                None
+            }
             Ok(_) => None,
             Err(e) => {
                 tracing::debug!("semantic cache lookup: {e}");
@@ -73,26 +172,78 @@ impl Semantic {
         }
     }
 
+    /// Stores a finished answer. In pool mode the write to the scope's owners runs in the
+    /// background, so the answer is never held up by it.
     pub fn store(&self, pending: &Pending, model: &str, answer: &CachedAnswer) {
         if pending.model != model {
             return;
         }
-        if let Err(e) = self.cache.insert(&pending.scope, &pending.embedding, answer.clone()) {
-            tracing::debug!("semantic cache insert: {e}");
+        let Some(pool) = self.pool.get() else {
+            if let Err(e) = self.shard.insert(&pending.scope, &pending.embedding, answer.clone()) {
+                tracing::debug!("semantic cache insert: {e}");
+            }
+            return;
+        };
+        let (pool, scope, embedding, answer) = (pool.clone(), pending.scope.clone(), pending.embedding.clone(), answer.clone());
+        let writes = self.writes.clone();
+        writes.send_modify(|n| *n += 1);
+        tokio::spawn(async move {
+            match pool.insert(&scope, &embedding, answer).await {
+                Ok(w) if !w.failed.is_empty() => tracing::debug!(failed = ?w.failed, "pool semantic cache insert"),
+                Ok(_) => {}
+                Err(e) => tracing::debug!("semantic cache insert: {e}"),
+            }
+            writes.send_modify(|n| *n -= 1);
+        });
+    }
+
+    /// Waits until the background stores (and, in pool mode, their replica writes) are done;
+    /// each is bounded by the pool's write timeout.
+    pub async fn settle(&self) {
+        let mut rx = self.writes.subscribe();
+        let _ = rx.wait_for(|n| *n == 0).await;
+        if let Some(p) = self.pool.get() {
+            p.settle().await;
         }
     }
 
-    /// Drops every entry (a model's weights changed under its id, or the operator asked).
+    /// Drops every entry this node holds (a model's weights changed under its id, or the
+    /// operator asked). Other members keep theirs; use [`Self::remove_scope`] for one scope
+    /// everywhere.
     pub fn clear(&self) {
-        self.cache.clear();
+        self.shard.clear();
+    }
+
+    /// Drops `scope` here and, in pool mode, on every member (bounded). Returns the members that
+    /// could not be reached.
+    pub async fn remove_scope(&self, scope: &str) -> Vec<String> {
+        match self.pool.get() {
+            Some(p) => p.remove_scope(scope).await.failed,
+            None => {
+                self.shard.remove_scope(scope);
+                Vec::new()
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.shard.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
+        self.shard.is_empty()
+    }
+
+    pub fn status(&self) -> CacheStatus {
+        let mut st =
+            CacheStatus { mode: "local".into(), embedding_model: self.opts.embedding_model.clone(), entries: self.len(), ..Default::default() };
+        if let Some(p) = self.pool.get() {
+            st.mode = "pool".into();
+            st.members = p.ring().nodes().map(str::to_string).collect();
+            st.down = st.members.iter().filter(|m| p.is_down(m)).cloned().collect();
+            st.stats = Some(p.stats().into());
+        }
+        st
     }
 }
 
@@ -146,7 +297,7 @@ mod tests {
     use super::*;
 
     fn opts() -> SemanticOptions {
-        SemanticOptions { embedding_model: "embed".into(), similarity: 0.88, ttl: None, max_entries: 8 }
+        SemanticOptions { embedding_model: "embed".into(), similarity: 0.88, ttl: None, max_entries: 8, pool: false }
     }
 
     #[test]
@@ -173,15 +324,17 @@ mod tests {
         assert_ne!(cacheable(&hot).unwrap().context, a.context);
     }
 
-    #[test]
-    fn hits_near_misses_far_and_scopes_apart() {
+    #[tokio::test]
+    async fn hits_near_misses_far_and_scopes_apart() {
         let s = Semantic::new(opts());
         let scope = s.scope("m", Some("r1"), None, "ctx");
         let p = Pending { model: "m".into(), scope: scope.clone(), embedding: vec![1.0, 0.0, 0.0] };
         s.store(&p, "m", &CachedAnswer::new("m", "hello", "stop"));
-        assert_eq!(s.lookup(&scope, &[0.99, 0.05, 0.0]).unwrap().0.text, "hello");
-        assert!(s.lookup(&scope, &[0.0, 1.0, 0.0]).is_none());
-        assert!(s.lookup(&s.scope("m", Some("r2"), None, "ctx"), &[1.0, 0.0, 0.0]).is_none());
+        assert_eq!(s.lookup(&scope, &[0.99, 0.05, 0.0]).await.unwrap().0.text, "hello");
+        assert!(s.lookup(&scope, &[0.0, 1.0, 0.0]).await.is_none());
+        assert!(s.lookup(&s.scope("m", Some("r2"), None, "ctx"), &[1.0, 0.0, 0.0]).await.is_none());
+        assert_eq!(s.status().mode, "local");
+        assert!(s.status().stats.is_none());
         // An answer from another model (a stand-in) is not stored under the asked one.
         s.store(&Pending { embedding: vec![0.0, 0.0, 1.0], ..p }, "standin", &CachedAnswer::new("standin", "x", "stop"));
         assert_eq!(s.len(), 1);

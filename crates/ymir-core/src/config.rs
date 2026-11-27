@@ -611,6 +611,7 @@ impl CacheSection {
             similarity: 1.0 - self.threshold,
             ttl: parse_duration(&self.ttl).ok(),
             max_entries: self.entries,
+            pool: self.mode == "pool",
         })
     }
 
