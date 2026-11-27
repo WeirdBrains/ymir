@@ -106,6 +106,12 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     assert!(o.contains("vLLM nightly") && o.contains("for cuda") && o.contains("with uv") && o.contains("wheels.vllm.ai/nightly vllm ray"), "{o}");
     assert!(o.contains("Inkling 2 Mini") && o.contains("dry run"), "{o}");
     assert!(o.contains("GPU driver: CUDA 13.0; PyTorch: PyPI's (CUDA 13.0 build)") && !o.contains("--torch-backend"), "{o}");
+    assert!(
+        o.contains("vLLM's kernels: CUDA 13.2 builds") && o.contains("warning: newer than the driver's CUDA 13.0") && o.contains("--vllm-cuda cu130"),
+        "{o}"
+    );
+    let o = engines(&home, &["install", "vllm", "--vllm-cuda", "cu130", "--dry-run"], &probe).unwrap();
+    assert!(o.contains("wheels.vllm.ai/nightly/cu130 vllm ray") && !o.contains("warning"), "{o}");
     assert!(!venv.exists() && !tools.join("calls.log").exists());
     assert!(engines(&home, &["upgrade", "vllm"], &probe).unwrap_err().to_string().contains("install vllm` first"));
 
@@ -124,6 +130,8 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     assert!(ymir_core::vllm::managed_with_inkling(&venv.join("bin/vllm")));
     assert_eq!((rec.driver_cuda.as_deref(), rec.torch_cuda.as_deref(), rec.torch_backend.as_deref()), (Some("13.0"), Some("13.0"), None));
     assert!(o.contains("PyTorch 2.14.0 (CUDA 13.0; the driver runs 13.0)"), "{o}");
+    assert_eq!(rec.vllm_cuda.as_deref(), Some("13.2"), "the default nightly's kernels");
+    assert!(o.contains("warning: vLLM 0.34.1rc1.dev231+g43108ffcc's kernels are CUDA 13.2 builds"), "{o}");
     assert!(ymir_core::vllm::ensure_inkling(&venv.join("bin/vllm"), false).is_ok(), "a nightly numbered below 0.35.0 is accepted by its record");
 
     // Auto-discovery: no node.toml edit, no PATH.

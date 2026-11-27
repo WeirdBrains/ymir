@@ -266,6 +266,7 @@ than the driver's, and <code>ymirctl engines status</code> shows both.</p>
 <tr><td><code>--accel auto|cuda|rocm|cpu</code></td><td>The accelerator; <code>auto</code> looks for <code>nvidia-smi</code>, then <code>rocminfo</code> or <code>/opt/rocm</code>, else CPU.</td></tr>
 <tr><td><code>--index-url URL</code></td><td>A vLLM wheel index. ROCm and CPU need one, because PyPI's vLLM wheels are CUDA builds (or use a container image: <code>vllm = "image:..."</code>).</td></tr>
 <tr><td><code>--torch-backend B</code></td><td>PyTorch's build for <code>uv</code> (<code>cu130</code>, <code>cu128</code>, <code>cpu</code>, <code>auto</code> ...) instead of the one matched to the driver.</td></tr>
+<tr><td><code>--vllm-cuda cuNNN</code></td><td>Install vLLM's nightly built for that CUDA (<a href="https://wheels.vllm.ai/nightly/cu130/vllm/">for example <code>nightly/cu130</code></a>). The default nightly's kernels are CUDA 13.2 builds; the installer warns when the driver runs an older CUDA, which breaks kernels such as Inkling 2 Mini's vision encoder on a DGX Spark.</td></tr>
 <tr><td><code>--uv PATH</code>, <code>--python PATH</code></td><td>Which <code>uv</code>, or which Python for <code>-m venv</code> and pip instead of <code>uv</code>.</td></tr>
 <tr><td><code>--reinstall</code>, <code>--dry-run</code>, <code>--force</code></td><td>Make the venv afresh; print the commands without running them; install on an OS other than Linux.</td></tr>
 <tr><td><code>ymirctl engines upgrade vllm</code></td><td>Upgrade the managed vLLM and Ray (same flags).</td></tr>

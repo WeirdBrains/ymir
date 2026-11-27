@@ -321,6 +321,9 @@ pub struct WorkerConfig {
     pub vllm: Option<PathBuf>,
     /// `[model] ray_trust_firewall`: allow Ray listeners on all interfaces (see [`crate::ray`]).
     pub ray_trust_firewall: bool,
+    /// `[model] ray_trusted_ports`: where `ray_trust_firewall` allows them (default
+    /// [`crate::ray::TRUSTED_PORTS`]).
+    pub ray_trusted_ports: Vec<String>,
 }
 
 /// One process of a group, the leader of its own process group: stopping it signals the whole
@@ -449,13 +452,15 @@ impl RpcWorkers {
     /// For a Ray process: its listeners are on the private link or loopback only.
     fn binds_ok(&self, p: &Proc) -> Result<(), RemoteError> {
         let (Some(own), Some(g)) = (p.ray_link, p.pgid) else { return Ok(()) };
-        match crate::ray::check_listeners(&crate::ray::listeners_of_tree(g), own, self.cfg.ray_trust_firewall) {
+        let ranges = crate::ray::trusted_ranges(&self.cfg.ray_trusted_ports).map_err(refused)?;
+        let trusted = self.cfg.ray_trust_firewall.then_some(ranges.as_slice());
+        match crate::ray::check_listeners(&crate::ray::listeners_of_tree(g), own, trusted) {
             Ok(wild) => {
                 if !wild.is_empty() {
                     let ports: Vec<u16> = wild.iter().map(|l| l.port).collect();
                     let mut seen = self.trusted_logged.lock().unwrap_or_else(|e| e.into_inner());
                     if seen.insert((p.role, ports.clone())) {
-                        tracing::info!(role = p.role, ports = ?ports, "listening on all interfaces, allowed by ray_trust_firewall = true: the host firewall must drop these ports off the private link");
+                        tracing::info!(role = p.role, ports = ?ports, "listening on all interfaces on firewalled ports, allowed by ray_trust_firewall = true: the host firewall must drop these ports off the private link");
                     }
                 }
                 Ok(())

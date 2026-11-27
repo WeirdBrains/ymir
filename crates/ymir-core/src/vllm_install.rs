@@ -43,6 +43,10 @@ pub const UV_PYTHON: &str = "3.12";
 pub const RECORD: &str = "ymir-install.json";
 /// vLLM's nightly wheels (CUDA, x86_64 and aarch64), built from main.
 pub const NIGHTLY_INDEX: &str = "https://wheels.vllm.ai/nightly";
+/// The CUDA vLLM's default nightly wheel is built with: on 2026-11-27 `nightly/` served the same
+/// wheel as `nightly/cu132/`. Its own kernels (vllm_flash_attn among them) then need a driver for
+/// CUDA 13.2 wherever the wheel has no SASS for the GPU and the driver JITs the PTX (GB10: sm_121).
+pub const NIGHTLY_DEFAULT_CUDA: (u32, u32) = (13, 2);
 /// Asks vLLM's model registry whether Inkling 2 Mini is there (prints `True` or `False`).
 /// Either of its architectures counts: [`crate::vllm::INKLING_ARCH`] (the model's `config.json`)
 /// or [`crate::vllm::INKLING2_LOOP_ARCH`] (the class vLLM main registers it as).
@@ -177,6 +181,9 @@ pub struct Options {
     pub force: bool,
     /// `uv --torch-backend` to use instead of the driver-matched choice ([`torch_backend`]).
     pub torch_backend: Option<String>,
+    /// A vLLM nightly CUDA variant (`cu130`): its index (`NIGHTLY_INDEX/cu130`) instead of the
+    /// default nightly, whose kernels are [`NIGHTLY_DEFAULT_CUDA`] builds.
+    pub vllm_cuda: Option<String>,
 }
 
 /// One command of the plan.
@@ -210,6 +217,9 @@ pub struct Plan {
     pub driver_cuda: Option<(u32, u32)>,
     /// The `--torch-backend` given to uv; `None`: PyPI's PyTorch (or pip's).
     pub torch_backend: Option<String>,
+    /// The CUDA the vLLM wheel is expected to be built with (the variant asked for, or the
+    /// default nightly's); `None` for a release or an operator's index (read from its version).
+    pub vllm_cuda: Option<(u32, u32)>,
     pub steps: Vec<Step>,
 }
 
@@ -247,6 +257,23 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
         bail!("--torch-backend `{b}` is not a backend like cu130, cu128, cpu or auto");
     }
     let driver_cuda = if accel == Accel::Cuda { p.driver_cuda() } else { None };
+    let variant = match &o.vllm_cuda {
+        Some(v) => {
+            let cuda = cuda_tag(v).filter(|_| v.starts_with("cu") && v.len() >= 5 && v[2..].chars().all(|c| c.is_ascii_digit()));
+            let Some(cuda) = cuda else { bail!("--vllm-cuda `{v}` is not a CUDA variant like cu130") };
+            if !nightly {
+                bail!("--vllm-cuda picks a nightly variant; it does not go with --version or --index-url");
+            }
+            Some((v.clone(), cuda))
+        }
+        None => None,
+    };
+    let nightly_index = variant.as_ref().map_or(NIGHTLY_INDEX.to_string(), |(v, _)| format!("{NIGHTLY_INDEX}/{v}"));
+    let vllm_cuda = match (&variant, nightly && accel == Accel::Cuda) {
+        (Some((_, c)), _) => Some(*c),
+        (None, true) => Some(NIGHTLY_DEFAULT_CUDA),
+        _ => None,
+    };
     let torch_backend = match (&o.torch_backend, accel) {
         (Some(b), _) => Some(b.clone()),
         (None, Accel::Cpu) => Some("cpu".into()),
@@ -278,7 +305,7 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
                 a.push(format!("--torch-backend={b}"));
             }
             if nightly {
-                a.extend(["--prerelease=allow".into(), "--extra-index-url".into(), NIGHTLY_INDEX.into()]);
+                a.extend(["--prerelease=allow".into(), "--extra-index-url".into(), nightly_index.clone()]);
             }
             if let Some(u) = &o.index_url {
                 a.extend(["--extra-index-url".into(), u.clone()]);
@@ -310,7 +337,7 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
                 a.push("--upgrade".into());
             }
             if nightly {
-                a.extend(["--pre".into(), "--extra-index-url".into(), NIGHTLY_INDEX.into()]);
+                a.extend(["--pre".into(), "--extra-index-url".into(), nightly_index.clone()]);
             }
             if let Some(u) = &o.index_url {
                 a.extend(["--extra-index-url".into(), u.clone()]);
@@ -320,7 +347,7 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
         }
     }
     let torch_backend = if installer == "uv" { torch_backend } else { None };
-    Ok(Plan { venv: venv.to_path_buf(), accel, installer, keep_venv, nightly, driver_cuda, torch_backend, steps })
+    Ok(Plan { venv: venv.to_path_buf(), accel, installer, keep_venv, nightly, driver_cuda, torch_backend, vllm_cuda, steps })
 }
 
 /// `Python 3.12.3` -> `(3, 12)`.
@@ -364,6 +391,9 @@ pub struct Record {
     pub torch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub torch_cuda: Option<String>,
+    /// The CUDA vLLM's own kernels are built with (its version's `cuNNN` tag, else the plan's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vllm_cuda: Option<String>,
     pub at_ms: u64,
 }
 
@@ -440,8 +470,10 @@ pub fn install(plan: &Plan, o: &Options, log: &mut dyn FnMut(&str)) -> Result<Re
         torch_backend: plan.torch_backend.clone(),
         torch,
         torch_cuda,
+        vllm_cuda: None,
         at_ms,
     };
+    let rec = Record { vllm_cuda: cuda_tag(&rec.vllm).or(plan.vllm_cuda).map(|(a, b)| format!("{a}.{b}")), ..rec };
     std::fs::write(plan.venv.join(RECORD), serde_json::to_vec_pretty(&rec)?)?;
     if let Some(e) = cuda_mismatch(&rec) {
         bail!("{e}; it is kept in {} (see `ymirctl engines status`)", plan.venv.display());
@@ -472,6 +504,32 @@ pub fn parse_torch(out: &str) -> Option<(String, String)> {
         let mut w = l.split_whitespace();
         (w.next()? == "torch").then_some(())?;
         Some((w.next()?.to_string(), w.next()?.to_string()))
+    })
+}
+
+/// `cu132` (alone or in a version such as `0.32.0rc1.dev100+g77154ca61.cu129`) -> `(13, 2)`.
+pub fn cuda_tag(s: &str) -> Option<(u32, u32)> {
+    let i = s.rfind("cu")?;
+    let d: String = s[i + 2..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    if d.len() < 3 || d.len() > 4 {
+        return None;
+    }
+    let (major, minor) = d.split_at(d.len() - 1);
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Why vLLM's own kernels may not run on this driver: built for a newer CUDA than it runs. Text
+/// can still work (on GB10 with driver 580 it did), while a kernel without SASS for the GPU, such
+/// as Inkling's vision attention, fails with "the provided PTX was compiled with an unsupported
+/// toolchain". A warning, not a failure, for that reason.
+pub fn vllm_cuda_mismatch(r: &Record) -> Option<String> {
+    let driver = cuda_version(r.driver_cuda.as_deref()?)?;
+    let built = cuda_version(r.vllm_cuda.as_deref()?)?;
+    (r.accel == Accel::Cuda && built > driver).then(|| {
+        format!(
+            "vLLM {}'s kernels are CUDA {}.{} builds and the GPU driver runs CUDA {}.{}: kernels the driver has to JIT from PTX (Inkling 2 Mini's vision encoder on a DGX Spark) fail with \"the provided PTX was compiled with an unsupported toolchain\". Update the NVIDIA driver to one for CUDA {}.{}, or install a vLLM built for CUDA {}.{} (`--vllm-cuda cu{}{}`, when that nightly has what you need)",
+            r.vllm, built.0, built.1, driver.0, driver.1, built.0, built.1, driver.0, driver.1, driver.0, driver.1
+        )
     })
 }
 
@@ -598,6 +656,55 @@ mod tests {
         assert_eq!(torch_backend(None, true).unwrap(), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_vllm_wheels_cuda_is_known_and_can_be_chosen() {
+        let v = Path::new("/h/engines/vllm");
+        let f = fake(&["uv", "nvidia-smi"]);
+        let p = plan(v, &Options::default(), &f).unwrap();
+        assert_eq!(p.vllm_cuda, Some(NIGHTLY_DEFAULT_CUDA), "the default nightly's kernels");
+        let p = plan(v, &Options { vllm_cuda: Some("cu130".into()), ..Default::default() }, &f).unwrap();
+        assert_eq!(p.vllm_cuda, Some((13, 0)));
+        assert!(p.steps[1].to_string().contains("--extra-index-url https://wheels.vllm.ai/nightly/cu130 vllm ray"), "{}", p.steps[1]);
+        for bad in ["13.0", "cu1", "cuda130", "cu13x"] {
+            assert!(plan(v, &Options { vllm_cuda: Some(bad.into()), ..Default::default() }, &f).is_err(), "{bad}");
+        }
+        assert!(plan(v, &Options { vllm_cuda: Some("cu130".into()), version: Some("0.34.0".into()), ..Default::default() }, &f).is_err());
+        assert_eq!(plan(v, &Options { version: Some("0.34.0".into()), ..Default::default() }, &f).unwrap().vllm_cuda, None);
+    }
+
+    #[test]
+    fn vllm_cuda_newer_than_the_driver_is_flagged() {
+        assert_eq!(cuda_tag("cu132"), Some((13, 2)));
+        assert_eq!(cuda_tag("0.32.0rc1.dev100+g77154ca61.cu129"), Some((12, 9)));
+        assert_eq!(cuda_tag("0.34.1rc1.dev290+g20da5d198"), None);
+        assert_eq!(cuda_tag("cu1"), None);
+        let mut r = Record {
+            accel: Accel::Cuda,
+            installer: "uv".into(),
+            requested: None,
+            vllm: "0.34.1rc1.dev290+g20da5d198".into(),
+            ray: "2.60.1".into(),
+            nightly: true,
+            inkling: true,
+            driver_cuda: Some("13.0".into()),
+            torch_backend: None,
+            torch: Some("2.14.0+cu130".into()),
+            torch_cuda: Some("13.0".into()),
+            vllm_cuda: Some("13.2".into()),
+            at_ms: 0,
+        };
+        let w = vllm_cuda_mismatch(&r).unwrap();
+        assert!(w.contains("CUDA 13.2 builds") && w.contains("runs CUDA 13.0") && w.contains("PTX") && w.contains("--vllm-cuda cu130"), "{w}");
+        assert!(cuda_mismatch(&r).is_none(), "PyTorch itself is fine");
+        r.vllm_cuda = Some("13.0".into());
+        assert!(vllm_cuda_mismatch(&r).is_none());
+        r.vllm_cuda = Some("12.9".into());
+        assert!(vllm_cuda_mismatch(&r).is_none());
+        r.vllm_cuda = None;
+        assert!(vllm_cuda_mismatch(&r).is_none(), "unknown: not flagged");
+    }
+
     #[test]
     fn reads_the_driver_and_torch_cuda() {
         let smi = "| NVIDIA-SMI 580.95.05   Driver Version: 580.95.05   CUDA Version: 13.0     |";
@@ -617,6 +724,7 @@ mod tests {
             torch_backend: None,
             torch: Some("2.14.0+cu132".into()),
             torch_cuda: Some("13.2".into()),
+            vllm_cuda: None,
             at_ms: 0,
         };
         let e = cuda_mismatch(&r).unwrap();

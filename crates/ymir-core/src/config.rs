@@ -253,6 +253,11 @@ pub struct ModelSection {
     /// drops Ray's ports on every interface but the private link.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ray_trust_firewall: bool,
+    /// The ports the host firewall drops off the private link (`"6390-6399"`, `"10001"`), where
+    /// `ray_trust_firewall` allows all-interface listeners; default 6390-6399 and 10000-10999. An
+    /// all-interface listener on any other port is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ray_trusted_ports: Vec<String>,
     /// MLX-LM's `mlx_lm.server`, for `backend = "mlx"` (Apple Silicon): `managed` (the venv
     /// `ymirctl setup` installs, else on `PATH`) | `system:/path/to/mlx_lm.server` | `off`.
     #[serde(default = "managed", skip_serializing_if = "is_managed")]
@@ -309,6 +314,7 @@ impl Default for ModelSection {
             ray: auto(),
             ray_args: Vec::new(),
             ray_trust_firewall: false,
+            ray_trusted_ports: Vec::new(),
             mlx: managed(),
             models_dir: None,
             local: Vec::new(),
@@ -979,6 +985,7 @@ impl NodeConfig {
             ray_args: self.model.ray_args.clone(),
             vllm: resolve_vllm(&self.model, paths),
             ray_trust_firewall: self.model.ray_trust_firewall,
+            ray_trusted_ports: self.model.ray_trusted_ports.clone(),
         }
     }
 

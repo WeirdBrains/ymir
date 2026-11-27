@@ -2,6 +2,19 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 15:30 EST: M7 Pass 2 findings and fixes (on main)
+
+Michael (11-27): "Then keep moving". The 0.22.1 re-run on m1 + m2 (results in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only), "Re-run with 0.22.1"): text works and no LAN or Tailscale listener was left, but the vision encoder still hit the PTX error (vLLM's own CUDA 13.2 kernels on a CUDA 13.0 driver), and two all-interface listeners (42477, 44217) were outside the firewalled ranges. Built on the dev box; no live node touched for this change.
+
+- **Listener check** ([ray.rs](crates/ymir-core/src/ray.rs) `check_listeners`, `trusted_ranges`; [group.rs](crates/ymir-core/src/group.rs)): with `ray_trust_firewall`, all-interface listeners pass only on `[model] ray_trusted_ports` (default 6390-6399, 10000-10999); a bad range refuses the group.
+- **Port pinning** (`PINNED_PORTS`, `VLLM_BASE_PORT`): Ray's agent, manager and worker ports in 10001-10899 unless `ray_args` sets them; `VLLM_PORT=10900`; default `ray_port` 6390.
+- **Installer** ([vllm_install.rs](crates/ymir-core/src/vllm_install.rs), [engines.rs](crates/ymirctl/src/engines.rs)): `vllm_cuda` recorded (version tag or `NIGHTLY_DEFAULT_CUDA` 13.2), a warning when newer than the driver (dry run and install), `--vllm-cuda cuNNN` for a nightly variant index.
+- **Tests:** ray unit tests (inside vs outside the trusted ranges, edges, custom ranges, bad specs, pinned args, operator args win), vllm_install (CUDA tags, mismatch, variant plan), [engines.rs tests](crates/ymirctl/tests/engines.rs) (warning, `--vllm-cuda cu130`), [m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs) 3/3.
+
+**Not tested:** the pinned ports and `VLLM_PORT` on real GPUs (a process that still takes a random all-interface port now gets the group refused, and the log names it).
+
+**Next:** a GPU re-run of the pinned ports; vision needs a CUDA 13.2 driver on m1 + m2 or a CUDA 13.0 vLLM build with Inkling.
+
 ## 2026-11-27 15:10 EST: drop Intel (x86_64) macOS (on main)
 
 Michael (11-27, t82u): "We should drop support for Mac OS x86_64. Make that adjustment in the shared release and [AGENTS.md](AGENTS.md)". Branch `drop-macos-x86_64` off `291af7b` (v0.23.0, the last release with an Intel Mac build); rebased onto `6ca27f3` after v0.23.0 published and committed straight to main. The shared side (`weirdnet-project-helpers`, collective [AGENTS.md](https://github.com/WeirdBrains/weirdnet-agents/blob/main/AGENTS.md)) is the Weirdnet lead's.
@@ -23,6 +36,7 @@ Michael (11-27, t82u): "We should drop support for Mac OS x86_64. Make that adju
 - On the way: alien-blue's `/mnt/ext1` disk was at about 95% IO pressure from another agent's cargo test, so the artifact download crawled; the publish was rerun with the download on the NVMe root (`pub-nvme-0230.sh`, the same steps and `leak-scan.sh` as `pub.sh`). The `/v1/audio/transcriptions` bridge still waits on `weirdnet-openai`, and transcription has not been run against a live Voxtral or Whisper server.
 
 **Next:** the M7 Pass 2 follow-ups: `ray_trust_firewall` should enforce the trusted port ranges (two Ray ports on m1 fell outside them), and `engines install vllm` should check the vLLM wheel's CUDA build as well as PyTorch's (vision on driver 580 needs a cu130 vLLM build or a newer driver).
+
 
 ## 2026-11-27 11:17 EST: video milestone 2, transcription role and route, measured limits (on main)
 

@@ -14,6 +14,23 @@ All notable changes to Ymir are listed here. The format follows
   `macos-15-intel`. v0.23.0 is the last release with an Intel Mac build; Intel Macs can still build from source with
   llama.cpp, unsupported.
 
+### Security
+
+- `vllm-ray`: `ray_trust_firewall = true` now allows all-interface Ray listeners only on the firewalled ports, the new
+  `[model] ray_trusted_ports` (default `6390-6399` and `10000-10999`, the documented `ymir_ray` firewall ranges). An
+  all-interface listener on any other port is refused. The 0.22.1 run on two DGX Sparks had two outside any firewall rule
+  (`*:42477`, a vLLM worker, and `0.0.0.0:44217`, a Ray agent) that the check let through.
+- Ray's and vLLM's ports are pinned into those ranges unless `ray_args` sets them: node manager, object manager,
+  runtime-env agent, dashboard agent and metrics ports (10003 to 10008), workers 10010 to 10899, the head's client server 10001,
+  and `VLLM_PORT=10900` for vLLM's internal ports. The default `ray_port` is 6390 (was 6379, Redis's port).
+
+### Added
+
+- `ymirctl engines install vllm` records the CUDA vLLM's own kernels are built with (the wheel version's `cuNNN` tag, or 13.2 for
+  the default nightly) and warns when it is newer than the driver's, with the way out: a newer driver, or the new
+  `--vllm-cuda cuNNN`, which installs from that vLLM nightly variant's index. On driver 580 (CUDA 13.0) the default nightly's
+  CUDA 13.2 kernels break Inkling 2 Mini's vision encoder ("the provided PTX was compiled with an unsupported toolchain").
+
 ## [0.23.0] - 2026-11-27
 
 ### Added

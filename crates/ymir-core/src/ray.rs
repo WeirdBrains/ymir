@@ -20,7 +20,54 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::group::SplitModel;
 
 /// Ray's GCS port, the head's `--port`.
-pub const DEFAULT_PORT: u16 = 6379;
+pub const DEFAULT_PORT: u16 = 6390;
+
+/// The port ranges a host firewall is expected to drop off the private link (the `ymir_ray`
+/// nftables table in DESIGN): with `ray_trust_firewall`, an all-interface listener passes only on
+/// one of these (`[model] ray_trusted_ports` overrides them). The GCS takes [`DEFAULT_PORT`];
+/// [`PINNED_PORTS`] puts Ray's agents and workers in the second range, and [`VLLM_BASE_PORT`] vLLM's.
+pub const TRUSTED_PORTS: &[(u16, u16)] = &[(6390, 6399), (10000, 10999)];
+
+/// Ray's own ports, pinned into [`TRUSTED_PORTS`] unless `ray_args` sets them. Unpinned, the
+/// agents and workers take random ports (a real run had all-interface listeners on 42477 and
+/// 44217, outside any firewall range).
+pub const PINNED_PORTS: &[(&str, u16)] = &[
+    ("--node-manager-port", 10003),
+    ("--object-manager-port", 10004),
+    ("--runtime-env-agent-port", 10005),
+    ("--dashboard-agent-grpc-port", 10006),
+    ("--dashboard-agent-listen-port", 10007),
+    ("--metrics-export-port", 10008),
+    ("--min-worker-port", 10010),
+    ("--max-worker-port", 10899),
+];
+
+/// `VLLM_PORT`: vLLM takes its internal ports (torch.distributed, its message queues) counting up
+/// from here, above Ray's workers and inside [`TRUSTED_PORTS`].
+pub const VLLM_BASE_PORT: u16 = 10900;
+
+/// Parses `[model] ray_trusted_ports` (`"6390-6399"`, `"10001"`); empty means [`TRUSTED_PORTS`].
+pub fn trusted_ranges(spec: &[String]) -> Result<Vec<(u16, u16)>, String> {
+    if spec.is_empty() {
+        return Ok(TRUSTED_PORTS.to_vec());
+    }
+    spec.iter()
+        .map(|r| {
+            let bad = || format!("ray_trusted_ports `{r}` is not a port or a range like 10000-10999");
+            let (a, b) = r.split_once('-').unwrap_or((r, r));
+            let (a, b): (u16, u16) = (a.trim().parse().map_err(|_| bad())?, b.trim().parse().map_err(|_| bad())?);
+            if a == 0 || a > b {
+                return Err(bad());
+            }
+            Ok((a, b))
+        })
+        .collect()
+}
+
+/// `--flag=PORT` for each of [`PINNED_PORTS`] that `extra` does not set (`--flag=V` or `--flag V`).
+fn pinned(extra: &[String]) -> Vec<String> {
+    PINNED_PORTS.iter().filter(|(f, _)| !extra.iter().any(|a| a.split('=').next() == Some(f))).map(|(f, p)| format!("{f}={p}")).collect()
+}
 
 /// `ray start` flags Ymir sets itself (or that would open Ray up); `[model] ray_args` may not.
 const OWN_FLAGS: &[&str] =
@@ -45,6 +92,10 @@ pub fn head_args(link: IpAddr, port: u16, extra: &[String]) -> Vec<String> {
     let mut a: Vec<String> =
         ["start", "--head", "--block", "--node-ip-address", &link.to_string(), "--port", &port.to_string()].iter().map(|s| s.to_string()).collect();
     a.extend(["--include-dashboard=false".into(), "--disable-usage-stats".into()]);
+    a.extend(pinned(extra));
+    if !extra.iter().any(|x| x.split('=').next() == Some("--ray-client-server-port")) {
+        a.push("--ray-client-server-port=10001".into());
+    }
     a.extend(extra.iter().cloned());
     a
 }
@@ -53,6 +104,7 @@ pub fn head_args(link: IpAddr, port: u16, extra: &[String]) -> Vec<String> {
 pub fn worker_args(head: &str, link: IpAddr, extra: &[String]) -> Vec<String> {
     let mut a: Vec<String> = ["start", "--block", "--address", head, "--node-ip-address", &link.to_string()].iter().map(|s| s.to_string()).collect();
     a.push("--disable-usage-stats".into());
+    a.extend(pinned(extra));
     a.extend(extra.iter().cloned());
     a
 }
@@ -299,7 +351,7 @@ pub fn iface_of(ip: IpAddr) -> Option<String> {
 /// interface NCCL and Gloo (torch.distributed) bind and connect on. Without it they pick an
 /// interface themselves, such as the LAN or Tailscale.
 pub fn link_env(ip: IpAddr, iface: Option<&str>) -> Vec<(String, String)> {
-    let mut v = vec![("VLLM_HOST_IP".to_string(), ip.to_string())];
+    let mut v = vec![("VLLM_HOST_IP".to_string(), ip.to_string()), ("VLLM_PORT".to_string(), VLLM_BASE_PORT.to_string())];
     if let Some(i) = iface {
         v.push(("NCCL_SOCKET_IFNAME".into(), format!("={i}")));
         v.push(("GLOO_SOCKET_IFNAME".into(), i.to_string()));
@@ -309,18 +361,25 @@ pub fn link_env(ip: IpAddr, iface: Option<&str>) -> Vec<(String, String)> {
 
 /// Whether the listeners of a Ray process tree are acceptable: `Err` names the ones that are
 /// not. With `trust_firewall`, all-interface listeners pass (the caller logs them).
-pub fn check_listeners(listeners: &[Listener], own: IpAddr, trust_firewall: bool) -> Result<Vec<Listener>, String> {
+pub fn check_listeners(listeners: &[Listener], own: IpAddr, trusted: Option<&[(u16, u16)]>) -> Result<Vec<Listener>, String> {
     let bad = foreign(listeners, own);
-    let (wild, other): (Vec<Listener>, Vec<Listener>) = bad.into_iter().partition(|l| l.ip.is_unspecified());
-    let refused: Vec<&Listener> = if trust_firewall { other.iter().collect() } else { wild.iter().chain(other.iter()).collect() };
+    let in_range = |p: u16| trusted.is_some_and(|r| r.iter().any(|(a, b)| (*a..=*b).contains(&p)));
+    let (wild, refused): (Vec<Listener>, Vec<Listener>) = bad.into_iter().partition(|l| l.ip.is_unspecified() && in_range(l.port));
     if refused.is_empty() {
         return Ok(wild);
     }
     let list = refused.iter().map(|l| endpoint(l.ip, l.port)).collect::<Vec<_>>().join(", ");
-    let hint = if !trust_firewall && refused.iter().any(|l| l.ip.is_unspecified()) {
-        " (Ray's GCS ignores --node-ip-address; with a host firewall that drops Ray's ports on every other interface, set [model] ray_trust_firewall = true)"
-    } else {
-        ""
+    let any_wild = refused.iter().any(|l| l.ip.is_unspecified());
+    let hint = match trusted {
+        None if any_wild => {
+            " (Ray's GCS ignores --node-ip-address; with a host firewall that drops Ray's ports on every other interface, set [model] ray_trust_firewall = true)"
+                .to_string()
+        }
+        Some(r) if any_wild => format!(
+            " (ray_trust_firewall allows all-interface listeners only on the firewalled ports {}; pin the port with ray_args, or list its range in [model] ray_trusted_ports if the firewall drops it)",
+            r.iter().map(|(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") }).collect::<Vec<_>>().join(", ")
+        ),
+        _ => String::new(),
     };
     Err(format!("Ray listens on {list}, but only {own} (the private link) and loopback are allowed: Ray has no authentication{hint}"))
 }
@@ -413,12 +472,59 @@ mod tests {
     fn only_the_link_and_loopback_may_listen() {
         let own: IpAddr = "10.0.0.2".parse().unwrap();
         let l = |ip: &str, port| Listener { ip: ip.parse().unwrap(), port, inode: port as u64 };
-        assert_eq!(check_listeners(&[l("10.0.0.2", 6379), l("127.0.0.1", 1)], own, false), Ok(vec![]));
-        let e = check_listeners(&[l("10.0.0.2", 6379), l("0.0.0.0", 6380)], own, false).unwrap_err();
+        assert_eq!(check_listeners(&[l("10.0.0.2", 6379), l("127.0.0.1", 1)], own, None), Ok(vec![]));
+        let e = check_listeners(&[l("10.0.0.2", 6379), l("0.0.0.0", 6380)], own, None).unwrap_err();
         assert!(e.contains("0.0.0.0:6380") && e.contains("ray_trust_firewall"), "{e}");
-        assert_eq!(check_listeners(&[l("::", 6380)], own, true), Ok(vec![l("::", 6380)]), "a firewalled node allows all-interface listeners");
-        let e = check_listeners(&[l("192.168.1.5", 6381)], own, true).unwrap_err();
-        assert!(e.contains("192.168.1.5:6381"), "another specific address is still refused: {e}");
+        let fw = Some(TRUSTED_PORTS);
+        assert_eq!(
+            check_listeners(&[l("::", 6390)], own, fw),
+            Ok(vec![l("::", 6390)]),
+            "a firewalled node allows all-interface listeners on firewalled ports"
+        );
+        let e = check_listeners(&[l("192.168.1.5", 6391)], own, fw).unwrap_err();
+        assert!(e.contains("192.168.1.5:6391"), "another specific address is still refused: {e}");
+    }
+
+    #[test]
+    fn trust_firewall_allows_all_interfaces_only_on_the_firewalled_ports() {
+        let own: IpAddr = "10.100.40.1".parse().unwrap();
+        let l = |ip: &str, port| Listener { ip: ip.parse().unwrap(), port, inode: port as u64 };
+        let fw = Some(TRUSTED_PORTS);
+        // Inside 6390-6399 and 10000-10999 (the edges too): allowed and returned for the log.
+        let inside = [l("0.0.0.0", 6390), l("::", 6399), l("0.0.0.0", 10000), l("0.0.0.0", 10999)];
+        assert_eq!(check_listeners(&inside, own, fw).unwrap().len(), 4);
+        // The real run's strays: a vLLM worker on 42477 and a Ray agent on 44217.
+        for port in [42477, 44217, 6389, 6400, 9999, 11000] {
+            let e = check_listeners(&[l("0.0.0.0", 6390), l("0.0.0.0", port)], own, fw).unwrap_err();
+            assert!(e.contains(&format!("0.0.0.0:{port}")) && e.contains("ray_trusted_ports") && !e.contains("6390,"), "{port}: {e}");
+        }
+        // An operator's ranges replace the defaults.
+        let custom = trusted_ranges(&["7000-7009".into(), "42477".into()]).unwrap();
+        assert_eq!(custom, [(7000, 7009), (42477, 42477)]);
+        assert!(check_listeners(&[l("0.0.0.0", 42477), l("::", 7005)], own, Some(&custom)).is_ok());
+        assert!(check_listeners(&[l("0.0.0.0", 6390)], own, Some(&custom)).is_err());
+        assert_eq!(trusted_ranges(&[]).unwrap(), TRUSTED_PORTS);
+        for bad in ["", "x", "10-5", "0-10", "70000", "1-2-3"] {
+            assert!(trusted_ranges(&[bad.into()]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn ray_and_vllm_ports_are_pinned_into_the_firewalled_ranges() {
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        let in_fw = |p: u16| TRUSTED_PORTS.iter().any(|(a, b)| (*a..=*b).contains(&p));
+        let h = head_args(ip, DEFAULT_PORT, &[]);
+        assert!(in_fw(DEFAULT_PORT));
+        for (f, p) in PINNED_PORTS {
+            assert!(h.contains(&format!("{f}={p}")) && in_fw(*p), "{f}");
+        }
+        assert!(h.contains(&"--ray-client-server-port=10001".to_string()));
+        assert!(in_fw(VLLM_BASE_PORT) && VLLM_BASE_PORT > 10899, "vLLM's ports above Ray's workers");
+        // The operator's ray_args win and are not doubled.
+        let w = worker_args("10.0.0.1:6390", ip, &["--min-worker-port=10100".into()]);
+        assert_eq!(w.iter().filter(|a| a.starts_with("--min-worker-port")).count(), 1);
+        assert!(w.contains(&"--min-worker-port=10100".to_string()) && w.contains(&"--max-worker-port=10899".to_string()));
+        assert!(link_env(ip, None).contains(&("VLLM_PORT".into(), "10900".into())));
     }
 
     #[test]
@@ -439,7 +545,7 @@ mod tests {
         assert!(env.contains(&("VLLM_HOST_IP".into(), "10.100.40.1".into())));
         assert!(env.contains(&("NCCL_SOCKET_IFNAME".into(), "=enp1s0f1np1".into())));
         assert!(env.contains(&("GLOO_SOCKET_IFNAME".into(), "enp1s0f1np1".into())));
-        assert_eq!(link_env(ip, None).len(), 1);
+        assert_eq!(link_env(ip, None).len(), 2);
         // `lo` on Linux, `lo0` on the BSDs and macOS (Windows names it otherwise).
         #[cfg(unix)]
         assert!(iface_of("127.0.0.1".parse().unwrap()).is_some_and(|i| i.starts_with("lo")));

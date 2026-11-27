@@ -64,6 +64,10 @@ pub struct InstallArgs {
     /// (nvidia-smi's CUDA version: PyPI's CUDA 13.0 build for a CUDA 13 driver).
     #[arg(long)]
     pub torch_backend: Option<String>,
+    /// A vLLM nightly built for this CUDA (cu130, cu132 ...): its index instead of the default
+    /// nightly, whose kernels are CUDA 13.2 builds. For a driver older than the default's CUDA.
+    #[arg(long)]
+    pub vllm_cuda: Option<String>,
     /// Print the commands, run nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -103,6 +107,7 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
         reinstall: a.reinstall,
         force: a.force,
         torch_backend: a.torch_backend,
+        vllm_cuda: a.vllm_cuda,
     };
     if upgrade && vllm_install::read_record(venv).is_none() {
         anyhow::bail!("no managed vLLM at {}; run `ymirctl engines install vllm` first", venv.display());
@@ -114,6 +119,15 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
         let driver = plan.driver_cuda.map_or("unknown (nvidia-smi gave none; not checked)".into(), |(a, b)| format!("CUDA {a}.{b}"));
         let torch = plan.torch_backend.clone().unwrap_or_else(|| "PyPI's (CUDA 13.0 build)".into());
         writeln!(out, "GPU driver: {driver}; PyTorch: {torch}")?;
+        if let (Some((da, db)), Some((va, vb))) = (plan.driver_cuda, plan.vllm_cuda) {
+            writeln!(out, "vLLM's kernels: CUDA {va}.{vb} builds")?;
+            if (va, vb) > (da, db) {
+                writeln!(
+                    out,
+                    "warning: newer than the driver's CUDA {da}.{db}: kernels it must JIT (Inkling 2 Mini's vision encoder on a DGX Spark) will fail; update the driver or pass --vllm-cuda cu{da}{db}"
+                )?;
+            }
+        }
     }
     if a.dry_run {
         for s in &plan.steps {
@@ -134,6 +148,9 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
     match (&rec.torch, &rec.torch_cuda) {
         (Some(t), Some(c)) => writeln!(out, "PyTorch {t} (CUDA {c}; the driver runs {})", rec.driver_cuda.as_deref().unwrap_or("?"))?,
         _ => writeln!(out, "PyTorch: could not read its version (`import torch` failed?)")?,
+    }
+    if let Some(w) = vllm_install::vllm_cuda_mismatch(&rec) {
+        writeln!(out, "warning: {w}")?;
     }
     if rec.inkling {
         writeln!(out, "Inkling 2 Mini: supported (vLLM registers {})", ymir_core::vllm::INKLING2_LOOP_ARCH)?;

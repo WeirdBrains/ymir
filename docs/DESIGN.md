@@ -2597,6 +2597,7 @@ private_link = "10.10.0.1"
 ray = "auto"               # or "system:/path/to/ray", or "off"
 # ray_args = ["--num-gpus=1"]
 # ray_trust_firewall = true  # see "Security boundary"
+# ray_trusted_ports = ["6390-6399", "10000-10999"]  # the default: where the firewall drops Ray off the link
 
 # The leader only: what `vllm serve` runs.
 [[model.split]]
@@ -2623,7 +2624,12 @@ passes no `--torch-backend`, so PyTorch comes from PyPI, whose wheels are CUDA 1
 13 and is refused there), and an older driver is refused. `--torch-backend B` overrides the choice (uv only). It used to pass
 `--torch-backend=auto`, which on a DGX Spark with driver 580 (CUDA 13.0) chose a cu132 PyTorch whose kernels the driver could
 not load. After installing it checks that `vllm --version` and `ray --version` run, that `torch.version.cuda` is not newer
-than the driver's (else the install fails, saying what to pass), and asks the venv's Python whether vLLM's model registry
+than the driver's (else the install fails, saying what to pass), records the CUDA vLLM's own
+kernels are built with (the version's `cuNNN` tag; for the default nightly
+`NIGHTLY_DEFAULT_CUDA`, 13.2 as of 2026-11-27) and warns when it is newer than the driver's: text may
+still run, but kernels the driver must JIT from PTX fail (Inkling 2 Mini's vision encoder on GB10 with
+driver 580). The way out is a newer driver, or `--vllm-cuda cuNNN`, which installs from that nightly
+variant's index (`https://wheels.vllm.ai/nightly/cuNNN`) instead. It then asks the venv's Python whether vLLM's model registry
 has Inkling 2 Mini (`InklingForConditionalGeneration`, the checkpoint's architecture, or
 `Inkling2LoopForConditionalGeneration`, the class vLLM main registers). It writes `ymir-install.json` with the answers
 (`inkling`, `nightly`, `driver_cuda`, `torch_backend`, `torch`, `torch_cuda`). A default (nightly) install without it fails; a pinned release
@@ -2681,9 +2687,21 @@ the node. So:
   the link and not whatever interface they would pick (on m1 and m2 that was the LAN and Tailscale).
 - **Ray's GCS listens on all interfaces** whatever `--node-ip-address` says (a known Ray limitation).
   So by default a real Ray cluster is refused. `[model] ray_trust_firewall = true` lets all-interface
-  listeners through (logged at info, once per process and port set). Set it only when a host firewall drops Ray's ports on every
-  interface but the private link. Listeners on any other specific address are still refused. The
-  "private link" must still be a direct cable or an isolated VLAN, as for `rpc-server`.
+  listeners through, but only on the firewalled ports: `[model] ray_trusted_ports`, by default
+  6390-6399 and 10000-10999 (the `ymir_ray` nftables table below drops those off the link). An
+  all-interface listener on any other port is refused even with `ray_trust_firewall`, because no
+  firewall rule covers it. Allowed ones are logged at info, once per process and port set. Set it
+  only when a host firewall drops those ports on every interface but the private link. Listeners on
+  any other specific address are still refused. The "private link" must still be a direct cable or
+  an isolated VLAN, as for `rpc-server`.
+- **Ymir pins Ray's and vLLM's ports into those ranges.** The GCS takes `ray_port` (default 6390, out
+  of Redis's way at 6379). Unless `ray_args` sets them, `ray start` gets `--node-manager-port=10003`,
+  `--object-manager-port=10004`, `--runtime-env-agent-port=10005`, `--dashboard-agent-grpc-port=10006`,
+  `--dashboard-agent-listen-port=10007`, `--metrics-export-port=10008`, `--min-worker-port=10010` and
+  `--max-worker-port=10899` (the head also `--ray-client-server-port=10001`), and vLLM gets
+  `VLLM_PORT=10900`, the base it counts its internal ports up from ([`ray.rs`](../crates/ymir-core/src/ray.rs)
+  `PINNED_PORTS`, `VLLM_BASE_PORT`). Not yet run on GPUs: if a process still picks a random
+  all-interface port, the group is refused and the log names it.
 - vLLM's API binds loopback, behind a key, like every other engine.
 
 **Tested (mocks only, no GPU).** `ymir-mock-ray` (head, join, `ray status`; the head starts a child
@@ -2739,6 +2757,26 @@ tree is checked too, and the all-interfaces listeners `ray_trust_firewall` lets 
 info (they were at debug). The installer now picks PyTorch's CUDA build from the driver and accepts
 `Inkling2LoopForConditionalGeneration`. The test config was taken off both nodes afterwards (their
 `node.toml` restored). UDP listeners are not checked.
+
+**Re-run with 0.22.1 (2026-11-27, m1 and m2, ymird 0.22.1 via self-update).** `ymirctl engines
+install vllm --reinstall` saw driver CUDA 13.0 and installed vLLM `0.34.1rc1.dev290+g20da5d198`, Ray
+2.60.1 and PyTorch `2.14.0+cu130` (torchvision `0.29.2+cu132`); the registry has both Inkling
+architectures. With the image limit off, `group up` failed in vLLM's startup profiling: Inkling's
+vision attention (`vllm/models/inkling2/nvidia/vision.py`, `vllm_flash_attn.flash_attn_varlen_func`,
+FlashAttention 2 on GB10) still raised "the provided PTX was compiled with an unsupported toolchain".
+The kernel is vLLM's own, not PyTorch's: the default nightly (`nightly/`) is the same wheel as
+`nightly/cu132/`, so its kernels are CUDA 13.2 builds, and the `nightly/cu130/` index stops at
+`0.34.0rc1.dev156`, which looks older than the Inkling merge (not checked). So vision on these nodes needs
+a driver for CUDA 13.2, or a CUDA 13.0 vLLM build with Inkling (from source, or a later cu130 nightly).
+The installer now says so (see "Installing vLLM and Ray": the vLLM wheel's CUDA is recorded and
+checked, `--vllm-cuda cuNNN` picks a nightly variant). Text only (`--limit-mm-per-prompt '{"image":
+0}'`): up in 2 min 15 s; "pong" in 5.8 s, about 350 words in 19.0 s, 44.4 tokens/s; `group down` in
+22 s with no Ray or vLLM process left on either node; both `node.toml` restored. **Listeners:** none on
+a LAN (192.168.x) or Tailscale (100.x) address on either node; Ray's workers and vLLM's engine bound
+10.100.40.1 / 10.100.40.2, and the tree check listed every worker. Two all-interface listeners were
+outside the firewalled ranges on m1, `*:42477` (a RayWorkerProc, vLLM's) and `0.0.0.0:44217` (a Ray
+Python agent), and `ray_trust_firewall` let them through; that is why the check now allows
+all-interface listeners only on `ray_trusted_ports` and Ymir pins Ray's and vLLM's ports there.
 
 ## B1 status (built 2026-11-19)
 
