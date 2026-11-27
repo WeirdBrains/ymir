@@ -43,9 +43,9 @@ version = "0.4.8"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 
-[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D); feature jobs: JobBoard (P3b); MediaLimits, CatalogModel::limits (LF-43)
+[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D); feature jobs: JobBoard (P3b); MediaLimits, CatalogModel::limits (LF-43); guests: GuestAuth, SharedPoolAuth, PoolShare, connect_shared (M11)
 crate = "weirdnet-agent"
-version = "0.5.7"
+version = "0.5.9"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
