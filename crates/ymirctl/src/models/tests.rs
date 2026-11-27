@@ -805,7 +805,7 @@ fn the_catalog_lists_the_speakers() {
     assert!(s.contains("qwen3-tts-1.7b-customvoice [speak] vllm-omni"), "{s}");
     assert!(s.contains("9 preset voices") && s.contains("designs voices") && s.contains("clones"), "{s}");
     assert!(!s.contains("[chat]"), "{s}");
-    assert!(s.contains("weirdnet-backends 0.4.10"), "{s}");
+    assert!(s.contains("--register") && !s.contains("0.4.10"), "{s}");
 
     let mut out = Vec::new();
     catalog::run(&mut out, &CatalogArgs { purpose: None, json: true }).unwrap();
@@ -843,6 +843,7 @@ fn drama_3_needs_its_license_accepted_before_any_request() {
     pull(&ctx, &mut out, &PullArgs { dry_run: true, ..accepted() }).unwrap();
     let s = text(out);
     assert!(s.contains("license fish-audio-community (accepted)") && s.contains("role = \"speak\"") && s.contains("mmproj = "), "{s}");
+    assert!(s.contains("Guests of a shared pool don't get this speaker"), "{s}");
     assert!(s.contains("Dry run"), "{s}");
     assert!(fx.hub.state.lock().unwrap().paths.is_empty());
     // Past the gate: the mock Hub has no such file (or this disk has no room for it).
@@ -851,9 +852,7 @@ fn drama_3_needs_its_license_accepted_before_any_request() {
     let asked = fx.hub.state.lock().unwrap().paths.clone();
     assert!(e.contains("free space") || asked.iter().any(|p| p.starts_with("/ggml-org/drama-3-GGUF/resolve/main/")), "{e}: {asked:?}");
 
-    // A speaker can't be registered yet; an unrestricted one needs no acceptance.
-    let e = pull(&ctx, &mut Vec::new(), &PullArgs { register: true, ..accepted() }).unwrap_err().to_string();
-    assert!(e.contains("role = \"speak\"") && e.contains("0.4.10"), "{e}");
+    // An unrestricted speaker needs no acceptance.
     let mut out = Vec::new();
     pull(&ctx, &mut out, &PullArgs { dry_run: true, ..pull_args("kokoro-82m") }).unwrap();
     let s = text(out);
@@ -862,4 +861,22 @@ fn drama_3_needs_its_license_accepted_before_any_request() {
     pull(&ctx, &mut out, &pull_args("qwen3-tts-1.7b-voicedesign")).unwrap();
     let s = text(out);
     assert!(s.contains("nothing to download") && s.contains("backend = \"vllm-omni\"") && s.contains("vLLM-Omni fetches"), "{s}");
+    assert!(!s.contains("Guests of a shared pool"), "apache-2.0: open to guests: {s}");
+}
+
+/// A speaker registers like any catalog model: node.toml gets `role = "speak"` and validates
+/// (a vLLM-Omni checkpoint downloads nothing, so this needs no Hub).
+#[test]
+fn speakers_register_with_the_speak_role() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(64, Some("[roles]\nmodel = true\n"));
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { register: true, ..pull_args("qwen3-tts-0.6b-customvoice") }).unwrap();
+    let s = text(out);
+    assert!(s.contains("Added `qwen3-tts-0.6b-customvoice`"), "{s}");
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let m = cfg.model.local.iter().find(|m| m.id == "qwen3-tts-0.6b-customvoice").unwrap();
+    assert!(m.is_speaker() && m.backend.as_deref() == Some("vllm-omni"), "{m:?}");
+    cfg.validate().unwrap();
+    assert_eq!(cfg.launches()[0].engine, weirdnet_backends::EngineKind::VllmOmni);
 }

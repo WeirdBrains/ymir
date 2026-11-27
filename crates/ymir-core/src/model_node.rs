@@ -28,6 +28,12 @@ pub fn transcribes(s: &ModelStatus) -> bool {
     s.capabilities.is_some_and(|c| c.transcribe)
 }
 
+/// Whether a model has the speech role here and its engine can serve it (`weirdnet-backends`
+/// 0.4.10 `Capabilities::speak`); records from older nodes say no.
+pub fn speaks(s: &ModelStatus) -> bool {
+    s.capabilities.is_some_and(|c| c.speak)
+}
+
 /// The context one request gets: what the engine reported at load (`weirdnet-backends` 0.4.9
 /// `ModelStatus::context_tokens`, llama-server `/props` or vLLM `max_model_len`), else the
 /// configured context split over the slots ([`request_context`]); `None` when neither is known.
@@ -82,6 +88,15 @@ pub fn limits_line(l: &weirdnet_agent::MediaLimits) -> Option<String> {
     if let Some(t) = l.audio_tokens_per_minute {
         parts.push(format!("{t} audio tokens per minute"));
     }
+    if let Some(s) = l.video_max_seconds {
+        parts.push(format!("video up to {s} s"));
+    }
+    if let Some(b) = l.video_max_bytes {
+        parts.push(format!("video up to {b} bytes"));
+    }
+    if let Some(f) = l.video_frames_per_minute {
+        parts.push(format!("{f} video frames per minute"));
+    }
     if let Some(b) = l.max_request_bytes {
         parts.push(format!("requests up to {b} bytes"));
     }
@@ -111,6 +126,16 @@ pub trait ModelNode: Send + Sync {
     ) -> BoxFuture<'a, Result<Transcribed, RemoteError>> {
         let _ = (model, request);
         Box::pin(async { Err(RemoteError::Unsupported { message: "this node serves no transcription".into() }) })
+    }
+    /// Speaks `request.input` with loaded text-to-speech `model` (audio design milestone 7). The
+    /// text, any reference clip and the audio are content: never logged, never cached.
+    fn speak<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::SpeakRequest,
+    ) -> BoxFuture<'a, Result<weirdnet_agent::remote::infer::v2::AudioStream, RemoteError>> {
+        let _ = (model, request);
+        Box::pin(async { Err(RemoteError::Unsupported { message: "this node serves no speech".into() }) })
     }
     /// The weights revision of `model` here (a Hub commit, a file hash, a fine-tune id), when
     /// known. The answer cache keys on it, so new weights under the same id don't replay old answers.
@@ -327,6 +352,17 @@ impl ModelNode for LocalModelNode {
             p.touch(model);
         }
         Box::pin(self.supervisor.transcribe(model, request))
+    }
+
+    fn speak<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::SpeakRequest,
+    ) -> BoxFuture<'a, Result<weirdnet_agent::remote::infer::v2::AudioStream, RemoteError>> {
+        if let Some(p) = self.planner() {
+            p.touch(model);
+        }
+        Box::pin(self.supervisor.speak(model, request))
     }
 
     fn draining(&self) -> bool {

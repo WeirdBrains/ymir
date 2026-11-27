@@ -124,7 +124,7 @@ pub fn run(out: &mut dyn Write, a: &CatalogArgs) -> Result<()> {
     if want.is_none_or(|p| p == Purpose::Speak) {
         writeln!(
             out,
-            "\nSpeakers can be pulled now (`ymirctl models pull ID`); ymird serves them once it is built on weirdnet-backends 0.4.10 (role = \"speak\")."
+            "\nPull a speaker with `ymirctl models pull ID --register` (role = \"speak\"); `ymirctl speak` and the bridge's /v1/audio/speech use it."
         )?;
     }
     Ok(())
@@ -156,18 +156,12 @@ pub fn license_gate(target: &str, accepted: Option<&str>) -> Result<Option<&'sta
 
 /// `ymirctl models pull ID` for a catalog entry: its pinned files (model and projector, each
 /// checked against its SHA-256), or for a vLLM-Omni checkpoint nothing (the engine fetches the
-/// repo). Prints the `[[model.local]]` entry. Speakers can't be registered yet: node.toml refuses
-/// `role = "speak"` until ymird serves speech.
+/// repo). Prints the `[[model.local]]` entry (a speaker's with `role = "speak"`), and with
+/// `--register` adds it to node.toml.
 pub fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, e: &CatalogEntry) -> Result<()> {
     let license = license_gate(&e.spec.id, a.accept_license.as_deref())?;
     if a.quant.is_some() || a.file.is_some() {
         bail!("{} is a pinned catalog entry; --quant and --file apply to Hub repos (pull {} for its other files)", e.spec.id, e.spec.repo);
-    }
-    if a.register && e.speaks() {
-        bail!(
-            "{} is a text-to-speech model; node.toml can't serve role = \"speak\" until ymird is built on weirdnet-backends 0.4.10. Pull it without --register",
-            e.spec.id
-        );
     }
     let id = a.id.clone().unwrap_or_else(|| e.spec.id.clone());
     let role = match e.purpose {
@@ -191,6 +185,12 @@ pub fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, e: &CatalogEntry) -> R
     if let Some(p) = e.speech() {
         writeln!(out, "Speaks: {}", speech_summary(&p))?;
     }
+    if e.restricted() {
+        writeln!(
+            out,
+            "Guests of a shared pool don't get this speaker (its license restricts serving it); to open it to them, add `[model.local.speak]` with `guests = true` under the entry."
+        )?;
+    }
     let mut stanza = format!("[[model.local]]\nid = \"{id}\"\nbackend = \"{}\"\nrole = \"{role}\"\n", engine(e));
     if e.is_gguf() {
         stanza.push_str(&format!("file = \"{}\"\n", ctx.store.path(&e.spec).display()));
@@ -211,12 +211,7 @@ pub fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs, e: &CatalogEntry) -> R
         writeln!(out, "{} fetches {} into the Hugging Face cache on first load.", if e.speaks() { "vLLM-Omni" } else { "vLLM" }, e.spec.repo)?;
     }
     writeln!(out, "\nnode.toml entry:\n{stanza}")?;
-    if e.speaks() {
-        writeln!(
-            out,
-            "Keep it for later: ymird serves speakers once it is built on weirdnet-backends 0.4.10 (node.toml refuses role = \"speak\" until then)."
-        )?;
-    } else if a.register {
+    if a.register {
         super::local::register(&ctx.config, &id, &stanza)?;
         writeln!(out, "Added `{id}` to {} (the old file is {}.bak). Restart ymird to load it.", ctx.config.display(), ctx.config.display())?;
     } else {

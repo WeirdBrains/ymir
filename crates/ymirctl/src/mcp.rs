@@ -961,7 +961,7 @@ impl YmirTools {
         // What a model takes, as this node's supervisors report it (null: not known here).
         let takes = |id: &str| -> Value {
             let caps = status.iter().flat_map(|s| s.models.iter()).filter(|m| m.id == id).find_map(|m| m.capabilities);
-            json!({"images": caps.map(|c| c.vision), "audio": caps.map(|c| c.audio)})
+            json!({"images": caps.map(|c| c.vision), "audio": caps.map(|c| c.audio), "video": caps.map(|c| c.video)})
         };
         let catalog = match crate::bridge(&self.ctx.paths).await {
             Ok(b) => b.models().await,
@@ -984,6 +984,8 @@ impl YmirTools {
                             "context": w["context"],
                             "origin": w["origin"],
                             "license": w["license"],
+                            "speech": w["speech"],
+                            "limits": w["limits"],
                             "takes": takes(id),
                             "placements": placements(id),
                         })
@@ -1007,6 +1009,8 @@ impl YmirTools {
                             "purpose": here.first().map(|m| m.purpose.clone()),
                             "state": if replicas > 0 { "warm" } else { "on disk" },
                             "replicas": replicas,
+                            "license": here.iter().find_map(|m| m.license.clone()),
+                            "speech": here.iter().find_map(|m| m.speech.clone()),
                             "takes": takes(id),
                             "placements": placements(id),
                         })

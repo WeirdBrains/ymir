@@ -37,9 +37,9 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), U8's origins (set_model_origin, placement hooks), U10's WritePolicy::uploads and StoredEntry constructors; Capabilities::limits (LF-43); measured limits, set_limits_store, Supervisor::transcribe (video M2)
+[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), U8's origins (set_model_origin, placement hooks), U10's WritePolicy::uploads and StoredEntry constructors; Capabilities::limits (LF-43); measured limits, set_limits_store, Supervisor::transcribe (video M2); speech out: ModelLaunch::speak/speech/check_speech, Supervisor::speak, ModelStatus::speech, EngineKind::VllmOmni, EngineConfig::vllm_omni; native video: ModelLaunch::video (0.4.10)
 crate = "weirdnet-backends"
-version = "0.4.9"
+version = "0.4.10"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
 lock = "Cargo.lock"
 

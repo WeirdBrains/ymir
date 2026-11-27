@@ -241,6 +241,12 @@ pub struct ModelSection {
     /// `system:/path/to/vllm` | `image:NAME` | `off`.
     #[serde(default = "auto")]
     pub vllm: String,
+    /// vLLM-Omni's `vllm`, for `backend = "vllm-omni"` speakers: `auto` (the venv `ymirctl
+    /// engines install vllm-omni` makes, `<home>/engines/vllm-omni`, else `vllm` on `PATH`) |
+    /// `system:/path/to/vllm` (a vLLM with the `vllm-omni` package) | `off`. Configured only
+    /// when a model uses it.
+    #[serde(default = "auto", skip_serializing_if = "is_auto")]
+    pub vllm_omni: String,
     /// Ray, for `vllm-ray` split models: `auto` (the managed vLLM venv, else `PATH`) |
     /// `system:/path/to/ray` | `off`.
     #[serde(default = "auto", skip_serializing_if = "is_auto")]
@@ -311,6 +317,7 @@ impl Default for ModelSection {
             rpc_server: managed(),
             rpc_args: Vec::new(),
             vllm: auto(),
+            vllm_omni: auto(),
             ray: auto(),
             ray_args: Vec::new(),
             ray_trust_firewall: false,
@@ -327,7 +334,8 @@ impl Default for ModelSection {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LocalModel {
     pub id: String,
-    /// `llamacpp` (default), `mlx` (Apple Silicon) or `vllm`.
+    /// `llamacpp` (default), `mlx` (Apple Silicon), `vllm` or `vllm-omni` (text to speech through
+    /// vLLM-Omni, `role = "speak"` only; see `[model] vllm_omni`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -341,7 +349,10 @@ pub struct LocalModel {
     pub swap_group: Option<String>,
     /// `main`, `standin`, `embedding` or `transcribe` (speech to text: Voxtral through llama.cpp
     /// with its audio projector, Whisper through vLLM; served over infer/2 `Transcribe` and
-    /// published with catalog/1 purpose `transcribe`); default `chat`.
+    /// published with catalog/1 purpose `transcribe`), or `speak` (text to speech: Kokoro,
+    /// VoxCPM2, Fish Audio Drama 3 or Qwen3-TTS through llama.cpp with its projector, Qwen3-TTS
+    /// through vLLM-Omni; served over infer/2 `Speak` and published with catalog/1 purpose
+    /// `speak`, see `[model.local.speak]`); default `chat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// GGUF path (absolute, or relative to `models_dir`), an MLX weights directory (likewise) or
@@ -394,6 +405,32 @@ pub struct LocalModel {
     /// fields stay unknown: there are no defaults in code (video design, milestone 1).
     #[serde(default, skip_serializing_if = "weirdnet_agent::MediaLimits::is_unknown")]
     pub limits: weirdnet_agent::MediaLimits,
+    /// The model reads video parts whole (`video_url`: Qwen2.5-VL, Qwen3-VL and the like on
+    /// vLLM, or a wrapped server declared as vLLM). The operator says so: no engine reports it.
+    /// Published as catalog/1 `inputs.video` (with the `video_*` limits above), so Bragi sends
+    /// whole clips when they fit and frames otherwise (video design, Phase 2). vLLM only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub video: bool,
+    /// Speech settings for a `role = "speak"` model (`[model.local.speak]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speak: Option<SpeakSettings>,
+}
+
+/// `[model.local.speak]`: what a speaking model may do on this node. The profile fields
+/// (`presets`, `languages`, `formats`, `max_input_chars`, `max_reference_seconds`,
+/// `max_reference_bytes`, `max_output_seconds`, `max_voices`, `script_speakers`, `clone`, ...,
+/// `weirdnet-agent`'s `SpeechProfile`) only narrow what the model's catalog entry and its
+/// engine say: fewer voices or languages, smaller limits. A setting that widens them is refused
+/// at startup (`weirdnet-backends` `ModelLaunch::check_speech`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeakSettings {
+    /// Whether guests of a shared pool may use this speaker (still only when their grant lists
+    /// it). Default: yes, unless the model's license restricts how its speech may be served
+    /// (Fish Audio Drama 3's `fish-audio-community`), which needs `guests = true` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
+    #[serde(flatten)]
+    pub profile: weirdnet_agent::speech::SpeechProfile,
 }
 
 /// A LoRA adapter on a `[[model.local]]` base, served as its own model id (for example
@@ -455,6 +492,29 @@ impl LocalModel {
     /// Whether it has the transcription role (`role = "transcribe"`, video design milestone 2).
     pub fn is_transcriber(&self) -> bool {
         self.role.as_deref() == Some("transcribe")
+    }
+
+    /// Whether it has the speech role (`role = "speak"`, audio design milestone 7).
+    pub fn is_speaker(&self) -> bool {
+        self.role.as_deref() == Some("speak")
+    }
+
+    /// The license that restricts how this model's speech may be served, if any: its catalog
+    /// entry's (Fish Audio Drama 3), else the one its speech settings name.
+    pub fn restricting_license(&self) -> Option<String> {
+        let cataloged = weirdnet_model::hw::find(&self.id).and_then(|e| e.license());
+        let set = self.speak.as_ref().and_then(|s| s.profile.license.as_deref());
+        weirdnet_model::speech::restricting_license(cataloged).or_else(|| weirdnet_model::speech::restricting_license(set))
+    }
+
+    /// Whether guests of a shared pool may use this speaker: `[model.local.speak] guests`, else
+    /// yes unless its license is restricted ([`Self::restricting_license`]). Always yes for a
+    /// model that doesn't speak (the grant's allowlist decides).
+    pub fn guests_may_speak(&self) -> bool {
+        if !self.is_speaker() {
+            return true;
+        }
+        self.speak.as_ref().and_then(|s| s.guests).unwrap_or_else(|| self.restricting_license().is_none())
     }
 }
 
@@ -767,21 +827,44 @@ impl NodeConfig {
             if let Some(b) = &m.backend
                 && !BACKENDS.contains(&b.as_str())
             {
-                bail!("model `{}`: unknown backend `{b}` (llamacpp, mlx or vllm)", m.id);
+                bail!("model `{}`: unknown backend `{b}` (llamacpp, mlx, vllm or vllm-omni)", m.id);
             }
             if m.backend.as_deref() == Some("mlx") && m.is_embedding() && !EngineKind::Mlx.capabilities().embeddings {
                 bail!("model `{}`: MLX-LM's server has no embeddings endpoint; use backend = \"llamacpp\" for embedding models", m.id);
             }
-            // Text to speech (weirdnet-model 0.5.5 catalogs the speakers) runs once the engines
-            // can launch it (`weirdnet-backends` 0.4.10). Until then a speaker would start as a chat
-            // model, so it is refused here, by role or by catalog id.
+            // Text to speech (audio design milestone 7, `weirdnet-backends` 0.4.10). A catalog
+            // speaker without the role would start as a chat model, so the role is required.
             let catalog_speaker = weirdnet_model::hw::find(&m.id).is_some_and(|e| e.speaks());
-            if m.role.as_deref() == Some("speak") || catalog_speaker {
-                bail!(
-                    "model `{}`: text-to-speech models can't be served by this ymird yet (they need weirdnet-backends 0.4.10); \
-                     keep the file and leave the entry out of node.toml until then",
-                    m.id
-                );
+            if catalog_speaker && !m.is_speaker() {
+                bail!("model `{}` is a text-to-speech model: set role = \"speak\"", m.id);
+            }
+            if m.backend.as_deref() == Some("vllm-omni") && !m.is_speaker() {
+                bail!("model `{}`: backend = \"vllm-omni\" serves text to speech only (role = \"speak\")", m.id);
+            }
+            if m.speak.is_some() && !m.is_speaker() {
+                bail!("model `{}`: [model.local.speak] is for role = \"speak\" models", m.id);
+            }
+            if m.is_speaker() {
+                if !matches!(m.backend.as_deref(), None | Some("llamacpp" | "vllm-omni")) {
+                    bail!("model `{}`: role = \"speak\" needs backend llamacpp (with the model's projector) or vllm-omni", m.id);
+                }
+                if !m.lora.is_empty() || m.lora_slots.is_some() {
+                    bail!("model `{}`: a speaking model takes no LoRA adapters", m.id);
+                }
+                if m.video {
+                    bail!("model `{}`: a speaking model reads no video", m.id);
+                }
+            }
+            if m.video {
+                if m.backend.as_deref() != Some("vllm") {
+                    bail!(
+                        "model `{}`: video = true needs backend = \"vllm\" (llama.cpp and MLX-LM take no video parts; Bragi sends them frames)",
+                        m.id
+                    );
+                }
+                if m.is_embedding() || m.is_transcriber() {
+                    bail!("model `{}`: video = true is for chat models", m.id);
+                }
             }
             if m.backend.as_deref() == Some("mlx") && m.is_transcriber() {
                 bail!("model `{}`: role = \"transcribe\" needs backend llamacpp (with an audio projector) or vllm, not mlx", m.id);
@@ -860,6 +943,20 @@ impl NodeConfig {
                 "[[model.local]] image: every unwrapped vLLM model on this node must use the same image (the supervisor has one vLLM program); wrap a server you started if you need more than one"
             );
         }
+        // Speakers: the engine and projector they need, and operator settings that only narrow
+        // what the catalog says (`weirdnet-backends` 0.4.10 `ModelLaunch::check_speech`).
+        if self.model.local.iter().any(LocalModel::is_speaker) {
+            for l in self.launches() {
+                l.check_speech().map_err(|e| {
+                    let hint = if l.engine == EngineKind::Llamacpp && e.contains("projector") {
+                        " (`ymirctl models pull ID` fetches a catalog speaker's projector; else set mmproj)"
+                    } else {
+                        ""
+                    };
+                    anyhow::anyhow!("model {e}{hint}")
+                })?;
+            }
+        }
         crate::mcp_servers::validate(&self.inference.agent.mcp)?;
         self.validate_splits()?;
         crate::rollout::validate(&self.inference.rollout).context("[[inference.rollout]]")?;
@@ -936,7 +1033,7 @@ impl NodeConfig {
             .local
             .iter()
             .find(|m| m.role.as_deref() == Some("main"))
-            .or_else(|| self.model.local.iter().find(|m| !m.is_embedding() && !m.is_transcriber()))
+            .or_else(|| self.model.local.iter().find(|m| !m.is_embedding() && !m.is_transcriber() && !m.is_speaker()))
     }
 
     /// The cold-start stand-in: `inference.standin`, else the model with `role = "standin"`.
@@ -951,6 +1048,7 @@ impl NodeConfig {
             splits: self.inference.split.clone(),
             rollouts: self.inference.rollout.clone(),
             semantic: self.inference.cache.semantic(),
+            speak_guests: self.model.local.iter().filter(|m| m.is_speaker()).map(|m| (m.id.clone(), m.guests_may_speak())).collect(),
         }
     }
 
@@ -973,6 +1071,14 @@ impl NodeConfig {
         }
         if let Some(p) = resolve_vllm(&self.model, paths) {
             out.push(EngineConfig::vllm(p));
+        }
+        if self.model.local.iter().any(|m| m.backend.as_deref() == Some("vllm-omni")) {
+            match resolve_vllm_omni(&self.model, paths) {
+                Some(p) => out.push(EngineConfig::vllm_omni(p)),
+                None => tracing::warn!(
+                    "models use vllm-omni but vLLM-Omni is not installed (run `ymirctl engines install vllm-omni`); they will fail to load"
+                ),
+            }
         }
         out
     }
@@ -1061,6 +1167,7 @@ impl NodeConfig {
                 let backend = m.backend.as_deref().unwrap_or("llamacpp");
                 let engine = match backend {
                     "vllm" => EngineKind::Vllm,
+                    "vllm-omni" => EngineKind::VllmOmni,
                     "mlx" => EngineKind::Mlx,
                     _ => EngineKind::Llamacpp,
                 };
@@ -1083,7 +1190,10 @@ impl NodeConfig {
                 l.limits = m.limits;
                 l.swap_group.clone_from(&m.swap_group);
                 l.embedding = m.is_embedding();
-                l = l.with_transcribe(m.is_transcriber());
+                l = l.with_transcribe(m.is_transcriber()).with_speak(m.is_speaker()).with_video(m.video);
+                if let Some(s) = &m.speak {
+                    l = l.with_speech(s.profile.clone());
+                }
                 l.extra_args.clone_from(&m.args);
                 // A context flag in `args` is what the engine would run with (it comes last), so it
                 // is the context: one flag on the command line, and the same number advertised.
@@ -1098,7 +1208,7 @@ impl NodeConfig {
                     && m.wrap.is_none()
                     && !m.is_embedding()
                     && !has_own
-                    && let Some(p) = crate::vision::resolve(&m.id, m.mmproj.as_deref(), &dir)
+                    && let Some(p) = crate::vision::resolve(&m.id, m.mmproj.as_deref(), &dir).or_else(|| speaker_projector(m, &dir))
                 {
                     l.extra_args.extend(["--mmproj".to_string(), p.to_string_lossy().into_owned()]);
                 }
@@ -1147,7 +1257,7 @@ fn origin_of(source: &str, models_dir: &Path) -> (Option<String>, Option<String>
 }
 
 /// The `[[model.local]]` backends.
-pub const BACKENDS: &[&str] = &["llamacpp", "mlx", "vllm"];
+pub const BACKENDS: &[&str] = &["llamacpp", "mlx", "vllm", "vllm-omni"];
 
 /// Where an MLX model's weights are: `file` (a directory, absolute or under `models_dir`, or a Hub
 /// id), else the catalog model's MLX weights under `models_dir/mlx/`.
@@ -1161,6 +1271,17 @@ fn mlx_source(m: &LocalModel, dir: &Path) -> String {
             None => dir.join("mlx").join(&m.id).to_string_lossy().into_owned(),
         },
     }
+}
+
+/// A catalog speaker's projector (its codec and voices, `weirdnet-model` `CatalogEntry::projector`)
+/// in `dir`, when `mmproj` is unset and the file is there (`ymirctl models pull ID` fetches it).
+fn speaker_projector(m: &LocalModel, dir: &Path) -> Option<PathBuf> {
+    if !m.is_speaker() || m.mmproj.is_some() {
+        return None;
+    }
+    let p = weirdnet_model::hw::find(&m.id)?.projector()?;
+    let path = weirdnet_model::ModelStore::new(dir).path(&p);
+    std::fs::metadata(&path).is_ok_and(|md| md.len() > 0).then_some(path)
 }
 
 /// `600` (seconds), `30s`, `10m`, `2h` or `1d`.
@@ -1214,6 +1335,17 @@ pub fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
         return Some(managed);
     }
     resolve_engine(setting, "vllm", &managed)
+}
+
+/// vLLM-Omni's `vllm`: `auto` (or `managed`) is the venv `ymirctl engines install vllm-omni`
+/// made, else `vllm` on `PATH`; `system:PATH`; `off`.
+pub fn resolve_vllm_omni(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+    let managed = crate::vllm::bin_in(&crate::vllm_omni_install::venv(&paths.engines()), "vllm");
+    match model.vllm_omni.trim() {
+        "auto" | "managed" if managed.is_file() => Some(managed),
+        "auto" | "managed" => find_in_path("vllm"),
+        other => resolve_engine(other, "vllm", &managed),
+    }
 }
 
 /// `ray`: `auto` (or `managed`) is the managed vLLM venv's, else `PATH`'s.
@@ -1497,19 +1629,119 @@ mod tests {
     }
 
     #[test]
-    fn speakers_are_refused_until_the_engines_serve_them() {
-        for toml_text in [
-            "[[model.local]]\nid = \"tts\"\nfile = \"/m/tts.gguf\"\nrole = \"speak\"\n",
-            // A catalog speaker by id, with no role (it would start as a chat model).
-            "[[model.local]]\nid = \"kokoro-82m\"\nfile = \"/m/kokoro.gguf\"\n",
-        ] {
+    fn speakers_launch_with_the_speak_role() {
+        let d = tempfile::tempdir().unwrap();
+        let mmproj = d.path().join("mmproj-tts.gguf");
+        std::fs::write(&mmproj, b"x").unwrap();
+        // A llama.cpp speaker with its projector, and a vLLM-Omni one narrowed to two voices.
+        let cfg: NodeConfig = toml::from_str(&format!(
+            r#"
+            [model]
+            vllm_omni = "system:/opt/omni/bin/vllm"
+            [[model.local]]
+            id = "tts"
+            file = "/m/tts.gguf"
+            role = "speak"
+            mmproj = "{}"
+            [[model.local]]
+            id = "qwen3-tts-0.6b-customvoice"
+            backend = "vllm-omni"
+            role = "speak"
+            file = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+            [model.local.speak]
+            presets = ["vivian", "ryan"]
+            max_input_chars = 2000
+            "#,
+            mmproj.display()
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        let l = cfg.launches();
+        assert!(l[0].speak && l[0].engine == EngineKind::Llamacpp && l[0].extra_args.contains(&"--mmproj".to_string()));
+        assert_eq!(l[0].purpose(), weirdnet_agent::remote::catalog::Purpose::Speak);
+        assert!(l[1].speak && l[1].engine == EngineKind::VllmOmni);
+        assert_eq!(l[1].speech.presets.as_deref(), Some(&["vivian".to_string(), "ryan".to_string()][..]));
+        assert_eq!(l[1].speech.max_input_chars, Some(2000));
+        let engines = cfg.engines(&Paths::new(d.path().to_path_buf()));
+        assert!(
+            engines.iter().any(|e| e.kind == EngineKind::VllmOmni && e.program == Path::new("/opt/omni/bin/vllm")),
+            "vLLM-Omni configured from [model] vllm_omni"
+        );
+        // Round trip: the speak table survives a save.
+        let back: NodeConfig = toml::from_str(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back.model.local[1].speak, cfg.model.local[1].speak);
+    }
+
+    #[test]
+    fn speakers_are_checked_against_their_engines_and_catalog() {
+        let refused = |toml_text: &str, want: &str| {
             let cfg: NodeConfig = toml::from_str(toml_text).unwrap();
             let e = cfg.validate().unwrap_err().to_string();
-            assert!(e.contains("text-to-speech") && e.contains("weirdnet-backends 0.4.10"), "{e}");
-        }
+            assert!(e.contains(want), "{toml_text}: {e}");
+        };
+        // A catalog speaker by id, with no role (it would start as a chat model).
+        refused("[[model.local]]\nid = \"kokoro-82m\"\nfile = \"/m/kokoro.gguf\"\n", "set role = \"speak\"");
+        // llama.cpp speaks only with the projector.
+        refused("[[model.local]]\nid = \"tts\"\nfile = \"/m/tts.gguf\"\nrole = \"speak\"\nmmproj = \"off\"\n", "projector");
+        refused("[[model.local]]\nid = \"tts\"\nbackend = \"vllm\"\nrole = \"speak\"\n", "llamacpp");
+        refused("[[model.local]]\nid = \"tts\"\nbackend = \"mlx\"\nrole = \"speak\"\n", "llamacpp");
+        refused("[[model.local]]\nid = \"chat\"\nbackend = \"vllm-omni\"\n", "text to speech only");
+        refused("[[model.local]]\nid = \"chat\"\n[model.local.speak]\nguests = true\n", "role = \"speak\" models");
+        // Settings only narrow: a voice the catalog doesn't list widens the profile.
+        refused(
+            "[[model.local]]\nid = \"qwen3-tts-0.6b-customvoice\"\nbackend = \"vllm-omni\"\nrole = \"speak\"\n[model.local.speak]\npresets = [\"nobody\"]\n",
+            "widen",
+        );
+        refused(
+            "[[model.local]]\nid = \"qwen3-tts-0.6b-customvoice\"\nbackend = \"vllm-omni\"\nrole = \"speak\"\nargs = [\"--allowed-local-media-path\", \"/\"]\n",
+            "local media",
+        );
         // Transcribers and chat models from the same catalog are unaffected.
         let cfg: NodeConfig = toml::from_str("[[model.local]]\nid = \"gemma-4-e4b\"\n").unwrap();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn restricted_speakers_are_closed_to_guests_by_default() {
+        let model = |toml_text: &str| -> LocalModel { toml::from_str::<NodeConfig>(toml_text).unwrap().model.local.remove(0) };
+        let drama = model("[[model.local]]\nid = \"fish-audio-drama-3\"\nrole = \"speak\"\n");
+        assert_eq!(drama.restricting_license().as_deref(), Some("fish-audio-community"));
+        assert!(!drama.guests_may_speak(), "a restricted license: guests off unless the operator opens it");
+        let opened = model("[[model.local]]\nid = \"fish-audio-drama-3\"\nrole = \"speak\"\n[model.local.speak]\nguests = true\n");
+        assert!(opened.guests_may_speak());
+        let kokoro = model("[[model.local]]\nid = \"kokoro-82m\"\nrole = \"speak\"\n");
+        assert!(kokoro.restricting_license().is_none() && kokoro.guests_may_speak(), "apache-2.0: open by default");
+        let closed = model("[[model.local]]\nid = \"kokoro-82m\"\nrole = \"speak\"\n[model.local.speak]\nguests = false\n");
+        assert!(!closed.guests_may_speak(), "the operator may close any speaker");
+        // A license named in the settings counts too.
+        let own = model("[[model.local]]\nid = \"tts\"\nrole = \"speak\"\n[model.local.speak]\nlicense = \"fish-audio-research\"\n");
+        assert!(!own.guests_may_speak());
+    }
+
+    #[test]
+    fn video_models_need_vllm() {
+        let cfg: NodeConfig = toml::from_str(
+            r#"
+            [[model.local]]
+            id = "qwen3-vl-8b"
+            backend = "vllm"
+            file = "Qwen/Qwen3-VL-8B-Instruct"
+            video = true
+            limits = { video_max_seconds = 60, video_max_bytes = 50000000, video_frames_per_minute = 120 }
+            "#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let l = &cfg.launches()[0];
+        assert!(l.video && l.capabilities().video);
+        assert_eq!(l.limits.video_max_seconds, Some(60));
+        assert_eq!(l.limits.video_max_bytes, Some(50_000_000));
+        assert_eq!(l.limits.video_frames_per_minute, Some(120));
+        assert!(l.capabilities().inputs().video);
+        for bad in ["[[model.local]]\nid = \"g\"\nvideo = true\n", "[[model.local]]\nid = \"g\"\nbackend = \"mlx\"\nvideo = true\n"] {
+            let cfg: NodeConfig = toml::from_str(bad).unwrap();
+            assert!(cfg.validate().unwrap_err().to_string().contains("backend = \"vllm\""));
+        }
     }
 
     #[test]

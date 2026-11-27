@@ -4,8 +4,8 @@
 //! First the bridge as ymird binds it (`daemon::bind_bridge`) over a pool of the mock speaker and
 //! transcriber (`common/speech.rs`, served through weirdnet-agent's own `v2::serve`), with a small
 //! `max_request_bytes`. Then a real ymird with the mock engine as a vLLM transcriber: the
-//! transcription goes through `InferenceHost` to the engine, and speech is a clean 400 until
-//! `weirdnet-backends` 0.4.10 brings speak nodes. Nothing touches the network or a model.
+//! transcription goes through `InferenceHost` to the engine, and speech with no speaker in the
+//! pool is a clean 400 (real speakers: `speak_e2e.rs`). Nothing touches the network or a model.
 
 use std::sync::Arc;
 
@@ -240,7 +240,7 @@ async fn ymird_bridge_serves_audio_routes() {
     let token = ymir_core::token::load(&paths).unwrap().unwrap();
     let b = Bridge { base: format!("http://127.0.0.1:{port}"), token, http: reqwest::Client::new() };
 
-    // The transcriber is listed; nothing speaks yet.
+    // The transcriber is listed; this node has no speaker.
     let mut listed = Vec::new();
     for _ in 0..100 {
         listed = b.models().await;
@@ -259,7 +259,7 @@ async fn ymird_bridge_serves_audio_routes() {
     assert_eq!(r.status(), 200);
     assert!(r.json::<Value>().await.unwrap()["text"].as_str().unwrap().starts_with("heard "));
 
-    // Speech: a clean 400 naming what is missing, not a hang or a 500.
+    // Speech with no speaker: a clean 400 naming what is missing, not a hang or a 500.
     let (status, message) = error_of(b.speech(json!({"input": "Hello."})).await).await;
     assert_eq!(status, 400, "{message}");
     assert!(message.contains("speak"), "{message}");

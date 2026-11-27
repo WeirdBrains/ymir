@@ -332,7 +332,8 @@ that machine's own bridge or Bragi.
   is a 400 that names what it has). The bridge doesn't split long text or convert formats the way `ymirctl speak`
   does. `stream_format: "audio"` streams the bytes, and `"sse"` is a 400. Transcriptions take a multipart `file` and
   answer json, verbose_json, text, srt or vtt. `/v1/models` adds `weirdnet.speech` (the profile) and
-  `weirdnet.inputs`. Until `weirdnet-backends` 0.4.10, no node speaks, so `/v1/audio/speech` is a 400.
+  `weirdnet.inputs` (with `video` for models set `video = true`). With no speaker in the pool `/v1/audio/speech` is a
+  400 that says so.
 - It runs inside `ymird` (app role) or alone (`ymirctl bridge`) on a laptop that runs no other role.
 - A local token, generated at setup, kept in the OS keyring (not a file) and shown by `ymirctl bridge
   token`, is required on **every** endpoint, `/v1/models` and `/metrics` included. It guards against
@@ -669,7 +670,18 @@ ymird keeps limits measured at load in the models dir (`weirdnet-backends` 0.4.9
 engine reports at load (llama-server `/props`, vLLM `max_model_len`) is what catalog/1 and `ymirctl status` report as the
 context per request. The bridge has no `/v1/audio/transcriptions` yet. See [docs/design/video.md](design/video.md#milestone-2-what-was-built-2026-11-27-mocks-only).
 
-**Speech out and audio processing (designed 2026-11-27, not built).** A `role = "speak"` model (Qwen3-TTS, Kokoro-82M,
+**Native video (video design Phase 2, built 2026-11-27, mocks only).** `video = true` on a `[[model.local]]` says the
+model reads `video_url` parts whole (Qwen2.5-VL, Qwen3-VL and the like on vLLM; a wrapped server declared as vLLM). No
+engine reports it, so the operator does, and it needs `backend = "vllm"` (llama.cpp and MLX-LM take no video;
+`weirdnet-backends` 0.4.10 refuses a video part there with `VIDEO_FALLBACK`). Config sets `ModelLaunch::with_video`,
+the capability record says `Capabilities::video`, and catalog/1 carries `inputs.video` with the video limits from
+`limits = { video_max_seconds = 60, video_max_bytes = 50000000, video_frames_per_minute = 120 }` (`MediaLimits`,
+strictest across nodes like the rest). The bridge's `/v1/models` shows `weirdnet.video` and `weirdnet.inputs.video`.
+Bragi V4 (`d39a236`) sends a whole clip when the model takes video and the clip fits those limits, and frames
+otherwise. `ymirctl status` shows `takes ... video` and the video limits. Requests with a video part route only to
+nodes whose copy takes video (`Modalities::VIDEO`).
+
+**Speech out and audio processing (designed 2026-11-27, built 2026-11-27, mocks only).** A `role = "speak"` model (Qwen3-TTS, Kokoro-82M,
 VoxCPM2, Fish Audio Drama 3 on llama-server or vLLM-Omni) with catalog/1 purpose `speak` and a reported speech profile
 (preset voices, voice design, cloning, multi-speaker scripts, formats, limits; absent when unknown), infer/2 `Speak`,
 `ymirctl speak`/`transcribe`, the bridge's `/v1/audio/speech` and `/v1/audio/transcriptions`, and client-side long-form
@@ -699,10 +711,39 @@ only, `/props` voices, cloning with `speaker_ref_b64`) and vLLM-Omni (`--omni`: 
 `ref_audio` only as a `data:` URL), with a sine tone of a length set by the word count. `ymirctl engines install vllm-omni`
 is under "Installing vLLM and Ray".
 
-**Speech out, before the backends (weirdnet-agent 0.5.11, built 2026-11-27, mocks only).** `InferenceHost::open_speak`
-receives the whole `SpeakRequest`. For a guest it refuses any cloned voice (`guest-clone`, consent or not) and a model
-outside the grant (`guest-model`). Otherwise it answers `Unsupported`: no model in this pool speaks yet, and that needs a
-`role = "speak"` node from `weirdnet-backends` 0.4.10. The pool fails over on that answer and reports it.
+**Speakers (weirdnet-backends 0.4.10, audio milestones 7 to 12, built 2026-11-27, mocks only).** A `[[model.local]]`
+with `role = "speak"` is a text-to-speech model: llama.cpp with the model's projector (`mmproj`; a catalog speaker's
+projector is found in the models dir when `mmproj` is unset) or `backend = "vllm-omni"`. Config sets
+`ModelLaunch::with_speak`, and node.toml validation runs `ModelLaunch::check_speech`: llama.cpp needs the projector, no
+other engine speaks, vLLM-Omni never gets `--allowed-local-media-path`, a speaker is nothing else (no embedding,
+transcription, LoRA or video), and a catalog speaker id must carry the role. `[model.local.speak]` takes
+`weirdnet-agent`'s `SpeechProfile` fields (`presets`, `languages`, `formats`, `max_input_chars`,
+`max_reference_seconds`, `max_output_seconds`, `max_voices`, ...), which only narrow what the catalog entry and the
+engine say (`ModelLaunch::with_speech`; a widening setting fails at startup), and `guests`. vLLM-Omni is
+`EngineConfig::vllm_omni`, from `[model] vllm_omni`: `auto` is the venv `ymirctl engines install vllm-omni` makes
+(`<home>/engines/vllm-omni/bin/vllm`), else `vllm` on `PATH`; `system:PATH`; `off`. It is configured only when a model
+uses it.
+
+The model node serves `ModelNode::speak` through `Supervisor::speak` (a remote model node relays infer/2 `Speak`
+piece by piece). Its capability record carries `Capabilities::speak` and `ModelStatus::speech`: the engine's report at
+load (llama-server `/props` voices; vLLM-Omni `/v1/audio/voices` and the sample rate of a one-word probe) over the
+catalog entry, narrowed by the operator. catalog/1 publishes such a model with purpose `speak`, its profile and its
+license (`CatalogRow::speak`/`speech`), so `/v1/models` has `weirdnet.speech`. A chat or embedding request naming a
+speaker is a 400.
+
+`InferenceHost::open_speak` keeps the guest rules first: a guest never clones (`guest-clone`), only names a speaker in
+its grant (`guest-model`), and never gets a speaker closed to guests (`guest-license`). A speaker is closed to guests
+when its license restricts serving it (Fish Audio Drama 3's `fish-audio-community`, from the profile or the catalog)
+unless the operator sets `[model.local.speak] guests = true`; any speaker can be closed with `guests = false`
+(`Coordinator::guests_may_speak`; a speaker on another model node goes by the license it publishes). With no model
+named, a guest's pick is made among the speakers it may use. Then `Coordinator::resolve_speaker` routes with
+`Catalog::route_speak` (a 400 names what each speaker lacks) and `Coordinator::speak` picks a node whose copy speaks,
+loads it if cold, and fails over before the audio starts. A named speaker with no profile yet (outside the catalog and
+never loaded) is left to its node, which loads it and checks the request against what the engine reports; the profile
+is known from then on. `ymirctl status` shows `speaks (text to speech): N voices (...), clones, 24 kHz`, the license and
+`not for guests`; MCP `ymir_models` adds `speech`, `license` and `limits`. `tests/speak_e2e.rs` runs a real ymird with
+the mock engine as both a llama-server and a vLLM-Omni speaker, through `ymirctl speak`, MCP `ymir_speak` and the
+bridge.
 
 `ymirctl speak` ([`speak.rs`](../crates/ymirctl/src/speak.rs)) runs over the control socket. `ControlRequest::Speak` is the
 request as a JSON line with its clone clips taken out, followed by the clips as raw bytes (lengths in `clips`, each up to
@@ -765,9 +806,9 @@ daemon.
   (`ggml-org/drama-3-GGUF` and the upstream `fishaudio/drama-3`), and `weirdnet-model` checks it again in
   `download` (`Consent::accepting_license`).
 - MCP `ymir_pull_model` never accepts a license.
-- Until ymird can launch speakers (`weirdnet-backends` 0.4.10), the printed `role = "speak"` entry is for later:
-  `--register` refuses it, and `node.toml` validation refuses `role = "speak"` or a catalog speaker id, because
-  either would start as a chat model.
+- A speaker's printed entry has `role = "speak"` (and `backend = "vllm-omni"` for the vLLM-Omni checkpoints);
+  `--register` adds it to `node.toml` like any other. A restricted one is closed to guests unless
+  `[model.local.speak] guests = true` is added.
 - `setup` never proposes a speaker (`plan()` doesn't).
 
 #### Context length (2026-11-22)
@@ -1773,6 +1814,7 @@ reserve = "12GiB"                    # unified memory kept for the OS
 private_link = "10.0.0.1"            # optional: private address for group jobs (RoCE/NCCL, RPC)
 llamacpp = "managed"                 # managed | system:/path | off
 vllm = "auto"                        # auto (only where supported) | off
+# vllm_omni = "auto"                 # speakers on vLLM-Omni: the `engines install vllm-omni` venv | system:/path | off
 # wrap = "http://127.0.0.1:8000"     # or wrap a stock vllm/llama-server already running here
 
 [[model.local]]                      # models this node keeps on disk and may be told to load
@@ -1787,6 +1829,20 @@ id = "gemma4-e4b"
 
 [[model.local]]
 id = "qwen3-embedding-0.6b"
+
+# [[model.local]]                    # text to speech (catalog speaker; `models pull kokoro-82m` fetches its projector)
+# id = "kokoro-82m"
+# role = "speak"
+# [model.local.speak]                # optional: narrows what the model does; never widens
+# max_input_chars = 2000
+# guests = true                      # default: true, false for a restricted license (Fish Audio Drama 3)
+
+# [[model.local]]                    # a vLLM model that reads video whole (video design Phase 2)
+# id = "qwen3-vl-8b"
+# backend = "vllm"
+# file = "Qwen/Qwen3-VL-8B-Instruct"
+# video = true
+# limits = { video_max_seconds = 60, video_max_bytes = 50000000, video_frames_per_minute = 120 }
 
 # ---- inference role ----
 [inference]

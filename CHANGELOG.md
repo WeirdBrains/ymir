@@ -56,8 +56,7 @@ All notable changes to Ymir are listed here. The format follows
 - Testkit mock engine `/v1/audio/speech` in llama-server and vLLM-Omni flavors (`/props` voices, `/v1/audio/voices`,
   `x-audio-sample-rate`, sine WAV/PCM).
 - `weirdnet-agent` 0.5.11 (speech out; `release.toml` updated). `InferenceHost::open_speak` refuses a guest's cloned voice
-  (`guest-clone`) and a model outside its grant (`guest-model`). Otherwise it answers a clean `Unsupported` ("no model in
-  this pool speaks yet") until `weirdnet-backends` 0.4.10 brings `role = "speak"` nodes.
+  (`guest-clone`) and a model outside its grant (`guest-model`).
 - `ymirctl speak`: text, `-`, `--file` or a multi-speaker `--script`, with `--voice` (also `N=NAME` per speaker),
   `--design`, or `--clone-audio`/`--clone-text`/`--clone-consent`. It also takes `--model`,
   `--format wav|mp3|opus|flac|pcm16`, `--out FILE|-` (it never writes raw audio to a terminal) and `--chunk auto|off`.
@@ -70,7 +69,7 @@ All notable changes to Ymir are listed here. The format follows
   (OpenAI fields plus `weirdnet` extensions: design, `data:` reference clips with consent, scripts, seed, language;
   `stream_format: "audio"`) and `POST /v1/audio/transcriptions` (multipart; json, verbose_json, text, srt, vtt).
   `/v1/models` lists `weirdnet.speech` and `weirdnet.inputs`. `[app.bridge] max_request_bytes` bounds audio bodies
-  too, with a 413. Speech answers 400 until a speak node exists (`weirdnet-backends` 0.4.10).
+  too, with a 413. Speech with no speaker in the pool is a 400.
 - `weirdnet-model` 0.5.5 (`release.toml` requires it): the text-to-speech catalog.
   - `ymirctl models catalog [--purpose speak] [--json]` lists the eight speakers (five Qwen3-TTS, Kokoro 82M,
     VoxCPM2, Fish Audio Drama 3) with engine, size, license and speech profile.
@@ -78,10 +77,25 @@ All notable changes to Ymir are listed here. The format follows
     are fetched by the engine.
   - Fish Audio Drama 3 (Fish Audio Community License) needs `--accept-license fish-audio-community`. Without it,
     it is refused before any request, by id or by either of its Hub repos.
-  - `node.toml` refuses `role = "speak"` and catalog speaker ids until speakers can be served
-    (`weirdnet-backends` 0.4.10).
 - `ymirctl engines install vllm-omni`: vLLM-Omni and its matching vLLM release in a managed venv
-  (`<home>/engines/vllm-omni`), with the same driver CUDA checks as `engines install vllm`. Nothing serves from it yet.
+  (`<home>/engines/vllm-omni`), with the same driver CUDA checks as `engines install vllm`. `backend = "vllm-omni"`
+  speakers run from it.
+- `weirdnet-backends` 0.4.10 (`release.toml` requires it): text to speech served (audio milestones 7 to 9).
+  - `role = "speak"` on a `[[model.local]]`: llama.cpp with the model's projector, or `backend = "vllm-omni"` (run from
+    `[model] vllm_omni`, default the managed venv). Validated with `ModelLaunch::check_speech`. The earlier refusal of
+    `role = "speak"` and catalog speaker ids (in node.toml and `models pull --register`) is gone.
+  - `[model.local.speak]`: the speech profile's fields, narrowing only (`presets`, `languages`, `max_input_chars`, ...),
+    and `guests`. Speakers under a restricting license (Fish Audio Drama 3) are closed to guests of a shared pool unless
+    `guests = true` (`guest-license`); `guests = false` closes any speaker.
+  - The inference role routes infer/2 `Speak` to a node whose copy speaks (`Coordinator::speak`, cold load, failover);
+    catalog/1 publishes purpose `speak`, the reported profile and the license, so `/v1/models` has `weirdnet.speech`.
+    `ymirctl speak`, MCP `ymir_speak` and `POST /v1/audio/speech` reach real speakers.
+  - `ymirctl status` shows `speaks (text to speech)` with the voices, cloning, sample rate, license and `not for guests`;
+    MCP `ymir_models` adds `speech`, `license` and `limits`.
+- Native video (video design Phase 2): `video = true` on a vLLM `[[model.local]]` (`ModelLaunch::with_video`) with
+  `limits = { video_max_seconds, video_max_bytes, video_frames_per_minute }`. catalog/1 publishes `inputs.video` and the
+  limits, the bridge's `/v1/models` `weirdnet.video`, and `ymirctl status` shows them, so Bragi V4 (`d39a236`) sends whole
+  clips when they fit. llama.cpp and MLX models can't set it.
 
 ### Changed
 

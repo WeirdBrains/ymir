@@ -4,8 +4,10 @@ Status: design, post-v1, 2026-11-22 (LF-38). Milestone 1 started 2026-11-26 (LF-
 context (smallest across nodes, absent when any node doesn't say) and the media limits (`weirdnet-agent` 0.5.7 `MediaLimits`,
 strictest across nodes, from the engine or `[model.local] limits`), `[bridge] max_request_bytes` sets the bridge's body limit,
 and `ymirctl status` shows both. Milestone 2 built 2026-11-27 (mocks only): a `role = "transcribe"` model, the infer/2
-`Transcribe` route through the inference role, and limits measured at load (see "Milestone 2" below). A video part still waits
-on the Weirdnet wish list below. None of it blocks v1. The client side (sampling, attach,
+`Transcribe` route through the inference role, and limits measured at load (see "Milestone 2" below). Phase 2 (native video)
+built 2026-11-27 (mocks only): Bragi V4 (`d39a236`, on Bragi main) sends a whole clip when the model takes video and the clip
+fits its limits, and Ymir publishes `inputs.video` and the video limits for models set `video = true` on vLLM, built on
+`weirdnet-agent` 0.5.11 and `weirdnet-backends` 0.4.10 (see "Phase 2: what was built" below). None of it blocks v1. The client side (sampling, attach,
 players in all three front ends, ffmpeg packaging) is in [`bragi/docs/design/video.md`](https://github.com/WeirdBrains/bragi/blob/main/docs/design/video.md);
 read it first. This document covers what Ymir does so that video works for Bragi and for every other client of the pool.
 
@@ -156,6 +158,30 @@ the bridge when the model does not read video natively: the same sampler Bragi u
 - **Tests.** [`transcribe.rs`](../../crates/ymir-testkit/tests/transcribe.rs): the mock engine as vLLM, catalog purpose and
   limits before and after load (measured `max_model_len`, the operator's audio limit kept, unknown fields absent), transcription
   through `local_pool` with timed segments, not cached, named-model and empty-pool 400s, and no audio or transcript in the logs.
+
+## Phase 2: what was built (2026-11-27, mocks only)
+
+- **Bragi V4** (`d39a236`, on Bragi main): when catalog/1 says the routed model takes video (`inputs.video`) and the clip fits
+  `video_max_seconds` and `video_max_bytes` (and the request limit), Bragi sends the clip whole as a `video_url` part;
+  otherwise it plans frames from the same reported limits (phase 1), as before. Missing limits mean frames, never a guess.
+- **Config.** `video = true` on a `[[model.local]]` (`ModelLaunch::with_video`, `weirdnet-backends` 0.4.10). The operator says
+  so because no engine reports it. It needs `backend = "vllm"` (a wrapped mistral.rs server is declared as vLLM): llama.cpp and
+  MLX-LM take no video, so validation refuses the flag there, and the backend refuses a video part on them with
+  `VIDEO_FALLBACK` ("send the video as frames"). Embedding, transcription and speaking models can't set it. The limits are the
+  ordinary `limits` table: `video_max_seconds`, `video_max_bytes`, `video_frames_per_minute` (`weirdnet-agent` 0.5.11
+  `MediaLimits`), reported or absent.
+- **Catalog.** `Capabilities::video` in the node record; catalog/1 `inputs.video` is the union over the nodes that have the
+  model and the video limits the strictest of them (`MediaLimits::tightest`), as for images and audio. The bridge's
+  `/v1/models` has `weirdnet.video` and `weirdnet.inputs.video` (`weirdnet-openai` 0.2.5).
+- **Routing.** A request with a video part goes only to a node whose copy takes video (`Modalities::VIDEO` in
+  `Request::needs`); a named model that doesn't is a 400 ("does not take video").
+- **Shown.** `ymirctl status` says `takes ... video` and `video up to N s, ... video frames per minute`; MCP `ymir_models` has
+  `takes.video` and `limits`.
+- **Not built.** Content-root references for large clips (item 5 above: clips still ride in the request, bounded by
+  `max_request_bytes`), server-side expansion, and MCP video inputs. Not tried against a real Qwen-VL on vLLM.
+- **Tests.** `speak_e2e.rs` `native_video_is_published_in_the_catalog_and_v1_models`: a real ymird with the mock engine as
+  vLLM, `inputs.video` and the three limits in catalog/1 and `/v1/models`, and the status line; config tests for the vLLM-only
+  rule.
 
 ## Weirdnet wish list
 

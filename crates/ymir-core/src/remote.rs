@@ -612,6 +612,52 @@ impl ModelNode for RemoteModelNode {
             Ok((t.transcript, t.usage))
         })
     }
+
+    /// Speech from the model node over infer/2 `Speak`, relayed piece by piece as it comes (the
+    /// remote request is cancelled when the asker drops the stream).
+    fn speak<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::SpeakRequest,
+    ) -> BoxFuture<'a, Result<weirdnet_agent::remote::infer::v2::AudioStream, RemoteError>> {
+        use weirdnet_agent::remote::infer::v2::AudioStream;
+        Box::pin(async move {
+            self.permitted()?;
+            let mut r = request.clone();
+            r.model = Some(model.to_string());
+            let cancel = CancelToken::new();
+            let mut remote = self.pool.speak_stream(r, &cancel).await?;
+            let (sink, stream) = AudioStream::channel(8);
+            let header = remote.header();
+            tokio::spawn(async move {
+                let _guard = CancelOnDrop(cancel);
+                if sink.start(header).await.is_err() {
+                    return;
+                }
+                loop {
+                    match remote.next().await {
+                        Ok(Some(bytes)) => {
+                            if sink.audio(bytes).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = sink.fail(e).await;
+                            return;
+                        }
+                    }
+                }
+                if let Some(u) = remote.usage() {
+                    let _ = sink.usage(u).await;
+                }
+                if let Some(m) = remote.meta() {
+                    let _ = sink.meta(m.clone()).await;
+                }
+            });
+            Ok(stream)
+        })
+    }
 }
 
 type PoolTask = tokio::task::JoinHandle<Result<weirdnet_agent::pool::Answer, weirdnet_agent::pool::Interrupted>>;

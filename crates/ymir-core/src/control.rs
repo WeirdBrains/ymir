@@ -294,6 +294,16 @@ pub struct NodeModel {
     /// keys the answer cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// What a speaker speaks (`weirdnet-backends` 0.4.10 `ModelStatus::speech`), when it speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<weirdnet_agent::speech::SpeechProfile>,
+    /// The model's license, when known (the node's record, the speech profile or the catalog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// For a speaker: whether guests of a shared pool may use it (`[model.local.speak] guests`,
+    /// else closed for a restricted license).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -664,7 +674,11 @@ impl ControlHandler {
         needs.reference_bytes = job.clips.iter().max().copied();
         needs.input_chars = 0;
         needs.format = None;
-        match catalog.route_speak(job.request.model.as_deref(), &needs) {
+        // A named speaker with no profile yet is left to its node (it loads, then checks).
+        let unknown = job.request.model.as_deref().and_then(|m| catalog.find(m)).is_some_and(crate::coordinator::speaker_unknown);
+        let routed =
+            if unknown { Ok(job.request.model.clone().unwrap_or_default()) } else { catalog.route_speak(job.request.model.as_deref(), &needs) };
+        match routed {
             Ok(id) => {
                 let profile = catalog.find(&id).and_then(|m| m.speech.clone());
                 let mut resp = ControlResponse::ok("speaker");
@@ -925,8 +939,22 @@ impl ControlHandler {
                     .flat_map(|n| {
                         n.status().into_iter().map(|s| NodeModel {
                             revision: n.revision(&s.id),
+                            license: n.origin(&s.id).1.or_else(|| {
+                                crate::model_node::speaks(&s)
+                                    .then(|| {
+                                        s.speech
+                                            .as_ref()
+                                            .and_then(|p| p.license.clone())
+                                            .or_else(|| weirdnet_model::hw::find(&s.id).and_then(|e| e.license()).map(str::to_string))
+                                    })
+                                    .flatten()
+                            }),
+                            guests: self.coordinator.as_ref().filter(|_| crate::model_node::speaks(&s)).map(|c| c.guests_may_speak(&s.id)),
+                            speech: s.speech.clone(),
                             purpose: if crate::model_node::embeds(&s) {
                                 "embedding".into()
+                            } else if crate::model_node::speaks(&s) {
+                                "speak".into()
                             } else if crate::model_node::transcribes(&s) {
                                 "transcribe".into()
                             } else {

@@ -194,36 +194,64 @@ impl InferHost for InferenceHost {
         Ok(Arc::new(Transcriber { coord: self.coord.clone(), model, caller: caller.clone() }))
     }
 
-    /// Speech out (infer/2 `Speak`, `weirdnet-agent` 0.5.11). The guest rules come first, so they
-    /// hold whatever serves speech: a guest of a shared pool never clones a voice (`guest-clone`;
-    /// a per-grant `clone` switch is designed, not built) and only names a speaker in its grant's
-    /// allowlist (`guest-model`). Then: no model node serves speech until `weirdnet-backends`
-    /// 0.4.10 brings `role = "speak"` launches, so this is `Unsupported` (the pool tries the next
-    /// node) with what is missing, never a stand-in voice. Nothing here logs the text or the clip.
+    /// Speech out (infer/2 `Speak`, audio design milestones 7–9). The guest rules come first: a
+    /// guest of a shared pool never clones a voice (`guest-clone`; a per-grant `clone` switch is
+    /// designed, not built), only names a speaker in its grant's allowlist (`guest-model`), and
+    /// never gets a speaker closed to guests ([`Coordinator::guests_may_speak`]: a restricted
+    /// license such as Fish Audio Drama 3's unless the operator set `guests = true`,
+    /// `guest-license`). With no model named, a guest's pick is made among the speakers it may
+    /// use. Then the request is routed to a model node whose copy of the speaker covers it
+    /// ([`Coordinator::resolve_speaker`]); a 400 says what each speaker lacks. Nothing here logs
+    /// the text or the clip.
     fn open_speak(&self, caller: &Caller, request: &SpeakRequest) -> Result<Arc<dyn SpeakBackend>, RemoteError> {
-        if let Some(g) = &self.guests
-            && let Some(grant) = g.grant_of(caller)?
-        {
+        let grant = match &self.guests {
+            Some(g) => g.grant_of(caller)?,
+            None => None,
+        };
+        if let Some(grant) = &grant {
             if request.clones() {
                 return Err(RemoteError::refused("guest-clone"));
             }
-            if let Some(m) = request.model.as_deref()
-                && !grant.allows_model(m)
-            {
-                return Err(RemoteError::refused("guest-model"));
+            if let Some(m) = request.model.as_deref() {
+                if !grant.allows_model(m) {
+                    return Err(RemoteError::refused("guest-model"));
+                }
+                if !self.coord.guests_may_speak(m) {
+                    return Err(RemoteError::refused("guest-license"));
+                }
             }
         }
-        Err(speech_unsupported(request.model.as_deref()))
+        let coord = self.coord.clone();
+        let allowed = |id: &str| grant.as_ref().is_none_or(|g| g.allows_model(id) && coord.guests_may_speak(id));
+        let model = self.coord.resolve_speaker(request.model.as_deref(), &request.needs(), &allowed)?;
+        Ok(Arc::new(Speaker { coord: self.coord.clone(), model, caller: caller.clone() }))
     }
 }
 
-/// Why this inference node has no speaker yet (see [`InferenceHost::open_speak`]).
-pub fn speech_unsupported(model: Option<&str>) -> RemoteError {
-    let what = model.map_or("a speaking model".to_string(), |m| format!("`{m}`"));
-    RemoteError::Unsupported {
-        message: format!(
-            "no model in this pool speaks yet: {what} needs a `role = \"speak\"` model node (llama-server or vLLM-Omni), which comes with weirdnet-backends 0.4.10"
-        ),
+/// One speech request, on the speaker [`InferHost::open_speak`] picked. Neither the text, the
+/// reference clip nor the audio is cached or logged: they are content.
+struct Speaker {
+    coord: Arc<Coordinator>,
+    model: String,
+    caller: Caller,
+}
+
+#[async_trait]
+impl SpeakBackend for Speaker {
+    fn name(&self) -> String {
+        self.model.clone()
+    }
+
+    async fn speak(&self, request: &SpeakRequest, cancel: &CancelToken) -> Result<v2::AudioStream, RemoteError> {
+        // A device's batch work is capped, as for chat, so it can't crowd out the others.
+        let _hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&self.caller.peer)?) };
+        let run = self.coord.speak(&self.model, request);
+        let (audio, node) = tokio::select! {
+            _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
+            r = run => r?,
+        };
+        tracing::debug!(model = %self.model, node = %node, chars = request.input.chars(), "speaking");
+        Ok(audio)
     }
 }
 

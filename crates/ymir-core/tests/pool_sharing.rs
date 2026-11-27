@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::json;
 use weirdnet_agent::pool::{Answer, NoEvents, Pool, PoolShare, connect_shared, encode_credential, share_dialer};
 use weirdnet_agent::remote::RemoteError;
-use weirdnet_agent::remote::infer::v2::{ContextRef, Request, SpeakRequest, Usage, Voice};
+use weirdnet_agent::remote::infer::v2::{AudioHeader, AudioStream, ContextRef, Request, ScriptTurn, SpeakRequest, Usage, Voice};
 use weirdnet_agent::remote::{Caller, Dialer, catalog};
 use weirdnet_agent::{CancelToken, Message};
 use weirdnet_backends::{Chunk, ChunkStream, ModelStatus};
@@ -35,12 +35,34 @@ fn status(id: &str, embedding: bool) -> ModelStatus {
     .unwrap()
 }
 
+/// A loaded speaker with preset voices and scripts, and `license` in its profile when restricted.
+fn speaker(id: &str, license: Option<&str>) -> ModelStatus {
+    let mut speech = json!({"presets": ["af_heart", "vivian"], "script_speakers": 4, "formats": ["wav"], "sample_rate": 24000});
+    if let Some(l) = license {
+        speech["license"] = json!(l);
+    }
+    serde_json::from_value(json!({
+        "id": id, "engine": "llamacpp", "state": {"state": "ready"}, "in_flight": 0, "swap_group": null,
+        "embedding": false, "pid": null, "last_load_secs": null, "size_bytes": null, "wrapped": false, "crashes": 0,
+        "capabilities": {"chat": false, "embeddings": false, "vision": false, "audio": false, "speak": true},
+        "speech": speech
+    }))
+    .unwrap()
+}
+
 impl ModelNode for FakeNode {
     fn name(&self) -> &str {
         &self.0
     }
     fn status(&self) -> Vec<ModelStatus> {
-        vec![status("small", false), status("emb", true)]
+        vec![status("small", false), status("emb", true), speaker("kokoro-82m", None), speaker("fish-audio-drama-3", Some("fish-audio-community"))]
+    }
+    fn speak<'a>(&'a self, model: &'a str, _: &'a SpeakRequest) -> BoxFuture<'a, Result<AudioStream, RemoteError>> {
+        Box::pin(async move {
+            let _ = model;
+            let header = AudioHeader::new(weirdnet_agent::speech::AudioFormat::Wav).with_sample_rate(24_000).with_channels(1);
+            Ok(AudioStream::from_file(header, b"RIFF".to_vec(), None))
+        })
     }
     fn load<'a>(&'a self, _: &'a str, _: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async { Ok(()) })
@@ -160,13 +182,24 @@ async fn a_second_identity_uses_a_shared_pool_until_unshared() {
     let ctx = Request::context(ContextRef::new("c1", None)).with_model("small");
     assert!(refused(answer(&pool, ctx).await, "guest-context"));
 
-    // Speech: a guest never clones a voice through a share link, consent or not; a preset gets
-    // the plain answer that no model here speaks yet.
+    // Speech: a guest never clones a voice through a share link, consent or not.
     let clone = SpeakRequest::text("hi").with_voice(Voice::clone_from(vec![1; 64], "wav", None, true));
     let r = pool.speak(clone, &CancelToken::new()).await.map(|s| s.model);
     assert!(matches!(&r, Err(RemoteError::Refused { message }) if message.contains("guest-clone")), "{r:?}");
-    let r = pool.speak(SpeakRequest::text("hi").with_voice(Voice::preset("vivian")), &CancelToken::new()).await.map(|s| s.model);
-    assert!(matches!(&r, Err(e) if e.to_string().contains("speaks yet")), "{r:?}");
+    // A preset on an open (apache-2.0) speaker works; with no model named the pick is made
+    // among the speakers a guest may use, so never Drama 3 (a restricted license, guests off).
+    let preset = || SpeakRequest::text("hi").with_voice(Voice::preset("vivian"));
+    let r = pool.speak(preset().with_model("kokoro-82m"), &CancelToken::new()).await.map(|s| s.model);
+    assert_eq!(r.unwrap(), "kokoro-82m");
+    for _ in 0..3 {
+        assert_eq!(pool.speak(preset(), &CancelToken::new()).await.unwrap().model, "kokoro-82m");
+    }
+    let r = pool.speak(preset().with_model("fish-audio-drama-3"), &CancelToken::new()).await.map(|s| s.model);
+    assert!(matches!(&r, Err(RemoteError::Refused { message }) if message.contains("guest-license")), "{r:?}");
+    // The owner's own devices get it.
+    let own = host::local_pool(coordinator("owner"), "owner", host::admission(2, 8), None);
+    let script = SpeakRequest::script(vec![ScriptTurn::new(0, "a"), ScriptTurn::new(1, "b")]).with_model("fish-audio-drama-3");
+    assert_eq!(own.speak(script, &CancelToken::new()).await.unwrap().model, "fish-audio-drama-3");
 
     // Everything outside catalog/infer stays on the roster check (models, train, tasks, wake, admin).
     let caller = Caller { peer: guest.peer(), cert_bytes: Some(encode_credential(&guest.m.user_key(), &guest.m.our_cert())) };

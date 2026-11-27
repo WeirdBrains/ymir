@@ -1,7 +1,8 @@
 # Audio through Ymir: speech out, and audio processing
 
 Status: design, 2026-11-27 (Michael, t75u: "support for transcripts to audio and for audio processing"). Milestones
-1 to 6 were built on 2026-11-27, against mocks only (see "What was built" under "Milestones"); speech out waits on the crates.
+1 to 10 were built on 2026-11-27, against mocks only (see "What was built" under "Milestones"), speech out included, on
+`weirdnet-backends` 0.4.10. Milestone 11 (real runs on m1/m2) and 12 (later) remain.
 "What exists" below is the state before them. It builds on the transcription route of video milestone 2 (`5b77934`, in v0.23.0) and needs new Weirdnet crate
 versions for speech out; what Ymir can build before them is listed under "Milestones". Read
 [video.md](video.md) first (limits are reported, never defaulted; the hardened ffmpeg rules) and [DESIGN.md](../DESIGN.md),
@@ -452,7 +453,7 @@ sampling of [video.md](video.md) joins it.
 
 ### What was built (2026-11-27, on `weirdnet-agent` 0.5.11, before the backends)
 
-- **open_speak.** `InferenceHost::open_speak` checks a guest first: a request that clones a voice is refused
+- **open_speak** (superseded by milestone 7 below). `InferenceHost::open_speak` checks a guest first: a request that clones a voice is refused
   `guest-clone` (all guest cloning, consent or not), and a model outside the grant's allowlist `guest-model`. Anything
   else is a clean `Unsupported` that says no model in this pool speaks yet and that a `role = "speak"` node comes with
   `weirdnet-backends` 0.4.10. Because it is `Unsupported`, the pool fails over and reports it.
@@ -524,9 +525,9 @@ sampling of [video.md](video.md) joins it.
 - **Departures.**
   - A speaker's `[[model.local]]` entry is printed but can't be registered yet. `node.toml` validation refuses
     `role = "speak"` and catalog speaker ids until `weirdnet-backends` 0.4.10, because they would otherwise launch
-    as chat models.
+    as chat models. (Lifted with milestone 7 below.)
   - `guests = false` for restricted models and the license in `ymirctl status` wait for speakers to be served
-    (milestone 7).
+    (milestone 7, now built).
   - Ymir uses neither `LimitsRecord::speech` nor the video frame limits yet, so nothing needed reconciling there.
 - **Tests.**
   - `models::tests::the_catalog_lists_the_speakers`: the eight ids, profiles, licenses, projectors, and the table
@@ -534,7 +535,54 @@ sampling of [video.md](video.md) joins it.
   - `drama_3_needs_its_license_accepted_before_any_request`: a refusal with no Hub request for the id and both
     repos, a wrong license refused, and acceptance reaching the Hub. It also covers the `--register` refusal, the
     Kokoro dry run and a vLLM-Omni pull.
-  - `config::tests::speakers_are_refused_until_the_engines_serve_them`.
+  - `config::tests::speakers_are_refused_until_the_engines_serve_them` (replaced in milestone 7).
+
+### What was built (2026-11-27, on `weirdnet-backends` 0.4.10: milestones 7 to 9 served end to end)
+
+- **7 (speakers on the node).**
+  - The temporary refusal is gone, in node.toml validation and in `models pull --register`. `role = "speak"` sets
+    `ModelLaunch::with_speak`; validation runs `ModelLaunch::check_speech` (llama.cpp needs the projector, only
+    llama.cpp and vLLM-Omni speak, no `--allowed-local-media-path`, settings only narrow the catalog entry) and refuses a
+    speaker that is also an embedding, transcription, LoRA or video model, a catalog speaker id without the role, and
+    `backend = "vllm-omni"` without it. A catalog speaker's projector is found in the models dir when `mmproj` is unset.
+  - `backend = "vllm-omni"` is `EngineKind::VllmOmni`, run from `EngineConfig::vllm_omni` with `[model] vllm_omni`:
+    `auto` uses the venv `ymirctl engines install vllm-omni` made (`<home>/engines/vllm-omni/bin/vllm`), else `vllm` on
+    `PATH`; also `system:PATH` and `off`. Configured only when a model uses it.
+  - `[model.local.speak]` is `weirdnet-agent`'s `SpeechProfile` (narrowing only, `ModelLaunch::with_speech`) plus
+    `guests`. Speakers are open to guests by default except under a restricting license (Drama 3's
+    `fish-audio-community`, from the catalog or the settings' `license`), which needs `guests = true`; `guests = false`
+    closes any speaker.
+  - `ModelNode::speak`: `Supervisor::speak` locally; a remote model node over infer/2 `Speak`, relayed piece by piece.
+    `Coordinator::speak` picks a node whose copy speaks (ready first, else one that loads it; failover before the audio
+    starts). catalog/1: purpose `speak`, the node's profile (`ModelStatus::speech`, unknown profiles left out) and the
+    license. A chat or embedding request naming a speaker is a 400.
+  - `InferenceHost::open_speak`: the guest checks (`guest-clone`, `guest-model`, and new `guest-license` for a speaker
+    closed to guests), then `Coordinator::resolve_speaker` (`Catalog::route_speak` among the speakers the caller may
+    use) and a `SpeakBackend` over `Coordinator::speak`.
+  - `ymirctl status`: `speak` purpose, `speaks (text to speech): 2 voices (af_heart, am_adam), clones, 24 kHz`, the
+    license, `not for guests`. There is no `ymirctl pool models` command; MCP `ymir_models` (the pool's model list) adds
+    `speech`, `license`, `limits` and `takes.video`.
+- **8 and 9.** `ymirctl speak`, MCP `ymir_speak` and the bridge's `/v1/audio/speech` now reach real speakers; no change to
+  them beyond the routing below.
+- **Departures.**
+  - The design's `voices` is the profile's `presets`, and there is no `clone = false`: the profile's bools can't say "off"
+    (`SpeechProfile::narrowed_by`), so turning cloning off per node waits on a Weirdnet field. Guests never clone anyway.
+  - A speaker outside the catalog has no profile until its engine loads once, and `Catalog::route_speak` would give it
+    only the plainest request. A request that names such a speaker is left to its node (ymird and `SpeakTarget`), which
+    loads it and checks against what the engine reports; the profile is kept from then on.
+  - The guest policy is the inference node's view: its own `[model.local.speak] guests`, else the license a remote
+    node publishes. A remote model node's `guests = true` doesn't reach another inference node yet.
+  - No per-grant `clone` switch and no `ymirctl voices` command yet.
+- **Tests.**
+  - `speak_e2e.rs` `speakers_in_both_flavors_through_ymirctl_mcp_and_the_bridge`: a real ymird with the mock engine as a
+    llama-server speaker (projector, `/props` voices) and a vLLM-Omni speaker (`--omni`, `/v1/audio/voices`, the probe's
+    sample rate, an operator `max_input_chars`). Cold load on first use, the reported profiles in `/v1/models`, `ymirctl
+    speak`, MCP `ymir_speak` and `ymir_models`, the bridge in WAV, PCM and streamed, the pool's pick with no model named,
+    clean 400s, and the status lines.
+  - `pool_sharing.rs`: a guest gets an open speaker by name and by the pool's pick, never Drama 3 (`guest-license`), while
+    the owner's devices get it.
+  - Config: `speakers_launch_with_the_speak_role`, `speakers_are_checked_against_their_engines_and_catalog`,
+    `restricted_speakers_are_closed_to_guests_by_default`; `models::tests::speakers_register_with_the_speak_role`.
 
 ## Not in this design
 

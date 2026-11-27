@@ -1005,15 +1005,29 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
             extra.push_str(", wrapped");
         }
         if let Some(c) = m.capabilities {
-            let media: Vec<&str> = [(c.vision, "images"), (c.audio, "audio")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect();
+            let media: Vec<&str> =
+                [(c.vision, "images"), (c.audio, "audio"), (c.video, "video")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect();
             if !media.is_empty() {
                 extra.push_str(&format!(", takes {}", media.join(" and ")));
             }
             if c.transcribe {
                 extra.push_str(", transcribes (speech to text)");
             }
+            if c.speak {
+                extra.push_str(&format!(", speaks (text to speech){}", speech_line(m.speech.as_ref())));
+                if let Some(l) = &m.license {
+                    extra.push_str(&format!(", license {l}"));
+                }
+                match m.guests {
+                    Some(false) => extra.push_str(", not for guests"),
+                    Some(true) if m.license.as_deref().is_some_and(|l| weirdnet_model::speech::restricting_license(Some(l)).is_some()) => {
+                        extra.push_str(", guests allowed (guests = true)")
+                    }
+                    _ => {}
+                }
+            }
         }
-        if m.capabilities.is_none_or(|c| c.chat) && m.base.is_none() {
+        if m.capabilities.is_none_or(|c| c.chat && !c.speak) && m.base.is_none() {
             let measured = if m.context_tokens.is_some_and(|c| c > 0) { " (measured)" } else { "" };
             let ctx = m.context_tokens.filter(|c| *c > 0).or_else(|| ymir_core::model_node::request_context(m.engine, m.context, m.slots));
             match ctx {
@@ -1073,6 +1087,40 @@ fn write_cache(out: &mut dyn Write, c: &ymir_core::semantic::CacheStatus) -> Res
         )?;
     }
     Ok(())
+}
+
+/// What a speaker does, for `ymirctl status`: `: 54 voices (af_heart, ...), clones, 24 kHz`.
+pub fn speech_line(p: Option<&weirdnet_agent::speech::SpeechProfile>) -> String {
+    let Some(p) = p else { return String::new() };
+    let mut parts = Vec::new();
+    match p.presets.as_deref() {
+        Some([one]) => parts.push(format!("voice {one}")),
+        Some(v) if !v.is_empty() => {
+            let shown: Vec<&str> = v.iter().take(3).map(String::as_str).collect();
+            let more = if v.len() > 3 { ", ..." } else { "" };
+            parts.push(format!("{} voices ({}{more})", v.len(), shown.join(", ")));
+        }
+        _ => {}
+    }
+    if p.design {
+        parts.push("designs voices".into());
+    }
+    if p.clone.is_some() {
+        parts.push("clones".into());
+    }
+    if let Some(n) = p.script_speakers {
+        parts.push(format!("scripts of up to {n} speakers"));
+    }
+    if let Some(l) = &p.languages {
+        parts.push(format!("{} languages", l.len()));
+    }
+    if let Some(hz) = p.sample_rate {
+        parts.push(format!("{} kHz", f64::from(hz) / 1000.0));
+    }
+    if let Some(c) = p.max_input_chars {
+        parts.push(format!("up to {c} characters"));
+    }
+    if parts.is_empty() { String::new() } else { format!(": {}", parts.join(", ")) }
 }
 
 fn write_nodes(out: &mut dyn Write, nodes: &[control::NodeSummary]) -> Result<()> {

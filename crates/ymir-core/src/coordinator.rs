@@ -2,7 +2,7 @@
 //! cold-start stand-in. It speaks `weirdnet-agent` infer/2 requests end to end; [`crate::host`]
 //! serves it as an `InferHost`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -52,11 +52,22 @@ pub struct CoordinatorOptions {
     pub rollouts: Vec<crate::rollout::Rollout>,
     /// The semantic answer cache (M6), behind the exact one; `None`: off.
     pub semantic: Option<crate::semantic::SemanticOptions>,
+    /// Whether guests of a shared pool may use each speaker this node's config lists
+    /// (`[model.local.speak] guests`, else closed for a restricted license). A speaker not
+    /// listed here goes by the license its node publishes ([`Coordinator::guests_may_speak`]).
+    pub speak_guests: HashMap<String, bool>,
 }
 
 impl Default for CoordinatorOptions {
     fn default() -> Self {
-        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new(), rollouts: Vec::new(), semantic: None }
+        Self {
+            standin: None,
+            standin_after: Duration::from_secs(10),
+            splits: Vec::new(),
+            rollouts: Vec::new(),
+            semantic: None,
+            speak_guests: HashMap::new(),
+        }
     }
 }
 
@@ -71,6 +82,12 @@ pub struct CatalogRow {
     /// Speech to text: at least one node's copy has the transcription role and can serve it
     /// (catalog/1 purpose `transcribe`, video design milestone 2).
     pub transcribe: bool,
+    /// Text to speech: at least one node's copy has the speech role and can serve it (catalog/1
+    /// purpose `speak`, audio design milestone 7).
+    pub speak: bool,
+    /// What it speaks, as the first node that reports a profile says (the engine's report over
+    /// the catalog entry, narrowed by that node's settings).
+    pub speech: Option<weirdnet_agent::speech::SpeechProfile>,
     /// The inputs beyond text that at least one node's copy takes (images, audio).
     pub inputs: Modalities,
     /// For a LoRA adapter: the base model it runs on (as the first node that has it says).
@@ -348,6 +365,8 @@ impl Coordinator {
                     draining: Vec::new(),
                     embedding: crate::model_node::embeds(&s),
                     transcribe: false,
+                    speak: false,
+                    speech: None,
                     inputs: Modalities::TEXT,
                     base: s.base.clone(),
                     origin: None,
@@ -357,6 +376,10 @@ impl Coordinator {
                 });
                 row.limits = row.limits.tightest(s.limits());
                 row.transcribe |= crate::model_node::transcribes(&s);
+                row.speak |= crate::model_node::speaks(&s);
+                if row.speech.is_none() && crate::model_node::speaks(&s) {
+                    row.speech = s.speech.clone().filter(|p| !p.is_unknown());
+                }
                 match crate::model_node::status_context(&s) {
                     Some(c) if !unknown_context.contains(&s.id) => row.context = Some(row.context.map_or(c, |r| r.min(c))),
                     _ => {
@@ -484,6 +507,8 @@ impl Coordinator {
                 };
                 let purpose = if m.embedding {
                     Purpose::Embedding
+                } else if m.speak {
+                    Purpose::Speak
                 } else if m.transcribe {
                     Purpose::Transcribe
                 } else {
@@ -499,7 +524,16 @@ impl Coordinator {
                     c = c.with_base(base);
                 }
                 (c.origin, c.license) = (m.origin.clone(), m.license.clone());
-                if !m.embedding && !m.transcribe {
+                if m.speak {
+                    if let Some(p) = &m.speech {
+                        c = c.with_speech(p.clone());
+                    }
+                    // A speaker's license is shown with it (Bragi labels restricted voices).
+                    if c.license.is_none() {
+                        c.license = speaker_license(&m.id, m.speech.as_ref());
+                    }
+                }
+                if !m.embedding && !m.transcribe && !m.speak {
                     c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
                 }
                 c
@@ -537,6 +571,9 @@ impl Coordinator {
                     } else {
                         format!("{model} is not an embedding model")
                     }));
+                }
+                if crate::model_node::speaks(&s) {
+                    return Err(bad_request(format!("{model} is a text-to-speech model; use /v1/audio/speech (or `ymirctl speak`)")));
                 }
                 // Images and audio go only to nodes whose copy of the model takes them.
                 if let Some(what) = crate::model_node::inputs_of(&s).lacking(needed) {
@@ -1155,6 +1192,113 @@ impl Coordinator {
         }
     }
 
+    /// The speaker for a speech request (audio design milestone 7): a named one must speak
+    /// somewhere in the pool and cover `needs` (else a 400 that says what it lacks); with none
+    /// named, the warmest speaker that covers them ([`AgentCatalog::route_speak`]). Only the
+    /// speakers `allowed` says yes to are considered (a guest's grant and license rules). A named
+    /// speaker with no profile yet (not in the catalog and never loaded, so its engine hasn't
+    /// said what it speaks) is left to its node, which loads it and checks the request against
+    /// what the engine reports ([`speaker_unknown`]).
+    pub fn resolve_speaker(
+        &self,
+        model: Option<&str>,
+        needs: &weirdnet_agent::speech::SpeechNeeds,
+        allowed: &dyn Fn(&str) -> bool,
+    ) -> Result<String, RemoteError> {
+        let mut models = self.agent_catalog();
+        let model = model.filter(|m| !matches!(*m, "default" | "ymir"));
+        if let Some(m) = model
+            && !models.iter().any(|c| c.id == m)
+        {
+            return Err(unknown_model(m));
+        }
+        models.retain(|c| !c.speaks() || allowed(&c.id));
+        if let Some(m) = model
+            && models.iter().any(|c| c.id == m && speaker_unknown(c))
+        {
+            return Ok(m.to_string());
+        }
+        AgentCatalog::new(0, models).route_speak(model, needs)
+    }
+
+    /// Whether guests of a shared pool may use speaker `model`: this node's own setting for it
+    /// (`[model.local.speak] guests`), else yes unless the license its node publishes (or the
+    /// catalog records) restricts how its speech may be served, as Fish Audio Drama 3's does.
+    pub fn guests_may_speak(&self, model: &str) -> bool {
+        if let Some(open) = self.opts.speak_guests.get(model) {
+            return *open;
+        }
+        let row = self.merged_catalog().into_iter().find(|m| m.id == model);
+        let license = row.as_ref().and_then(|m| m.license.clone()).or_else(|| speaker_license(model, row.as_ref().and_then(|m| m.speech.as_ref())));
+        weirdnet_model::speech::restricting_license(license.as_deref()).is_none()
+    }
+
+    /// Speaks with `model`, loading it first if it is cold. Returns the audio stream and the
+    /// node that answered. A node that fails before the audio starts is skipped for another that
+    /// speaks with the model. Nothing is cached (the text, any reference clip and the audio are
+    /// content) and nothing of them is logged.
+    pub async fn speak(
+        &self,
+        model: &str,
+        request: &weirdnet_agent::remote::infer::v2::SpeakRequest,
+    ) -> Result<(weirdnet_agent::remote::infer::v2::AudioStream, String), RemoteError> {
+        let mut tried: HashSet<String> = HashSet::new();
+        loop {
+            let (node, status) = self.pick_speaker(model, &tried)?;
+            let attempt = async {
+                if status.state != ModelState::Ready {
+                    tracing::info!(model = %model, node = node.name(), "cold start: loading");
+                    node.load(model, false).await?;
+                }
+                node.speak(model, request).await
+            }
+            .await;
+            let err = match attempt {
+                Ok(a) => return Ok((a, node.name().to_string())),
+                Err(e) => e,
+            };
+            if !retryable(&err) {
+                return Err(err);
+            }
+            tried.insert(node.name().to_string());
+            if self.pick_speaker(model, &tried).is_err() {
+                return Err(err);
+            }
+            tracing::warn!(model = %model, node = node.name(), "{err}; trying another node");
+        }
+    }
+
+    /// A node whose copy of `model` speaks: a ready one first, else one that can load it.
+    /// Draining and reserved nodes and those in `exclude` are skipped.
+    fn pick_speaker(&self, model: &str, exclude: &HashSet<String>) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+        let mut known = false;
+        let mut fallback = None;
+        for node in self.nodes() {
+            let Some(s) = node.status().into_iter().find(|s| s.id == model) else { continue };
+            known = true;
+            if !crate::model_node::speaks(&s)
+                || node.draining()
+                || node.reserved().is_some()
+                || exclude.contains(node.name())
+                || self.is_leaving(node.name(), model)
+            {
+                continue;
+            }
+            if s.state == ModelState::Ready {
+                return Ok((node, s));
+            }
+            fallback.get_or_insert((node, s));
+        }
+        match fallback {
+            Some(f) => Ok(f),
+            None if !known => Err(unknown_model(model)),
+            None if exclude.is_empty() => Err(bad_request(format!(
+                "model `{model}` does not speak (text to speech) on any node that takes requests; pick one whose catalog purpose is `speak`"
+            ))),
+            None => Err(unavailable(format!("no other node speaks with {model}"))),
+        }
+    }
+
     pub fn resolve_embedding(&self, model: Option<&str>) -> Result<String, RemoteError> {
         match model {
             None | Some("default") | Some("ymir") => self
@@ -1224,4 +1368,17 @@ fn replay(hit: CachedAnswer, out: &dyn Sink) -> Finish {
     f.meta.cache_hit = true;
     f.meta.served_by = Some("cache".into());
     f
+}
+
+/// A speaker whose profile is not known yet: no node has published one (a speaker outside the
+/// `weirdnet-model` catalog reports its voices once its engine has loaded). A request naming it
+/// is left to the node rather than refused as if the speaker had nothing.
+pub fn speaker_unknown(m: &AgentModel) -> bool {
+    m.speaks() && m.speech.as_ref().is_none_or(weirdnet_agent::speech::SpeechProfile::is_unknown)
+}
+
+/// A speaker's license: what its profile names, else what the catalog records for its id
+/// (`weirdnet-model` 0.5.5 `CatalogEntry::license`).
+fn speaker_license(id: &str, speech: Option<&weirdnet_agent::speech::SpeechProfile>) -> Option<String> {
+    speech.and_then(|p| p.license.clone()).or_else(|| weirdnet_model::hw::find(id).and_then(|e| e.license()).map(str::to_string))
 }
