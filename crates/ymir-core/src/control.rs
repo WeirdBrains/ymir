@@ -210,6 +210,14 @@ pub enum ControlRequest {
         #[serde(default)]
         model: Option<String>,
     },
+    /// Text to speech through the pool (`weirdnet-agent` 0.5.11 infer/2 `Speak`): the reference
+    /// clips of cloned voices follow this line raw, `clips[i]` bytes for the i-th cloned voice
+    /// (local transport only; see [`speak`]). The answer's audio follows the answer line, raw
+    /// ([`SpeechReply::bytes`]). Neither text, clip nor audio is logged.
+    Speak(SpeakJob),
+    /// The speaker a speech request would use and its catalog/1 profile, so a client can plan
+    /// long text (`max_input_chars`) and pick formats. Nothing is sent to a model.
+    SpeakTarget(SpeakJob),
     /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
     /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
     Shutdown,
@@ -372,6 +380,105 @@ pub struct ControlResponse {
     /// The answer to [`ControlRequest::TranscribeTarget`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcriber: Option<Transcriber>,
+    /// The answer to [`ControlRequest::Speak`]; its audio follows the answer line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<SpeechReply>,
+    /// The answer to [`ControlRequest::SpeakTarget`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<Speaker>,
+}
+
+/// The most reference audio one [`ControlRequest::Speak`] carries, all clips together (each clip
+/// is also held to infer/2's 30 MiB, `MAX_REFERENCE_BYTES`).
+pub const MAX_SPEAK_CLIP_BYTES: u64 = 31 << 20;
+
+/// A speech request for the control socket: the infer/2 request with every cloned voice's audio
+/// left empty, and the length of each clip that follows the line, in [`SpeakRequest::all_voices`]
+/// order.
+///
+/// [`SpeakRequest::all_voices`]: weirdnet_agent::remote::infer::v2::SpeakRequest::all_voices
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpeakJob {
+    pub request: weirdnet_agent::remote::infer::v2::SpeakRequest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<u64>,
+}
+
+impl SpeakJob {
+    /// `request` with its clips taken out (to send after the line).
+    pub fn split(mut request: weirdnet_agent::remote::infer::v2::SpeakRequest) -> (Self, Vec<Vec<u8>>) {
+        use weirdnet_agent::remote::infer::v2::Voice;
+        let mut clips = Vec::new();
+        let voices = request.voice.iter_mut().chain(request.voices.iter_mut().map(|v| &mut v.voice));
+        for v in voices {
+            if let Voice::Clone { audio, .. } = v {
+                clips.push(std::mem::take(audio));
+            }
+        }
+        request.cert = None;
+        (Self { request, clips: clips.iter().map(|c| c.len() as u64).collect() }, clips)
+    }
+
+    /// The request with `clips` put back, checked against [`Self::clips`].
+    pub fn join(self, clips: Vec<Vec<u8>>) -> Result<weirdnet_agent::remote::infer::v2::SpeakRequest> {
+        use weirdnet_agent::remote::infer::v2::Voice;
+        let mut request = self.request;
+        request.cert = None;
+        let mut it = clips.into_iter();
+        let voices = request.voice.iter_mut().chain(request.voices.iter_mut().map(|v| &mut v.voice));
+        for v in voices {
+            if let Voice::Clone { audio, .. } = v {
+                *audio = it.next().context("fewer reference clips than cloned voices")?;
+            }
+        }
+        if it.next().is_some() {
+            bail!("more reference clips than cloned voices");
+        }
+        Ok(request)
+    }
+
+    fn check_clips(&self) -> Result<u64, String> {
+        let cloned = self.request.all_voices().filter(|v| matches!(v, weirdnet_agent::remote::infer::v2::Voice::Clone { .. })).count();
+        if cloned != self.clips.len() {
+            return Err(format!("{} reference clip lengths for {cloned} cloned voices", self.clips.len()));
+        }
+        let max = weirdnet_agent::remote::infer::v2::MAX_REFERENCE_BYTES as u64;
+        if let Some(c) = self.clips.iter().find(|c| **c == 0 || **c > max) {
+            return Err(format!("a reference clip takes 1 to {max} bytes, not {c}"));
+        }
+        let total: u64 = self.clips.iter().sum();
+        if total > MAX_SPEAK_CLIP_BYTES {
+            return Err(format!("the reference clips are {total} bytes together; one request carries at most {MAX_SPEAK_CLIP_BYTES}"));
+        }
+        Ok(total)
+    }
+}
+
+/// Speech and where it came from; [`Self::bytes`] of audio follow the answer line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeechReply {
+    pub bytes: u64,
+    pub format: weirdnet_agent::speech::AudioFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u16>,
+    pub model: String,
+    pub node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<weirdnet_agent::remote::infer::v2::Usage>,
+    /// Request fields the model received but does not use (`Meta::ignored`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
+}
+
+/// The speaker a request would be routed to, and its profile from catalog/1 (absent when no node
+/// reports one; never defaulted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Speaker {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<weirdnet_agent::speech::SpeechProfile>,
 }
 
 /// Largest audio clip one [`ControlRequest::Transcribe`] carries: infer/2 frames are at most
@@ -457,6 +564,8 @@ impl ControlResponse {
             job: None,
             transcript: None,
             transcriber: None,
+            speech: None,
+            speaker: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -476,6 +585,8 @@ impl ControlResponse {
             job: None,
             transcript: None,
             transcriber: None,
+            speech: None,
+            speaker: None,
         }
     }
 }
@@ -502,6 +613,62 @@ impl ControlHandler {
             Ok(t) => {
                 let mut resp = ControlResponse::ok("transcribed");
                 resp.transcript = Some(TranscribeReply { transcript: t.transcript, model: t.model, node: t.node });
+                resp
+            }
+            Err(e) => ControlResponse::err(e.to_string()),
+        }
+    }
+
+    /// [`ControlRequest::Speak`], with its clips read: the whole speech, through the pool. The
+    /// audio comes back beside the answer (to write after its line).
+    pub async fn speak(&self, job: SpeakJob, clips: Vec<Vec<u8>>) -> (ControlResponse, Vec<u8>) {
+        let Some(pool) = &self.pool else {
+            return (ControlResponse::err("speech needs the app role (it asks the pool like the bridge does)"), Vec::new());
+        };
+        let request = match job.join(clips) {
+            Ok(r) => r,
+            Err(e) => return (ControlResponse::err(e.to_string()), Vec::new()),
+        };
+        match pool.speak(request, &weirdnet_agent::CancelToken::new()).await {
+            Ok(s) => {
+                let mut resp = ControlResponse::ok("spoken");
+                resp.speech = Some(SpeechReply {
+                    bytes: s.audio.len() as u64,
+                    format: s.format,
+                    sample_rate: s.sample_rate,
+                    channels: s.channels,
+                    model: s.model,
+                    node: s.node,
+                    usage: s.usage,
+                    ignored: s.meta.ignored.clone(),
+                });
+                (resp, s.audio)
+            }
+            Err(e) => (ControlResponse::err(e.to_string()), Vec::new()),
+        }
+    }
+
+    /// [`ControlRequest::SpeakTarget`]: routed as the speech request would be, from catalog/1.
+    pub async fn speak_target(&self, job: SpeakJob) -> ControlResponse {
+        let Some(pool) = &self.pool else {
+            return ControlResponse::err("speech needs the app role (it asks the pool like the bridge does)");
+        };
+        let catalog = match pool.catalog().await {
+            Ok(c) => c,
+            Err(e) => return ControlResponse::err(format!("no catalog from the pool: {e}")),
+        };
+        let mut needs = job.request.needs();
+        // The clips are not sent for routing; their lengths are. Length and format are left
+        // out: the caller splits long text to the speaker's `max_input_chars` and converts to a
+        // format it doesn't make.
+        needs.reference_bytes = job.clips.iter().max().copied();
+        needs.input_chars = 0;
+        needs.format = None;
+        match catalog.route_speak(job.request.model.as_deref(), &needs) {
+            Ok(id) => {
+                let profile = catalog.find(&id).and_then(|m| m.speech.clone());
+                let mut resp = ControlResponse::ok("speaker");
+                resp.speaker = Some(Speaker { model: id, profile });
                 resp
             }
             Err(e) => ControlResponse::err(e.to_string()),
@@ -744,6 +911,8 @@ impl ControlHandler {
             }
             ControlRequest::Transcribe(_) => ControlResponse::err("a transcription request carries audio: send it over the control socket"),
             ControlRequest::TranscribeTarget { model } => self.transcribe_target(model.as_deref()).await,
+            ControlRequest::Speak(_) => ControlResponse::err("a speech request returns audio: send it over the control socket"),
+            ControlRequest::SpeakTarget(job) => self.speak_target(job).await,
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -812,6 +981,8 @@ impl ControlHandler {
                     job: None,
                     transcript: None,
                     transcriber: None,
+                    speech: None,
+                    speaker: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -1221,6 +1392,34 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, handl
                 reader.read_exact(&mut audio).await?;
                 handler.transcribe(job, audio).await
             }
+            Ok(ControlRequest::Speak(job)) => {
+                let total = match job.check_clips() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // Clips that follow can't be skipped safely: answer and close.
+                        let mut out = serde_json::to_vec(&ControlResponse::err(e))?;
+                        out.push(b'\n');
+                        w.write_all(&out).await?;
+                        break;
+                    }
+                };
+                let reader = lines.get_mut();
+                let take = reader.get_mut();
+                take.set_limit(take.limit().saturating_add(total));
+                let mut clips = Vec::with_capacity(job.clips.len());
+                for len in &job.clips {
+                    let mut clip = vec![0u8; usize::try_from(*len)?];
+                    reader.read_exact(&mut clip).await?;
+                    clips.push(clip);
+                }
+                let (resp, audio) = handler.speak(job, clips).await;
+                let mut out = serde_json::to_vec(&resp)?;
+                out.push(b'\n');
+                w.write_all(&out).await?;
+                w.write_all(&audio).await?;
+                w.flush().await?;
+                continue;
+            }
             Ok(ControlRequest::Train { node, request }) => {
                 // The caller sends nothing more; its side closing ends the run.
                 let closed = async { while let Ok(Some(_)) = lines.next_line().await {} };
@@ -1360,6 +1559,46 @@ pub async fn transcribe(socket: &Path, mut job: TranscribeJob, audio: &[u8]) -> 
     r.transcript.context("ymird sent no transcript (is it older than this ymirctl?)")
 }
 
+/// Speech for `request` through the `ymird` on `socket` ([`ControlRequest::Speak`]): the answer
+/// and the audio.
+pub async fn speak(socket: &Path, request: weirdnet_agent::remote::infer::v2::SpeakRequest) -> Result<(SpeechReply, Vec<u8>)> {
+    let (job, clips) = SpeakJob::split(request);
+    job.check_clips().map_err(|e| anyhow::anyhow!(e))?;
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    let mut line = serde_json::to_vec(&ControlRequest::Speak(job))?;
+    line.push(b'\n');
+    w.write_all(&line).await?;
+    for c in &clips {
+        w.write_all(c).await?;
+    }
+    w.flush().await?;
+    let mut reader = BufReader::new(r);
+    let mut resp = String::new();
+    if reader.read_line(&mut resp).await? == 0 {
+        bail!("ymird closed the control connection");
+    }
+    let r: ControlResponse =
+        serde_json::from_str(&resp).context("ymird sent something this ymirctl does not understand (are they the same version?)")?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    let reply = r.speech.context("ymird sent no speech (is it older than this ymirctl?)")?;
+    let mut audio = vec![0u8; usize::try_from(reply.bytes)?];
+    reader.read_exact(&mut audio).await.context("ymird closed the connection before all the audio came")?;
+    Ok((reply, audio))
+}
+
+/// The speaker the pool would use for `request` (its model, or the pool's pick), with its profile.
+pub async fn speak_target(socket: &Path, speech: &weirdnet_agent::remote::infer::v2::SpeakRequest) -> Result<Speaker> {
+    let (job, _) = SpeakJob::split(speech.clone());
+    let r = request(socket, &ControlRequest::SpeakTarget(job)).await?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    r.speaker.context("ymird sent no speaker (is it older than this ymirctl?)")
+}
+
 /// The transcriber the pool would use for `model` (or its pick), with its audio limits.
 pub async fn transcribe_target(socket: &Path, model: Option<&str>) -> Result<Transcriber> {
     let r = request(socket, &ControlRequest::TranscribeTarget { model: model.map(str::to_string) }).await?;
@@ -1376,4 +1615,43 @@ pub async fn reachable(socket: &Path) -> bool {
 
 fn no_context() -> ControlResponse {
     ControlResponse::err("this node keeps no conversations: it needs the inference or app role and a device identity (see `ymirctl pool link`)")
+}
+
+#[cfg(test)]
+mod speak_tests {
+    use super::*;
+    use weirdnet_agent::remote::infer::v2::{ScriptTurn, SpeakRequest, Voice};
+
+    fn clone(n: usize) -> Voice {
+        Voice::clone_from(vec![7; n], "wav", None, true)
+    }
+
+    #[test]
+    fn speak_jobs_carry_clips_beside_the_line() {
+        let req = SpeakRequest::script(vec![ScriptTurn::new(0, "a"), ScriptTurn::new(1, "b")])
+            .with_voice(clone(3))
+            .with_speaker_voice(0, Voice::preset("vivian"))
+            .with_speaker_voice(1, clone(5));
+        let (job, clips) = SpeakJob::split(req.clone());
+        assert_eq!(job.clips, [3, 5]);
+        assert_eq!(clips, [vec![7; 3], vec![7; 5]]);
+        // The line carries no audio.
+        let line = serde_json::to_string(&ControlRequest::Speak(job.clone())).unwrap();
+        assert!(line.len() < 1024, "{line}");
+        assert_eq!(job.check_clips(), Ok(8));
+        assert_eq!(job.clone().join(clips.clone()).unwrap(), req);
+        assert!(job.clone().join(clips[..1].to_vec()).is_err());
+        assert!(job.clone().join([clips.clone(), vec![vec![1]]].concat()).is_err());
+
+        // Lengths that don't match the voices, or out of range, are refused before reading.
+        let mut bad = job.clone();
+        bad.clips.pop();
+        assert!(bad.check_clips().is_err());
+        let mut bad = job.clone();
+        bad.clips[0] = 0;
+        assert!(bad.check_clips().is_err());
+        let mut bad = job;
+        bad.clips[0] = weirdnet_agent::remote::infer::v2::MAX_REFERENCE_BYTES as u64 + 1;
+        assert!(bad.check_clips().is_err());
+    }
 }

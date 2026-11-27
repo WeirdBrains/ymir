@@ -55,6 +55,17 @@ All notable changes to Ymir are listed here. The format follows
   limits the paths it may read.
 - Testkit mock engine `/v1/audio/speech` in llama-server and vLLM-Omni flavors (`/props` voices, `/v1/audio/voices`,
   `x-audio-sample-rate`, sine WAV/PCM).
+- `weirdnet-agent` 0.5.11 (speech out; `release.toml` updated). `InferenceHost::open_speak` refuses a guest's cloned voice
+  (`guest-clone`) and a model outside its grant (`guest-model`). Otherwise it answers a clean `Unsupported` ("no model in
+  this pool speaks yet") until `weirdnet-backends` 0.4.10 brings `role = "speak"` nodes.
+- `ymirctl speak`: text, `-`, `--file` or a multi-speaker `--script`, with `--voice` (also `N=NAME` per speaker),
+  `--design`, or `--clone-audio`/`--clone-text`/`--clone-consent`. It also takes `--model`,
+  `--format wav|mp3|opus|flac|pcm16`, `--out FILE|-` (it never writes raw audio to a terminal) and `--chunk auto|off`.
+  Long text is split to the model's `max_input_chars` and stitched with pauses and crossfades. It runs over the control
+  socket (`ControlRequest::Speak`, with the clips and audio as raw bytes) through `Pool::speak`.
+- MCP `ymir_speak` (mutating, so it is hidden under `--read-only`). `out` needs `confirm=true` and must be under
+  `--root`. A reference clip is a path under `--root` or base64, never a URL or `data:`, and needs `consent`. It returns
+  the path or base64 audio, plus the duration and usage.
 - `ymirctl engines install vllm-omni`: vLLM-Omni and its matching vLLM release in a managed venv
   (`<home>/engines/vllm-omni`), with the same driver CUDA checks as `engines install vllm`. Nothing serves from it yet.
 

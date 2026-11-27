@@ -52,14 +52,16 @@ pub struct McpArgs {
     /// token.
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = DEFAULT_HTTP)]
     pub http: Option<String>,
-    /// Offer no tool that changes anything: no load, unload or pull.
+    /// Offer no tool that changes anything: no load, unload, pull, or `ymir_speak` (it writes
+    /// audio files).
     #[arg(long)]
     pub read_only: bool,
     /// Also offer `ymir_remove_model`, which deletes downloaded model files (it still needs `confirm`).
     #[arg(long)]
     pub allow_remove: bool,
-    /// A directory `ymir_transcribe` may read files from (repeatable). Without any, it reads
-    /// audio and video files anywhere this user can; with some, only under them.
+    /// A directory `ymir_transcribe` and `ymir_speak` may read files from and `ymir_speak` may
+    /// write audio to (repeatable). Without any, anywhere this user can; with some, only under
+    /// them.
     #[arg(long = "root", value_name = "DIR")]
     pub roots: Vec<PathBuf>,
 }
@@ -295,6 +297,42 @@ const TRANSCRIBE_PARAMS: &[Param] = &[
     ),
 ];
 
+const SPEAK_TURN: &[Param] =
+    &[Param::required("speaker", T::Integer, "The speaker number, from 0."), Param::required("text", T::String, "What this speaker says.")];
+
+const SPEAK_PARAMS: &[Param] = &[
+    Param::optional("text", T::String, "The text to speak (paragraphs separated by blank lines). Use this or `script`."),
+    Param::optional("script", T::Array(&T::Object(SPEAK_TURN)), "A multi-speaker script, turn by turn. Needs a model that speaks scripts."),
+    Param::optional("voice", T::String, "A preset voice of the model (ymir_models lists them). Default: the model's own."),
+    Param::optional("voices", T::Any, "For a script: preset voices per speaker, as {\"0\": \"vivian\", \"1\": \"ryan\"}."),
+    Param::optional("design", T::String, "Design a voice from this description instead, when the model designs voices."),
+    Param::optional(
+        "clone_path",
+        T::String,
+        "Clone the voice in this reference clip (wav, mp3, flac, ogg; at most 30 MB) on this machine, under the allowed roots. URLs are never fetched. Needs consent=true.",
+    ),
+    Param::optional("clone_audio", T::String, "The reference clip itself, base64, instead of clone_path. Needs consent=true."),
+    Param::optional("clone_text", T::String, "What the reference clip says (some models need it)."),
+    Param::optional("consent", T::Boolean, "For a cloned voice: true only when the user confirmed the voice is theirs or they may use it."),
+    Param::optional("instructions", T::String, "Style or emotion, when the model takes instructions."),
+    Param::optional("language", T::String, "The language (ISO 639-1, such as en)."),
+    Param::optional("speed", T::Number, "Speaking speed, 0.25 to 4 (1: the model's pace), when the model takes one."),
+    Param::optional("seed", T::Integer, "A seed, for a repeatable take."),
+    Param::optional("model", T::String, "A speaking model (catalog purpose speak). Default: the pool's pick."),
+    Param::optional("format", T::Enum(&["wav", "mp3", "opus", "flac", "pcm16"]), "The audio format (default wav)."),
+    Param::optional(
+        "chunk",
+        T::Enum(&["auto", "off"]),
+        "auto (default): split long text to the model's max_input_chars and stitch. off: one request.",
+    ),
+    Param::optional(
+        "out",
+        T::String,
+        "Write the audio to this file (under the allowed roots; its folder must exist; needs confirm=true). Without it the audio comes back as base64.",
+    ),
+    CONFIRM,
+];
+
 const REMOVE_PARAMS: &[Param] = &[Param::required("id", T::String, "A model id or file name from ymir_models_local."), CONFIRM];
 
 const READ_TOOLS: &[ToolSpec] = &[
@@ -407,6 +445,14 @@ const MUTATING_TOOLS: &[ToolSpec] = &[
         false,
         true,
     ),
+    spec(
+        "ymir_speak",
+        "WRITES A FILE (needs confirm=true with `out`): text to speech from the pool's speaking model, with a preset, designed or cloned voice, or a multi-speaker script. Long text is split and stitched. Returns the file's path (or base64 audio without `out`), its length and the usage.",
+        SPEAK_PARAMS,
+        false,
+        false,
+        false,
+    ),
 ];
 
 const REMOVE_TOOL: ToolSpec = spec(
@@ -426,12 +472,26 @@ pub fn mutating_tools() -> Vec<&'static str> {
 struct Ctx {
     paths: Paths,
     explicit_home: Option<PathBuf>,
-    /// Where `ymir_transcribe` may read (canonical); empty: anywhere.
+    /// Where `ymir_transcribe` and `ymir_speak` may read and `ymir_speak` may write (canonical);
+    /// empty: anywhere.
     roots: Vec<PathBuf>,
 }
 
 /// File types `ymir_transcribe` reads, checked before anything is opened.
 const TRANSCRIBE_EXTS: &[&str] = &["wav", "mp3", "flac", "ogg", "oga", "opus", "m4a", "mp4", "mov", "mkv", "webm"];
+/// What `ymir_speak` reads as a reference clip.
+const CLIP_EXTS: &[&str] = &["wav", "mp3", "flac", "ogg", "oga", "opus"];
+/// What `ymir_speak` writes, by format.
+fn out_exts(format: crate::speak::OutFormat) -> &'static [&'static str] {
+    use crate::speak::OutFormat::*;
+    match format {
+        Wav => &["wav"],
+        Mp3 => &["mp3"],
+        Opus => &["opus", "ogg", "oga"],
+        Flac => &["flac"],
+        Pcm16 => &["pcm", "raw"],
+    }
+}
 
 /// Read-only resources: URI, name, description and the read tool that produces each.
 const RESOURCES: &[(&str, &str, &str, &str)] = &[
@@ -619,10 +679,159 @@ impl YmirTools {
             bail!("{src}: not an audio or video type ymir_transcribe reads ({})", TRANSCRIBE_EXTS.join(", "));
         }
         let real = path.canonicalize().with_context(|| format!("reading {src}"))?;
+        self.under_roots(&real, src)?;
+        crate::transcribe::read_capped(&real)
+    }
+
+    fn under_roots(&self, real: &Path, src: &str) -> Result<()> {
         if !self.ctx.roots.is_empty() && !self.ctx.roots.iter().any(|r| real.starts_with(r)) {
             bail!("{src} is outside the allowed roots");
         }
-        crate::transcribe::read_capped(&real)
+        Ok(())
+    }
+
+    /// A reference clip `ymir_speak` may read: no URL, an audio type (checked before opening),
+    /// under a root (links resolved), at most 30 MB.
+    fn clip_file(&self, src: &str) -> Result<Vec<u8>> {
+        if src.contains("://") || src.starts_with("data:") {
+            bail!("{src}: URLs are never fetched; pass a file on this machine, or the clip as base64 in `clone_audio`");
+        }
+        let path = Path::new(src);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        if !CLIP_EXTS.contains(&ext.as_str()) {
+            bail!("{src}: not an audio type ymir_speak clones from ({})", CLIP_EXTS.join(", "));
+        }
+        let real = path.canonicalize().with_context(|| format!("reading {src}"))?;
+        self.under_roots(&real, src)?;
+        let f = std::fs::File::open(&real).with_context(|| format!("reading {src}"))?;
+        if !f.metadata()?.is_file() {
+            bail!("{src} is not a regular file");
+        }
+        let mut b = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(f, weirdnet_agent::remote::infer::v2::MAX_REFERENCE_BYTES as u64 + 1), &mut b)?;
+        Ok(b)
+    }
+
+    /// Where `ymir_speak` may write: no URL, the format's extension, a folder that exists under a
+    /// root (links resolved), and not a link or anything but a regular file if it is there.
+    fn out_file(&self, dst: &str, format: crate::speak::OutFormat) -> Result<PathBuf> {
+        if dst.contains("://") || dst.starts_with("data:") {
+            bail!("{dst}: write to a file on this machine");
+        }
+        let path = Path::new(dst);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        let exts = out_exts(format);
+        if !exts.contains(&ext.as_str()) {
+            bail!("{dst}: a {} file ends in .{}", format.wire(), exts.join(" or ."));
+        }
+        let name = path.file_name().with_context(|| format!("{dst} has no file name"))?;
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let dir = parent.canonicalize().with_context(|| format!("{}: the folder must exist", parent.display()))?;
+        let real = dir.join(name);
+        self.under_roots(&real, dst)?;
+        if let Ok(m) = std::fs::symlink_metadata(&real)
+            && !m.file_type().is_file()
+        {
+            bail!("{dst} is there and is not a regular file; not writing over it");
+        }
+        Ok(real)
+    }
+
+    async fn speak(&self, args: &Value) -> Result<Value> {
+        use crate::speak::{Chunking, Options, OutFormat, Text};
+        use weirdnet_agent::remote::infer::v2::Voice;
+        let format = match str_arg(args, "format") {
+            None => OutFormat::Wav,
+            Some(f) => OutFormat::parse(f).with_context(|| format!("unknown format `{f}` (wav, mp3, opus, flac, pcm16)"))?,
+        };
+        // Checked before anything is spoken.
+        let out = match str_arg(args, "out") {
+            Some(o) => {
+                confirmed(args, &format!("writing {o}"))?;
+                Some(self.out_file(o, format)?)
+            }
+            None => None,
+        };
+        let text = match (str_arg(args, "text"), args.get("script").filter(|v| !v.is_null())) {
+            (Some(t), None) => Text::Plain(t.to_string()),
+            (None, Some(s)) => {
+                let turns = s.as_array().context("`script` is a list of {speaker, text}")?;
+                let mut out = Vec::with_capacity(turns.len());
+                for t in turns {
+                    let sp = t["speaker"].as_u64().filter(|n| *n <= u64::from(u8::MAX)).context("every turn needs a `speaker` number (0 to 255)")?;
+                    let tx = t["text"].as_str().context("every turn needs `text`")?;
+                    out.push((sp as u8, tx.to_string()));
+                }
+                Text::Script(out)
+            }
+            (Some(_), Some(_)) => bail!("give `text` or `script`, not both"),
+            (None, None) => bail!("`text` or `script` is required"),
+        };
+        let mut voice = str_arg(args, "voice").map(Voice::preset);
+        let mut voices = Vec::new();
+        if let Some(map) = args.get("voices").and_then(Value::as_object) {
+            for (k, v) in map {
+                let n: u8 = k.trim_start_matches(['S', 's']).parse().with_context(|| format!("`voices` key `{k}` is not a speaker number"))?;
+                voices.push((n, Voice::preset(v.as_str().with_context(|| format!("`voices.{k}` is a preset name"))?)));
+            }
+        }
+        let clip = match (str_arg(args, "clone_path"), str_arg(args, "clone_audio")) {
+            (Some(p), None) => Some(self.clip_file(p)?),
+            (None, Some(b)) => {
+                if b.starts_with("data:") || b.contains("://") {
+                    bail!("`clone_audio` is the clip as base64, not a URL");
+                }
+                Some(base64::engine::general_purpose::STANDARD.decode(b.trim()).context("`clone_audio` is not base64")?)
+            }
+            (Some(_), Some(_)) => bail!("give `clone_path` or `clone_audio`, not both"),
+            (None, None) => None,
+        };
+        let design = str_arg(args, "design");
+        if [voice.is_some(), design.is_some(), clip.is_some()].iter().filter(|b| **b).count() > 1 {
+            bail!("give one of `voice`, `design` and a clone");
+        }
+        if let Some(d) = design {
+            voice = Some(Voice::design(d));
+        }
+        if let Some(c) = clip {
+            voice = Some(crate::speak::clone_voice(c, str_arg(args, "clone_text").map(str::to_string), args["consent"].as_bool() == Some(true))?);
+        }
+        let speed = match args["speed"].as_f64() {
+            Some(s) if !(0.25..=4.0).contains(&s) => bail!("`speed` is 0.25 to 4"),
+            s => s.map(|s| (s * 1000.0).round() as u32),
+        };
+        let chunk = match str_arg(args, "chunk") {
+            None | Some("auto") => Chunking::Auto,
+            Some("off") => Chunking::Off,
+            Some(c) => bail!("unknown chunk mode `{c}` (auto, off)"),
+        };
+        let opts = Options {
+            text: Some(text),
+            model: str_arg(args, "model").map(str::to_string),
+            voice,
+            voices,
+            instructions: str_arg(args, "instructions").map(str::to_string),
+            language: str_arg(args, "language").map(str::to_string),
+            speed,
+            seed: args["seed"].as_u64(),
+            format,
+            chunk,
+            pause_ms: weirdnet_media::speak::DEFAULT_PAUSE_MS,
+            crossfade_ms: weirdnet_media::speak::DEFAULT_CROSSFADE_MS,
+        };
+        let o = crate::speak::speak(&self.ctx.paths.socket(), &opts, None, &mut |_| {}).await?;
+        let mut v = crate::speak::summary(&o);
+        match out {
+            Some(path) => {
+                std::fs::write(&path, &o.audio).with_context(|| format!("writing {}", path.display()))?;
+                v["path"] = path.display().to_string().into();
+            }
+            None => v["audio_base64"] = base64::engine::general_purpose::STANDARD.encode(&o.audio).into(),
+        }
+        Ok(v)
     }
 
     async fn transcribe(&self, args: &Value) -> Result<Value> {
@@ -682,6 +891,7 @@ impl YmirTools {
             "ymir_complete" => self.complete(args).await,
             "ymir_embed" => self.embed(args).await,
             "ymir_transcribe" => self.transcribe(args).await,
+            "ymir_speak" => self.speak(args).await,
             "ymir_service_status" => {
                 let a = ServiceArgs { system: args["system"].as_bool() == Some(true), ..Default::default() };
                 let lines = crate::service_lines(self.ctx.explicit_home.as_deref(), self.ctx.paths.clone(), ServiceCmd::Status { args: a }).await?;
@@ -1042,7 +1252,10 @@ mod tests {
             assert!(t.params.iter().all(|p| p.name != "confirm"), "{}", t.name);
             assert!(!t.description.contains("MUTATES"), "{}", t.name);
         }
-        assert_eq!(mutating_tools(), ["ymir_load_model", "ymir_unload_model", "ymir_move_model", "ymir_pull_model", "ymir_remove_model"]);
+        assert_eq!(
+            mutating_tools(),
+            ["ymir_load_model", "ymir_unload_model", "ymir_move_model", "ymir_pull_model", "ymir_speak", "ymir_remove_model"]
+        );
     }
 
     #[test]

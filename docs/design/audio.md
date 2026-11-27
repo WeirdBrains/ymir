@@ -145,7 +145,7 @@ the intersection of lists, the smallest limit, and a bool only when every node w
   a different engine; `BadRequest` when it names what the model lacks).
 
 Server frames: `Accepted`, `Working` keepalives until the first audio, then `ServerFrame::SpeechStart { id, format,
-sample_rate, channels }` once, `ServerFrame::Audio { id, offset, data: bytes }` (chunks of at most 256 KiB; with
+sample_rate: Option, channels: Option }` once (the rate and channels are optional, since an encoded format may not say), `ServerFrame::Audio { id, offset, data: bytes }` (chunks of at most 256 KiB; with
 `stream`, as the engine produces them; without, the finished file in chunks), then `Done` with usage (input
 characters, audio milliseconds, engine tokens when known). A reference transcript the model doesn't use (VoxCPM2) is
 named in `Done`'s meta (`ignored: ["reference_text"]`) rather than refused, because sending it is harmless and clients
@@ -156,7 +156,8 @@ speech again with another voice draw, and splicing two takes is worse than an er
 
 ### Routing
 
-`InferHost::open_speak(caller, model)` on the inference node, the same chain as transcription:
+`InferHost::open_speak(caller, &request)` on the inference node, which gets the whole `SpeakRequest` (so the host can
+check the voice, a clone and the model before opening a backend), then the same chain as transcription:
 
 1. `Catalog::route_speak(model, &needs)`: a named model must have `Purpose::Speak` and a profile that covers the
    request's needs (preset, design, clone, script speakers, format) or it is a 400 that says which; with none named, the
@@ -166,7 +167,7 @@ speech again with another voice draw, and splicing two takes is worse than an er
    reserved and leaving nodes skipped; retryable failures before audio go to the next node.
 3. Admission: the same `authorize` as chat. A guest gets only speakers in its grant's allowlist (`guest-model`), only
    models with `guests = true`, and `Voice::Clone` only when the grant has `clone = true` (`guest-clone`, a new grant
-   field, default off).
+   field, default off). *Built so far:* every guest clone is refused (`guest-clone`); the per-grant switch is not built.
 4. Nothing is cached; the semantic cache is never asked.
 
 ### Large clips
@@ -283,7 +284,19 @@ through the inference role like `ymirctl chat`; nothing talks to an engine direc
 For the Weirdnet Lead Developer. All additive; every new enum variant and struct is `#[non_exhaustive]`, every new
 field `#[serde(default, skip_serializing_if = ...)]` and absent in records from older nodes.
 
-### `weirdnet-agent` (0.5.10)
+### `weirdnet-agent` (0.5.11, published)
+
+Published as 0.5.11 with four departures from the spec below, which Ymir follows:
+
+1. `InferHost::open_speak(caller, request: &SpeakRequest)` takes the whole request, not a model name.
+2. `SpeechNeeds.presets` is a `Vec<String>` (every preset the request names, a script's speakers included), and it
+   gained `reference_bytes: Option<u64>` beside `reference_ms`.
+3. `SpeechStart`'s `sample_rate` and `channels` are optional (`AudioHeader::new(format).with_sample_rate(..)
+   .with_channels(..)`).
+4. There is no public `serve_speak`: speech is a private handler dispatched inside `v2::serve` on `ClientFrame::Speak`,
+   so a host serving infer/2 serves speech with the same admission.
+
+The spec as written:
 
 - `remote::catalog::Purpose::Speak` (`"speak"` in `as_str`/`parse`). `Catalog::for_older` generalized: a peer that
   doesn't advertise `speak` doesn't get those entries (as for `transcribe` before 0.5.8). `CatalogModel::speaks()`,
@@ -304,22 +317,22 @@ field `#[serde(default, skip_serializing_if = ...)]` and absent in records from 
   }
   impl SpeechProfile { pub fn tightest(a, b) -> Self; pub fn narrowed_by(&self, operator: &SpeechProfile) -> Result<Self, String>;
                        pub fn covers(&self, needs: &SpeechNeeds) -> Result<(), String>; }
-  pub struct SpeechNeeds { preset: Option<String>, design, instructions, clone: Option<bool /*has text*/>,
+  pub struct SpeechNeeds { presets: Vec<String> /*0.5.11; spec: preset: Option<String>*/, design, instructions, clone: Option<bool /*has text*/>,
                            speakers: u8, voices: u8, raw, speed, format: Option<AudioFormat>, input_chars: u32,
-                           reference_ms: Option<u64> }   // SpeakRequest::needs()
+                           reference_ms: Option<u64>, reference_bytes: Option<u64> /*0.5.11*/ }   // SpeakRequest::needs()
   ```
 - `remote::infer::v2`: `ClientFrame::Speak(SpeakRequest)`; `SpeakRequest { id, model, input: SpeakInput, voice:
   Option<Voice>, voices: Vec<SpeakerVoice>, instructions, language, speed: Option<u32 /*per mille*/>, seed: Option<u64>,
   format: Option<AudioFormat>, sample_rate: Option<u32>, stream: bool, priority, cert }` with `check()` and builders;
   `SpeakInput::{Text, Script(Vec<ScriptTurn { speaker: u8, text }>), Raw}`; `Voice::{Preset { name }, Design {
   description }, Clone { #[serde(with = "bytes")] audio, format, text: Option<String>, consent: bool }}`;
-  `ServerFrame::SpeechStart { id, format, sample_rate, channels }`, `ServerFrame::Audio { id, offset, #[serde(with =
+  `ServerFrame::SpeechStart { id, format, sample_rate: Option, channels: Option }`, `ServerFrame::Audio { id, offset, #[serde(with =
   "bytes")] data }` (≤ 256 KiB), `Working` reused; `Usage` gains `input_chars` and `audio_ms`; `Meta` gains `ignored:
   Vec<String>`. Speed is per mille so the request keeps `Eq`.
 - `SpeakBackend` trait (`name`, `speak(&SpeakRequest, &CancelToken) -> Result<AudioStream, RemoteError>` where
-  `AudioStream` yields `SpeechStart` then chunks then usage), `InferHost::open_speak(caller, model) -> Result<Arc<dyn
-  SpeakBackend>, RemoteError>` (default `unavailable("no speech model on this node")`), `serve_speak` with the same
-  admission and keepalive as `serve_transcribe`.
+  `AudioStream` yields `SpeechStart` then chunks then usage), `InferHost::open_speak(caller, &SpeakRequest) -> Result<Arc<dyn
+  SpeakBackend>, RemoteError>` (default `unavailable("no speech model on this node")`), served inside `v2::serve` (a
+  private handler, not a public `serve_speak`) with the same admission and keepalive as transcription.
 - `Pool::speak(request, cancel) -> Result<Speech, RemoteError>` and `Pool::speak_stream`: failover across nodes only
   before `SpeechStart`; `Speech { audio: Vec<u8>, format, sample_rate, channels, model, node, meta, usage }`.
 - Tests as `transcribe_tests.rs`: frames round-trip, an older node drops the stream (counts as `Unsupported`),
@@ -408,7 +421,7 @@ sampling of [video.md](video.md) joins it.
 6. `ymirctl engines install vllm-omni` (venv, the same CUDA wheel check as vLLM), usable with `wrap` once the crate
    knows the engine.
 
-**After the crates** (`weirdnet-agent` 0.5.10, `weirdnet-backends` 0.4.10, `weirdnet-model` 0.5.5,
+**After the crates** (`weirdnet-agent` 0.5.11, `weirdnet-backends` 0.4.10, `weirdnet-model` 0.5.5,
 `weirdnet-openai` 0.2.5):
 
 7. `role = "speak"`, `[model.local.speak]`, catalog/1 `speak` with profiles, `InferenceHost::open_speak`,
@@ -436,6 +449,43 @@ sampling of [video.md](video.md) joins it.
 - **6.** `ymirctl engines install vllm-omni` in its own venv (`<home>/engines/vllm-omni`), vLLM and vLLM-Omni pinned to one
   release. It has the PyTorch-versus-driver check and warns when vLLM's wheel is newer than the driver. The `--vllm-cuda`
   nightly variants on the unmerged M7 pass 2 branch do not apply, because vLLM-Omni needs a release.
+
+### What was built (2026-11-27, on `weirdnet-agent` 0.5.11, before the backends)
+
+- **open_speak.** `InferenceHost::open_speak` checks a guest first: a request that clones a voice is refused
+  `guest-clone` (all guest cloning, consent or not), and a model outside the grant's allowlist `guest-model`. Anything
+  else is a clean `Unsupported` that says no model in this pool speaks yet and that a `role = "speak"` node comes with
+  `weirdnet-backends` 0.4.10. Because it is `Unsupported`, the pool fails over and reports it.
+- **Control socket.** `ControlRequest::Speak` carries the `SpeakRequest` with the clone clips taken out. Their lengths
+  are in `clips`, and the bytes follow the JSON line (each clip 1 byte to 30 MiB, 31 MiB together, checked before
+  reading). The answer line (`SpeechReply`: bytes, format, rate, channels, model, node, usage, ignored) is followed by
+  the audio. `SpeakTarget` routes with `Catalog::route_speak` and returns the model and its profile. It leaves out
+  input length and format, because the client splits text and converts formats itself.
+- **8 (partly).** `ymirctl speak [TEXT | - | --file F | --script F|-] [--voice V | --voice N=V ...] [--design "..."]
+  [--clone-audio F --clone-text T --clone-consent] [--instructions ..] [--lang xx] [--speed 1.2] [--seed N]
+  [--model M] [--format wav|mp3|opus|flac|pcm16] [--out F|-] [--chunk auto|off] [--pause-ms N] [--crossfade-ms N]`.
+  `--ref-*` are aliases. `--stream`, `--anchor` and `ymirctl voices` are not built.
+  - Raw audio is never written to a terminal. Without `--out` it needs a pipe, or `--out -`.
+  - With `--chunk auto` (the default), text is planned with `weirdnet-media` `speak::TextPlan` to the profile's
+    `max_input_chars`. Every piece goes to the same model with the same voice and seed, as WAV, and the pieces are
+    stitched with `pcm::concat` and `joins` (300 ms pauses, 10 ms crossfades).
+  - A script goes one turn at a time, each turn carrying only its speaker's voice.
+  - A format the model doesn't make is asked as WAV and encoded here with `audio::encode`.
+  - The summary (model, nodes, pieces, duration, usage) goes to stderr.
+- **MCP `ymir_speak`.** A mutating tool, hidden under `--read-only`.
+  - With `out` it needs `confirm=true`. The path must have the format's extension and sit in an existing folder under
+    `--root` (links resolved), and it must not be a link or a non-file.
+  - Without `out` it returns base64 audio.
+  - A clone comes from `clone_path` (under `--root`, an audio extension, 30 MB at most) or from `clone_audio`
+    (base64). A URL or `data:` is refused in either, and a clone needs `consent=true`.
+  - It returns the path, duration, format, model, nodes, pieces and usage.
+- **Tests.**
+  - `ymir-testkit/tests/speak_cli.rs`: a mock `InferHost` and `SpeakBackend` served through `v2::serve` and
+    `catalog::serve` on a `MemoryDialer`, with a `Pool` and the control socket. It covers single requests, PCM,
+    chunking and stitching, a two-speaker script, a clone crossing the socket, MP3 via ffmpeg when present, the CLI,
+    the TTY refusal, and MCP `ymir_speak` with its refusals.
+  - `ymir-core/tests/pool_sharing.rs`: a real guest identity's clone is refused, and a preset gets the "speaks yet"
+    answer.
 
 ## Not in this design
 

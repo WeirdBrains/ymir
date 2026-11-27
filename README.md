@@ -65,6 +65,7 @@ ymirctl engines install vllm                 # optional: vLLM nightly (runs Inkl
 ymird &                                      # model, inference and app roles in one process
 ymirctl chat "Hello"                         # streams through the loopback bridge
 ymirctl transcribe talk.mp3 --format srt     # transcribe through the pool (--chunk auto for clips over the model limit)
+ymirctl speak "Hello" -o hello.wav           # text to speech through the pool (needs a speak model; weirdnet-backends 0.4.10)
 ymirctl status                               # roles, models and their state
 ymirctl load <model> / ymirctl unload <model>
 ymirctl mcp                                  # MCP server for Cursor, Claude Desktop and VS Code (stdio; --http for loopback HTTP)

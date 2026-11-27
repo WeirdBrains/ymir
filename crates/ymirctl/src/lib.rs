@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod mcp_servers;
 pub mod models;
 pub mod pool;
+pub mod speak;
 pub mod train;
 pub mod transcribe;
 pub mod update_fetch;
@@ -211,6 +212,9 @@ pub enum Cmd {
     /// Speech to text through the pool: an audio or video file (or stdin) to text, JSON, SRT or
     /// VTT. `--chunk auto` cuts long audio at silences to the transcriber's reported length.
     Transcribe(transcribe::TranscribeArgs),
+    /// Text to speech through the pool: text, a file, stdin or a multi-speaker script, with a
+    /// preset, designed or cloned voice; long text is split, spoken and stitched.
+    Speak(speak::SpeakArgs),
     /// Split models: a model too big for one node, served by a group of nodes over a private link.
     Group {
         #[command(subcommand)]
@@ -555,6 +559,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, adapter_scale, prompt).await
         }
         Cmd::Transcribe(args) => transcribe::run(&paths.socket(), args, out, input).await,
+        Cmd::Speak(args) => speak::run(&paths.socket(), args, out, input, speak::stdout_is_tty()).await,
         Cmd::Batch { file, model, concurrency, retries, jsonl } if jsonl.jsonl => {
             batch_jsonl(&paths, out, file, model, concurrency, retries, jsonl).await
         }

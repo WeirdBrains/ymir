@@ -691,6 +691,35 @@ only, `/props` voices, cloning with `speaker_ref_b64`) and vLLM-Omni (`--omni`: 
 `ref_audio` only as a `data:` URL), with a sine tone of a length set by the word count. `ymirctl engines install vllm-omni`
 is under "Installing vLLM and Ray".
 
+**Speech out, before the backends (weirdnet-agent 0.5.11, built 2026-11-27, mocks only).** `InferenceHost::open_speak`
+receives the whole `SpeakRequest`. For a guest it refuses any cloned voice (`guest-clone`, consent or not) and a model
+outside the grant (`guest-model`). Otherwise it answers `Unsupported`: no model in this pool speaks yet, and that needs a
+`role = "speak"` node from `weirdnet-backends` 0.4.10. The pool fails over on that answer and reports it.
+
+`ymirctl speak` ([`speak.rs`](../crates/ymirctl/src/speak.rs)) runs over the control socket. `ControlRequest::Speak` is the
+request as a JSON line with its clone clips taken out, followed by the clips as raw bytes (lengths in `clips`, each up to
+30 MiB, 31 MiB together, checked before reading). The answer line (`SpeechReply`) is followed by the audio. ymird calls
+`Pool::speak`. `ControlRequest::SpeakTarget` routes with `Catalog::route_speak` and returns the model and its
+`SpeechProfile`.
+
+The CLI:
+- Takes text, `-` for stdin, `--file`, or `--script` (JSON turns, or `S0:` lines), with `--voice` (per speaker as
+  `N=NAME`), `--design`, or `--clone-audio` with `--clone-text` and `--clone-consent`.
+- Splits long text with `weirdnet-media` `speak::TextPlan` to the profile's `max_input_chars`. Every piece goes to the
+  same model with the same voice and seed, as WAV, and the pieces are stitched with `pcm::concat` (300 ms pauses, 10 ms
+  crossfades). A script goes turn by turn with each speaker's voice.
+- Encodes MP3, Opus and FLAC itself with `audio::encode` when the model doesn't make them.
+- Never writes raw audio to a terminal (`--out -` or a pipe).
+
+MCP `ymir_speak` is a mutating tool, so `--read-only` hides it.
+- Writing `out` needs `confirm=true`. The path needs the format's extension and an existing folder under `--root`, and
+  it must not be a link.
+- A clone comes from `clone_path` (under `--root`, never a URL or `data:`) or base64 `clone_audio`, and needs
+  `consent=true`.
+- It returns the path (or base64 audio without `out`), the duration and the usage.
+
+Neither the text nor the audio is logged.
+
 ### Model sizing
 
 `weirdnet-model`'s catalog grows from Gemma 4 only to a tiered catalog with per-quant memory
@@ -1004,7 +1033,7 @@ resources come from the published `weirdnet-mcp` 0.6 crate (features `stdio-serv
   backends, so the client side adds nothing a local `ymirctl` could not do.
 - **Tools.** Read: `ymir_status`, `ymir_nodes`, `ymir_devices`, `ymir_models`, `ymir_chat`, `ymir_complete`, `ymir_embed`,
   `ymir_service_status`, `ymir_models_search`, `ymir_models_local`, `ymir_transcribe`. Mutating: `ymir_load_model`, `ymir_unload_model`,
-  `ymir_move_model`, `ymir_pull_model`, and (only with `--allow-remove`) `ymir_remove_model`. `--read-only` hides all five.
+  `ymir_move_model`, `ymir_pull_model`, `ymir_speak` (writes an audio file), and (only with `--allow-remove`) `ymir_remove_model`. `--read-only` hides all six.
 - **Safety.** Mutating tools say `MUTATES THE POOL` (or `DELETES FILES`) in their description, carry `readOnlyHint: false`
   (`destructiveHint: true` for unload and remove) and refuse unless the arguments hold `confirm: true` (a string `"true"` does
   not count). Pull and remove without it return a preview. Nothing edits `node.toml` (`--register` is not exposed). Media files
