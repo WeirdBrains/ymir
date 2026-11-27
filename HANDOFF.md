@@ -2,6 +2,14 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 10:40 EST: v0.22.1 released
+
+**Release:** [v0.22.1](https://github.com/WeirdBrains/ymir/releases/tag/v0.22.1) (release commit fac5d21 on 49f61fd; Release run 46009619619 green, CI 46009618777, macOS 46009618590 and Pages 46009619015 green on fac5d21, FreeBSD 46002234634 green on 49f61fd): the M7 fixes from the first real GPU run. The `vllm-ray` listener check follows Ray's whole process tree, Ray and vLLM workers are pinned to the private link (`VLLM_HOST_IP`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`), trusted all-interface listeners are logged at info, and `ymirctl engines install vllm` picks a PyTorch CUDA build the driver can run (`--torch-backend` overrides), checks it after installing, and accepts `Inkling2LoopForConditionalGeneration`. 44 files on GitHub: leak scan 33 files, 0 hits (sums ok 32), then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.22.1` EXIT 0); `weirdnet_release.py assets 0.22.1` ok for linux, macos, windows and both FreeBSD files. Arch recipes on main; TAUR ymir-bin and ymir-cuda-bin 0.22.1-1 (dry-run first). Committed straight to main (no PRs). No live nodes touched.
+
+- On the way: Windows CI failed twice on test-only code (a loopback-name assertion, then `std::os::unix` in `ymir-mock-ray`), fixed in c5b5bf3 and 49f61fd; the first cut attempt stopped on a flaky `m3` network-timing test (passes alone) before committing; alien-blue's artifact download ran at about 0.57 MB/s, so `pub.sh` took about an hour.
+
+**Next:** re-verify on m1 + m2 with 0.22.1: the driver-matched install (PyPI's CUDA 13.0 PyTorch on driver 580), `vllm-ray` with Inkling 2 Mini, text and vision with the Python frontend, no LAN or Tailscale listeners under the new check, clean teardown, `node.toml` restored.
+
 ## 2026-11-27 07:00 EST: v0.22.1 fixes from the M7 real run (on main)
 
 Michael (11-27, t64u): "Let's fix the bugs you found." Built on the dev box with mocks; no live node touched for this commit. Details in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only) ("Security boundary", "Installing vLLM and Ray").
