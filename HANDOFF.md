@@ -2,6 +2,14 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 15:05 EST: v0.23.0 released
+
+**Release:** [v0.23.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.23.0) (release commit 291af7b on 5b77934; Release run 46042359473 green, CI 46042359823, macOS 46042359574 and Pages 46042359576 green on 291af7b, FreeBSD 46036160780 green on 5b77934): M11 cross-identity pool sharing (`ymirctl pool share` / `unshare` / `guests`, `weirdnet-agent` 0.5.9 guests limited to catalog/1 and infer/2) and video milestone 2 (`role = "transcribe"` models routed over infer/2 `Transcribe` with failover, limits measured at load with `weirdnet-backends` 0.4.9 and `weirdnet-model` 0.5.4). 44 files on GitHub: leak scan 33 files, 0 hits (sums ok 32), then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.23.0` EXIT 0); `weirdnet_release.py assets 0.23.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 10ddf97 on main; TAUR ymir-bin and ymir-cuda-bin 0.23.0-1 (dry-run first). Committed straight to main (no PRs). No live nodes touched.
+
+- On the way: alien-blue's `/mnt/ext1` disk was at about 95% IO pressure from another agent's cargo test, so the artifact download crawled; the publish was rerun with the download on the NVMe root (`pub-nvme-0230.sh`, the same steps and `leak-scan.sh` as `pub.sh`). The `/v1/audio/transcriptions` bridge still waits on `weirdnet-openai`, and transcription has not been run against a live Voxtral or Whisper server.
+
+**Next:** the M7 Pass 2 follow-ups: `ray_trust_firewall` should enforce the trusted port ranges (two Ray ports on m1 fell outside them), and `engines install vllm` should check the vLLM wheel's CUDA build as well as PyTorch's (vision on driver 580 needs a cu130 vLLM build or a newer driver).
+
 ## 2026-11-27 11:17 EST: video milestone 2, transcription role and route, measured limits (on main)
 
 Michael (11-27, t68u): "Keep going on Ymir roadmap". Built on the dev box with mocks (branch `video-m2` off `fac5d21`), rebased onto M11 pool sharing (`790a734`) and committed straight to main; no live node touched. Details in [video.md](docs/design/video.md#milestone-2-what-was-built-2026-11-27-mocks-only).
