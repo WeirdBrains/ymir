@@ -2666,8 +2666,37 @@ the cluster for its node count and exits when there are fewer than `--pipeline-p
   refused with the `ray_trust_firewall` hint and torn down, and nothing is left listening on all
   interfaces.
 
-**Not done.** A run on real GPUs (Ray and vLLM versions, NCCL over RoCE, how real `ray start
---block` handles SIGTERM) needs hardware m3talsmith picks. UDP listeners are not checked. A member's
+**Real GPU run (2026-11-27, m1 and m2: two DGX Spark GB10 nodes, ymird 0.22.0, 200 Gb/s link
+10.100.40.0/24).** `ymirctl engines install vllm` (uv) installed vLLM `0.34.1rc1.dev273+gef706a1b8` and
+Ray 2.60.1 on both and recorded Inkling 2 Mini (the registry also has the checkpoint's own
+`Inkling2LoopForConditionalGeneration`). Inkling 2 Mini (NVFP4, 18.2 GiB) came up as a `vllm-ray` group in
+about 3 minutes and answered through the pool: about 52 tokens/s generation for one request, 145,715
+tokens of KV cache at `--gpu-memory-utilization 0.25`, 9.47 GiB of weights per node. `group down`
+took 21 s and left no Ray or vLLM process on either node. What it took:
+
+- **`tensor_parallel = 2`, `pipeline_parallel = 1`.** Inkling has no pipeline parallelism in vLLM
+  (no `SupportsPP`), and the default sizing (one GPU each: tp 1, pp 2) is refused by vLLM.
+- **The planner refuses a group that fits on one node**, so `size` has to be above one node's `memory`.
+- **The Python frontend.** With `VLLM_USE_RUST_FRONTEND=1` (m1's unit sets it) the Rust frontend
+  fails on Inkling ("failed to create chat/text backends"); a wrapper with `VLLM_USE_RUST_FRONTEND=0`
+  as `[model] vllm` works.
+- **Text only on driver 580 (CUDA 13.0).** `--torch-backend=auto` picked torch `2.14.0+cu132`; the
+  vision encoder's flash-attention then fails with "the provided PTX was compiled with an unsupported
+  toolchain". `--limit-mm-per-prompt '{"image": 0}'` serves text. vLLM pins torchvision 0.29.2, which
+  has no cu130 build.
+- **`ray_port` 6390** on m1, where Redis has 6379 on loopback. The Ray ports were pinned with
+  `ray_args` (6391 to 6396, workers 10002 to 10999) and an nftables table dropped 6390 to 6399 and
+  10000 to 10999 on every interface but loopback and the private links.
+
+**Found on the real run (open).** The listener check covers only the `ray start` process group:
+gcs_server and raylet (which listen on all interfaces, as expected). Ray's worker processes, where
+vLLM's workers, NCCL and torch.distributed run, are in other process groups and were not checked. They
+listened on all interfaces on ports outside the pinned ranges (such as 43953), on m1's LAN address and
+on m2's Tailscale address, and the group was not refused. So a port-range firewall does not cover
+Ray, and `ray_trust_firewall` must not be used until the check follows Ray's workers (by session or
+process tree) and the workers are pinned to the link (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`,
+`VLLM_HOST_IP`). The all-interfaces listeners `ray_trust_firewall` lets through are logged at debug
+level only. The test config was taken off both nodes afterwards (their `node.toml` restored). UDP listeners are not checked. A member's
 own vLLM worker processes run under its raylet, so they are in its Ray process group and checked
 with it.
 
