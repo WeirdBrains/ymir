@@ -1,17 +1,17 @@
 //! Pool mode for the semantic answer cache (M6, `[inference.cache] mode = "pool"`): the pool's
-//! inference nodes share one cache through `weirdnet-semcache` 0.2.3's [`PooledSemanticCache`]
+//! inference nodes share one cache through `weirdnet-semcache` 0.2.3's [`PooledSemanticCache`](weirdnet_semcache::pool::PooledSemanticCache)
 //! (rendezvous sharding on the scope to a home node and one replica, so a lookup is one call).
 //! This module only wires it to Weirdnet; the sharding, the wire format and the fallbacks are
 //! the crate's.
 //!
-//! - **Serving:** each sharing node serves its shards ([`PooledSemanticCache::host`]) on
+//! - **Serving:** each sharing node serves its shards ([`PooledSemanticCache::host`](weirdnet_semcache::pool::PooledSemanticCache::host)) on
 //!   [`PROTOCOL`] (`/weirdnet-semcache/shared/1`) with [`weirdnet_semcache::pool::serve`],
 //!   behind the roster ([`crate::remote::roster_auth`]) narrowed to the current members, so an
 //!   app device or a model node can neither read nor fill the cache.
 //! - **Finding each other:** a sharing node announces [`app_name`] (it names a hash of the
 //!   embedding model, so only nodes embedding with the same model share). Every [`FOLLOW_EVERY`]
 //!   the active devices in the roster that announce it, plus this node, are the ring's members
-//!   ([`PooledSemanticCache::set_nodes`]); a revoked or silent one drops out.
+//!   ([`PooledSemanticCache::set_nodes`](weirdnet_semcache::pool::PooledSemanticCache::set_nodes)); a revoked or silent one drops out.
 //! - **One node:** with no other member, every lookup and insert stays in this process (the ring
 //!   holds only this node), with no network call.
 //! - **Outages never block an answer:** every remote call is bounded (150 ms lookups, 2 s
