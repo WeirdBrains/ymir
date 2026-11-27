@@ -147,6 +147,11 @@ fn head_child(h: &Home) -> Option<u32> {
     log(h, "ray-head").lines().find_map(|l| l.strip_prefix("mock ray: child ")?.trim().parse().ok())
 }
 
+/// The pid of the mock head's worker in a process group of its own.
+fn head_worker(h: &Home) -> Option<u32> {
+    log(h, "ray-head").lines().find_map(|l| l.strip_prefix("mock ray: worker ")?.trim().parse().ok())
+}
+
 fn running(pid: u32) -> bool {
     // A zombie is gone for our purposes (its parent was killed with it).
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.rsplit_once(')').is_some_and(|(_, r)| r.trim_start().starts_with('Z')))
@@ -214,6 +219,11 @@ async fn a_vllm_ray_group_comes_up_on_the_private_link_serves_and_leaves_nothing
     let vllm = log(&p.lead_h, "leader");
     assert!(vllm.contains("nodes=2 tp=1 pp=2"), "vllm serve ran on a 2-node Ray cluster with pp=2: {vllm}");
     assert!(log(&p.work_h, "ray-worker").contains("joined"), "the member joined the head");
+    // Ray (and so NCCL, Gloo and vLLM's workers) is pinned to the link on both nodes.
+    let head = log(&p.lead_h, "ray-head");
+    for want in ["mock ray env VLLM_HOST_IP=127.0.0.1", "mock ray env NCCL_SOCKET_IFNAME==lo", "mock ray env GLOO_SOCKET_IFNAME=lo"] {
+        assert!(head.contains(want), "{want}: {head}");
+    }
     let child = head_child(&p.lead_h).expect("the head's child pid");
     assert!(running(child));
     let a = ctl(&p.inf_h.home, &["chat", "--model", "big", "--wait", "hello"]).await?;
@@ -258,6 +268,24 @@ async fn ray_listening_on_all_interfaces_is_refused_and_torn_down() -> Result<()
         Ok(!log(&p.work_h, "ray-worker").contains("joined") || log(&p.work_h, "ray-worker").contains("went away"))
     })
     .await?;
+    p.inf.shutdown().await;
+    p.lead.shutdown().await;
+    p.work.shutdown().await;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ray_worker_in_another_process_group_listening_on_all_interfaces_is_refused() -> Result<()> {
+    // Ray's workers run in process groups of their own: the check follows the process tree.
+    let p = pool(&["--mock-worker-bind-any"]).await?;
+    let e = ctl(&p.inf_h.home, &["group", "up", "big"]).await.unwrap_err().to_string();
+    assert!(e.contains("0.0.0.0") && e.contains("ray_trust_firewall"), "{e}");
+    let worker = head_worker(&p.lead_h).expect("the head's worker pid");
+    eventually(15, "the refused head stops", async || Ok(!listening(p.ray_port).await)).await?;
+    eventually(15, "with its worker in the other process group", async || Ok(!running(worker))).await?;
+    assert!(!listening(p.ray_port + 2).await, "nothing listens on all interfaces any more");
+    assert!(ctl(&p.inf_h.home, &["group", "status"]).await?.contains("no group is up"));
     p.inf.shutdown().await;
     p.lead.shutdown().await;
     p.work.shutdown().await;

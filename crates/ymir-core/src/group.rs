@@ -341,6 +341,12 @@ impl Proc {
 
     /// SIGTERM to the process group, up to 10 s for it to exit, then SIGKILL to what is left.
     async fn stop(mut self) {
+        // Ray's workers live in process groups of their own: remember them to finish them off.
+        #[cfg(unix)]
+        let tree = match (self.ray_link, self.pgid) {
+            (Some(_), Some(g)) => crate::ray::started(&crate::ray::tree_of(g)),
+            _ => Vec::new(),
+        };
         #[cfg(unix)]
         if let Some(g) = self.pgid
             && self.running()
@@ -359,6 +365,18 @@ impl Proc {
             // Members that outlived the leader (a raylet that ignored SIGTERM).
             // SAFETY: plain syscall on the group we started, right after its leader exited.
             unsafe { libc::killpg(g, libc::SIGKILL) };
+        }
+        #[cfg(unix)]
+        if !tree.is_empty() {
+            // Give Ray's own shutdown a moment, then kill what is left of the tree (the same
+            // processes: their start time is checked again, so a reused pid is spared).
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            for (pid, at) in tree {
+                if crate::ray::started(&[pid]).first() == Some(&(pid, at)) {
+                    // SAFETY: plain syscall on a process of the tree we started, still the same one.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
         }
     }
 }
@@ -388,6 +406,8 @@ pub struct RpcWorkers {
     groups: tokio::sync::Mutex<HashMap<String, Vec<Proc>>>,
     /// Set by [`RpcWorkers::down_all`]: a start still waiting gives up.
     stopping: std::sync::atomic::AtomicBool,
+    /// All-interface listeners already logged (role, ports), so a watch tick doesn't repeat them.
+    trusted_logged: std::sync::Mutex<std::collections::HashSet<(&'static str, Vec<u16>)>>,
 }
 
 fn refused(m: impl Into<String>) -> RemoteError {
@@ -400,7 +420,12 @@ fn failed(m: impl Into<String>) -> RemoteError {
 
 impl RpcWorkers {
     pub fn new(cfg: WorkerConfig) -> Self {
-        Self { cfg, groups: tokio::sync::Mutex::new(HashMap::new()), stopping: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            cfg,
+            groups: tokio::sync::Mutex::new(HashMap::new()),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            trusted_logged: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
     }
 
     /// Whether every process of `group` here is still running.
@@ -424,10 +449,14 @@ impl RpcWorkers {
     /// For a Ray process: its listeners are on the private link or loopback only.
     fn binds_ok(&self, p: &Proc) -> Result<(), RemoteError> {
         let (Some(own), Some(g)) = (p.ray_link, p.pgid) else { return Ok(()) };
-        match crate::ray::check_listeners(&crate::ray::listeners_of_group(g), own, self.cfg.ray_trust_firewall) {
+        match crate::ray::check_listeners(&crate::ray::listeners_of_tree(g), own, self.cfg.ray_trust_firewall) {
             Ok(wild) => {
                 if !wild.is_empty() {
-                    tracing::debug!(role = p.role, listeners = ?wild, "Ray listens on all interfaces (ray_trust_firewall = true)");
+                    let ports: Vec<u16> = wild.iter().map(|l| l.port).collect();
+                    let mut seen = self.trusted_logged.lock().unwrap_or_else(|e| e.into_inner());
+                    if seen.insert((p.role, ports.clone())) {
+                        tracing::info!(role = p.role, ports = ?ports, "listening on all interfaces, allowed by ray_trust_firewall = true: the host firewall must drop these ports off the private link");
+                    }
                 }
                 Ok(())
             }
@@ -593,7 +622,9 @@ impl RpcWorkers {
             let tp = plan.extra.get("vllm.tp").and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
             let pp = plan.extra.get("vllm.pp").and_then(|v| v.parse::<u32>().ok()).unwrap_or(plan.members.len() as u32);
             let head = crate::ray::endpoint(ip, port);
-            let mut h = self.spawn(ray, &crate::ray::head_args(ip, port, &self.cfg.ray_args), "ray-head", &plan.group, &[])?;
+            let link_env = crate::ray::link_env(ip, crate::ray::iface_of(ip).as_deref());
+            let link: Vec<(&str, &str)> = link_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let mut h = self.spawn(ray, &crate::ray::head_args(ip, port, &self.cfg.ray_args), "ray-head", &plan.group, &link)?;
             h.ray_link = Some(ip);
             let joined = async {
                 self.wait_tcp((ip, port), &mut h, Duration::from_secs(60)).await?;
@@ -606,8 +637,8 @@ impl RpcWorkers {
                 h.stop().await;
                 return Err(e);
             }
-            let env = [("VLLM_API_KEY", self.cfg.key.as_str()), ("RAY_ADDRESS", head.as_str()), ("VLLM_HOST_IP", &ip.to_string())];
-            let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, *v)).collect();
+            let mut env = vec![("VLLM_API_KEY", self.cfg.key.as_str()), ("RAY_ADDRESS", head.as_str())];
+            env.extend(link.iter().copied());
             let mut v = match self.spawn(vllm, &crate::ray::vllm_args(split, &model, tp, pp), "leader", &plan.group, &env) {
                 Ok(v) => v,
                 Err(e) => {
@@ -615,9 +646,12 @@ impl RpcWorkers {
                     return Err(e);
                 }
             };
+            // vLLM's own processes (the engine core and its sockets) are held to the link too.
+            v.ray_link = Some(ip);
             let ready = async {
                 self.wait_health(split.serve_port, &self.cfg.key, &mut v, Duration::from_secs(1800)).await?;
-                self.binds_ok(&h)
+                self.binds_ok(&h)?;
+                self.binds_ok(&v)
             }
             .await;
             if let Err(e) = ready {
@@ -638,7 +672,9 @@ impl RpcWorkers {
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            let mut w = self.spawn(ray, &crate::ray::worker_args(&head, ip, &self.cfg.ray_args), "ray-worker", &plan.group, &[])?;
+            let link_env = crate::ray::link_env(ip, crate::ray::iface_of(ip).as_deref());
+            let link: Vec<(&str, &str)> = link_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let mut w = self.spawn(ray, &crate::ray::worker_args(&head, ip, &self.cfg.ray_args), "ray-worker", &plan.group, &link)?;
             w.ray_link = Some(ip);
             // `ray start --block` exits at once when it cannot join.
             tokio::time::sleep(Duration::from_secs(1)).await;

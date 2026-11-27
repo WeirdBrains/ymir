@@ -22,6 +22,8 @@ pub const INKLING_MIN_VERSION: (u64, u64, u64) = (0, 35, 0);
 
 /// The architecture vLLM registers for Inkling 2 Mini (`vllm/model_executor/models/registry.py`).
 pub const INKLING_ARCH: &str = "InklingForConditionalGeneration";
+/// The class vLLM main registers Inkling 2 Mini (`inkling2_loop`) as.
+pub const INKLING2_LOOP_ARCH: &str = "Inkling2LoopForConditionalGeneration";
 
 /// Day-0 image with Inkling 2 Mini, including linux/arm64 for DGX Spark.
 pub const INKLING_IMAGE: &str = "vllm/vllm-openai:inkling-2-mini";

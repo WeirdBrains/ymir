@@ -2595,11 +2595,20 @@ context = 32768
 (`--extra-index-url https://wheels.vllm.ai/nightly` with `--prerelease=allow` for uv or `--pre` for pip), because only
 the nightly runs Inkling 2 Mini until vLLM 0.35.0 is released (see "Inkling 2 Mini" above); `--version V` installs
 `vllm==V` from PyPI instead, and `--index-url` replaces the nightly with that index. It uses `uv venv --python 3.12` and
-`uv pip install --torch-backend=auto` when `uv` is on `PATH`, else `python3 -m venv` and pip, refusing a Python outside 3.10 to
+`uv pip install` when `uv` is on `PATH`, else `python3 -m venv` and pip, refusing a Python outside 3.10 to
 3.13. It detects the accelerator (`nvidia-smi`: CUDA; `rocminfo` or `/opt/rocm`: ROCm; else CPU) unless `--accel` says. PyPI's
-vLLM wheels are CUDA builds, so ROCm and CPU need `--index-url` (or a container image). It checks that `vllm --version` and
-`ray --version` run, asks the venv's Python whether vLLM's model registry has `InklingForConditionalGeneration`, and writes
-`ymir-install.json` with the answer (`inkling`, `nightly`). A default (nightly) install without it fails; a pinned release
+vLLM wheels are CUDA builds, so ROCm and CPU need `--index-url` (or a container image). For CUDA it matches PyTorch's CUDA
+build to the driver: it reads the newest CUDA the driver runs from `nvidia-smi` ("CUDA Version") and, for 13.0 or newer,
+passes no `--torch-backend`, so PyTorch comes from PyPI, whose wheels are CUDA 13.0 builds (vLLM's nightly pins torchvision
+0.29.2 and torchaudio 2.11.1, which PyTorch's own cu130 index lacks, so `--torch-backend=cu130` cannot resolve them). For a
+12.6 to 12.9 driver it uses PyTorch's `cu126`/`cu128`/`cu129` index with a release (`--version`; the nightly is built for CUDA
+13 and is refused there), and an older driver is refused. `--torch-backend B` overrides the choice (uv only). It used to pass
+`--torch-backend=auto`, which on a DGX Spark with driver 580 (CUDA 13.0) chose a cu132 PyTorch whose kernels the driver could
+not load. After installing it checks that `vllm --version` and `ray --version` run, that `torch.version.cuda` is not newer
+than the driver's (else the install fails, saying what to pass), and asks the venv's Python whether vLLM's model registry
+has Inkling 2 Mini (`InklingForConditionalGeneration`, the checkpoint's architecture, or
+`Inkling2LoopForConditionalGeneration`, the class vLLM main registers). It writes `ymir-install.json` with the answers
+(`inkling`, `nightly`, `driver_cuda`, `torch_backend`, `torch`, `torch_cuda`). A default (nightly) install without it fails; a pinned release
 without it installs and says Inkling 2 Mini needs 0.35.0 or a nightly. ymird's Inkling preflight trusts that record for the
 venv's `vllm`. `upgrade` keeps the venv and passes `--upgrade`, `--reinstall` clears it,
 `--dry-run` prints the commands, and `uninstall` removes the venv only when that record is there. `[model] vllm = "auto"` and
@@ -2639,13 +2648,22 @@ the node. So:
   public, CGNAT or tailnet address). The plan's address must match it. `ray_args` may not set
   `--head`, `--address`, `--node-ip-address`, `--port`, `--block`, `--dashboard-host`,
   `--include-dashboard` or any all-interfaces address. The dashboard is off.
-- **Ymir checks the binds.** It lists the TCP listeners of each Ray process group (`/proc`, so Linux
-  only; `vllm-ray` groups are refused elsewhere). Any listener on an address other than the private
-  link or loopback makes it refuse the group and tear it down. It checks after the head is up, after
-  members join, after vLLM is ready, and on every group watch tick.
+- **Ymir checks the binds.** It lists the TCP listeners of every process under each Ray (and vLLM)
+  process it started: the members of its process group and, transitively, every child of one of
+  them, whatever process group or session it moved to (`/proc/PID/stat`, so Linux only; `vllm-ray`
+  groups are refused elsewhere). That covers Ray's workers, which the raylet starts in process groups
+  of their own, and so vLLM's workers, NCCL and torch.distributed. Any listener on an address other
+  than the private link or loopback makes it refuse the group and tear it down. It checks after the
+  head is up, after members join, after vLLM is ready, and on every group watch tick. Stopping a
+  group kills what is left of that process tree too (each process checked by its start time, so a
+  reused pid is spared).
+- **Ymir pins Ray's workers to the link.** The Ray head, each member's `ray start` and `vllm serve`
+  get `VLLM_HOST_IP` (the node's link address), `NCCL_SOCKET_IFNAME` (`=` and the link's interface,
+  an exact match) and `GLOO_SOCKET_IFNAME` (the interface), so vLLM, NCCL and torch.distributed use
+  the link and not whatever interface they would pick (on m1 and m2 that was the LAN and Tailscale).
 - **Ray's GCS listens on all interfaces** whatever `--node-ip-address` says (a known Ray limitation).
   So by default a real Ray cluster is refused. `[model] ray_trust_firewall = true` lets all-interface
-  listeners through (they are logged). Set it only when a host firewall drops Ray's ports on every
+  listeners through (logged at info, once per process and port set). Set it only when a host firewall drops Ray's ports on every
   interface but the private link. Listeners on any other specific address are still refused. The
   "private link" must still be a direct cable or an isolated VLAN, as for `rpc-server`.
 - vLLM's API binds loopback, behind a key, like every other engine.
@@ -2656,15 +2674,18 @@ on `0.0.0.0` like the real GCS). The mock engine acts as `vllm serve`: with the 
 the cluster for its node count and exits when there are fewer than `--pipeline-parallel-size`.
 
 - Unit tests: args and refusals, `ray status` parsing, sizing, `vllm serve` arguments (no key in argv),
-  `/proc/net/tcp` parsing, the listener rule, finding a process group's listeners, Ray plans, member
-  refusals.
+  `/proc/net/tcp` parsing, the listener rule, finding a process group's listeners, following a process
+  tree into other process groups, the link environment, Ray plans, member refusals.
 - [`m7_ray.rs`](../crates/ymir-testkit/tests/m7_ray.rs): three daemons over Weirdnet. A sizing that
   does not fit is refused before anything starts. `group up` brings up the head on the link, the
   member joins, and vLLM starts on a two-node cluster with `tp=1 pp=2` and answers a chat through the
   pool. `group down` stops the head and its child. After another `up`, the member's node shutting down
   takes the group down along with the head's child. A head whose child listens on `0.0.0.0` is
   refused with the `ray_trust_firewall` hint and torn down, and nothing is left listening on all
-  interfaces.
+  interfaces. So is a head whose "worker", started in a process group of its own
+  (`--mock-worker-bind-any`, as the raylet starts Ray's workers), listens on `0.0.0.0`, and that worker
+  is stopped with the group. The head gets `VLLM_HOST_IP`, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`
+  for the link (`lo` in the test).
 
 **Real GPU run (2026-11-27, m1 and m2: two DGX Spark GB10 nodes, ymird 0.22.0, 200 Gb/s link
 10.100.40.0/24).** `ymirctl engines install vllm` (uv) installed vLLM `0.34.1rc1.dev273+gef706a1b8` and
@@ -2683,22 +2704,23 @@ took 21 s and left no Ray or vLLM process on either node. What it took:
 - **Text only on driver 580 (CUDA 13.0).** `--torch-backend=auto` picked torch `2.14.0+cu132`; the
   vision encoder's flash-attention then fails with "the provided PTX was compiled with an unsupported
   toolchain". `--limit-mm-per-prompt '{"image": 0}'` serves text. vLLM pins torchvision 0.29.2, which
-  has no cu130 build.
+  has no build on PyTorch's cu130 index; PyPI's torch 2.14.0 is a CUDA 13.0 build, so the installer
+  now leaves PyTorch to PyPI on a CUDA 13.0 driver (see "Installing vLLM and Ray").
 - **`ray_port` 6390** on m1, where Redis has 6379 on loopback. The Ray ports were pinned with
   `ray_args` (6391 to 6396, workers 10002 to 10999) and an nftables table dropped 6390 to 6399 and
   10000 to 10999 on every interface but loopback and the private links.
 
-**Found on the real run (open).** The listener check covers only the `ray start` process group:
-gcs_server and raylet (which listen on all interfaces, as expected). Ray's worker processes, where
-vLLM's workers, NCCL and torch.distributed run, are in other process groups and were not checked. They
-listened on all interfaces on ports outside the pinned ranges (such as 43953), on m1's LAN address and
-on m2's Tailscale address, and the group was not refused. So a port-range firewall does not cover
-Ray, and `ray_trust_firewall` must not be used until the check follows Ray's workers (by session or
-process tree) and the workers are pinned to the link (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`,
-`VLLM_HOST_IP`). The all-interfaces listeners `ray_trust_firewall` lets through are logged at debug
-level only. The test config was taken off both nodes afterwards (their `node.toml` restored). UDP listeners are not checked. A member's
-own vLLM worker processes run under its raylet, so they are in its Ray process group and checked
-with it.
+**Found on the real run (fixed after 0.22.0).** The listener check covered only the `ray start`
+process group: gcs_server and raylet (which listen on all interfaces, as expected). Ray's worker
+processes, where vLLM's workers, NCCL and torch.distributed run, are in other process groups and were
+not checked. They listened on all interfaces on ports outside the pinned ranges (such as 43953), on
+m1's LAN address and on m2's Tailscale address, and the group was not refused. So a port-range
+firewall does not cover Ray. Fixed: the check follows the whole process tree, Ymir pins the workers
+to the link (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `VLLM_HOST_IP`), the leader's vLLM process
+tree is checked too, and the all-interfaces listeners `ray_trust_firewall` lets through are logged at
+info (they were at debug). The installer now picks PyTorch's CUDA build from the driver and accepts
+`Inkling2LoopForConditionalGeneration`. The test config was taken off both nodes afterwards (their
+`node.toml` restored). UDP listeners are not checked.
 
 ## B1 status (built 2026-11-19)
 

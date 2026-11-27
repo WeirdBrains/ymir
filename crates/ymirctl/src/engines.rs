@@ -60,6 +60,10 @@ pub struct InstallArgs {
     /// Install on an OS vLLM does not support.
     #[arg(long)]
     pub force: bool,
+    /// PyTorch's build for uv (cu130, cu128, cpu, auto ...). Default: the one the GPU driver runs
+    /// (nvidia-smi's CUDA version: PyPI's CUDA 13.0 build for a CUDA 13 driver).
+    #[arg(long)]
+    pub torch_backend: Option<String>,
     /// Print the commands, run nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -98,6 +102,7 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
         upgrade,
         reinstall: a.reinstall,
         force: a.force,
+        torch_backend: a.torch_backend,
     };
     if upgrade && vllm_install::read_record(venv).is_none() {
         anyhow::bail!("no managed vLLM at {}; run `ymirctl engines install vllm` first", venv.display());
@@ -105,11 +110,19 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
     let plan = vllm_install::plan(venv, &o, probe)?;
     let what = if plan.nightly { "vLLM nightly" } else { "vLLM" };
     writeln!(out, "{what} and Ray for {} into {} (with {})", plan.accel.name(), plan.venv.display(), plan.installer)?;
+    if plan.accel == Accel::Cuda {
+        let driver = plan.driver_cuda.map_or("unknown (nvidia-smi gave none; not checked)".into(), |(a, b)| format!("CUDA {a}.{b}"));
+        let torch = plan.torch_backend.clone().unwrap_or_else(|| "PyPI's (CUDA 13.0 build)".into());
+        writeln!(out, "GPU driver: {driver}; PyTorch: {torch}")?;
+    }
     if a.dry_run {
         for s in &plan.steps {
             writeln!(out, "  {s}")?;
         }
-        writeln!(out, "  then check `vllm --version`, `ray --version` and that vLLM has Inkling 2 Mini (dry run: nothing ran)")?;
+        writeln!(
+            out,
+            "  then check `vllm --version`, `ray --version`, that PyTorch's CUDA is not newer than the driver's and that vLLM has Inkling 2 Mini (dry run: nothing ran)"
+        )?;
         return Ok(());
     }
     let mut lines = Vec::new();
@@ -118,8 +131,12 @@ fn install(venv: &std::path::Path, a: InstallArgs, upgrade: bool, out: &mut dyn 
         writeln!(out, "  ran {l}")?;
     }
     writeln!(out, "installed vLLM {} and Ray {} ({})", rec.vllm, rec.ray, rec.accel.name())?;
+    match (&rec.torch, &rec.torch_cuda) {
+        (Some(t), Some(c)) => writeln!(out, "PyTorch {t} (CUDA {c}; the driver runs {})", rec.driver_cuda.as_deref().unwrap_or("?"))?,
+        _ => writeln!(out, "PyTorch: could not read its version (`import torch` failed?)")?,
+    }
     if rec.inkling {
-        writeln!(out, "Inkling 2 Mini: supported (vLLM registers {})", ymir_core::vllm::INKLING_ARCH)?;
+        writeln!(out, "Inkling 2 Mini: supported (vLLM registers {})", ymir_core::vllm::INKLING2_LOOP_ARCH)?;
     } else {
         writeln!(
             out,
@@ -136,7 +153,7 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     match vllm_install::read_record(&venv) {
         Some(r) => writeln!(
             out,
-            "managed: {} (vLLM {}{}, Ray {}, {}, by {}, Inkling 2 Mini {}{})",
+            "managed: {} (vLLM {}{}, Ray {}, {}, by {}, Inkling 2 Mini {}{}{})",
             venv.display(),
             r.vllm,
             if r.nightly { " nightly" } else { "" },
@@ -144,7 +161,11 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             r.accel.name(),
             r.installer,
             if r.inkling { "yes" } else { "no" },
-            r.requested.map(|v| format!(", asked for {v}")).unwrap_or_default()
+            r.requested.as_ref().map(|v| format!(", asked for {v}")).unwrap_or_default(),
+            match (&r.torch, &r.torch_cuda) {
+                (Some(t), Some(c)) => format!(", PyTorch {t} CUDA {c}, driver CUDA {}", r.driver_cuda.as_deref().unwrap_or("?")),
+                _ => String::new(),
+            }
         )?,
         None => writeln!(out, "managed: none (`ymirctl engines install vllm`)")?,
     }

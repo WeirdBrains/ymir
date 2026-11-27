@@ -193,27 +193,86 @@ pub fn foreign(listeners: &[Listener], own: IpAddr) -> Vec<Listener> {
     v
 }
 
-/// The TCP listeners of every process in process group `pgid` (Linux).
+/// `(pid, ppid, pgrp)` of every process (`/proc/PID/stat`, Linux).
 #[cfg(target_os = "linux")]
-pub fn listeners_of_group(pgid: i32) -> Vec<Listener> {
-    let mut inodes = std::collections::HashSet::new();
+fn processes() -> Vec<(i32, i32, i32)> {
+    let mut out = Vec::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
         for e in dir.flatten() {
             let name = e.file_name();
-            let Some(pid) = name.to_str().filter(|s| s.bytes().all(|b| b.is_ascii_digit())) else { continue };
+            let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+            // `pid (comm) state ppid pgrp ...`; comm may hold spaces and parentheses.
             let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
-            if rest.split_whitespace().nth(2).and_then(|g| g.parse::<i32>().ok()) != Some(pgid) {
-                continue;
+            let mut f = rest.split_whitespace().skip(1);
+            if let (Some(Ok(ppid)), Some(Ok(pgrp))) = (f.next().map(str::parse::<i32>), f.next().map(str::parse::<i32>)) {
+                out.push((pid, ppid, pgrp));
             }
-            let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
-            for fd in fds.flatten() {
-                if let Ok(t) = std::fs::read_link(fd.path())
-                    && let Some(i) = t.to_str().and_then(|s| s.strip_prefix("socket:[")).and_then(|s| s.strip_suffix(']'))
-                    && let Ok(i) = i.parse::<u64>()
-                {
-                    inodes.insert(i);
-                }
+        }
+    }
+    out
+}
+
+/// Which of `procs` (`(pid, ppid, pgrp)`) belong to the process Ymir started as `root` (the leader of
+/// its own process group): the members of that group and, transitively, every child of one of them,
+/// whatever process group or session it moved to. Ray starts its workers (and so vLLM's workers,
+/// NCCL and torch.distributed) in groups of their own, so the group alone misses them.
+pub fn tree_in(procs: &[(i32, i32, i32)], root: i32) -> Vec<i32> {
+    let mut set: std::collections::HashSet<i32> = procs.iter().filter(|p| p.0 == root || p.2 == root).map(|p| p.0).collect();
+    loop {
+        let before = set.len();
+        for p in procs {
+            if set.contains(&p.1) {
+                set.insert(p.0);
+            }
+        }
+        if set.len() == before {
+            break;
+        }
+    }
+    let mut v: Vec<i32> = set.into_iter().collect();
+    v.sort_unstable();
+    v
+}
+
+/// [`tree_in`] over the running processes (Linux; empty elsewhere).
+pub fn tree_of(root: i32) -> Vec<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        tree_in(&processes(), root)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+/// `(pid, start time)` of those of `pids` still running (`/proc/PID/stat` field 22; Linux), so a
+/// later kill can tell a process from one that reused its pid.
+pub fn started(pids: &[i32]) -> Vec<(i32, u64)> {
+    pids.iter()
+        .filter_map(|&pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let rest = stat.rsplit_once(')')?.1;
+            Some((pid, rest.split_whitespace().nth(19)?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// The TCP listeners of the process Ymir started as `root` and of everything under it
+/// ([`tree_of`]; Linux).
+#[cfg(target_os = "linux")]
+pub fn listeners_of_tree(root: i32) -> Vec<Listener> {
+    let mut inodes = std::collections::HashSet::new();
+    for pid in tree_of(root) {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+        for fd in fds.flatten() {
+            if let Ok(t) = std::fs::read_link(fd.path())
+                && let Some(i) = t.to_str().and_then(|s| s.strip_prefix("socket:[")).and_then(|s| s.strip_suffix(']'))
+                && let Ok(i) = i.parse::<u64>()
+            {
+                inodes.insert(i);
             }
         }
     }
@@ -227,11 +286,28 @@ pub fn listeners_of_group(pgid: i32) -> Vec<Listener> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn listeners_of_group(_pgid: i32) -> Vec<Listener> {
+pub fn listeners_of_tree(_root: i32) -> Vec<Listener> {
     Vec::new()
 }
 
-/// Whether the listeners of a Ray process group are acceptable: `Err` names the ones that are
+/// The network interface that holds `ip` (`lo` for loopback), for pinning NCCL and Gloo to it.
+pub fn iface_of(ip: IpAddr) -> Option<String> {
+    if_addrs::get_if_addrs().ok()?.into_iter().find(|i| i.ip() == ip).map(|i| i.name)
+}
+
+/// Environment that keeps a Ray node's workers on the private link: vLLM's own address and the
+/// interface NCCL and Gloo (torch.distributed) bind and connect on. Without it they pick an
+/// interface themselves, such as the LAN or Tailscale.
+pub fn link_env(ip: IpAddr, iface: Option<&str>) -> Vec<(String, String)> {
+    let mut v = vec![("VLLM_HOST_IP".to_string(), ip.to_string())];
+    if let Some(i) = iface {
+        v.push(("NCCL_SOCKET_IFNAME".into(), format!("={i}")));
+        v.push(("GLOO_SOCKET_IFNAME".into(), i.to_string()));
+    }
+    v
+}
+
+/// Whether the listeners of a Ray process tree are acceptable: `Err` names the ones that are
 /// not. With `trust_firewall`, all-interface listeners pass (the caller logs them).
 pub fn check_listeners(listeners: &[Listener], own: IpAddr, trust_firewall: bool) -> Result<Vec<Listener>, String> {
     let bad = foreign(listeners, own);
@@ -347,15 +423,37 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_tree_follows_children_into_other_groups() {
+        // (pid, ppid, pgrp): `ray start` 100 leads group 100; raylet 101 is in it; a worker 200
+        // moved to its own group and its child 201 to another; 300 is unrelated, 400 is in 100's
+        // group though its parent is elsewhere.
+        let procs = [(1, 0, 1), (100, 50, 100), (101, 100, 100), (200, 101, 200), (201, 200, 201), (300, 1, 300), (400, 1, 100)];
+        assert_eq!(tree_in(&procs, 100), vec![100, 101, 200, 201, 400]);
+        assert_eq!(tree_in(&procs, 200), vec![200, 201]);
+        assert!(tree_in(&procs, 999).is_empty());
+    }
+
+    #[test]
+    fn link_env_pins_nccl_and_gloo_to_the_link() {
+        let ip: IpAddr = "10.100.40.1".parse().unwrap();
+        let env = link_env(ip, Some("enp1s0f1np1"));
+        assert!(env.contains(&("VLLM_HOST_IP".into(), "10.100.40.1".into())));
+        assert!(env.contains(&("NCCL_SOCKET_IFNAME".into(), "=enp1s0f1np1".into())));
+        assert!(env.contains(&("GLOO_SOCKET_IFNAME".into(), "enp1s0f1np1".into())));
+        assert_eq!(link_env(ip, None).len(), 1);
+        assert_eq!(iface_of("127.0.0.1".parse().unwrap()).as_deref(), Some("lo"));
+    }
+
+    #[test]
     fn finds_the_listeners_of_a_process_group() {
         use std::os::unix::process::CommandExt;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         // Our own process group holds `l`.
         let me = unsafe { libc::getpgrp() };
-        assert!(listeners_of_group(me).iter().any(|x| x.port == port));
+        assert!(listeners_of_tree(me).iter().any(|x| x.port == port));
         let mut child = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
-        assert!(!listeners_of_group(child.id() as i32).iter().any(|x| x.port == port), "another group does not hold it");
+        assert!(!listeners_of_tree(child.id() as i32).iter().any(|x| x.port == port), "another group does not hold it");
         let _ = child.kill();
         let _ = child.wait();
     }

@@ -232,7 +232,9 @@ ymirctl drain server-a --resume</code></pre>
 <code>split</code> in the pool policy first (see the <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md">design document</a>).
 The backend is <code>llamacpp-rpc</code> (GGUF, <code>rpc-server</code> workers) or <code>vllm-ray</code> (vLLM on a Ray cluster over the
 private link; Linux, with <a href="#engines"><code>ymirctl engines install vllm</code></a> on each member). Ray has no authentication, so
-Ymir refuses a Ray process that listens anywhere but the private link or loopback; see the design document's security notes.</p>
+Ymir refuses the group when any process under Ray or vLLM (Ray's workers included) listens anywhere but the private link or
+loopback, and pins Ray's workers to the link (<code>VLLM_HOST_IP</code>, <code>NCCL_SOCKET_IFNAME</code>, <code>GLOO_SOCKET_IFNAME</code>);
+see the design document's security notes.</p>
 <ul>
 <li><code>ymirctl group up MODEL</code>: plan and start the group for MODEL.</li>
 <li><code>ymirctl group down MODEL</code>: stop it; its members return to normal placement.</li>
@@ -252,6 +254,10 @@ ymirctl group status</code></pre>
 <a href="https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini">vLLM recipe</a> asks for 0.35.0 or a nightly. The installer
 checks that the installed vLLM registers Inkling 2 Mini and records it, so <code>ymird</code> accepts the nightly even though its
 version (<code>0.34.1rc1.devN</code>) is below 0.35.0. <code>--index-url</code> (ROCm, CPU) replaces the nightly index.</p>
+<p>For NVIDIA GPUs it picks a PyTorch build the driver can run, from the CUDA version <code>nvidia-smi</code> reports: PyPI's PyTorch
+(a CUDA 13.0 build) for a CUDA 13 driver (580 or newer), PyTorch's <code>cu126</code> to <code>cu129</code> index for a CUDA 12
+driver (with <code>--version</code>; the nightly needs CUDA 13). After installing it checks that PyTorch's CUDA is not newer
+than the driver's, and <code>ymirctl engines status</code> shows both.</p>
 <table>
 <thead><tr><th>Command or flag</th><th>What it does</th></tr></thead>
 <tbody>
@@ -259,6 +265,7 @@ version (<code>0.34.1rc1.devN</code>) is below 0.35.0. <code>--index-url</code> 
 <tr><td><code>--version V</code></td><td>A vLLM release from PyPI, such as <code>0.34.0</code>, instead of the nightly. Inkling 2 Mini needs 0.35.0 or a nightly.</td></tr>
 <tr><td><code>--accel auto|cuda|rocm|cpu</code></td><td>The accelerator; <code>auto</code> looks for <code>nvidia-smi</code>, then <code>rocminfo</code> or <code>/opt/rocm</code>, else CPU.</td></tr>
 <tr><td><code>--index-url URL</code></td><td>A vLLM wheel index. ROCm and CPU need one, because PyPI's vLLM wheels are CUDA builds (or use a container image: <code>vllm = "image:..."</code>).</td></tr>
+<tr><td><code>--torch-backend B</code></td><td>PyTorch's build for <code>uv</code> (<code>cu130</code>, <code>cu128</code>, <code>cpu</code>, <code>auto</code> ...) instead of the one matched to the driver.</td></tr>
 <tr><td><code>--uv PATH</code>, <code>--python PATH</code></td><td>Which <code>uv</code>, or which Python for <code>-m venv</code> and pip instead of <code>uv</code>.</td></tr>
 <tr><td><code>--reinstall</code>, <code>--dry-run</code>, <code>--force</code></td><td>Make the venv afresh; print the commands without running them; install on an OS other than Linux.</td></tr>
 <tr><td><code>ymirctl engines upgrade vllm</code></td><td>Upgrade the managed vLLM and Ray (same flags).</td></tr>

@@ -16,8 +16,8 @@ stubs() {
   case "$2" in *vllm==*) v=0.34.0 ink=False ;; *) v=0.34.1rc1.dev231+g43108ffcc ink=True ;; esac
   printf '#!/bin/sh\necho %s\n' "$v" > "$1/vllm"
   printf '#!/bin/sh\necho "ray, version 2.49.1"\n' > "$1/ray"
-  # The venv's python answers the registry check.
-  [ -s "$1/python" ] || printf '#!/bin/sh\n[ "$1" = -c ] && echo %s\n' "$ink" > "$1/python"
+  # The venv's python answers the registry check and PyTorch's CUDA (bin/torch_cuda, default 13.0).
+  [ -s "$1/python" ] || printf '#!/bin/sh\ncase "$2" in *torch.version*) echo "torch 2.14.0 $(cat "$(dirname "$0")/torch_cuda" 2>/dev/null || echo 13.0)" ;; *) echo %s ;; esac\n' "$ink" > "$1/python"
   chmod +x "$1/vllm" "$1/ray" "$1/python"
 }
 "#;
@@ -77,6 +77,9 @@ impl Probe for Linux {
     fn os(&self) -> &'static str {
         "linux"
     }
+    fn driver_cuda(&self) -> Option<(u32, u32)> {
+        Some((13, 0))
+    }
 }
 
 fn engines(home: &Path, args: &[&str], probe: &dyn Probe) -> anyhow::Result<String> {
@@ -102,6 +105,7 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     let o = engines(&home, &["install", "vllm", "--dry-run"], &probe).unwrap();
     assert!(o.contains("vLLM nightly") && o.contains("for cuda") && o.contains("with uv") && o.contains("wheels.vllm.ai/nightly vllm ray"), "{o}");
     assert!(o.contains("Inkling 2 Mini") && o.contains("dry run"), "{o}");
+    assert!(o.contains("GPU driver: CUDA 13.0; PyTorch: PyPI's (CUDA 13.0 build)") && !o.contains("--torch-backend"), "{o}");
     assert!(!venv.exists() && !tools.join("calls.log").exists());
     assert!(engines(&home, &["upgrade", "vllm"], &probe).unwrap_err().to_string().contains("install vllm` first"));
 
@@ -118,6 +122,8 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     let rec = ymir_core::vllm_install::read_record(&venv).unwrap();
     assert_eq!((rec.requested.as_deref(), rec.installer.as_str(), rec.nightly, rec.inkling), (None, "uv", true, true));
     assert!(ymir_core::vllm::managed_with_inkling(&venv.join("bin/vllm")));
+    assert_eq!((rec.driver_cuda.as_deref(), rec.torch_cuda.as_deref(), rec.torch_backend.as_deref()), (Some("13.0"), Some("13.0"), None));
+    assert!(o.contains("PyTorch 2.14.0 (CUDA 13.0; the driver runs 13.0)"), "{o}");
     assert!(ymir_core::vllm::ensure_inkling(&venv.join("bin/vllm"), false).is_ok(), "a nightly numbered below 0.35.0 is accepted by its record");
 
     // Auto-discovery: no node.toml edit, no PATH.
@@ -143,6 +149,13 @@ fn install_with_uv_then_ymird_finds_vllm_and_ray_then_upgrade_and_uninstall() {
     let new: Vec<&str> = calls.lines().skip(calls_before).collect();
     assert_eq!(new.len(), 1, "no new venv: {new:?}");
     assert!(new[0].contains("pip install") && new[0].contains("--upgrade") && new[0].contains("nightly vllm ray"), "{new:?}");
+
+    // A PyTorch built for a newer CUDA than the driver's fails the install, and says what to do.
+    std::fs::write(venv.join("bin/torch_cuda"), "13.2").unwrap();
+    let e = engines(&home, &["upgrade", "vllm"], &probe).unwrap_err().to_string();
+    assert!(e.contains("CUDA 13.2 build") && e.contains("driver runs CUDA 13.0"), "{e}");
+    let o = engines(&home, &["install", "vllm", "--torch-backend", "cu130", "--dry-run"], &probe).unwrap();
+    assert!(o.contains("--torch-backend=cu130") && o.contains("PyTorch: cu130"), "{o}");
 
     // Uninstall removes it; a directory Ymir did not make is left alone.
     assert!(engines(&home, &["uninstall", "vllm"], &probe).unwrap().contains("removed"));

@@ -6,6 +6,24 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `vllm-ray` listener check: Ymir now checks every process under the Ray and vLLM processes it starts, the members of their
+  process groups and, transitively, all their children in any process group or session. It used to check only the `ray start`
+  process group, which missed Ray's workers (vLLM's workers, NCCL, torch.distributed); on a real two-node run they listened on
+  the LAN and Tailscale addresses and the group was not refused. The leader's `vllm serve` tree is checked as well, and stopping
+  a group kills what is left of the tree. Tested with a mock worker in its own process group ([m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs)).
+- Ray's workers are pinned to the private link: the Ray head, members' `ray start` and `vllm serve` get `VLLM_HOST_IP`,
+  `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` for the link's address and interface.
+- All-interface Ray listeners allowed by `ray_trust_firewall` are logged at info (once per process and port set), not debug.
+- `ymirctl engines install vllm` picks a PyTorch CUDA build the GPU driver can run: it reads the driver's CUDA version from
+  `nvidia-smi` and, for CUDA 13.0 or newer, uses PyPI's PyTorch (a CUDA 13.0 build) instead of `--torch-backend=auto`, which
+  chose cu132 on driver 580 and broke Inkling 2 Mini's vision encoder. CUDA 12.6 to 12.9 drivers get PyTorch's matching index
+  (with `--version`; the nightly needs CUDA 13), older drivers are refused, and the new `--torch-backend` overrides. The install
+  fails when `torch.version.cuda` is newer than the driver's, and `ymir-install.json` records the driver CUDA, the backend and
+  PyTorch's version and CUDA.
+- The installer's Inkling 2 Mini check also accepts `Inkling2LoopForConditionalGeneration`.
+
 ## [0.22.0] - 2026-11-26
 
 ### Added

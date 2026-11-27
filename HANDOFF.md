@@ -2,6 +2,18 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 07:00 EST: v0.22.1 fixes from the M7 real run (on main)
+
+Michael (11-27, t64u): "Let's fix the bugs you found." Built on the dev box with mocks; no live node touched for this commit. Details in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only) ("Security boundary", "Installing vLLM and Ray").
+
+- **Listener check follows the process tree** ([ray.rs](crates/ymir-core/src/ray.rs) `tree_in`/`tree_of`/`listeners_of_tree`, [group.rs](crates/ymir-core/src/group.rs)): every member of the started process's group plus, transitively, every child in any process group or session (Ray's workers, vLLM's workers, NCCL, torch.distributed). The leader's `vllm serve` tree is checked after ready and on watch ticks. `stop` kills what is left of the tree, checking each pid's start time.
+- **Link pinning:** Ray head, member `ray start` and `vllm serve` get `VLLM_HOST_IP`, `NCCL_SOCKET_IFNAME==IFACE` and `GLOO_SOCKET_IFNAME=IFACE` (interface from the link address via `if-addrs`).
+- **Trusted all-interface listeners** are logged at info, once per (role, ports).
+- **Installer** ([vllm_install.rs](crates/ymir-core/src/vllm_install.rs), [engines.rs](crates/ymirctl/src/engines.rs)): driver CUDA from `nvidia-smi`; CUDA 13+ → PyPI PyTorch (cu130 build, no `--torch-backend`); 12.6–12.9 → `cu126`/`cu128`/`cu129` with `--version` (nightly refused); older refused; `--torch-backend` overrides. Post-install `torch.version.cuda` ≤ driver CUDA or the install fails. Record gains `driver_cuda`, `torch_backend`, `torch`, `torch_cuda`. Inkling check accepts `Inkling2LoopForConditionalGeneration`.
+- **Tests:** [m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs) 3/3 (new: a mock worker in its own process group listening on 0.0.0.0 is refused and stopped with the group; the head gets the link env), ray/vllm_install unit tests (tree following, link env, driver parsing, backend choice, CUDA mismatch), [engines.rs tests](crates/ymirctl/tests/engines.rs) 2/2 (dry run shows driver/PyTorch, record, mismatch failure, override). fmt, clippy `-D warnings`, workspace tests, link check.
+
+**Next:** cut v0.22.1, then re-verify on m1 + m2 (driver-matched install, text and vision with the Python frontend, no stray listeners).
+
 ## 2026-11-27 06:29 EST: M7 `vllm-ray` with Inkling 2 Mini on real GPUs (m1 + m2)
 
 Michael (11-27) approved a live GPU run. It worked, and it found a security gap in the listener check (open; see below). Results and settings are in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only) ("Real GPU run").

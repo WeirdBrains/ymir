@@ -4,6 +4,9 @@
 //!   It also starts a child in its process group (as Ray's head starts `gcs_server` and the
 //!   raylet) and prints `mock ray: child PID`, so tests can see that stopping the group stops it.
 //!   With `--mock-bind-any` the child listens on all interfaces at `P+1`, like Ray's real GCS.
+//!   With `--mock-worker-bind-any` it also starts a "worker" in a process group of its own (as the
+//!   raylet starts Ray's workers) that listens on all interfaces at `P+2`, and prints
+//!   `mock ray: worker PID`. It prints `mock ray env K=V` for the link pinning variables it got.
 //! - `ray start --block --address HOST:P --node-ip-address IP`: joins the head and holds the
 //!   connection until killed; exits 1 when the head goes away.
 //! - `ray status --address HOST:P`: prints Ray's "Active:" block, one `node_` line per node.
@@ -43,6 +46,21 @@ fn main() {
             let mut child = child.spawn().expect("child");
             eprintln!("mock ray: child {}", child.id());
             std::thread::spawn(move || child.wait());
+            for k in ["VLLM_HOST_IP", "NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"] {
+                if let Ok(v) = std::env::var(k) {
+                    eprintln!("mock ray env {k}={v}");
+                }
+            }
+            if has("--mock-worker-bind-any") {
+                use std::os::unix::process::CommandExt;
+                let mut w = std::process::Command::new(&args[0])
+                    .args(["__child", "--listen-any", &(port + 2).to_string()])
+                    .process_group(0)
+                    .spawn()
+                    .expect("worker");
+                eprintln!("mock ray: worker {}", w.id());
+                std::thread::spawn(move || w.wait());
+            }
             let l = TcpListener::bind((ip.as_str(), port)).expect("bind");
             eprintln!("mock ray head on {}", l.local_addr().expect("addr"));
             let nodes = Arc::new(AtomicUsize::new(1));

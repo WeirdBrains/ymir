@@ -19,6 +19,18 @@
 //! the answer; ymird trusts that record ([`crate::vllm::managed_with_inkling`]). A default install
 //! whose vLLM lacks Inkling fails. `--version V` installs that release from PyPI instead, and says
 //! when it cannot run Inkling.
+//!
+//! **PyTorch's CUDA build.** vLLM brings PyTorch, and PyTorch's CUDA build has to be one the GPU
+//! driver can run: a newer one fails in GPU kernels, not at import (on a DGX Spark with driver 580,
+//! CUDA 13.0, `--torch-backend=auto` chose cu132 and Inkling's vision encoder failed with "the
+//! provided PTX was compiled with an unsupported toolchain"). So the installer reads the driver's
+//! CUDA version from `nvidia-smi` ([`driver_cuda`]) and picks the build ([`torch_backend`]): for
+//! CUDA 13.0 or newer it leaves PyTorch to PyPI, whose wheels are CUDA 13.0 builds (vLLM's nightly
+//! pins its torchvision and torchaudio there; PyTorch's own cu130 index lacks them); for 12.6 to
+//! 12.9 it uses PyTorch's matching index with a vLLM release (`--version`; the nightly is built
+//! for CUDA 13); older drivers are refused. `--torch-backend` overrides. After installing,
+//! `torch.version.cuda` must not be newer than the driver's ([`TORCH_CHECK`]), and the record
+//! keeps both.
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +44,12 @@ pub const RECORD: &str = "ymir-install.json";
 /// vLLM's nightly wheels (CUDA, x86_64 and aarch64), built from main.
 pub const NIGHTLY_INDEX: &str = "https://wheels.vllm.ai/nightly";
 /// Asks vLLM's model registry whether Inkling 2 Mini is there (prints `True` or `False`).
-pub const INKLING_CHECK: &str =
-    "from vllm.model_executor.models.registry import ModelRegistry as R; print('InklingForConditionalGeneration' in R.get_supported_archs())";
+/// Either of its architectures counts: [`crate::vllm::INKLING_ARCH`] (the model's `config.json`)
+/// or [`crate::vllm::INKLING2_LOOP_ARCH`] (the class vLLM main registers it as).
+pub const INKLING_CHECK: &str = "from vllm.model_executor.models.registry import ModelRegistry as R; a = R.get_supported_archs(); \
+     print('InklingForConditionalGeneration' in a or 'Inkling2LoopForConditionalGeneration' in a)";
+/// Prints `torch VERSION CUDA` (`torch 2.14.0 13.0`; `none` for a build without CUDA).
+pub const TORCH_CHECK: &str = "import torch; print('torch', torch.__version__, torch.version.cuda or 'none')";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -68,6 +84,8 @@ pub trait Probe {
     fn which(&self, program: &str) -> Option<PathBuf>;
     fn exists(&self, path: &Path) -> bool;
     fn os(&self) -> &'static str;
+    /// The newest CUDA the GPU driver runs (`nvidia-smi`'s "CUDA Version"), if it can be read.
+    fn driver_cuda(&self) -> Option<(u32, u32)>;
 }
 
 /// The real machine.
@@ -83,6 +101,49 @@ impl Probe for System {
     fn os(&self) -> &'static str {
         std::env::consts::OS
     }
+    fn driver_cuda(&self) -> Option<(u32, u32)> {
+        let smi = self.which("nvidia-smi")?;
+        let out = std::process::Command::new(smi).stdin(std::process::Stdio::null()).output().ok()?;
+        driver_cuda(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// `nvidia-smi`'s header (`... CUDA Version: 13.0 |`) -> `(13, 0)`.
+pub fn driver_cuda(smi: &str) -> Option<(u32, u32)> {
+    let rest = smi.split("CUDA Version:").nth(1)?;
+    cuda_version(rest.split_whitespace().next()?)
+}
+
+/// `13.0` -> `(13, 0)`.
+pub fn cuda_version(v: &str) -> Option<(u32, u32)> {
+    let mut it = v.trim().split('.');
+    Some((it.next()?.parse().ok()?, it.next().unwrap_or("0").parse().ok()?))
+}
+
+/// The `uv --torch-backend` for a CUDA driver, `None` for PyPI's PyTorch (CUDA 13.0 builds).
+/// `nightly`: vLLM's nightly, built for CUDA 13, which needs a CUDA 13 driver.
+pub fn torch_backend(driver: Option<(u32, u32)>, nightly: bool) -> Result<Option<String>> {
+    let Some((major, minor)) = driver else {
+        // `--accel cuda` without a readable driver (a build host): PyPI's builds, unchecked.
+        return Ok(None);
+    };
+    if major >= 13 {
+        return Ok(None);
+    }
+    let cu = match (major, minor) {
+        (12, m) if m >= 9 => "cu129",
+        (12, 8) => "cu128",
+        (12, 6) | (12, 7) => "cu126",
+        _ => bail!(
+            "the GPU driver runs CUDA {major}.{minor}; vLLM needs a driver for CUDA 12.6 or newer (13.0 for the nightly). Update the NVIDIA driver, or pass --torch-backend"
+        ),
+    };
+    if nightly {
+        bail!(
+            "the GPU driver runs CUDA {major}.{minor}, and vLLM's nightly (for Inkling 2 Mini) is built for CUDA 13.0: update the NVIDIA driver (580 or newer), install a release with --version (PyTorch {cu}), or pass --torch-backend"
+        );
+    }
+    Ok(Some(cu.into()))
 }
 
 /// CUDA when `nvidia-smi` is on `PATH`, ROCm when `rocminfo` is or `/opt/rocm` exists, else CPU.
@@ -114,6 +175,8 @@ pub struct Options {
     pub reinstall: bool,
     /// Install on an OS vLLM does not support (it runs on Linux).
     pub force: bool,
+    /// `uv --torch-backend` to use instead of the driver-matched choice ([`torch_backend`]).
+    pub torch_backend: Option<String>,
 }
 
 /// One command of the plan.
@@ -143,6 +206,10 @@ pub struct Plan {
     pub keep_venv: bool,
     /// vLLM's nightly (the default; it has Inkling 2 Mini).
     pub nightly: bool,
+    /// The newest CUDA the driver runs (CUDA only).
+    pub driver_cuda: Option<(u32, u32)>,
+    /// The `--torch-backend` given to uv; `None`: PyPI's PyTorch (or pip's).
+    pub torch_backend: Option<String>,
     pub steps: Vec<Step>,
 }
 
@@ -174,6 +241,18 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
     };
     // The nightly, unless a release is pinned or the operator gave an index (ROCm, CPU).
     let nightly = o.version.is_none() && o.index_url.is_none();
+    if let Some(b) = &o.torch_backend
+        && (b.is_empty() || !b.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'))
+    {
+        bail!("--torch-backend `{b}` is not a backend like cu130, cu128, cpu or auto");
+    }
+    let driver_cuda = if accel == Accel::Cuda { p.driver_cuda() } else { None };
+    let torch_backend = match (&o.torch_backend, accel) {
+        (Some(b), _) => Some(b.clone()),
+        (None, Accel::Cpu) => Some("cpu".into()),
+        (None, Accel::Rocm) => Some("auto".into()),
+        (None, Accel::Cuda) => torch_backend(driver_cuda, nightly)?,
+    };
     let py = crate::vllm::bin_in(venv, "python");
     let keep_venv = !o.reinstall && p.exists(&py);
     let uv = if o.python.is_some() { None } else { o.uv.clone().or_else(|| p.which("uv")) };
@@ -195,7 +274,9 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
             if o.upgrade {
                 a.push("--upgrade".into());
             }
-            a.push(format!("--torch-backend={}", if accel == Accel::Cpu { "cpu" } else { "auto" }));
+            if let Some(b) = &torch_backend {
+                a.push(format!("--torch-backend={b}"));
+            }
             if nightly {
                 a.extend(["--prerelease=allow".into(), "--extra-index-url".into(), NIGHTLY_INDEX.into()]);
             }
@@ -207,6 +288,9 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
         }
         None => {
             installer = "pip";
+            if let Some(b) = torch_backend.as_ref().filter(|b| *b != "cpu" && *b != "auto") {
+                bail!("PyTorch {b} (for this driver) needs `uv` (https://docs.astral.sh/uv/); pip installs PyPI's CUDA 13.0 build");
+            }
             let python = o
                 .python
                 .clone()
@@ -235,7 +319,8 @@ pub fn plan(venv: &Path, o: &Options, p: &dyn Probe) -> Result<Plan> {
             steps.push(Step { program: py, args: a });
         }
     }
-    Ok(Plan { venv: venv.to_path_buf(), accel, installer, keep_venv, nightly, steps })
+    let torch_backend = if installer == "uv" { torch_backend } else { None };
+    Ok(Plan { venv: venv.to_path_buf(), accel, installer, keep_venv, nightly, driver_cuda, torch_backend, steps })
 }
 
 /// `Python 3.12.3` -> `(3, 12)`.
@@ -268,6 +353,17 @@ pub struct Record {
     /// vLLM's model registry has Inkling 2 Mini ([`INKLING_CHECK`]).
     #[serde(default)]
     pub inkling: bool,
+    /// The newest CUDA the driver ran at install (`13.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_cuda: Option<String>,
+    /// The `uv --torch-backend` used (`None`: PyPI's PyTorch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torch_backend: Option<String>,
+    /// PyTorch's version and CUDA build ([`TORCH_CHECK`]; `none` without CUDA).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torch_cuda: Option<String>,
     pub at_ms: u64,
 }
 
@@ -324,7 +420,9 @@ pub fn install(plan: &Plan, o: &Options, log: &mut dyn FnMut(&str)) -> Result<Re
     }
     let vllm = program_version(&crate::vllm::bin_in(&plan.venv, "vllm")).context("vLLM was installed but does not run")?;
     let ray = program_version(&crate::vllm::bin_in(&plan.venv, "ray")).context("Ray was installed but does not run")?;
-    let inkling = has_inkling(&crate::vllm::bin_in(&plan.venv, "python"));
+    let python = crate::vllm::bin_in(&plan.venv, "python");
+    let inkling = has_inkling(&python);
+    let (torch, torch_cuda) = torch_build(&python).map_or((None, None), |(v, c)| (Some(v), Some(c)));
     let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     let rec = Record {
         accel: plan.accel,
@@ -334,9 +432,16 @@ pub fn install(plan: &Plan, o: &Options, log: &mut dyn FnMut(&str)) -> Result<Re
         ray,
         nightly: plan.nightly,
         inkling,
+        driver_cuda: plan.driver_cuda.map(|(a, b)| format!("{a}.{b}")),
+        torch_backend: plan.torch_backend.clone(),
+        torch,
+        torch_cuda,
         at_ms,
     };
     std::fs::write(plan.venv.join(RECORD), serde_json::to_vec_pretty(&rec)?)?;
+    if let Some(e) = cuda_mismatch(&rec) {
+        bail!("{e}; it is kept in {} (see `ymirctl engines status`)", plan.venv.display());
+    }
     if plan.nightly && !inkling {
         bail!(
             "vLLM {} from the nightly index does not register Inkling 2 Mini ({}); it is kept in {} (see `ymirctl engines status`)",
@@ -346,6 +451,42 @@ pub fn install(plan: &Plan, o: &Options, log: &mut dyn FnMut(&str)) -> Result<Re
         );
     }
     Ok(rec)
+}
+
+/// PyTorch's version and CUDA build in the venv ([`TORCH_CHECK`]), when it imports.
+pub fn torch_build(python: &Path) -> Option<(String, String)> {
+    let o = std::process::Command::new(python).args(["-c", TORCH_CHECK]).stdin(std::process::Stdio::null()).output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    parse_torch(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// `torch 2.14.0 13.0` -> `("2.14.0", "13.0")` (the last such line).
+pub fn parse_torch(out: &str) -> Option<(String, String)> {
+    out.lines().rev().find_map(|l| {
+        let mut w = l.split_whitespace();
+        (w.next()? == "torch").then_some(())?;
+        Some((w.next()?.to_string(), w.next()?.to_string()))
+    })
+}
+
+/// Why the installed PyTorch cannot run on this driver: a CUDA build newer than the driver's.
+pub fn cuda_mismatch(r: &Record) -> Option<String> {
+    let driver = cuda_version(r.driver_cuda.as_deref()?)?;
+    let built = cuda_version(r.torch_cuda.as_deref()?)?;
+    (r.accel == Accel::Cuda && built > driver).then(|| {
+        format!(
+            "PyTorch {} is a CUDA {}.{} build and the GPU driver runs CUDA {}.{}: GPU kernels would fail. Update the NVIDIA driver, or reinstall with --torch-backend cu{}{}",
+            r.torch.as_deref().unwrap_or("?"),
+            built.0,
+            built.1,
+            driver.0,
+            driver.1,
+            driver.0,
+            driver.1
+        )
+    })
 }
 
 /// Whether the venv's vLLM registers Inkling 2 Mini (runs [`INKLING_CHECK`] with its Python).
@@ -377,6 +518,7 @@ mod tests {
         on_path: Vec<&'static str>,
         files: Vec<PathBuf>,
         os: &'static str,
+        cuda: Option<(u32, u32)>,
     }
 
     impl Probe for Fake {
@@ -389,10 +531,13 @@ mod tests {
         fn os(&self) -> &'static str {
             self.os
         }
+        fn driver_cuda(&self) -> Option<(u32, u32)> {
+            self.cuda
+        }
     }
 
     fn fake(on_path: &[&'static str]) -> Fake {
-        Fake { on_path: on_path.to_vec(), files: vec![], os: "linux" }
+        Fake { on_path: on_path.to_vec(), files: vec![], os: "linux", cuda: Some((13, 0)) }
     }
 
     #[test]
@@ -415,14 +560,67 @@ mod tests {
         let p = plan(v, &Options { version: Some("0.34.0".into()), ..Default::default() }, &fake(&["uv", "nvidia-smi"])).unwrap();
         assert_eq!((p.installer, p.accel, p.keep_venv, p.nightly), ("uv", Accel::Cuda, false, false));
         assert_eq!(p.steps[0].to_string(), "/usr/bin/uv venv --python 3.12 /h/engines/vllm");
-        assert_eq!(p.steps[1].to_string(), "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --torch-backend=auto vllm==0.34.0 ray");
+        assert_eq!(p.steps[1].to_string(), "/usr/bin/uv pip install --python /h/engines/vllm/bin/python vllm==0.34.0 ray");
         // The default is the nightly, for Inkling 2 Mini.
         let p = plan(v, &Options::default(), &fake(&["uv", "nvidia-smi"])).unwrap();
         assert!(p.nightly);
         assert_eq!(
             p.steps[1].to_string(),
-            "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --torch-backend=auto --prerelease=allow --extra-index-url https://wheels.vllm.ai/nightly vllm ray"
+            "/usr/bin/uv pip install --python /h/engines/vllm/bin/python --prerelease=allow --extra-index-url https://wheels.vllm.ai/nightly vllm ray"
         );
+        assert_eq!((p.driver_cuda, p.torch_backend.as_deref()), (Some((13, 0)), None), "CUDA 13 driver: PyPI's cu130 PyTorch");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pytorch_matches_the_driver() {
+        let v = Path::new("/h/engines/vllm");
+        let mut f = fake(&["uv", "nvidia-smi"]);
+        f.cuda = Some((12, 8));
+        let e = plan(v, &Options::default(), &f).unwrap_err().to_string();
+        assert!(e.contains("CUDA 12.8") && e.contains("nightly"), "the nightly needs a CUDA 13 driver: {e}");
+        let p = plan(v, &Options { version: Some("0.34.0".into()), ..Default::default() }, &f).unwrap();
+        assert!(p.steps[1].args.contains(&"--torch-backend=cu128".to_string()), "{}", p.steps[1]);
+        let p = plan(v, &Options { torch_backend: Some("cu126".into()), ..Default::default() }, &f).unwrap();
+        assert!(p.steps[1].args.contains(&"--torch-backend=cu126".to_string()), "the override wins");
+        f.cuda = Some((11, 8));
+        assert!(plan(v, &Options { version: Some("0.34.0".into()), ..Default::default() }, &f).is_err());
+        assert!(plan(v, &Options { torch_backend: Some("cu1;x".into()), ..Default::default() }, &fake(&["uv", "nvidia-smi"])).is_err());
+        // pip cannot choose a PyTorch index.
+        let mut f = fake(&["python3", "nvidia-smi"]);
+        f.cuda = Some((12, 9));
+        assert!(plan(v, &Options { version: Some("0.34.0".into()), ..Default::default() }, &f).unwrap_err().to_string().contains("needs `uv`"));
+        assert_eq!(torch_backend(Some((13, 2)), true).unwrap(), None);
+        assert_eq!(torch_backend(None, true).unwrap(), None);
+    }
+
+    #[test]
+    fn reads_the_driver_and_torch_cuda() {
+        let smi = "| NVIDIA-SMI 580.95.05   Driver Version: 580.95.05   CUDA Version: 13.0     |";
+        assert_eq!(driver_cuda(smi), Some((13, 0)));
+        assert_eq!(driver_cuda("no gpu"), None);
+        assert_eq!(parse_torch("INFO x\ntorch 2.14.0+cu132 13.2\n"), Some(("2.14.0+cu132".into(), "13.2".into())));
+        assert_eq!(parse_torch("True"), None);
+        let mut r = Record {
+            accel: Accel::Cuda,
+            installer: "uv".into(),
+            requested: None,
+            vllm: "0.34.1".into(),
+            ray: "2.60.1".into(),
+            nightly: true,
+            inkling: true,
+            driver_cuda: Some("13.0".into()),
+            torch_backend: None,
+            torch: Some("2.14.0+cu132".into()),
+            torch_cuda: Some("13.2".into()),
+            at_ms: 0,
+        };
+        let e = cuda_mismatch(&r).unwrap();
+        assert!(e.contains("CUDA 13.2 build") && e.contains("runs CUDA 13.0") && e.contains("cu130"), "{e}");
+        r.torch_cuda = Some("13.0".into());
+        assert!(cuda_mismatch(&r).is_none());
+        r.torch_cuda = Some("none".into());
+        assert!(cuda_mismatch(&r).is_none());
     }
 
     // Unix paths in the expected commands (vLLM runs on Linux).
