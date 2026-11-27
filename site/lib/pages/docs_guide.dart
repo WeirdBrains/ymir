@@ -8,7 +8,7 @@ const _html = r'''
 Bragi chat app, and point Jan at it. Commands are exactly those <code>ymirctl</code> offers; run
 <code>ymirctl --help</code> or <code>ymirctl &lt;command&gt; --help</code> for the full list.</p>
 <p><strong>What is released.</strong> <a href="${release}">Ymir ${version}</a> is out, with downloads for Linux
-(x86_64 and ARM64, CPU/Vulkan and CUDA), macOS and Windows on its release page. On Arch Linux, install it from
+(x86_64 and ARM64, CPU/Vulkan and CUDA), macOS (Apple Silicon) and Windows on its release page. On Arch Linux, install it from
 <a href="${taur}/packages/ymir-bin">TAUR</a>: <code>${taurInstall}</code> (or <code>ymir-cuda-bin</code> for NVIDIA).
 This release gives each model the largest context that fits beside the others (<code>ymirctl models context</code>
 shows it and why). 0.3.1 fixes the context plan so it counts both attention score matrices llama.cpp keeps for
@@ -219,7 +219,7 @@ optional.</p>
 <code>ymirctl setup --download</code> installs MLX-LM into Ymir's folder (with <code>uv</code> if you have it, else
 Python 3) and downloads the weights, asking first. Models that take images, and the embedding model, run on
 llama.cpp.</li>
-<li><strong>Intel Mac, Linux and Windows</strong>: llama.cpp, included in every download (<code>ymir-cuda</code> for
+<li><strong>Linux and Windows</strong>: llama.cpp, included in every download (<code>ymir-cuda</code> for
 NVIDIA GPUs).</li>
 </ul>
 <p>On a Mac, <code>ymirctl setup --backend llamacpp</code> keeps everything on llama.cpp; <code>backend</code> can also be

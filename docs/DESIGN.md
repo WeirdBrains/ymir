@@ -445,7 +445,7 @@ Three ways were weighed:
 | Option | For | Against |
 |---|---|---|
 | (a) llama.cpp in-process (`llama-cpp-2`, GPU backends as cargo features) | One binary, no IPC | A model crash (CUDA error, `GGML_ASSERT`, out-of-memory abort) kills `ymird` and every other model and the coordinator with it; a server would have to be rewritten on top of the bindings (OpenAI API, chat templates, slots, embeddings, tool calls, RPC); one build per GPU backend for `ymird` itself; CUDA builds of the whole daemon in CI |
-| **(b) bundle upstream's `llama-server` in the release files** (chosen) | Crash isolation for free (the engine is a child process; the supervisor restarts it and the coordinator fails over, as before); the supervisor, adapters and tests stay the same; llama.cpp's own server, which is what the pool already runs; upstream publishes checksummed builds for every target we ship (Linux x86_64/ARM64 CPU+Vulkan and CUDA 13, macOS Metal, Windows), so CI never compiles CUDA | Larger downloads, the CUDA variant especially; two variants per Linux target |
+| **(b) bundle upstream's `llama-server` in the release files** (chosen) | Crash isolation for free (the engine is a child process; the supervisor restarts it and the coordinator fails over, as before); the supervisor, adapters and tests stay the same; llama.cpp's own server, which is what the pool already runs; upstream publishes checksummed builds for every target we ship (Linux x86_64/ARM64 CPU+Vulkan and CUDA 13, macOS Apple Silicon Metal, Windows), so CI never compiles CUDA | Larger downloads, the CUDA variant especially; two variants per Linux target |
 | (c) download a pinned llama.cpp during `ymirctl setup` | Small packages | Setup needs the internet and a second trust path; an air-gapped or locked-down server can't install; the package isn't self-contained |
 
 Why (b): crash isolation and failover are requirements, and (b) keeps the engine a separate process
@@ -549,7 +549,6 @@ ready yet.
 | Platform | Chat models | Vision models, embeddings | Opt-in |
 |---|---|---|---|
 | macOS, Apple Silicon | **MLX-LM** (`backend = "mlx"`), MLX weights from `mlx-community` | llama.cpp (bundled, Metal) | `--backend llamacpp` |
-| macOS, Intel | llama.cpp (bundled, Metal/CPU) | llama.cpp | — |
 | Linux, Windows | llama.cpp (bundled; `ymir-cuda` for NVIDIA) | llama.cpp | vLLM (Linux, NVIDIA) |
 
 **MLX (default on Apple Silicon).** m3talsmith: "run MLX/MLX-LM on Macs instead of llama.cpp".
@@ -581,7 +580,7 @@ ones, falling back to the older `embedding` flag for nodes that don't report the
 status` shows what each model takes. (Until 0.1.3 Ymir shipped its own `ymir-engine` wrapper for
 this; it is gone.) Tests: `ymir-testkit/tests/mlx.rs` (a llama.cpp and an MLX model on one node,
 mock engines, capabilities) and unit tests in `mlx` and `setup`; the macOS workflow runs a setup
-dry run on Apple Silicon (expects MLX) and Intel (expects llama.cpp), and an Apple Silicon job
+dry run on Apple Silicon (expects MLX), and an Apple Silicon job
 that installs mlx-lm, downloads SmolLM2 135M's MLX weights and chats with it (reported but not
 required, as hosted runners may not expose Metal).
 
@@ -1710,7 +1709,7 @@ has `[roles] app = true` and nothing else.
 ## Install and deploy
 
 - **Packages** per the platform matrix: Linux `tar.gz`, `deb`, `rpm`, `pkg.tar.zst` (TAUR), Nix flake,
-  x86_64 and aarch64 (the daemon has no `.desktop` entry); macOS (Apple Silicon Metal; Intel CPU) as
+  x86_64 and aarch64 (the daemon has no `.desktop` entry); macOS (Apple Silicon Metal only; Intel x86_64 dropped after 0.23.0) as
   `zip` and Homebrew; Windows `zip`, standalone `exe` and a WiX 7 installer (`-acceptEula wix7`),
   service as `NT SERVICE\ymird`; FreeBSD `pkg`/`tar.gz`, OpenBSD `tar.gz`, GhostBSD and DragonFly
   BSD after them (CPU and Vulkan; no vLLM).

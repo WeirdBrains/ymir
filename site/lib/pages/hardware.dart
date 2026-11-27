@@ -23,7 +23,7 @@ tiers.</p>
 <h2 id="disk">Disk and downloads</h2>
 <p>Models are big. Setup shows the download size and asks before fetching, then checks size and SHA-256.</p>
 <h2 id="platforms">Platforms</h2>
-<p>Ymir builds for Linux (x86_64 and ARM64), macOS and Windows; on Windows it runs as a logon task or as a Windows
+<p>Ymir builds for Linux (x86_64 and ARM64), macOS (Apple Silicon only; Intel Macs are not supported) and Windows; on Windows it runs as a logon task or as a Windows
 service. BSD packages are planned (M9).</p>
 ''';
 

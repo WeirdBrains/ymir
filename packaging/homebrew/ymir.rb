@@ -1,19 +1,16 @@
 # Homebrew formula template for the WeirdBrains tap. The release workflow fills in the version and
-# sha256 of the macOS tarballs. Not built or tested yet (no macOS build in M2).
+# sha256 of the macOS (Apple Silicon) tarball. Not built or tested yet (no macOS build in M2).
 class Ymir < Formula
   desc "Private cloud of LLM models on your own machines (node daemon and CLI)"
   homepage "https://github.com/WeirdBrains/ymir"
   version "0.23.0"
   license all_of: ["BSD-3-Clause", "MIT"] # Ymir; the bundled llama.cpp
 
-  on_arm do
-    url "https://github.com/WeirdBrains/ymir/releases/download/v#{version}/ymir-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "REPLACE_WITH_AARCH64_SHA256"
-  end
-  on_intel do
-    url "https://github.com/WeirdBrains/ymir/releases/download/v#{version}/ymir-#{version}-x86_64-apple-darwin.tar.gz"
-    sha256 "REPLACE_WITH_X86_64_SHA256"
-  end
+  # Apple Silicon only; Intel (x86_64) macOS is not built.
+  depends_on arch: :arm64
+
+  url "https://github.com/WeirdBrains/ymir/releases/download/v#{version}/ymir-#{version}-aarch64-apple-darwin.tar.gz"
+  sha256 "REPLACE_WITH_AARCH64_SHA256"
 
   def install
     bin.install "bin/ymird", "bin/ymirctl"

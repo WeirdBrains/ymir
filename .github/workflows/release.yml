@@ -119,10 +119,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS is Apple Silicon only; Intel (x86_64-apple-darwin) was dropped after v0.23.0.
           - target: aarch64-apple-darwin
             runner: macos-15
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5

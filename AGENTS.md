@@ -15,6 +15,10 @@ conflict. Read it first. This file only adds Ymir-specific rules.
 - Ymir has three roles (model, inference, app) that are independent toggles in `node.toml` and run in
   one `ymird`. Keep the protocols identical whether a peer is local or remote; the in-process path is
   only a fast path. Apps never talk to model nodes directly.
+- Supported release targets: Linux x86_64 and aarch64 (plain and CUDA), Windows x86_64 and aarch64,
+  FreeBSD x86_64, and macOS on Apple Silicon only (`aarch64-apple-darwin`). Intel (`x86_64-apple-darwin`)
+  macOS is dropped (v0.23.0 was its last release): never add it back to the release or macOS workflows,
+  `release.toml`, the update bundles, the llama.cpp engine pin or the Homebrew formula.
 - Licensed BSD-3-Clause (`LICENSE`); every crate sets `license = "BSD-3-Clause"`.
 - Protocol ids are `/ymir/...` for app protocols. The URL scheme is `weirdnet-ymir://`, registered in
   `weirdnet-schemes`. Never use bare `weirdnet://`.

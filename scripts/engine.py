@@ -62,7 +62,6 @@ LAYOUT = {
     ("aarch64-unknown-linux-gnu", "default"): (["cpu", "vulkan"], ["llama-{b}-bin-ubuntu-vulkan-arm64.tar.gz"]),
     ("aarch64-unknown-linux-gnu", "cuda"): (["cpu", "cuda"], ["llama-{b}-bin-ubuntu-cuda-13.5-arm64.tar.gz", "cudart-llama-{b}-bin-ubuntu-cuda-13.5-arm64.tar.gz"]),
     ("aarch64-apple-darwin", "default"): (["cpu", "metal"], ["llama-{b}-bin-macos-arm64.tar.gz"]),
-    ("x86_64-apple-darwin", "default"): (["cpu"], ["llama-{b}-bin-macos-x64.tar.gz"]),
     ("x86_64-pc-windows-msvc", "default"): (["cpu", "vulkan"], ["llama-{b}-bin-win-vulkan-x64.zip"]),
     ("x86_64-pc-windows-msvc", "cuda"): (["cpu", "cuda"], ["llama-{b}-bin-win-cuda-13.5-x64.zip", "cudart-llama-bin-win-cuda-13.5-x64.zip"]),
     ("aarch64-pc-windows-msvc", "default"): (["cpu", "vulkan"], ["llama-{b}-bin-win-vulkan-arm64.zip"]),

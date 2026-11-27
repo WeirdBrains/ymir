@@ -159,10 +159,11 @@ assets = [
 
 [[platforms]]
 os = "macos"
-arch = ["x86_64", "aarch64"]
+arch = ["aarch64"]
+arch_note = "Apple Silicon only; Intel Macs dropped after v0.23.0"
 formats = ["tar.gz", "zip", "brew-formula"]
 channels = ["github", "homebrew"]
-assets = ["ymir-{version}-*-apple-darwin.tar.gz", "ymir-{version}-macos-x86_64.update.tar.gz", "ymir-{version}-macos-aarch64.update.tar.gz"]
+assets = ["ymir-{version}-aarch64-apple-darwin.tar.gz", "ymir-{version}-macos-aarch64.update.tar.gz"]
 
 [[platforms]]
 os = "windows"
@@ -230,13 +231,6 @@ name = "ymir-cuda-{version}-linux-aarch64.update.tar.gz"
 asset = "ymir-cuda-{version}-aarch64-unknown-linux-gnu.tar.gz"
 os = "linux"
 arch = "aarch64"
-files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
-
-[[updates.bundles]]
-name = "ymir-{version}-macos-x86_64.update.tar.gz"
-asset = "ymir-{version}-x86_64-apple-darwin.tar.gz"
-os = "macos"
-arch = "x86_64"
 files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
 
 [[updates.bundles]]

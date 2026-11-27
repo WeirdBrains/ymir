@@ -3,7 +3,7 @@
 //! On an arm64 Mac, `ymirctl setup` serves chat models with Apple's MLX through `mlx_lm.server`
 //! instead of llama.cpp: MLX-format weights from `mlx-community` run faster on the Mac's GPU and
 //! unified memory than GGUF through llama.cpp's Metal backend. llama.cpp stays for what MLX-LM's
-//! server cannot do (embeddings), for catalog models without MLX weights, and on Intel Macs.
+//! server cannot do (embeddings), and for catalog models without MLX weights.
 //!
 //! MLX-LM is Python. Setup installs the `mlx-lm` that `weirdnet-backends` pins into a venv under
 //! Ymir's engines dir (`<home>/engines/mlx`) with [`install`] (`uv` when it is on `PATH`, else

@@ -46,14 +46,6 @@ assets = [
 ]
 
 [[variant]]
-target = "x86_64-apple-darwin"
-variant = "default"
-backends = ["cpu"]
-assets = [
-  { name = "llama-b12628-bin-macos-x64.tar.gz", sha256 = "00e6c8bc278acb89d1653d5771b823cbdd217ddfcaae718bc51d383018049517", size = 12382069 },
-]
-
-[[variant]]
 target = "x86_64-pc-windows-msvc"
 variant = "default"
 backends = ["cpu", "vulkan"]

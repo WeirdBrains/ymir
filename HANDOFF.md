@@ -2,6 +2,19 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 15:10 EST: drop Intel (x86_64) macOS (on main)
+
+Michael (11-27, t82u): "We should drop support for Mac OS x86_64. Make that adjustment in the shared release and [AGENTS.md](AGENTS.md)". Branch `drop-macos-x86_64` off `291af7b` (v0.23.0, the last release with an Intel Mac build); rebased onto `6ca27f3` after v0.23.0 published and committed straight to main. The shared side (`weirdnet-project-helpers`, collective [AGENTS.md](https://github.com/WeirdBrains/weirdnet-agents/blob/main/AGENTS.md)) is the Weirdnet lead's.
+
+- **Release:** `release.yml` macOS matrix is `aarch64-apple-darwin` only; `release.toml` macOS `arch = ["aarch64"]` with an `arch_note`, assets without the x86_64 tarball or `macos-x86_64.update.tar.gz`, and that update bundle removed (5 bundles now).
+- **Packaging:** Homebrew formula arm64-only (`depends_on arch: :arm64`); llama.cpp `macos-x64` pin and `engine.py` layout entry removed.
+- **CI:** `macos.yml` no longer runs the `macos-15-intel` setup dry run.
+- **Docs:** [AGENTS.md](AGENTS.md) (supported targets), [DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` Removed, site guide/hardware pages, whitepaper table, `mlx.rs` doc comment.
+- **Checks:** `cargo fmt --check`, `weirdnet_release.py validate`, `test_engine.py` 6/6, `engine.py list`, `check_links.py`. No Rust logic changed (doc comment only), so no clippy/test run.
+- **Signing:** alien-blue's `sign-release.sh` no longer downloads `ymir-$V-x86_64-apple-darwin.tar.gz`; its update-bundle step has no per-target list (it builds what the tag's `release.toml` `[[updates.bundles]]` lists, now 5).
+
+**Next:** v0.24.0 is the first release without an Intel Mac build.
+
 ## 2026-11-27 15:05 EST: v0.23.0 released
 
 **Release:** [v0.23.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.23.0) (release commit 291af7b on 5b77934; Release run 46042359473 green, CI 46042359823, macOS 46042359574 and Pages 46042359576 green on 291af7b, FreeBSD 46036160780 green on 5b77934): M11 cross-identity pool sharing (`ymirctl pool share` / `unshare` / `guests`, `weirdnet-agent` 0.5.9 guests limited to catalog/1 and infer/2) and video milestone 2 (`role = "transcribe"` models routed over infer/2 `Transcribe` with failover, limits measured at load with `weirdnet-backends` 0.4.9 and `weirdnet-model` 0.5.4). 44 files on GitHub: leak scan 33 files, 0 hits (sums ok 32), then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.23.0` EXIT 0); `weirdnet_release.py assets 0.23.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 10ddf97 on main; TAUR ymir-bin and ymir-cuda-bin 0.23.0-1 (dry-run first). Committed straight to main (no PRs). No live nodes touched.

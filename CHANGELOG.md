@@ -6,6 +6,14 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- Intel (x86_64) macOS: macOS is now Apple Silicon (`aarch64-apple-darwin`) only. The release no longer builds
+  `ymir-VERSION-x86_64-apple-darwin.tar.gz`/`.zip` or the `ymir-VERSION-macos-x86_64.update.tar.gz` self-update bundle, the
+  Homebrew formula is arm64-only, the pinned llama.cpp `macos-x64` engine is gone, and the macOS workflow no longer runs on
+  `macos-15-intel`. v0.23.0 is the last release with an Intel Mac build; Intel Macs can still build from source with
+  llama.cpp, unsupported.
+
 ## [0.23.0] - 2026-11-27
 
 ### Added
