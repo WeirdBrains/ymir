@@ -70,9 +70,9 @@ manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
 
-[[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads; limits::measure and ModelStore::record_limits (video M2)
+[[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads; limits::measure and ModelStore::record_limits (video M2); the text-to-speech catalog (Purpose::Speak, CatalogEntry::speech/license/restricted) and Consent::accepting_license (0.5.5)
 crate = "weirdnet-model"
-version = "0.5.4"
+version = "0.5.5"
 manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"

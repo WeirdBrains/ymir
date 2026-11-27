@@ -71,6 +71,15 @@ All notable changes to Ymir are listed here. The format follows
   `stream_format: "audio"`) and `POST /v1/audio/transcriptions` (multipart; json, verbose_json, text, srt, vtt).
   `/v1/models` lists `weirdnet.speech` and `weirdnet.inputs`. `[app.bridge] max_request_bytes` bounds audio bodies
   too, with a 413. Speech answers 400 until a speak node exists (`weirdnet-backends` 0.4.10).
+- `weirdnet-model` 0.5.5 (`release.toml` requires it): the text-to-speech catalog.
+  - `ymirctl models catalog [--purpose speak] [--json]` lists the eight speakers (five Qwen3-TTS, Kokoro 82M,
+    VoxCPM2, Fish Audio Drama 3) with engine, size, license and speech profile.
+  - `ymirctl models pull ID` takes catalog ids. GGUF speakers download with their projector; vLLM-Omni speakers
+    are fetched by the engine.
+  - Fish Audio Drama 3 (Fish Audio Community License) needs `--accept-license fish-audio-community`. Without it,
+    it is refused before any request, by id or by either of its Hub repos.
+  - `node.toml` refuses `role = "speak"` and catalog speaker ids until speakers can be served
+    (`weirdnet-backends` 0.4.10).
 - `ymirctl engines install vllm-omni`: vLLM-Omni and its matching vLLM release in a managed venv
   (`<home>/engines/vllm-omni`), with the same driver CUDA checks as `engines install vllm`. Nothing serves from it yet.
 

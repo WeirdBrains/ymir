@@ -1184,6 +1184,8 @@ impl YmirTools {
     fn pull_args(args: &Value, dry_run: bool) -> Result<PullArgs> {
         Ok(PullArgs {
             repo: req_str(args, "repo")?.to_string(),
+            // A restricted license is accepted by the operator at the CLI, never by a tool call.
+            accept_license: None,
             quant: str_arg(args, "quant").map(str::to_string),
             file: str_arg(args, "file").map(str::to_string),
             context: args["context"].as_u64(),

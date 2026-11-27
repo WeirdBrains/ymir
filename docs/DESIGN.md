@@ -753,6 +753,23 @@ to `node.toml`, otherwise the file is never touched. `list` shows what is on dis
 registered; `remove` deletes files only. Without `--node` these run on the machine itself and need no
 daemon.
 
+**The catalog and its speakers (weirdnet-model 0.5.5, 2026-11-27).**
+- `ymirctl models catalog [--purpose chat|embedding|transcribe|speak] [--json]` lists `weirdnet-model`'s pinned
+  entries: purpose, engine (llama.cpp for GGUF, vLLM-Omni for the other speakers), download size, license, and a
+  summary of each speaker's `SpeechProfile` (all of it with `--json`). There are eight text-to-speech entries: five
+  Qwen3-TTS, Kokoro 82M, VoxCPM2 and Fish Audio Drama 3.
+- `ymirctl models pull ID` takes a catalog id as well as `owner/name`. A GGUF entry downloads its model and
+  projector, both pinned by SHA-256. A vLLM-Omni entry downloads nothing, because the engine fetches its repo.
+- A restricted license (only Drama 3's `fish-audio-community`) needs `--accept-license fish-audio-community`. The
+  check runs first, before the Hub or another node is asked anything. It covers the catalog id and both of its repos
+  (`ggml-org/drama-3-GGUF` and the upstream `fishaudio/drama-3`), and `weirdnet-model` checks it again in
+  `download` (`Consent::accepting_license`).
+- MCP `ymir_pull_model` never accepts a license.
+- Until ymird can launch speakers (`weirdnet-backends` 0.4.10), the printed `role = "speak"` entry is for later:
+  `--register` refuses it, and `node.toml` validation refuses `role = "speak"` or a catalog speaker id, because
+  either would start as a chat model.
+- `setup` never proposes a speaker (`plan()` doesn't).
+
 #### Context length (2026-11-22)
 
 A model runs with as much context as it can take. `pull` (and `setup`, for llama.cpp) writes no

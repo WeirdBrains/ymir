@@ -29,6 +29,7 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, no
         ModelsCmd::Adapter { cmd } => adapter(paths, out, node, cmd).await,
         ModelsCmd::Rollout { .. } => bail!("rollouts are this inference node's pool policy; run `ymirctl models rollout` on it (without --node)"),
         ModelsCmd::Upload(a) => upload(paths, out, node, &a).await,
+        ModelsCmd::Catalog(_) => unreachable!("the catalog is this build's; handled in models::run"),
     }
 }
 

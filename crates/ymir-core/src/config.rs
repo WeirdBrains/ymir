@@ -772,6 +772,17 @@ impl NodeConfig {
             if m.backend.as_deref() == Some("mlx") && m.is_embedding() && !EngineKind::Mlx.capabilities().embeddings {
                 bail!("model `{}`: MLX-LM's server has no embeddings endpoint; use backend = \"llamacpp\" for embedding models", m.id);
             }
+            // Text to speech (weirdnet-model 0.5.5 catalogs the speakers) runs once the engines
+            // can launch it (`weirdnet-backends` 0.4.10). Until then a speaker would start as a chat
+            // model, so it is refused here, by role or by catalog id.
+            let catalog_speaker = weirdnet_model::hw::find(&m.id).is_some_and(|e| e.speaks());
+            if m.role.as_deref() == Some("speak") || catalog_speaker {
+                bail!(
+                    "model `{}`: text-to-speech models can't be served by this ymird yet (they need weirdnet-backends 0.4.10); \
+                     keep the file and leave the entry out of node.toml until then",
+                    m.id
+                );
+            }
             if m.backend.as_deref() == Some("mlx") && m.is_transcriber() {
                 bail!("model `{}`: role = \"transcribe\" needs backend llamacpp (with an audio projector) or vllm, not mlx", m.id);
             }
@@ -1483,6 +1494,22 @@ mod tests {
         );
         assert!(bad(&|c| c.model.local[0].wrap = Some("http://127.0.0.1:9000".into())).contains("wrapped"));
         assert!(bad(&|c| c.model.local[0].lora[0].file = String::new()).contains("file is required"));
+    }
+
+    #[test]
+    fn speakers_are_refused_until_the_engines_serve_them() {
+        for toml_text in [
+            "[[model.local]]\nid = \"tts\"\nfile = \"/m/tts.gguf\"\nrole = \"speak\"\n",
+            // A catalog speaker by id, with no role (it would start as a chat model).
+            "[[model.local]]\nid = \"kokoro-82m\"\nfile = \"/m/kokoro.gguf\"\n",
+        ] {
+            let cfg: NodeConfig = toml::from_str(toml_text).unwrap();
+            let e = cfg.validate().unwrap_err().to_string();
+            assert!(e.contains("text-to-speech") && e.contains("weirdnet-backends 0.4.10"), "{e}");
+        }
+        // Transcribers and chat models from the same catalog are unaffected.
+        let cfg: NodeConfig = toml::from_str("[[model.local]]\nid = \"gemma-4-e4b\"\n").unwrap();
+        cfg.validate().unwrap();
     }
 
     #[test]

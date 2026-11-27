@@ -71,6 +71,7 @@ impl Fixture {
 fn pull_args(repo: &str) -> PullArgs {
     PullArgs {
         repo: repo.into(),
+        accept_license: None,
         quant: None,
         file: None,
         context: None,
@@ -765,4 +766,100 @@ fn an_upload_to_another_node_carries_the_files_and_the_run_record() {
     std::fs::write(&lone, &bytes).unwrap();
     let err = upload::remote_op(&mut Vec::new(), &upload::UploadArgs { node: Some("gpu".into()), ..upload_args(&lone) }).unwrap_err();
     assert!(err.to_string().contains("--adapter-for BASE"), "{err}");
+}
+
+/// The eight text-to-speech entries weirdnet-model 0.5.5 ships, with purpose, engine, license and
+/// profile; only Drama 3 is restricted.
+#[test]
+fn the_catalog_lists_the_speakers() {
+    use weirdnet_model::hw::{self, Purpose};
+    let speakers = hw::by_purpose(Purpose::Speak);
+    let ids: Vec<&str> = speakers.iter().map(|e| e.spec.id.as_str()).collect();
+    let mut want = vec![
+        hw::QWEN3_TTS_0_6B_CUSTOMVOICE,
+        hw::QWEN3_TTS_0_6B_BASE,
+        hw::QWEN3_TTS_1_7B_CUSTOMVOICE,
+        hw::QWEN3_TTS_1_7B_VOICEDESIGN,
+        hw::QWEN3_TTS_1_7B_BASE,
+        hw::KOKORO_82M,
+        hw::VOXCPM2,
+        hw::FISH_AUDIO_DRAMA_3,
+    ];
+    let mut got = ids.clone();
+    got.sort_unstable();
+    want.sort_unstable();
+    assert_eq!(got, want);
+    for e in &speakers {
+        assert!(e.speaks() && e.speech().is_some(), "{}", e.spec.id);
+        assert_eq!(e.restricted(), e.spec.id == hw::FISH_AUDIO_DRAMA_3, "{}", e.spec.id);
+        assert!(e.license().is_some(), "{}", e.spec.id);
+        // GGUF speakers come with their projector (the audio generator).
+        assert_eq!(e.is_gguf(), e.projector().is_some(), "{}", e.spec.id);
+    }
+
+    let mut out = Vec::new();
+    catalog::run(&mut out, &CatalogArgs { purpose: Some("speak".into()), json: false }).unwrap();
+    let s = text(out);
+    assert_eq!(s.lines().filter(|l| l.contains("[speak]")).count(), 8, "{s}");
+    assert!(s.contains("fish-audio-drama-3 [speak] llamacpp") && s.contains("--accept-license fish-audio-community"), "{s}");
+    assert!(s.contains("qwen3-tts-1.7b-customvoice [speak] vllm-omni"), "{s}");
+    assert!(s.contains("9 preset voices") && s.contains("designs voices") && s.contains("clones"), "{s}");
+    assert!(!s.contains("[chat]"), "{s}");
+    assert!(s.contains("weirdnet-backends 0.4.10"), "{s}");
+
+    let mut out = Vec::new();
+    catalog::run(&mut out, &CatalogArgs { purpose: None, json: true }).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let all = v.as_array().unwrap();
+    assert!(all.iter().any(|e| e["purpose"] == "chat"));
+    let drama = all.iter().find(|e| e["id"] == hw::FISH_AUDIO_DRAMA_3).unwrap();
+    assert_eq!((drama["license"].as_str(), drama["restricted"].as_bool()), (Some("fish-audio-community"), Some(true)));
+    assert!(drama["speech"]["script_speakers"].as_u64().unwrap() > 1, "{drama}");
+    let kokoro = all.iter().find(|e| e["id"] == hw::KOKORO_82M).unwrap();
+    assert_eq!(kokoro["speech"]["presets"].as_array().unwrap().len(), 54);
+    assert_eq!(kokoro["engine"], "llamacpp");
+    assert!(kokoro["projector"]["file"].as_str().unwrap().starts_with("mmproj-"));
+    assert!(catalog::run(&mut Vec::new(), &CatalogArgs { purpose: Some("sing".into()), json: false }).is_err());
+}
+
+/// Drama 3 by catalog id or by either of its Hub repos: refused without --accept-license before
+/// the Hub is asked anything; with it, the download starts (against the mock Hub here).
+#[test]
+fn drama_3_needs_its_license_accepted_before_any_request() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(64, None);
+    for target in ["fish-audio-drama-3", "ggml-org/drama-3-GGUF", "fishaudio/drama-3"] {
+        for accepted in [None, Some("apache-2.0")] {
+            let e =
+                pull(&ctx, &mut Vec::new(), &PullArgs { accept_license: accepted.map(str::to_string), ..pull_args(target) }).unwrap_err().to_string();
+            assert!(e.contains("fish-audio-community") && e.contains("Nothing was downloaded"), "{target}: {e}");
+        }
+    }
+    assert!(fx.hub.state.lock().unwrap().paths.is_empty(), "the Hub was asked: {:?}", fx.hub.state.lock().unwrap().paths);
+
+    // Accepted (any case): a dry run prints the plan, a pull goes to the Hub for the pinned files.
+    let accepted = || PullArgs { accept_license: Some("Fish-Audio-Community".into()), ..pull_args("fish-audio-drama-3") };
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { dry_run: true, ..accepted() }).unwrap();
+    let s = text(out);
+    assert!(s.contains("license fish-audio-community (accepted)") && s.contains("role = \"speak\"") && s.contains("mmproj = "), "{s}");
+    assert!(s.contains("Dry run"), "{s}");
+    assert!(fx.hub.state.lock().unwrap().paths.is_empty());
+    // Past the gate: the mock Hub has no such file (or this disk has no room for it).
+    let e = pull(&ctx, &mut Vec::new(), &accepted()).unwrap_err().to_string();
+    assert!(!e.contains("Nothing was downloaded"), "{e}");
+    let asked = fx.hub.state.lock().unwrap().paths.clone();
+    assert!(e.contains("free space") || asked.iter().any(|p| p.starts_with("/ggml-org/drama-3-GGUF/resolve/main/")), "{e}: {asked:?}");
+
+    // A speaker can't be registered yet; an unrestricted one needs no acceptance.
+    let e = pull(&ctx, &mut Vec::new(), &PullArgs { register: true, ..accepted() }).unwrap_err().to_string();
+    assert!(e.contains("role = \"speak\"") && e.contains("0.4.10"), "{e}");
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { dry_run: true, ..pull_args("kokoro-82m") }).unwrap();
+    let s = text(out);
+    assert!(s.contains("kokoro-82m: ") && s.contains("[speak] on llamacpp") && !s.contains("(accepted)"), "{s}");
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &pull_args("qwen3-tts-1.7b-voicedesign")).unwrap();
+    let s = text(out);
+    assert!(s.contains("nothing to download") && s.contains("backend = \"vllm-omni\"") && s.contains("vLLM-Omni fetches"), "{s}");
 }

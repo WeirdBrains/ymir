@@ -371,7 +371,7 @@ The spec as written:
   `subtitles` helper in `weirdnet-agent` or here).
 - Tests: OpenAI SDK request shapes, `alloy` refused with the preset list, `data:` URL only for `ref_audio`, the 413.
 
-### `weirdnet-model` (0.5.5)
+### `weirdnet-model` (0.5.5, published)
 
 - `hw::Purpose::Speak` (`"speak"`), `hw::speaker()`, `by_purpose(Speak)`.
 - Catalog entries, each with memory footprints and a `SpeechProfile` cited to its model card (never measured numbers
@@ -508,6 +508,33 @@ sampling of [video.md](video.md) joins it.
     - `/v1/models` `weirdnet.speech`.
   - Against a real ymird with the mock vLLM transcriber: `/v1/models`, a transcription through `InferenceHost`, the
     speech 400 (nothing speaks yet), and the 413.
+
+### What was built (2026-11-27, on `weirdnet-model` 0.5.5)
+
+- **10 (catalog downloads).**
+  - `ymirctl models catalog [--purpose speak] [--json]` shows the eight speakers: purpose, engine, size, license,
+    restriction and profile.
+  - `ymirctl models pull ID` takes catalog ids. GGUF speakers download with their projector; vLLM-Omni ones download
+    nothing.
+  - Drama 3 needs `--accept-license fish-audio-community` (case-insensitive) for its id and both of its repos. The
+    check runs before any request to the Hub or to another node, and is passed on as
+    `Consent::accepting_license`.
+  - With `--node`, catalog ids and `--accept-license` are refused: the remote models protocol carries no
+    acceptance, so pull on the node itself. MCP never accepts a license.
+- **Departures.**
+  - A speaker's `[[model.local]]` entry is printed but can't be registered yet. `node.toml` validation refuses
+    `role = "speak"` and catalog speaker ids until `weirdnet-backends` 0.4.10, because they would otherwise launch
+    as chat models.
+  - `guests = false` for restricted models and the license in `ymirctl status` wait for speakers to be served
+    (milestone 7).
+  - Ymir uses neither `LimitsRecord::speech` nor the video frame limits yet, so nothing needed reconciling there.
+- **Tests.**
+  - `models::tests::the_catalog_lists_the_speakers`: the eight ids, profiles, licenses, projectors, and the table
+    and JSON output.
+  - `drama_3_needs_its_license_accepted_before_any_request`: a refusal with no Hub request for the id and both
+    repos, a wrong license refused, and acceptance reaching the Hub. It also covers the `--register` refusal, the
+    Kokoro dry run and a vLLM-Omni pull.
+  - `config::tests::speakers_are_refused_until_the_engines_serve_them`.
 
 ## Not in this design
 
