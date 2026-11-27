@@ -200,6 +200,16 @@ pub enum ControlRequest {
         node: String,
         request: crate::rollouts_net::Request,
     },
+    /// Speech to text through the pool (audio design milestone 1): `bytes` of audio follow this
+    /// line on the connection, raw (local transport only; see [`transcribe`]). Goes through the
+    /// app role's pool, so the inference role routes it as it routes infer/2 `Transcribe`.
+    Transcribe(TranscribeJob),
+    /// The transcriber a request would use and its audio limits from catalog/1, so a client can
+    /// plan chunks (audio design milestone 3). Nothing is sent to a model.
+    TranscribeTarget {
+        #[serde(default)]
+        model: Option<String>,
+    },
     /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
     /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
     Shutdown,
@@ -356,6 +366,53 @@ pub struct ControlResponse {
     /// The answer to [`ControlRequest::Jobs`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<crate::train_jobs_ctl::JobReply>,
+    /// The answer to [`ControlRequest::Transcribe`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscribeReply>,
+    /// The answer to [`ControlRequest::TranscribeTarget`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcriber: Option<Transcriber>,
+}
+
+/// Largest audio clip one [`ControlRequest::Transcribe`] carries: infer/2 frames are at most
+/// 32 MiB (`weirdnet-agent` `MAX_FRAME`), less room for the rest of the request. Longer audio is
+/// chunked by the client (`ymirctl transcribe --chunk auto`).
+pub const MAX_TRANSCRIBE_BYTES: u64 = 31 << 20;
+
+/// A transcription request; the audio follows on the connection.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TranscribeJob {
+    /// How many bytes of audio follow the request line.
+    pub bytes: u64,
+    /// `wav`, `mp3`, `flac`, ...
+    pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timestamps: bool,
+}
+
+/// A transcript and where it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscribeReply {
+    pub transcript: weirdnet_agent::remote::infer::v2::Transcript,
+    pub model: String,
+    pub node: String,
+}
+
+/// The transcriber a request would be routed to, and what catalog/1 reports for it (each field
+/// absent when no node reports it; never defaulted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transcriber {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_max_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -398,6 +455,8 @@ impl ControlResponse {
             remote_rollouts: None,
             train_status: None,
             job: None,
+            transcript: None,
+            transcriber: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -415,6 +474,58 @@ impl ControlResponse {
             remote_rollouts: None,
             train_status: None,
             job: None,
+            transcript: None,
+            transcriber: None,
+        }
+    }
+}
+
+impl ControlHandler {
+    /// [`ControlRequest::Transcribe`], with its audio read. Neither the audio nor the transcript
+    /// is logged.
+    pub async fn transcribe(&self, job: TranscribeJob, audio: Vec<u8>) -> ControlResponse {
+        use weirdnet_agent::remote::infer::v2::TranscribeRequest;
+        let Some(pool) = &self.pool else {
+            return ControlResponse::err("transcription needs the app role (it asks the pool like the bridge does)");
+        };
+        let mut r = TranscribeRequest::new(audio, job.format).with_timestamps(job.timestamps);
+        if let Some(m) = job.model {
+            r = r.with_model(m);
+        }
+        if let Some(l) = job.language.filter(|l| !l.trim().is_empty()) {
+            r = r.with_language(l);
+        }
+        if let Some(p) = job.prompt.filter(|p| !p.trim().is_empty()) {
+            r = r.with_prompt(p);
+        }
+        match pool.transcribe(r, &weirdnet_agent::CancelToken::new()).await {
+            Ok(t) => {
+                let mut resp = ControlResponse::ok("transcribed");
+                resp.transcript = Some(TranscribeReply { transcript: t.transcript, model: t.model, node: t.node });
+                resp
+            }
+            Err(e) => ControlResponse::err(e.to_string()),
+        }
+    }
+
+    /// [`ControlRequest::TranscribeTarget`]: routed as a transcription would be, from catalog/1.
+    pub async fn transcribe_target(&self, model: Option<&str>) -> ControlResponse {
+        let Some(pool) = &self.pool else {
+            return ControlResponse::err("transcription needs the app role (it asks the pool like the bridge does)");
+        };
+        let catalog = match pool.catalog().await {
+            Ok(c) => c,
+            Err(e) => return ControlResponse::err(format!("no catalog from the pool: {e}")),
+        };
+        match catalog.route_transcribe(model) {
+            Ok(id) => {
+                let limits = catalog.find(&id).map(|m| m.limits).unwrap_or_default();
+                let mut resp = ControlResponse::ok("transcriber");
+                resp.transcriber =
+                    Some(Transcriber { model: id, audio_max_seconds: limits.audio_max_seconds, max_request_bytes: limits.max_request_bytes });
+                resp
+            }
+            Err(e) => ControlResponse::err(e.to_string()),
         }
     }
 }
@@ -631,6 +742,8 @@ impl ControlHandler {
                     Err(e) => ControlResponse::err(e),
                 }
             }
+            ControlRequest::Transcribe(_) => ControlResponse::err("a transcription request carries audio: send it over the control socket"),
+            ControlRequest::TranscribeTarget { model } => self.transcribe_target(model.as_deref()).await,
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -697,6 +810,8 @@ impl ControlHandler {
                     remote_rollouts: None,
                     train_status: None,
                     job: None,
+                    transcript: None,
+                    transcriber: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -1087,6 +1202,25 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, handl
                 handler.stream_models(node, request, &mut w).await?;
                 continue;
             }
+            Ok(ControlRequest::Transcribe(job)) => {
+                if job.bytes == 0 || job.bytes > MAX_TRANSCRIBE_BYTES {
+                    // The audio that follows can't be skipped safely: answer and close.
+                    let resp = ControlResponse::err(format!(
+                        "a transcription request takes 1 to {MAX_TRANSCRIBE_BYTES} bytes of audio, not {} (longer audio: `ymirctl transcribe --chunk auto`)",
+                        job.bytes
+                    ));
+                    let mut out = serde_json::to_vec(&resp)?;
+                    out.push(b'\n');
+                    w.write_all(&out).await?;
+                    break;
+                }
+                let reader = lines.get_mut();
+                let take = reader.get_mut();
+                take.set_limit(take.limit().saturating_add(job.bytes));
+                let mut audio = vec![0u8; usize::try_from(job.bytes)?];
+                reader.read_exact(&mut audio).await?;
+                handler.transcribe(job, audio).await
+            }
             Ok(ControlRequest::Train { node, request }) => {
                 // The caller sends nothing more; its side closing ends the run.
                 let closed = async { while let Ok(Some(_)) = lines.next_line().await {} };
@@ -1201,6 +1335,38 @@ pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlRespo
     let mut lines = BufReader::new(r).lines();
     let resp = lines.next_line().await?.context("ymird closed the control connection")?;
     Ok(serde_json::from_str(&resp)?)
+}
+
+/// Transcribes `audio` through the `ymird` on `socket` ([`ControlRequest::Transcribe`]).
+pub async fn transcribe(socket: &Path, mut job: TranscribeJob, audio: &[u8]) -> Result<TranscribeReply> {
+    job.bytes = audio.len() as u64;
+    if job.bytes > MAX_TRANSCRIBE_BYTES {
+        bail!("the audio is {} bytes; one request takes at most {MAX_TRANSCRIBE_BYTES} (use --chunk auto)", job.bytes);
+    }
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    let mut line = serde_json::to_vec(&ControlRequest::Transcribe(job))?;
+    line.push(b'\n');
+    w.write_all(&line).await?;
+    w.write_all(audio).await?;
+    w.flush().await?;
+    let mut lines = BufReader::new(r).lines();
+    let resp = lines.next_line().await?.context("ymird closed the control connection")?;
+    let r: ControlResponse =
+        serde_json::from_str(&resp).context("ymird sent something this ymirctl does not understand (are they the same version?)")?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    r.transcript.context("ymird sent no transcript (is it older than this ymirctl?)")
+}
+
+/// The transcriber the pool would use for `model` (or its pick), with its audio limits.
+pub async fn transcribe_target(socket: &Path, model: Option<&str>) -> Result<Transcriber> {
+    let r = request(socket, &ControlRequest::TranscribeTarget { model: model.map(str::to_string) }).await?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    r.transcriber.context("ymird sent no transcriber (is it older than this ymirctl?)")
 }
 
 /// Whether a `ymird` answers on `socket`.

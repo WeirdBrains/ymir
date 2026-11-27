@@ -60,6 +60,7 @@ weirdnet-alerts.workspace = true
 ymirctl.workspace = true
 ymir-core.workspace = true
 weirdnet-semcache.workspace = true
+ymir-media.workspace = true
 
 [lints]
 workspace = true

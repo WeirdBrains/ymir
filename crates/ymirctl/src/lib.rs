@@ -12,6 +12,7 @@ pub mod mcp_servers;
 pub mod models;
 pub mod pool;
 pub mod train;
+pub mod transcribe;
 pub mod update_fetch;
 
 use anyhow::{Context, Result, bail};
@@ -207,6 +208,9 @@ pub enum Cmd {
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
     },
+    /// Speech to text through the pool: an audio or video file (or stdin) to text, JSON, SRT or
+    /// VTT. `--chunk auto` cuts long audio at silences to the transcriber's reported length.
+    Transcribe(transcribe::TranscribeArgs),
     /// Split models: a model too big for one node, served by a group of nodes over a private link.
     Group {
         #[command(subcommand)]
@@ -550,6 +554,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Chat { model, system, temperature, max_tokens, wait, adapter_scale, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, adapter_scale, prompt).await
         }
+        Cmd::Transcribe(args) => transcribe::run(&paths.socket(), args, out, input).await,
         Cmd::Batch { file, model, concurrency, retries, jsonl } if jsonl.jsonl => {
             batch_jsonl(&paths, out, file, model, concurrency, retries, jsonl).await
         }
