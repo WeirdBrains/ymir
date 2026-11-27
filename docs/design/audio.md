@@ -1,7 +1,8 @@
 # Audio through Ymir: speech out, and audio processing
 
-Status: design, 2026-11-27 (Michael, t75u: "support for transcripts to audio and for audio processing"). Nothing built
-yet. It builds on the transcription route of video milestone 2 (`5b77934`, in v0.23.0) and needs new Weirdnet crate
+Status: design, 2026-11-27 (Michael, t75u: "support for transcripts to audio and for audio processing"). Milestones
+1 to 6 were built on 2026-11-27, against mocks only (see "What was built" under "Milestones"); speech out waits on the crates.
+"What exists" below is the state before them. It builds on the transcription route of video milestone 2 (`5b77934`, in v0.23.0) and needs new Weirdnet crate
 versions for speech out; what Ymir can build before them is listed under "Milestones". Read
 [video.md](video.md) first (limits are reported, never defaulted; the hardened ffmpeg rules) and [DESIGN.md](../DESIGN.md),
 "Images and audio through the pool".
@@ -418,6 +419,22 @@ sampling of [video.md](video.md) joins it.
 10. Catalog downloads for the four models, with Drama 3's license acceptance.
 11. Real runs of the four on llama-server and vLLM-Omni, the compatibility row, measured profiles.
 12. Later: opt-in server-side long-form and normalization (`[media] server = true`), content-root references.
+
+### What was built (2026-11-27, milestones 1 to 6, mocks only)
+
+- **1 and 3.** `ymirctl transcribe` as above, plus `--chunk off|auto` (off by default), `--no-normalize` and `--out`.
+  `ControlRequest::Transcribe` carries the audio as raw bytes after its JSON line (`bytes`, at most 31 MiB), not a path,
+  so ymird never opens a client's file; `TranscribeTarget` reads the transcriber and its catalog/1 limits. `--chunk auto`
+  refuses without a reported `audio_max_seconds` and names `limits = { audio_max_seconds = N }`.
+- **2.** `crates/ymir-media` (no Ymir types). One deviation: ffmpeg's input format is sniffed from magic bytes against the
+  allowlist and forced with `-f`, rather than probed with ffprobe, so no second tool parses the input.
+- **4.** MCP `ymir_transcribe` (read tool). "Allowed roots" are new: `ymirctl mcp --root DIR`, applied to this tool's
+  `path`; without a root any file the user can read is allowed after the extension check. Chat media is unchanged.
+- **5.** The mock's `/v1/audio/speech` in both flavors. It encodes WAV and PCM only (it refuses mp3, flac and opus with each
+  flavor's error), which is enough for the client tests; ffmpeg does real encoding.
+- **6.** `ymirctl engines install vllm-omni` in its own venv (`<home>/engines/vllm-omni`), vLLM and vLLM-Omni pinned to one
+  release. It has the PyTorch-versus-driver check and warns when vLLM's wheel is newer than the driver. The `--vllm-cuda`
+  nightly variants on the unmerged M7 pass 2 branch do not apply, because vLLM-Omni needs a release.
 
 ## Not in this design
 

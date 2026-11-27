@@ -44,6 +44,20 @@ All notable changes to Ymir are listed here. The format follows
   `/weirdnet-semcache/shared/1` to the other members only (roster, then membership), members are the roster devices
   announcing the same embedding model, lookups go L1 → home → replica with 150 ms bounds and an outage is a miss, and
   stores run in the background. `ymirctl status` shows the cache's mode, entries, members and counters.
+- `ymirctl transcribe FILE|-` (audio milestones 1 and 3): sends audio to the pool's transcriber over the control socket (raw
+  bytes after the request line, at most 31 MiB), normalized to 16 kHz mono WAV first (ffmpeg for non-WAV input), printed as
+  text, JSON, SRT or VTT, with `--language`, `--prompt`, `--model`, `--timestamps` and `--out`. `--chunk auto` splits long clips
+  at silences to the model's catalog/1 `audio_max_seconds` and re-aligns the timestamps; it refuses when the limit is not
+  reported.
+- `ymir-media`, an interim crate with no Ymir types, to be replaced by `weirdnet-media`. It has WAV probe/decode, resampling,
+  silence-aware chunking, transcript re-alignment, PCM stitching with crossfade, a long-text plan for speech, SRT/VTT, and a
+  hardened ffmpeg runner with a fake for tests.
+- MCP `ymir_transcribe` (read-only; allowed under `--read-only`). It takes a path or base64 audio, never a URL. `ymirctl mcp --root DIR`
+  limits the paths it may read.
+- Testkit mock engine `/v1/audio/speech` in llama-server and vLLM-Omni flavors (`/props` voices, `/v1/audio/voices`,
+  `x-audio-sample-rate`, sine WAV/PCM).
+- `ymirctl engines install vllm-omni`: vLLM-Omni and its matching vLLM release in a managed venv
+  (`<home>/engines/vllm-omni`), with the same driver CUDA checks as `engines install vllm`. Nothing serves from it yet.
 
 ### Changed
 

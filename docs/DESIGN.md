@@ -668,6 +668,32 @@ VoxCPM2, Fish Audio Drama 3 on llama-server or vLLM-Omni) with catalog/1 purpose
 synthesis and long-audio chunking through the interim `ymir-media` crate. Speech is content: not cached, not logged. See
 [docs/design/audio.md](design/audio.md).
 
+**Transcription from the CLI and MCP, and the interim media crate (audio milestones 1 to 6, built 2026-11-27, mocks only).**
+`ymirctl transcribe FILE|-` ([`transcribe.rs`](../crates/ymirctl/src/transcribe.rs)) sends audio to the pool's transcriber over
+the control socket: `ControlRequest::Transcribe` is a JSON line followed by exactly `bytes` raw audio bytes (at most 31 MiB,
+`MAX_TRANSCRIBE_BYTES`, under infer/2's 32 MiB frame; the line's own 64 KiB cap is raised only for that read), and ymird hands it
+to `Pool::transcribe` through the inference role. No path crosses the socket, so ymird never opens a file for a client.
+`ControlRequest::TranscribeTarget` answers which model would transcribe and its catalog/1 limits (`audio_max_seconds`,
+`max_request_bytes`). The CLI normalizes first: WAV in Rust, anything else through ffmpeg, to 16 kHz mono PCM16 WAV
+(`--no-normalize` sends the file as it is). Output is `--format text|json|srt|vtt` (`--timestamps` adds them to text), with
+`--language`, `--prompt`, `--model` and `--out`. `--chunk auto` splits a clip longer than the model's `audio_max_seconds` at the
+quietest 30 ms frame near each limit, transcribes the chunks in order with the previous chunk's tail as the prompt, and shifts
+the segments back onto the clip's timeline; it refuses when catalog/1 has no `audio_max_seconds` (naming the setting). Off by
+default. Transcripts are not logged. MCP `ymir_transcribe` (a read tool, so it stays under `--read-only`) takes `path` or
+base64 `audio`: a path is checked by extension before it is opened, never a URL or `data:`, and, with `ymirctl mcp --root DIR`
+(repeatable), must resolve (links followed) inside one of the roots. The media code is the interim
+[`ymir-media`](../crates/ymir-media) crate, written to the Weirdnet crate spec in [docs/design/audio.md](design/audio.md) with
+no Ymir types, so it can be replaced by `weirdnet-media`: WAV probe and decode (8 to 32-bit integer, float, extensible;
+hostile headers refused), windowed-sinc resampling, silence-aware chunk planning, segment re-alignment, PCM stitching with an
+equal-power crossfade, `TextPlan` (sentence and speaker-turn splitting for long speech, CJK-aware), SRT/VTT, and a hardened
+`ffmpeg::Runner`: input demuxer sniffed from magic bytes against an allowlist (no ffprobe), `-protocol_whitelist file,pipe`,
+`-f` forced, the input in a private temp dir, the first audio stream only, metadata dropped, a cleared environment, memory,
+CPU-time and file-size rlimits, a best-effort user and network namespace on Linux, a timeout and an output cap. `FakeRunner`
+stands in for tests. The testkit mock engine serves `/v1/audio/speech` in two flavors: llama-server (`/tts` too, WAV and PCM
+only, `/props` voices, cloning with `speaker_ref_b64`) and vLLM-Omni (`--omni`: `/v1/audio/voices`, `x-audio-sample-rate`,
+`ref_audio` only as a `data:` URL), with a sine tone of a length set by the word count. `ymirctl engines install vllm-omni`
+is under "Installing vLLM and Ray".
+
 ### Model sizing
 
 `weirdnet-model`'s catalog grows from Gemma 4 only to a tiered catalog with per-quant memory
@@ -980,7 +1006,7 @@ resources come from the published `weirdnet-mcp` 0.6 crate (features `stdio-serv
   look at the bind address, so `ymirctl` refuses non-loopback addresses itself (`loopback_addr`, and again on the listener). The `ymird`-hosted variant is not built; the control socket and bridge are the only
   backends, so the client side adds nothing a local `ymirctl` could not do.
 - **Tools.** Read: `ymir_status`, `ymir_nodes`, `ymir_devices`, `ymir_models`, `ymir_chat`, `ymir_complete`, `ymir_embed`,
-  `ymir_service_status`, `ymir_models_search`, `ymir_models_local`. Mutating: `ymir_load_model`, `ymir_unload_model`,
+  `ymir_service_status`, `ymir_models_search`, `ymir_models_local`, `ymir_transcribe`. Mutating: `ymir_load_model`, `ymir_unload_model`,
   `ymir_move_model`, `ymir_pull_model`, and (only with `--allow-remove`) `ymir_remove_model`. `--read-only` hides all five.
 - **Safety.** Mutating tools say `MUTATES THE POOL` (or `DELETES FILES`) in their description, carry `readOnlyHint: false`
   (`destructiveHint: true` for unload and remove) and refuse unless the arguments hold `confirm: true` (a string `"true"` does
@@ -2699,6 +2725,16 @@ venv's `vllm`. `upgrade` keeps the venv and passes `--upgrade`, `--reinstall` cl
 `ray = "auto"` (the defaults) use the venv's programs before `PATH`, so nothing else is edited. Tests use fake `uv` and
 `python3` that leave stub programs ([`tests/engines.rs`](../crates/ymirctl/tests/engines.rs)); nothing is downloaded in tests or
 CI.
+
+`ymirctl engines install vllm-omni` ([`vllm_omni_install.rs`](../crates/ymir-core/src/vllm_omni_install.rs)) makes a separate
+venv, `<home>/engines/vllm-omni`, for speech models (Qwen3-TTS, VoxCPM2; docs/design/audio.md). vLLM-Omni needs the vLLM
+release of its own version and does not declare it, so the installer pins both (`vllm==V vllm-omni==V`, default 0.34.0,
+`--version V` for another); it is kept out of the vLLM venv, whose vLLM is a nightly for Inkling 2 Mini. Everything else is the
+vLLM installer's: uv or pip (Python 3.11 to 3.13 for pip), the accelerator, `--index-url` off CUDA, PyTorch's build matched to the
+driver (`torch_backend`), the install failing when PyTorch's CUDA is newer than the driver's, and a warning, before and after,
+when vLLM's wheel is (PyPI's release wheels are CUDA 13.0 builds; a version's `+cuNNN` tag wins). After installing, `vllm
+--version` must run and the venv's Python must report `vllm-omni`'s version. `engines status` shows it, and `uninstall
+vllm-omni` removes it only with its record. Nothing serves from it yet: that comes with the Weirdnet engine kind.
 
 **Lifecycle.** The coordinator sends `GroupUp` (worker kind `ray`) to every member at once, since the
 head is the one waiting. The plan carries every member's link, `ray.port` and the sizing (`vllm.tp`,
