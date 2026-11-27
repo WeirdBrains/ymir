@@ -409,11 +409,15 @@ pub fn install(plan: &Plan, o: &Options, log: &mut dyn FnMut(&str)) -> Result<Re
     }
     for step in &plan.steps {
         log(&step.to_string());
-        let status = std::process::Command::new(&step.program)
-            .args(&step.args)
-            .stdin(std::process::Stdio::null())
-            .status()
-            .with_context(|| format!("running {step}"))?;
+        let mut cmd = std::process::Command::new(&step.program);
+        cmd.args(&step.args).stdin(std::process::Stdio::null());
+        // Run from the engines dir: uv reads `uv.toml` from the working directory up, and an
+        // operator's home (via `sudo -u`) may hold one the service user cannot read.
+        // (Only for an absolute venv: the steps' relative paths stay valid.)
+        if let Some(parent) = plan.venv.parent().filter(|_| plan.venv.is_absolute()) {
+            cmd.current_dir(parent);
+        }
+        let status = cmd.status().with_context(|| format!("running {step}"))?;
         if !status.success() {
             bail!("{step} failed ({status})");
         }

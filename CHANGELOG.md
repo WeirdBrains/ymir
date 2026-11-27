@@ -23,6 +23,8 @@ All notable changes to Ymir are listed here. The format follows
   fails when `torch.version.cuda` is newer than the driver's, and `ymir-install.json` records the driver CUDA, the backend and
   PyTorch's version and CUDA.
 - The installer's Inkling 2 Mini check also accepts `Inkling2LoopForConditionalGeneration`.
+- The installer runs `uv` and pip from the engines dir, so a `uv.toml` the service user cannot read in the caller's working
+  directory (`sudo -u llm` from a home) no longer stops it.
 
 ## [0.22.0] - 2026-11-26
 
