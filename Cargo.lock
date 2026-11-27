@@ -5957,6 +5957,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ymir-media"
+version = "0.23.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ymir-testkit"
 version = "0.23.0"
 dependencies = [

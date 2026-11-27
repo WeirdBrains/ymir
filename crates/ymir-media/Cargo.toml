@@ -1,0 +1,22 @@
+[package]
+name = "ymir-media"
+description = "Audio helpers for speech in and out: WAV probe and decode, resampling, silence-aware chunking, segment re-alignment, stitching, text planning, subtitles and a hardened ffmpeg runner. Interim: to be extracted into weirdnet-media."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true
