@@ -440,7 +440,8 @@ mod tests {
         assert!(env.contains(&("NCCL_SOCKET_IFNAME".into(), "=enp1s0f1np1".into())));
         assert!(env.contains(&("GLOO_SOCKET_IFNAME".into(), "enp1s0f1np1".into())));
         assert_eq!(link_env(ip, None).len(), 1);
-        // `lo` on Linux, `lo0` on the BSDs and macOS.
+        // `lo` on Linux, `lo0` on the BSDs and macOS (Windows names it otherwise).
+        #[cfg(unix)]
         assert!(iface_of("127.0.0.1".parse().unwrap()).is_some_and(|i| i.starts_with("lo")));
     }
 
