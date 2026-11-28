@@ -43,6 +43,11 @@ impl Paths {
         self.state().join("pool")
     }
 
+    /// The model node's placement-lease terms (`weirdnet-backends` `FenceGuard`, CBOR).
+    pub fn model_fence(&self) -> PathBuf {
+        self.state().join("model-fence.cbor")
+    }
+
     pub fn logs(&self) -> PathBuf {
         self.state().join("logs")
     }

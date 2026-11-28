@@ -396,6 +396,7 @@ impl Daemon {
                     coordinator.is_some(),
                     group_workers.clone().map(|w| w as Arc<dyn weirdnet_backends::node::GroupWorkers>),
                     &cfg.model.callers,
+                    Some(&paths.model_fence()),
                 )
                 .map_err(|e| anyhow!("serving the model role on Weirdnet: {e}"))?;
                 if cfg.model.callers.is_empty() {

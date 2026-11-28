@@ -9,6 +9,10 @@
 //! - Cloud-wide swap: a cold request loads where it evicts nothing and the node is emptiest;
 //!   an unmanaged model idle past `idle_unload_secs` is unloaded, never the main model or a busy
 //!   one, and never one asked for recently.
+//! - Model-node fencing (`weirdnet-backends` 0.4.11): a fencing node gets the holder's
+//!   `(ymir.scheduler, term)` on every step and refuses an older term; that refusal stops the
+//!   round and the holder for good at that term. A node before 0.4.11 gets unfenced steps, and a
+//!   node that requires a fence is left out of lease-less rounds after it refuses one.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -19,12 +23,13 @@ use serde_json::json;
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_agent::remote::infer::v2::{Request, Usage};
 use weirdnet_agent::{CancelToken, Message, ToolCall};
+use weirdnet_backends::fence::{Fence as NodeFence, FenceGuard, FenceRefusal};
 use weirdnet_backends::{Chunk, ChunkStream, ModelStatus};
 use weirdnet_semcache::NoCache;
 use weirdnet_sync::Term;
 use ymir_core::coordinator::{Coordinator, Sink};
 use ymir_core::model_node::{BoxFuture, Embedded, ModelNode};
-use ymir_core::placement::{Fence, Lead, PlacementPlan, PlacementPolicy, PlanBook, PublishedPlan, Step};
+use ymir_core::placement::{Alone, Fence, Lead, PlacementPlan, PlacementPolicy, PlanBook, PublishedPlan, SCHEDULER_LEASE, Step};
 
 /// A node holding copies of some models, each loaded or not; a chat takes `delay` and counts
 /// as in flight meanwhile.
@@ -35,6 +40,12 @@ struct Node {
     delay: Duration,
     load_fails: AtomicBool,
     group: Option<&'static str>,
+    /// Checks fences (`Capability::fencing`), and refuses unfenced load/unload (`fence_required`).
+    fencing: AtomicBool,
+    required: AtomicBool,
+    guard: Mutex<FenceGuard>,
+    /// The fence on each load/unload received (`None`: unfenced).
+    got: Mutex<Vec<Option<NodeFence>>>,
 }
 
 impl Node {
@@ -46,6 +57,10 @@ impl Node {
             delay: Duration::from_millis(delay_ms),
             load_fails: AtomicBool::new(false),
             group: None,
+            fencing: AtomicBool::new(false),
+            required: AtomicBool::new(false),
+            guard: Mutex::new(FenceGuard::new()),
+            got: Mutex::new(Vec::new()),
         })
     }
     fn grouped(name: &str, models: &[(&str, bool)], group: &'static str) -> Arc<Self> {
@@ -55,6 +70,36 @@ impl Node {
     }
     fn is_loaded(&self, m: &str) -> bool {
         self.loaded.lock().unwrap().get(m).copied().unwrap_or(false)
+    }
+    fn fencing(name: &str, models: &[(&str, bool)], required: bool) -> Arc<Self> {
+        let n = Self::new(name, models, 0);
+        n.fencing.store(true, Ordering::SeqCst);
+        n.required.store(required, Ordering::SeqCst);
+        n
+    }
+    /// As a `weirdnet-backends` 0.4.11 node: an older term changes nothing.
+    fn admit(&self, fence: Option<&NodeFence>) -> Result<(), RemoteError> {
+        self.got.lock().unwrap().push(fence.cloned());
+        match fence {
+            Some(f) => self
+                .guard
+                .lock()
+                .unwrap()
+                .check(&f.lease, f.term)
+                .map_err(|s| FenceRefusal::Stale { lease: f.lease.clone(), term: f.term, seen: s.seen }.to_error()),
+            None if self.required.load(Ordering::SeqCst) => Err(FenceRefusal::Required.to_error()),
+            None => Ok(()),
+        }
+    }
+    fn set(&self, model: &str, on: bool) -> Result<(), RemoteError> {
+        if on && self.load_fails.load(Ordering::SeqCst) {
+            return Err(RemoteError::unavailable("engine won't start"));
+        }
+        self.loaded.lock().unwrap().insert(model.to_string(), on);
+        Ok(())
+    }
+    fn fences(&self) -> Vec<Option<NodeFence>> {
+        self.got.lock().unwrap().clone()
     }
 }
 
@@ -80,17 +125,30 @@ impl ModelNode for Node {
     }
     fn load<'a>(&'a self, model: &'a str, _: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
-            if self.load_fails.load(Ordering::SeqCst) {
-                return Err(RemoteError::unavailable("engine won't start"));
-            }
-            self.loaded.lock().unwrap().insert(model.to_string(), true);
-            Ok(())
+            self.admit(None)?;
+            self.set(model, true)
         })
     }
     fn unload<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
-            self.loaded.lock().unwrap().insert(model.to_string(), false);
-            Ok(())
+            self.admit(None)?;
+            self.set(model, false)
+        })
+    }
+    fn fencing(&self) -> bool {
+        self.fencing.load(Ordering::SeqCst)
+    }
+    fn load_fenced<'a>(&'a self, model: &'a str, _: bool, fence: &'a NodeFence) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            // As RemoteModelNode: a node that doesn't fence gets the unfenced command.
+            self.admit(self.fencing.load(Ordering::SeqCst).then_some(fence))?;
+            self.set(model, true)
+        })
+    }
+    fn unload_fenced<'a>(&'a self, model: &'a str, fence: &'a NodeFence) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.admit(self.fencing.load(Ordering::SeqCst).then_some(fence))?;
+            self.set(model, false)
         })
     }
     fn chat<'a>(&'a self, _model: &'a str, _req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>> {
@@ -321,4 +379,96 @@ async fn idle_models_are_swapped_out_but_not_the_main_model_or_a_managed_one() {
 fn idle_unload_needs_a_minute() {
     assert!(policy(&[], Some(30)).validate().is_err());
     assert!(!policy(&[], Some(60)).is_empty());
+}
+
+fn scheduler(term: u64) -> Option<NodeFence> {
+    Some(NodeFence::new(SCHEDULER_LEASE, term))
+}
+
+#[tokio::test]
+async fn model_nodes_get_the_holders_term_and_refuse_an_older_one() {
+    let (a, b) = (Node::fencing("a", &[("alpha", true)], false), Node::fencing("b", &[("alpha", false)], false));
+    let co = pool(&[&a, &b], None);
+    let p = policy(&[("alpha", 2)], None);
+
+    // A holder of term 5 has already placed on b (it took over while this one was paused); this
+    // holder of term 3 has not seen its plan yet, so only the node can stop it.
+    b.guard.lock().unwrap().check(SCHEDULER_LEASE, 5).unwrap();
+    let book = Book::new(3);
+    let fence = Fence::new();
+    let r = co.place_round(&p, &*book, &fence, None).await;
+    assert!(r.fenced && r.published.is_none(), "{r:?}");
+    assert_eq!(r.done.len(), 1);
+    assert!(r.done[0].fenced && r.done[0].error.as_deref().is_some_and(|e| e.contains("stale fence")), "{:?}", r.done[0]);
+    assert_eq!(b.fences(), vec![scheduler(3)]);
+    assert!(!b.is_loaded("alpha"), "a refused step changes nothing");
+    // The holder now knows term 5 and stops: no step, nothing sent, nothing published.
+    assert_eq!(fence.seen(), Some(Term(5)));
+    let r = co.place_round(&p, &*book, &fence, None).await;
+    assert!(r.fenced && r.done.is_empty() && r.published.is_none(), "{r:?}");
+    assert_eq!(b.fences().len(), 1, "a stale refusal is never retried");
+
+    // The newer holder (term 5) places there; its fence goes with the step.
+    let book = Book::new(5);
+    let r = co.place_round(&p, &*book, &Fence::new(), None).await;
+    assert!(!r.fenced && r.done.len() == 1 && r.done[0].error.is_none(), "{r:?}");
+    assert!(b.is_loaded("alpha"));
+    assert_eq!(b.fences().last().unwrap(), &scheduler(5));
+    assert_eq!(b.guard.lock().unwrap().seen(SCHEDULER_LEASE), Some(5));
+
+    // Unloads are fenced too: term 4 can't take a replica away from term 5's plan.
+    let p1 = policy(&[("alpha", 1)], None);
+    a.guard.lock().unwrap().check(SCHEDULER_LEASE, 5).unwrap();
+    let r = co.place_round(&p1, &*Book::new(4), &Fence::new(), None).await;
+    assert!(r.fenced && r.done.len() == 1 && r.done[0].fenced, "{r:?}");
+    assert!(a.is_loaded("alpha") && b.is_loaded("alpha"));
+    let r = co.place_round(&p1, &*Book::new(5), &Fence::new(), None).await;
+    assert!(!r.fenced && r.done.len() == 1 && r.done[0].error.is_none(), "{r:?}");
+    assert_eq!(a.is_loaded("alpha") as u8 + b.is_loaded("alpha") as u8, 1);
+}
+
+#[tokio::test]
+async fn a_node_before_fencing_gets_unfenced_steps_and_other_errors_dont_fence() {
+    let a = Node::new("a", &[("alpha", false)], 0);
+    let co = pool(&[&a], None);
+    let p = policy(&[("alpha", 1)], None);
+    let book = Book::new(2);
+    let fence = Fence::new();
+    // A transient failure is an error, not a fence: the next round tries again.
+    a.load_fails.store(true, Ordering::SeqCst);
+    let r = co.place_round(&p, &*book, &fence, None).await;
+    assert!(!r.fenced && r.done.len() == 1 && !r.done[0].fenced && r.done[0].error.is_some(), "{r:?}");
+    a.load_fails.store(false, Ordering::SeqCst);
+    let r = co.place_round(&p, &*book, &fence, None).await;
+    assert!(!r.fenced && r.done[0].error.is_none(), "{r:?}");
+    assert!(a.is_loaded("alpha"));
+    assert_eq!(a.fences(), vec![None, None], "a node without fencing never sees a fence");
+    assert_eq!(fence.seen(), Some(Term(2)));
+}
+
+#[tokio::test]
+async fn a_lease_less_placer_leaves_a_node_that_requires_a_fence_alone() {
+    // `a` sorts first, so it is asked first; it requires a fence and a lease-less placer has none.
+    let (a, b) = (Node::fencing("a", &[("alpha", false)], true), Node::new("b", &[("alpha", false)], 0));
+    let co = pool(&[&a, &b], None);
+    let p = policy(&[("alpha", 1)], None);
+    let fence = Fence::new();
+    let r = co.place_round(&p, &Alone(true), &fence, None).await;
+    assert!(!r.fenced && r.done.len() == 1 && r.done[0].error.as_deref().is_some_and(|e| e.contains("fence required")), "{r:?}");
+    assert!(fence.requires("a") && !fence.requires("b"));
+    // Next round it goes to b instead of asking a again.
+    let r = co.place_round(&p, &Alone(true), &fence, None).await;
+    assert_eq!(
+        r.done.iter().map(|d| (d.step.clone(), d.error.is_none())).collect::<Vec<_>>(),
+        vec![(Step::Load { model: "alpha".into(), node: "b".into() }, true)]
+    );
+    assert!(b.is_loaded("alpha") && !a.is_loaded("alpha"));
+    assert_eq!(a.fences(), vec![None]);
+    // A lease holder's fenced steps do reach it.
+    b.loaded.lock().unwrap().insert("alpha".into(), false);
+    b.loaded.lock().unwrap().remove("alpha");
+    let r = co.place_round(&p, &*Book::new(1), &fence, None).await;
+    assert!(!r.fenced && r.done.len() == 1 && r.done[0].error.is_none(), "{r:?}");
+    assert!(a.is_loaded("alpha"));
+    assert_eq!(a.fences().last().unwrap(), &scheduler(1));
 }

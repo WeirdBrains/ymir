@@ -113,6 +113,24 @@ pub trait ModelNode: Send + Sync {
     /// Loads `model`. `force` is an operator's explicit load: it also clears a crash loop.
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>>;
     fn unload<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Result<(), RemoteError>>;
+    /// Whether the node checks a placement-lease fence on load and unload (`weirdnet-backends`
+    /// 0.4.11 `Capability::fencing`). A node that doesn't is sent unfenced commands.
+    fn fencing(&self) -> bool {
+        false
+    }
+    /// [`load`](Self::load) under the placement lease: a fencing node refuses it, loading
+    /// nothing, when it has seen a newer term (`weirdnet_backends::fence::FenceRefusal`). A node
+    /// that doesn't fence (an in-process one, or one before `weirdnet-backends` 0.4.11) loads
+    /// unfenced, as before.
+    fn load_fenced<'a>(&'a self, model: &'a str, force: bool, fence: &'a weirdnet_backends::fence::Fence) -> BoxFuture<'a, Result<(), RemoteError>> {
+        let _ = fence;
+        self.load(model, force)
+    }
+    /// [`unload`](Self::unload) under the placement lease; as [`load_fenced`](Self::load_fenced).
+    fn unload_fenced<'a>(&'a self, model: &'a str, fence: &'a weirdnet_backends::fence::Fence) -> BoxFuture<'a, Result<(), RemoteError>> {
+        let _ = fence;
+        self.unload(model)
+    }
     /// Streams an answer from loaded `model`: fully assembled messages in, chunks out.
     fn chat<'a>(&'a self, model: &'a str, req: &'a Request) -> BoxFuture<'a, Result<ChunkStream, RemoteError>>;
     /// Embeds `input` with loaded embedding `model`.

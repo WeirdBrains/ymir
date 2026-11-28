@@ -30,8 +30,16 @@
 //! before every step in it, the holder checks that its lease is still valid and that no plan of a
 //! newer term has reached it (a [`weirdnet_sync::FenceGuard`] over the terms seen). A paused or
 //! partitioned ex-holder that wakes up sees the new holder's plan on its next sync pass and stops,
-//! and `publish_plan` itself refuses a stale term. Model nodes do not check terms yet: node/1
-//! `Load`/`Unload` carry none (a `weirdnet-backends` gap; see docs/DESIGN.md, M6 status).
+//! and `publish_plan` itself refuses a stale term.
+//!
+//! **Model-node fencing.** The holder's steps go to model nodes as `weirdnet-backends` 0.4.11
+//! node/1 `LoadFenced`/`UnloadFenced` carrying `(ymir.scheduler, term)` when the node's record
+//! says `fencing`; such a node keeps the newest term it has seen (in `state/model-fence.cbor`)
+//! and refuses an older one, changing nothing. So an ex-holder whose plan check has not caught
+//! up yet is still stopped at the node. A `FenceRefusal::Stale` ends the round, never retried:
+//! the term the node saw goes into this holder's [`Fence`], so it places again only under a
+//! newer term. A node that requires a fence (`fence_required`) and refuses an unfenced step
+//! from a lease-less placer is left out of lease-less rounds. Older nodes get unfenced commands.
 //!
 //! **Cloud-wide swap.** A cold request loads its model where it is cheapest ([`cold_rank`]): a
 //! node already loading it, then one that would evict nothing, the fewest models loaded, the
@@ -44,6 +52,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use weirdnet_backends::fence::{Fence as NodeFence, FenceRefusal};
 use weirdnet_backends::{ModelState, ModelStatus};
 use weirdnet_sync::{FenceGuard, LeaseName, Term};
 
@@ -157,6 +166,8 @@ pub fn plan(model: &str, want: u32, nodes: &[NodeView]) -> Option<Step> {
 pub struct Done {
     pub step: Step,
     pub error: Option<String>,
+    /// The model node refused the step for a newer scheduler term (`FenceRefusal::Stale`).
+    pub fenced: bool,
 }
 
 fn active(s: &ModelState) -> bool {
@@ -319,10 +330,13 @@ pub struct Round {
     pub published: Option<(Term, u64)>,
 }
 
-/// The holder's own fence: the terms of plans seen, so a holder whose term is older stops.
+/// The holder's own fence: the terms of plans seen (and of model nodes' refusals), so a holder
+/// whose term is older stops.
 pub struct Fence {
     guard: Mutex<FenceGuard>,
     name: LeaseName,
+    /// Model nodes that refused an unfenced step because they require a fence.
+    requires: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Default for Fence {
@@ -333,7 +347,30 @@ impl Default for Fence {
 
 impl Fence {
     pub fn new() -> Self {
-        Self { guard: Mutex::new(FenceGuard::new()), name: LeaseName::new(SCHEDULER_LEASE).expect("a valid lease name") }
+        Self {
+            guard: Mutex::new(FenceGuard::new()),
+            name: LeaseName::new(SCHEDULER_LEASE).expect("a valid lease name"),
+            requires: Mutex::new(Default::default()),
+        }
+    }
+
+    /// Records a term seen elsewhere (a model node's refusal), without checking anything.
+    pub fn saw(&self, term: Term) {
+        let _ = self.guard.lock().unwrap_or_else(|e| e.into_inner()).check(&self.name, term);
+    }
+
+    /// The newest term seen.
+    pub fn seen(&self) -> Option<Term> {
+        self.guard.lock().unwrap_or_else(|e| e.into_inner()).seen(&self.name)
+    }
+
+    /// Whether `node` refused an unfenced step because it requires a fence.
+    pub fn requires(&self, node: &str) -> bool {
+        self.requires.lock().unwrap_or_else(|e| e.into_inner()).contains(node)
+    }
+
+    fn required_by(&self, node: &str) {
+        self.requires.lock().unwrap_or_else(|e| e.into_inner()).insert(node.to_string());
     }
 
     /// Records `seen` (a published plan's term) and checks `ours` against everything seen.
@@ -389,15 +426,33 @@ impl Coordinator {
             tracing::info!("placement: a newer scheduler term has published, or the lease ran out; not placing");
             return round;
         }
+        let node_fence = term.map(|t| NodeFence::new(SCHEDULER_LEASE, t.0));
+        // A node that requires a fence takes nothing from a lease-less placer.
+        let views_of = |nodes: &[Arc<dyn ModelNode>], model: &str| -> Vec<NodeView> {
+            nodes
+                .iter()
+                .map(|n| {
+                    let mut v = view(self, n, model);
+                    v.closed |= term.is_none() && fence.requires(n.name());
+                    v
+                })
+                .collect()
+        };
         let mut swapped = Vec::new();
         for (model, want) in &policy.replicas {
             let nodes = self.nodes();
-            let views: Vec<NodeView> = nodes.iter().map(|n| view(self, n, model)).collect();
+            let views = views_of(&nodes, model);
             let Some(step) = plan(model, *want, &views) else { continue };
             if !leads(&mut round) {
                 return round;
             }
-            round.done.push(self.take(&nodes, step).await);
+            let d = self.take(&nodes, step, node_fence.as_ref(), fence).await;
+            let stop = d.fenced;
+            round.done.push(d);
+            if stop {
+                round.fenced = true;
+                return round;
+            }
         }
         if let Some(idle) = policy.idle_unload() {
             let nodes = self.nodes();
@@ -411,8 +466,7 @@ impl Coordinator {
                         self.demand().touch(&s.id);
                     }
                     if !views.contains_key(&s.id) {
-                        let v = nodes.iter().map(|n| view(self, n, &s.id)).collect();
-                        views.insert(s.id.clone(), v);
+                        views.insert(s.id.clone(), views_of(&nodes, &s.id));
                     }
                 }
             }
@@ -420,7 +474,12 @@ impl Coordinator {
                 if !leads(&mut round) {
                     return round;
                 }
-                let d = self.take(&nodes, step).await;
+                let d = self.take(&nodes, step, node_fence.as_ref(), fence).await;
+                if d.fenced {
+                    round.done.push(d);
+                    round.fenced = true;
+                    return round;
+                }
                 if d.error.is_none()
                     && let Step::Unload { model, .. } = &d.step
                 {
@@ -459,18 +518,35 @@ impl Coordinator {
         PlacementPlan { models, swapped_out: Vec::new() }
     }
 
-    async fn take(&self, nodes: &[Arc<dyn ModelNode>], step: Step) -> Done {
+    /// Takes `step`, fenced with `node_fence` under a lease. A model node's stale-term refusal
+    /// is recorded in `fence` and marks the step `fenced` (the round stops; never retried); a
+    /// node that requires a fence is remembered so lease-less rounds leave it alone.
+    async fn take(&self, nodes: &[Arc<dyn ModelNode>], step: Step, node_fence: Option<&NodeFence>, fence: &Fence) -> Done {
         let (Step::Load { node, .. } | Step::Unload { node, .. }) = &step;
-        let Some(n) = nodes.iter().find(|n| n.name() == node) else { return Done { step, error: Some("the node went away".into()) } };
-        let r = match &step {
-            Step::Load { model, .. } => n.load(model, false).await,
-            Step::Unload { model, .. } => n.unload(model).await,
+        let Some(n) = nodes.iter().find(|n| n.name() == node) else { return Done { step, error: Some("the node went away".into()), fenced: false } };
+        let r = match (&step, node_fence) {
+            (Step::Load { model, .. }, Some(f)) => n.load_fenced(model, false, f).await,
+            (Step::Unload { model, .. }, Some(f)) => n.unload_fenced(model, f).await,
+            (Step::Load { model, .. }, None) => n.load(model, false).await,
+            (Step::Unload { model, .. }, None) => n.unload(model).await,
         };
+        let mut fenced = false;
         match &r {
             Ok(()) => tracing::info!(?step, "placement"),
-            Err(e) => tracing::warn!(?step, "placement: {e}"),
+            Err(e) => match FenceRefusal::from_error(e) {
+                Some(FenceRefusal::Stale { seen, .. }) => {
+                    fence.saw(Term(seen));
+                    fenced = true;
+                    tracing::info!(?step, seen, "placement: the model node has seen a newer scheduler term; stopping");
+                }
+                Some(FenceRefusal::Required) if node_fence.is_none() => {
+                    fence.required_by(n.name());
+                    tracing::warn!(?step, "placement: the model node takes only fenced steps; leaving it out until this node holds the lease");
+                }
+                _ => tracing::warn!(?step, "placement: {e}"),
+            },
         }
-        Done { step, error: r.err().map(|e| e.to_string()) }
+        Done { step, error: r.err().map(|e| e.to_string()), fenced }
     }
 
     /// Runs [`Self::place_round`] every `policy.every()`, publishing through `book`.
