@@ -3,7 +3,7 @@
 class Ymir < Formula
   desc "Private cloud of LLM models on your own machines (node daemon and CLI)"
   homepage "https://github.com/WeirdBrains/ymir"
-  version "0.23.0"
+  version "0.24.0"
   license all_of: ["BSD-3-Clause", "MIT"] # Ymir; the bundled llama.cpp
 
   # Apple Silicon only; Intel (x86_64) macOS is not built.

@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.99"
 license = "BSD-3-Clause"
@@ -19,9 +19,9 @@ authors = ["Weird Brains LLC"]
 async-trait = "0.1"
 # Crates in this workspace. The ones marked "to be extracted" in their README are generic and move
 # to weirdnet-* crates (Weirdnet lead); app crates depend on them only through these names.
-ymir-core = { path = "crates/ymir-core", version = "0.23.0" }
-ymird = { path = "crates/ymird", version = "0.23.0" }
-ymirctl = { path = "crates/ymirctl", version = "0.23.0" }
+ymir-core = { path = "crates/ymir-core", version = "0.24.0" }
+ymird = { path = "crates/ymird", version = "0.24.0" }
+ymirctl = { path = "crates/ymirctl", version = "0.24.0" }
 
 # Published Weirdnet crates, used as they are.
 weirdnet-agent = { version = "0.5.11", features = ["pool", "serve", "jobs"] }

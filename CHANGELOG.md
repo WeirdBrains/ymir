@@ -6,6 +6,8 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-28
+
 ### Added
 
 - Model-node fencing for placement (M6): the `ymir.scheduler` lease holder's loads and unloads carry its term
@@ -81,6 +83,7 @@ All notable changes to Ymir are listed here. The format follows
   `limits = { video_max_seconds, video_max_bytes, video_frames_per_minute }`. catalog/1 publishes `inputs.video` and the
   limits, the bridge's `/v1/models` `weirdnet.video`, and `ymirctl status` shows them, so Bragi V4 (`d39a236`) sends whole
   clips when they fit. llama.cpp and MLX models can't set it.
+- M6 model-node fencing on weirdnet-backends 0.4.11, Intel macOS dropped, vllm-ray port hardening, rollout list without an inference role
 
 ### Changed
 
