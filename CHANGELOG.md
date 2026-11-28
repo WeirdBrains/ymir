@@ -111,6 +111,10 @@ All notable changes to Ymir are listed here. The format follows
 
 - `weirdnet-semcache` 0.2.3 with the `pool` feature (was 0.2.2).
 
+### Fixed
+
+- `ymirctl models rollout list` on a node without the inference role said "ymird is not running here" while ymird was running. It now says the node has no inference role, so no rollouts are routed there (and lists any in node.toml without suggesting `add`).
+
 ## [0.23.0] - 2026-11-27
 
 ### Added

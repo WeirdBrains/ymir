@@ -1634,6 +1634,7 @@ mod tests {
         let mmproj = d.path().join("mmproj-tts.gguf");
         std::fs::write(&mmproj, b"x").unwrap();
         // A llama.cpp speaker with its projector, and a vLLM-Omni one narrowed to two voices.
+        // mmproj is a TOML literal string so a Windows path's backslashes are not escapes.
         let cfg: NodeConfig = toml::from_str(&format!(
             r#"
             [model]
@@ -1642,7 +1643,7 @@ mod tests {
             id = "tts"
             file = "/m/tts.gguf"
             role = "speak"
-            mmproj = "{}"
+            mmproj = '{}'
             [[model.local]]
             id = "qwen3-tts-0.6b-customvoice"
             backend = "vllm-omni"
