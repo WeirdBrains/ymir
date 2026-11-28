@@ -2204,7 +2204,9 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
   `weirdnet-sync` 0.7 and `weirdnet-device-link` 0.4 give service nodes a node certificate and sync keys
   without the root seed; `ymirctl pool cert-only` moves an existing node and wipes its seed copy; a node
   can be revoked without rotating the root identity. Bragi links a server cert-only with
-  `bragi-tui link CODE --server inference|model` (Bragi v0.5.0).
+  `bragi-tui link CODE --server inference|model` (Bragi v0.5.0). Since Bragi's cert-only default
+  (2026-11-28) any Ymir server code (`ymirctl pool link`) is linked cert-only as an inference node in every
+  Bragi app, and `bragi-tui link CODE --full-identity` is the opt-out that sends the seed.
 - **M11 Sharing a pool with other identities** (built 2026-11-27, in-process tests only; see
   [docs/design/pool-sharing.md](design/pool-sharing.md)).
 
