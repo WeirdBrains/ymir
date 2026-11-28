@@ -15,8 +15,15 @@ use weirdnet_model::hw::{Accel, Hardware};
 
 /// First vLLM version whose recipe includes Inkling 2 Mini. 0.34.0 does not. Support landed on
 /// main in vllm-project/vllm#69028 and is also published as the `inkling-2-mini` image until a
-/// release has it (`nightly_required` on 0.35.0).
+/// release has it (`nightly_required` on 0.35.0). Nightlies built after it (merge commit
+/// ab18334, 2026-11-21) carry it but are numbered below this (`0.34.1rc1.devN+gSHA`), so the
+/// managed install ([`crate::vllm_install`]) checks vLLM's model registry instead and records it.
 pub const INKLING_MIN_VERSION: (u64, u64, u64) = (0, 35, 0);
+
+/// The architecture vLLM registers for Inkling 2 Mini (`vllm/model_executor/models/registry.py`).
+pub const INKLING_ARCH: &str = "InklingForConditionalGeneration";
+/// The class vLLM main registers Inkling 2 Mini (`inkling2_loop`) as.
+pub const INKLING2_LOOP_ARCH: &str = "Inkling2LoopForConditionalGeneration";
 
 /// Day-0 image with Inkling 2 Mini, including linux/arm64 for DGX Spark.
 pub const INKLING_IMAGE: &str = "vllm/vllm-openai:inkling-2-mini";
@@ -25,6 +32,16 @@ pub const INKLING_IMAGE: &str = "vllm/vllm-openai:inkling-2-mini";
 /// sizes `--max-model-len` from the model and the node, see [`crate::kvfit`]); it is only the
 /// example for a container started by hand and wrapped.
 pub const SPARK_MAX_MODEL_LEN: u32 = 262_144;
+
+/// The managed vLLM venv (`ymirctl engines install vllm`): vLLM and Ray, under the engines dir.
+pub fn venv(engines_dir: &Path) -> PathBuf {
+    engines_dir.join("vllm")
+}
+
+/// A program in a venv: `bin/NAME` (`Scripts\\NAME.exe` on Windows).
+pub fn bin_in(venv: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) { venv.join("Scripts").join(format!("{name}.exe")) } else { venv.join("bin").join(name) }
+}
 
 /// A Hugging Face repo, file path or Hub id that is Inkling 2 Mini (or its varloop research
 /// checkpoint).
@@ -70,7 +87,7 @@ pub fn inkling_unsupported_message(found: Option<(u64, u64, u64)>) -> String {
         None => "unknown".into(),
     };
     format!(
-        "this node's vLLM ({have}) cannot load Inkling 2 Mini (inkling2_loop). It needs vLLM {}.{}.{} or a newer nightly, or the {INKLING_IMAGE} image (support is not in 0.34.0, and is not in a vLLM release yet). Point `[model] vllm` at `image:{INKLING_IMAGE}`, or start the image yourself and wrap it: `docker run --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface {INKLING_IMAGE} thinkingmachines/Inkling-2-Mini --reasoning-parser inkling --tool-call-parser inkling --enable-auto-tool-choice --max-model-len {SPARK_MAX_MODEL_LEN}` then set `wrap = \"http://127.0.0.1:8000/v1\"` and `context = {SPARK_MAX_MODEL_LEN}` (the same length) on the model",
+        "this node's vLLM ({have}) cannot load Inkling 2 Mini (inkling2_loop). It needs vLLM {}.{}.{} or a nightly built since 2026-11-21 (`ymirctl engines install vllm` installs one and checks it), or the {INKLING_IMAGE} image (support is not in 0.34.0, and is not in a vLLM release yet). Point `[model] vllm` at `image:{INKLING_IMAGE}`, or start the image yourself and wrap it: `docker run --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface {INKLING_IMAGE} thinkingmachines/Inkling-2-Mini --reasoning-parser inkling --tool-call-parser inkling --enable-auto-tool-choice --max-model-len {SPARK_MAX_MODEL_LEN}` then set `wrap = \"http://127.0.0.1:8000/v1\"` and `context = {SPARK_MAX_MODEL_LEN}` (the same length) on the model",
         INKLING_MIN_VERSION.0, INKLING_MIN_VERSION.1, INKLING_MIN_VERSION.2
     )
 }
@@ -187,10 +204,20 @@ pub fn ensure_inkling(program: &Path, via_image: bool) -> Result<()> {
         return Ok(());
     }
     let p = probe(program);
-    if p.supports_inkling(false) {
+    if p.supports_inkling(false) || managed_with_inkling(program) {
         return Ok(());
     }
     bail!("{}", inkling_unsupported_message(p.version));
+}
+
+/// Whether `program` is the managed venv's `vllm` and its install record says the registry has
+/// Inkling (`ymirctl engines install vllm` checked it).
+pub fn managed_with_inkling(program: &Path) -> bool {
+    program
+        .parent()
+        .and_then(Path::parent)
+        .and_then(crate::vllm_install::read_record)
+        .is_some_and(|r| r.inkling && program.file_name() == Some(std::ffi::OsStr::new(if cfg!(windows) { "vllm.exe" } else { "vllm" })))
 }
 
 /// A small `vllm` shim that runs `docker` or `podman` with `--entrypoint vllm`, so the supervisor

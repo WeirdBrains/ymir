@@ -119,10 +119,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS is Apple Silicon only; Intel (x86_64-apple-darwin) was dropped after v0.23.0.
           - target: aarch64-apple-darwin
             runner: macos-15
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -238,6 +237,8 @@ jobs:
           if ($msis.ContainsKey("arm64")) { $setup += @("-MsiArm64", $msis["arm64"]) }
           powershell -File packaging\windows\make-installer.ps1 @setup
           if ($LASTEXITCODE -ne 0) { throw "YmirSetup build failed" }
+          # WiX debug databases are build output, not release files.
+          Remove-Item -Path dist\*.wixpdb -ErrorAction SilentlyContinue
           Get-ChildItem dist
       - uses: actions/upload-artifact@v4
         with:
@@ -245,9 +246,42 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  freebsd:
+    # M9: built in a FreeBSD 14.2 VM (no cross build: aws-lc-sys needs a FreeBSD sysroot), x86_64
+    # only. No bundled llama.cpp (upstream has no BSD builds; the pkg message names misc/llama-cpp),
+    # so no real-model smoke test here; .github/workflows/freebsd.yml runs the rc.d service.
+    name: freebsd (x86_64-unknown-freebsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
+      - uses: cross-platform-actions/action@v0.29.0
+        with:
+          operating_system: freebsd
+          version: '14.2'
+          memory: 12G
+          cpu_count: 4
+          run: |
+            set -eux
+            set -o pipefail
+            sudo pkg install -y ca_root_nss curl git cmake pkgconf python3 perl5
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --release --locked -p ymird -p ymirctl
+            python3 scripts/package.py --out dist
+            ls -l dist
+            ls dist/ymir-*-x86_64-unknown-freebsd.tar.gz dist/ymir-*-x86_64-unknown-freebsd.pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-x86_64-unknown-freebsd
+          path: dist/
+          if-no-files-found: error
+
   sums:
     name: SHA256SUMS
-    needs: [linux, arch, macos, windows, windows-installer]
+    needs: [linux, arch, macos, windows, windows-installer, freebsd]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v5
@@ -255,6 +289,19 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.checkout_ref || github.ref }}
+          path: src
+      - name: Every self-update bundle has its archive
+        # Signing happens on the release machine (`weirdnet_release.py updates VERSION --upload`),
+        # never here: the release key is not a CI secret. This checks the plan against the build.
+        run: |
+          ref="${{ github.event.inputs.checkout_ref || github.ref_name }}"
+          v="${ref#v}"
+          case "$v" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a release tag ($ref): skipped"; exit 0;; esac
+          case "$v" in *-*) echo "pre-release $v: no update bundles"; exit 0;; esac
+          python3 src/scripts/weirdnet_release.py --repo src updates "$v" --dist dist --dry-run
       - name: One SHA256SUMS for every file
         run: |
           cd dist && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS && cat SHA256SUMS

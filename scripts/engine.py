@@ -20,7 +20,10 @@ and GPU backends, LICENSE files and engine.toml. Release files put DIR at lib/ym
 `build` compiles the same set from source at the pinned build, for targets upstream doesn't publish
 binaries for (FreeBSD, OpenBSD and other BSDs, or distribution builds that must build from source).
 `--trainer` adds `llama-finetune` at the same build, for scripts/trainer.py (fine-tuning, training
-plan P3a); upstream's release archives don't carry it.
+plan P3a; upstream's release archives don't carry it), and `llama-tokenize`, which the trainer uses to
+check the training text is long enough. Only that build applies the patches in
+packaging/engines/patches/ (TRAINER_PATCHES), and they touch only llama-finetune's source, so
+llama-server and rpc-server stay upstream's.
 """
 
 import argparse
@@ -43,6 +46,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PIN = ROOT / "packaging/engines/llama.cpp.toml"
 UPSTREAM = "ggml-org/llama.cpp"
+PATCHES = ROOT / "packaging/engines/patches"
+# Applied by `build --trainer`, in order. Each touches only examples/training/finetune.cpp, and each
+# id is what the patched `llama-finetune --ymir-patches` prints (scripts/trainer.py REQUIRED_PATCHES).
+#   parse-special: tokenize the training text with parse_special = true, so the chat template's
+#   special tokens train as the tokens the model emits. Drop it once upstream releases the fix
+#   (tracked: draft ggml-org/llama.cpp#31258) and the pin moves past it.
+TRAINER_PATCHES = {"parse-special": "llama-finetune-parse-special.patch"}
 
 # Which upstream archives make up each (target, variant). `{b}` is the build. The CUDA builds use
 # CUDA 13, whose default architectures cover Turing (sm_75) through Blackwell, GB10 (sm_121) included.
@@ -52,7 +62,6 @@ LAYOUT = {
     ("aarch64-unknown-linux-gnu", "default"): (["cpu", "vulkan"], ["llama-{b}-bin-ubuntu-vulkan-arm64.tar.gz"]),
     ("aarch64-unknown-linux-gnu", "cuda"): (["cpu", "cuda"], ["llama-{b}-bin-ubuntu-cuda-13.5-arm64.tar.gz", "cudart-llama-{b}-bin-ubuntu-cuda-13.5-arm64.tar.gz"]),
     ("aarch64-apple-darwin", "default"): (["cpu", "metal"], ["llama-{b}-bin-macos-arm64.tar.gz"]),
-    ("x86_64-apple-darwin", "default"): (["cpu"], ["llama-{b}-bin-macos-x64.tar.gz"]),
     ("x86_64-pc-windows-msvc", "default"): (["cpu", "vulkan"], ["llama-{b}-bin-win-vulkan-x64.zip"]),
     ("x86_64-pc-windows-msvc", "cuda"): (["cpu", "cuda"], ["llama-{b}-bin-win-cuda-13.5-x64.zip", "cudart-llama-bin-win-cuda-13.5-x64.zip"]),
     ("aarch64-pc-windows-msvc", "default"): (["cpu", "vulkan"], ["llama-{b}-bin-win-vulkan-arm64.zip"]),
@@ -60,7 +69,7 @@ LAYOUT = {
 
 PROGRAMS = {"llama-server": "llama-server", "ggml-rpc-server": "rpc-server", "rpc-server": "rpc-server"}
 # With `build --trainer`.
-TRAINER_PROGRAMS = {"llama-finetune": "llama-finetune"}
+TRAINER_PROGRAMS = {"llama-finetune": "llama-finetune", "llama-tokenize": "llama-tokenize"}
 LIB_PREFIXES = ("ggml", "llama", "mtmd", "cudart", "cublas")
 CUDA_NOTICE = """The CUDA runtime libraries in this directory (cudart, cuBLAS, cuBLASLt) are NVIDIA CUDA
 Toolkit redistributables, shipped unmodified under the NVIDIA CUDA Toolkit End User License
@@ -156,7 +165,7 @@ def keep(name, trainer=False):
     if not stem.startswith(LIB_PREFIXES):
         return None
     # Each llama.cpp tool has an -impl library; only the server's is needed.
-    if stem.endswith("-impl") and not stem.startswith("llama-server-impl") and not (trainer and stem.startswith("llama-finetune-impl")):
+    if stem.endswith("-impl") and not stem.startswith("llama-server-impl") and not (trainer and stem.startswith(("llama-finetune-impl", "llama-tokenize-impl"))):
         return None
     return name
 
@@ -176,7 +185,7 @@ def select(src, out, trainer=False):
             os.symlink(os.readlink(p), dest)
         else:
             shutil.copy2(p, dest)
-            if name.removesuffix(".exe") in ("llama-server", "rpc-server", "llama-finetune") or ".so" in name or name.endswith(".dylib"):
+            if name.removesuffix(".exe") in ("llama-server", "rpc-server", "llama-finetune", "llama-tokenize") or ".so" in name or name.endswith(".dylib"):
                 dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         kept.append(name)
     # Drop symlinks whose target was not kept.
@@ -186,12 +195,61 @@ def select(src, out, trainer=False):
             kept.remove(p.name)
     if not any(k.startswith("llama-server") for k in kept):
         sys.exit(f"no llama-server in {src}")
-    if trainer and not any(k.startswith("llama-finetune") for k in kept):
-        sys.exit(f"no llama-finetune in {src}")
+    for prog in TRAINER_PROGRAMS if trainer else ():
+        if not any(k.startswith(prog) for k in kept):
+            sys.exit(f"no {prog} in {src}")
     return kept
 
 
-def write_info(out, build, variant, backends, source):
+def trainer_patches():
+    return [PATCHES / name for name in TRAINER_PATCHES.values()]
+
+
+def apply_patch(src, patch):
+    """Applies `patch` to the llama.cpp tree `src` with git; a tree that already has it (a reused
+    --work) is left as it is. Exits if it does not apply cleanly."""
+    git = ["git", "-C", str(src), "apply", "--whitespace=nowarn"]
+    if subprocess.run([*git, "--reverse", "--check", str(patch)], capture_output=True).returncode == 0:
+        print(f"{patch.name}: already applied", file=sys.stderr)
+        return
+    r = subprocess.run([*git, "--check", str(patch)], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"{patch.name} does not apply to llama.cpp {load_pin()['build']}: {r.stderr.strip()}")
+    subprocess.run([*git, str(patch)], check=True)
+    print(f"{patch.name}: applied", file=sys.stderr)
+
+
+def build_number(build):
+    """12628 for the llama.cpp build `b12628`."""
+    m = re.fullmatch(r"b(\d+)", build)
+    if not m:
+        sys.exit(f"{build}: a llama.cpp build is bNNNN")
+    return int(m.group(1))
+
+
+def build_plan(a, src, build):
+    """The steps of `build`, in order: ("patch", PATH) for each trainer patch (with --trainer only),
+    then ("run", ARGV) for cmake's configure and build."""
+    rpath = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
+    defs = [
+        "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=" + ("ON" if a.trainer else "OFF"),
+        "-DLLAMA_BUILD_SERVER=ON", "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON", "-DGGML_RPC=ON",
+        f"-DCMAKE_INSTALL_RPATH={rpath}", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
+        # llama.cpp counts commits for its build number, which is 1 in our shallow clone; the
+        # programs then report `build 1`, and scripts/trainer.py's pin check would refuse them.
+        f"-DLLAMA_BUILD_NUMBER={build_number(load_pin()['build'])}",
+    ]
+    if platform.machine() in ("x86_64", "AMD64", "amd64", "aarch64", "arm64") and not a.no_cpu_variants:
+        defs.append("-DGGML_CPU_ALL_VARIANTS=ON")
+    for b in a.backend or []:
+        defs.append({"vulkan": "-DGGML_VULKAN=ON", "cuda": "-DGGML_CUDA=ON", "metal": "-DGGML_METAL=ON", "rocm": "-DGGML_HIP=ON"}[b])
+    steps = [("patch", p) for p in trainer_patches()] if a.trainer else []
+    steps.append(("run", ["cmake", "-S", str(src), "-B", str(build), "-G", "Ninja" if shutil.which("ninja") else "Unix Makefiles", *defs]))
+    steps.append(("run", ["cmake", "--build", str(build), "--config", "Release", "-j", str(a.jobs), "--target", "llama-server", "ggml-rpc-server", *(["llama-finetune", "llama-tokenize"] if a.trainer else [])]))
+    return steps
+
+
+def write_info(out, build, variant, backends, source, patches=()):
     lines = [
         "# The llama.cpp build shipped with Ymir (scripts/engine.py). ymirctl setup reads this.",
         'engine = "llama.cpp"',
@@ -200,6 +258,8 @@ def write_info(out, build, variant, backends, source):
         "backends = [" + ", ".join(f'"{b}"' for b in backends) + "]",
         f'source = "{source}"',
     ]
+    if patches:
+        lines.append("trainer_patches = [" + ", ".join(f'"{p}"' for p in patches) + "]")
     (out / "engine.toml").write_text("\n".join(lines) + "\n")
 
 
@@ -249,25 +309,18 @@ def cmd_build(a):
     src = work / "llama.cpp"
     if not src.exists():
         subprocess.run(["git", "clone", "--depth", "1", "--branch", pin["build"], f"https://github.com/{UPSTREAM}", str(src)], check=True)
-    rpath = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
-    defs = [
-        "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=" + ("ON" if a.trainer else "OFF"),
-        "-DLLAMA_BUILD_SERVER=ON", "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON", "-DGGML_RPC=ON",
-        f"-DCMAKE_INSTALL_RPATH={rpath}", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
-    ]
-    if platform.machine() in ("x86_64", "AMD64", "amd64", "aarch64", "arm64") and not a.no_cpu_variants:
-        defs.append("-DGGML_CPU_ALL_VARIANTS=ON")
     backends = ["cpu"] + list(a.backend or [])
-    for b in a.backend or []:
-        defs.append({"vulkan": "-DGGML_VULKAN=ON", "cuda": "-DGGML_CUDA=ON", "metal": "-DGGML_METAL=ON", "rocm": "-DGGML_HIP=ON"}[b])
     build = work / "build"
-    subprocess.run(["cmake", "-S", str(src), "-B", str(build), "-G", "Ninja" if shutil.which("ninja") else "Unix Makefiles", *defs], check=True)
-    subprocess.run(["cmake", "--build", str(build), "--config", "Release", "-j", str(a.jobs), "--target", "llama-server", "ggml-rpc-server", *(["llama-finetune"] if a.trainer else [])], check=True)
+    for kind, step in build_plan(a, src, build):
+        if kind == "patch":
+            apply_patch(src, step)
+        else:
+            subprocess.run(step, check=True)
     if out.exists():
         shutil.rmtree(out)
     select(build / "bin", out, a.trainer)
     shutil.copy(src / "LICENSE", out / "LICENSE-llama.cpp")
-    write_info(out, pin["build"], a.variant, backends, f"https://github.com/{UPSTREAM}/tree/{pin['build']} (built from source)")
+    write_info(out, pin["build"], a.variant, backends, f"https://github.com/{UPSTREAM}/tree/{pin['build']} (built from source)", list(TRAINER_PATCHES) if a.trainer else ())
     print(f"{out}: llama.cpp {pin['build']} built from source ({', '.join(backends)}, {dir_size(out) // (1 << 20)} MiB)")
     if a.check:
         check(out)
@@ -332,7 +385,7 @@ def main():
     p.add_argument("--variant", default="default")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     p.add_argument("--work", help="source and build directory (default: a temp dir)")
-    p.add_argument("--trainer", action="store_true", help="also build llama-finetune, for scripts/trainer.py")
+    p.add_argument("--trainer", action="store_true", help="also build llama-finetune and llama-tokenize, for scripts/trainer.py")
     p.add_argument("--no-cpu-variants", action="store_true", help="one CPU backend instead of one per CPU generation")
     p.add_argument("--check", action="store_true")
     p = sub.add_parser("pin")

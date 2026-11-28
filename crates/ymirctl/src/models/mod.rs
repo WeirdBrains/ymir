@@ -11,16 +11,20 @@
 //! quality-first quant choice (`plan.rs`), `node.toml` handling (`local.rs`) and the output.
 
 mod adapters;
+mod catalog;
+pub use catalog::CatalogArgs;
 
 /// `[[model.local.lora]]` editing, for `ymirctl train run --add`.
 pub(crate) use adapters::{add as adapters_add, save as adapters_save};
 mod ctxcmd;
 pub use ctxcmd::Live;
-mod hub;
+pub(crate) mod hub;
 mod local;
 mod plan;
 mod remote;
 pub mod rollout;
+mod upload;
+mod upload_rollout;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -40,12 +44,20 @@ use plan::{Capacity, KvSource, Verdict};
 pub enum ModelsCmd {
     /// Search the Hugging Face Hub for GGUF, MLX and (where vLLM can run) safetensors models, with a fit verdict for this node.
     Search(SearchArgs),
-    /// Download a model into this node's model directory and print its `[[model.local]]` entry.
+    /// Download a model into this node's model directory and print its `[[model.local]]` entry:
+    /// a Hub repo (`owner/name`) or a catalog id (`ymirctl models catalog`).
     Pull(PullArgs),
+    /// The models weirdnet-model ships pinned entries for (chat, embedding, transcription and
+    /// text-to-speech), with engine, size, license and what each speaker does.
+    Catalog(CatalogArgs),
     /// List the model files on this node and whether `node.toml` uses each.
     List(ListArgs),
     /// Delete a downloaded model's files (never edits `node.toml`).
     Remove(RemoveArgs),
+    /// Put a model or LoRA adapter trained elsewhere (a GGUF file) into this node's model
+    /// directory (or another model node's, with --node), with a provenance record, and add it to
+    /// node.toml there.
+    Upload(upload::UploadArgs),
     /// Show the context each model runs with on this node and why, or put models back on the
     /// automatic context (their full trained length, cut only where the KV cache would not fit).
     Context(ContextArgs),
@@ -59,6 +71,13 @@ pub enum ModelsCmd {
     Rollout {
         #[command(subcommand)]
         cmd: rollout::RolloutCmd,
+        /// Another inference node's rollouts, over Weirdnet (a roster label or peer id): read or
+        /// changed by that node's rules (`/ymir/rollouts/1`).
+        #[arg(long, global = true)]
+        inference: Option<String>,
+        /// With --inference: change only its live rollouts, not its node.toml (gone when its ymird restarts).
+        #[arg(long, global = true, requires = "inference")]
+        no_persist: bool,
     },
 }
 
@@ -125,8 +144,12 @@ pub struct SearchArgs {
 
 #[derive(Args, Debug)]
 pub struct PullArgs {
-    /// The Hub repo, `owner/name`.
+    /// The Hub repo, `owner/name`, or a catalog id such as `kokoro-82m` (`ymirctl models catalog`).
     pub repo: String,
+    /// Accept a restricted model's license by name, after reading it: `fish-audio-community` for
+    /// Fish Audio Drama 3. Without it such a model is refused before anything is downloaded.
+    #[arg(long, value_name = "LICENSE")]
+    pub accept_license: Option<String>,
     /// The quant to take, such as `Q4_K_M` (default: the best that fits this node).
     #[arg(long, short)]
     pub quant: Option<String>,
@@ -216,8 +239,11 @@ impl Ctx {
 
 /// Runs a `models` command. With `--node` it goes to the model nodes through the local `ymird`.
 pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: ModelsCmd) -> Result<()> {
-    if let ModelsCmd::Rollout { cmd } = cmd {
-        return rollout::run(paths, out, cmd).await;
+    if let ModelsCmd::Rollout { cmd, inference, no_persist } = cmd {
+        return match inference {
+            Some(node) => rollout::run_remote(paths, out, &node, cmd, !no_persist).await,
+            None => rollout::run(paths, out, cmd).await,
+        };
     }
     let node = match &cmd {
         ModelsCmd::Search(a) => a.node.node.clone(),
@@ -225,9 +251,36 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cm
         ModelsCmd::List(a) => a.node.node.clone(),
         ModelsCmd::Remove(a) => a.node.node.clone(),
         ModelsCmd::Adapter { cmd } => cmd.node(),
-        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } => None,
+        ModelsCmd::Upload(a) => a.node.clone(),
+        ModelsCmd::Context(_) | ModelsCmd::Rollout { .. } | ModelsCmd::Catalog(_) => None,
     };
+    // U9: a directory or projector from a machine that serves no models goes to the model node
+    // with the most room.
+    let node = match &cmd {
+        ModelsCmd::Upload(a) if node.is_none() && upload::goes_to_pool(NodeConfig::load(&paths.config()).ok().as_ref(), a) => {
+            Some("auto".to_string())
+        }
+        _ => node,
+    };
+    // A restricted license is accepted here or nothing goes out, to the Hub or to another node.
+    if let ModelsCmd::Pull(a) = &cmd {
+        catalog::license_gate(&a.repo, a.accept_license.as_deref())?;
+    }
+    if let ModelsCmd::Catalog(a) = &cmd {
+        return catalog::run(out, a);
+    }
     if let Some(node) = node {
+        if let ModelsCmd::Pull(a) = &cmd
+            && !a.repo.contains('/')
+            && weirdnet_model::hw::find(&a.repo).is_some()
+        {
+            bail!("{} is a catalog id; pull catalog entries on the node itself (without --node), or pull its Hub repo with --node", a.repo);
+        }
+        if let ModelsCmd::Pull(a) = &cmd
+            && a.accept_license.is_some()
+        {
+            bail!("--accept-license works on the machine that downloads: run `ymirctl models pull {} --accept-license ...` on that node", a.repo);
+        }
         return remote::run(paths, out, input, &node, cmd).await;
     }
     if let ModelsCmd::Pull(a) = &cmd
@@ -255,7 +308,8 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::List(a) => a.dir.dir.clone(),
         ModelsCmd::Remove(a) => a.dir.dir.clone(),
         ModelsCmd::Context(a) => a.dir.dir.clone(),
-        ModelsCmd::Search(_) | ModelsCmd::Adapter { .. } | ModelsCmd::Rollout { .. } => None,
+        ModelsCmd::Upload(a) => a.dir.dir.clone(),
+        ModelsCmd::Search(_) | ModelsCmd::Adapter { .. } | ModelsCmd::Rollout { .. } | ModelsCmd::Catalog(_) => None,
     };
     let env_store = ModelStore::from_env();
     let dir = dir_arg.or_else(|| cfg.as_ref().map(NodeConfig::models_dir)).unwrap_or_else(|| env_store.dir().to_path_buf());
@@ -278,12 +332,14 @@ fn run_local(paths: &Paths, out: &mut dyn Write, input: &mut dyn BufRead, cmd: M
         ModelsCmd::Remove(a) => remove(&ctx, out, input, &a),
         ModelsCmd::Context(a) => ctxcmd::run(&ctx, out, &a),
         ModelsCmd::Adapter { cmd } => adapters::run(&ctx, out, cmd),
+        ModelsCmd::Upload(a) => upload::run(&ctx, out, &a),
+        ModelsCmd::Catalog(a) => catalog::run(out, &a),
         ModelsCmd::Rollout { .. } => unreachable!("handled in run"),
     }
 }
 
 /// `812 MiB` under a GiB, else `12.4 GiB`.
-fn gib(b: u64) -> String {
+pub(crate) fn gib(b: u64) -> String {
     if b < plan::GIB { format!("{} MiB", b.div_ceil(1 << 20)) } else { human_gib(b) }
 }
 
@@ -527,8 +583,9 @@ impl Meter<'_> {
 }
 
 /// Downloads every file of `specs` (a split GGUF's shards, or an MLX repo's files) into `store`:
-/// resumes, checks size and SHA-256, and says what happened.
-fn download(ctx: &Ctx, out: &mut dyn Write, store: &ModelStore, name: &str, specs: &[ModelSpec]) -> Result<()> {
+/// resumes, checks size and SHA-256, and says what happened. `license`: a restricted license the
+/// operator accepted (`--accept-license`), which `weirdnet-model` needs for such files.
+pub(crate) fn download(ctx: &Ctx, out: &mut dyn Write, store: &ModelStore, name: &str, specs: &[ModelSpec], license: Option<&str>) -> Result<()> {
     let total: u64 = specs.iter().map(|s| s.size).sum();
     let dir = store.dir();
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -540,7 +597,11 @@ fn download(ctx: &Ctx, out: &mut dyn Write, store: &ModelStore, name: &str, spec
     }
     let here = specs.iter().all(|s| store.installed(s));
     let mut meter = Meter { out: &mut *out, total, tty: ctx.tty, last: 0 };
-    download_parts(store, specs, &Consent::given(&specs[0]), &mut |p| {
+    let consent = match license {
+        Some(l) => Consent::given(&specs[0]).accepting_license(l),
+        None => Consent::given(&specs[0]),
+    };
+    download_parts(store, specs, &consent, &mut |p| {
         meter.tick(name, p.done);
         true
     })?;
@@ -571,6 +632,13 @@ struct PullPlan {
 }
 
 fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs) -> Result<()> {
+    // Checked before the Hub is asked anything.
+    let license = catalog::license_gate(&a.repo, a.accept_license.as_deref())?;
+    if !a.repo.contains('/')
+        && let Some(e) = weirdnet_model::hw::find(&a.repo)
+    {
+        return catalog::pull(ctx, out, a, &e);
+    }
     let ggufs = ctx.hub().models(&a.repo)?;
     let info = if ggufs.is_empty() { Some(ctx.mlx.repo(&a.repo)?) } else { ctx.mlx.repo(&a.repo).ok() };
     if ggufs.is_empty() {
@@ -667,7 +735,7 @@ fn pull(ctx: &Ctx, out: &mut dyn Write, a: &PullArgs) -> Result<()> {
         return Ok(writeln!(out, "Dry run: nothing was downloaded.")?);
     }
     let name = plan.specs[0].id.clone();
-    download(ctx, out, &plan.store, &name, &plan.specs)?;
+    download(ctx, out, &plan.store, &name, &plan.specs, license)?;
     let role = a.role.clone().unwrap_or_else(|| {
         if a.repo.to_ascii_lowercase().contains("embed") {
             "embedding".into()

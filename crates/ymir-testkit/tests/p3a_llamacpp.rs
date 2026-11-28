@@ -67,7 +67,7 @@ async fn the_llamacpp_trainer_trains_and_extracts_an_adapter_ymir_serves() -> Re
     let paths = Paths::new(&home);
 
     let out = ctl(&home, &["train", "check"]).await?;
-    assert!(out.contains("llama.cpp build b12628 (interface 1), as pinned"), "{out}");
+    assert!(out.contains("llama.cpp build b12628 (interface 2), as pinned"), "{out}");
 
     let data = root.join("chats.jsonl");
     let body = "{\"id\": \"c1\", \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}, {\"role\": \"assistant\", \"content\": \"hello\"}]}\n";
@@ -86,14 +86,14 @@ async fn the_llamacpp_trainer_trains_and_extracts_an_adapter_ymir_serves() -> Re
     let out =
         ctl(&home, &["train", "run", "--base", "alpha", "--dataset", &d, "--epochs", "2", "--rank", "4", "--id", "alpha+chats", "--add"]).await?;
     assert!(out.contains("train: 8/8") && out.contains("extract-lora: 4/4"), "{out}");
-    assert!(out.contains("Done: 8 steps, final loss 0.2500. Adapter `alpha+chats` is adapters/alpha+chats.gguf"), "{out}");
+    assert!(out.contains("Done: 8 steps, final loss 0.2500. Adapter `alpha+chats` is adapters/alpha+chats/alpha+chats.gguf"), "{out}");
     assert!(train::held(&paths).is_none(), "the GPU is free again");
 
     let run = out.split_whitespace().nth(1).expect("the run id").to_string();
     let r: train::RunRecord = serde_json::from_str(&std::fs::read_to_string(paths.state().join("train").join(&run).join("run.json"))?)?;
     assert_eq!((r.status, r.trainer.engine.as_str(), r.trainer.build.as_str()), (RunStatus::Done, "llama.cpp", "b12628"));
     let log = std::fs::read_to_string(paths.state().join("train").join(&run).join("trainer.log")).unwrap_or_default();
-    let adapter = models.join("adapters/alpha+chats.gguf");
+    let adapter = models.join("adapters/alpha+chats/alpha+chats.gguf");
     let names = python(
         &py,
         &format!(
@@ -107,6 +107,6 @@ async fn the_llamacpp_trainer_trains_and_extracts_an_adapter_ymir_serves() -> Re
         "{log}"
     );
     let cfg = NodeConfig::load(&paths.config())?;
-    assert_eq!(cfg.model.local[0].lora[0].file, "adapters/alpha+chats.gguf");
+    assert_eq!(cfg.model.local[0].lora[0].file, "adapters/alpha+chats/alpha+chats.gguf");
     Ok(())
 }

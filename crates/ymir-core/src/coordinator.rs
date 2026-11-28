@@ -2,7 +2,7 @@
 //! cold-start stand-in. It speaks `weirdnet-agent` infer/2 requests end to end; [`crate::host`]
 //! serves it as an `InferHost`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -50,11 +50,24 @@ pub struct CoordinatorOptions {
     pub splits: Vec<crate::group::SplitPolicy>,
     /// Versioned rollouts at start (P4b); [`Coordinator::set_rollouts`] changes them live.
     pub rollouts: Vec<crate::rollout::Rollout>,
+    /// The semantic answer cache (M6), behind the exact one; `None`: off.
+    pub semantic: Option<crate::semantic::SemanticOptions>,
+    /// Whether guests of a shared pool may use each speaker this node's config lists
+    /// (`[model.local.speak] guests`, else closed for a restricted license). A speaker not
+    /// listed here goes by the license its node publishes ([`Coordinator::guests_may_speak`]).
+    pub speak_guests: HashMap<String, bool>,
 }
 
 impl Default for CoordinatorOptions {
     fn default() -> Self {
-        Self { standin: None, standin_after: Duration::from_secs(10), splits: Vec::new(), rollouts: Vec::new() }
+        Self {
+            standin: None,
+            standin_after: Duration::from_secs(10),
+            splits: Vec::new(),
+            rollouts: Vec::new(),
+            semantic: None,
+            speak_guests: HashMap::new(),
+        }
     }
 }
 
@@ -66,10 +79,31 @@ pub struct CatalogRow {
     /// The nodes (among `nodes`) that are draining: they finish what they have and take no more.
     pub draining: Vec<String>,
     pub embedding: bool,
+    /// Speech to text: at least one node's copy has the transcription role and can serve it
+    /// (catalog/1 purpose `transcribe`, video design milestone 2).
+    pub transcribe: bool,
+    /// Text to speech: at least one node's copy has the speech role and can serve it (catalog/1
+    /// purpose `speak`, audio design milestone 7).
+    pub speak: bool,
+    /// What it speaks, as the first node that reports a profile says (the engine's report over
+    /// the catalog entry, narrowed by that node's settings).
+    pub speech: Option<weirdnet_agent::speech::SpeechProfile>,
     /// The inputs beyond text that at least one node's copy takes (images, audio).
     pub inputs: Modalities,
     /// For a LoRA adapter: the base model it runs on (as the first node that has it says).
     pub base: Option<String>,
+    /// Where it came from (`hub`, `upload`, `train`) and its license, as the first node that
+    /// knows says (U8).
+    pub origin: Option<String>,
+    pub license: Option<String>,
+    /// The context window a request can count on wherever it is routed: the smallest
+    /// [`status_context`](crate::model_node::status_context) of the nodes that have it (what the
+    /// engine measured at load, else the configured context per slot). `None`
+    /// when any of them doesn't say, since the request may go there; never a guess.
+    pub context: Option<u32>,
+    /// Media and request limits: the strictest of each limit across the nodes that have it
+    /// (`MediaLimits::tightest`); a limit no node reports stays absent.
+    pub limits: weirdnet_agent::MediaLimits,
 }
 
 impl CatalogRow {
@@ -182,6 +216,13 @@ pub struct Coordinator {
     pub(crate) groups: Mutex<crate::group::GroupBook>,
     /// Versioned rollouts (P4b), changed live by `ymirctl models rollout`.
     rollouts: RwLock<Vec<crate::rollout::Rollout>>,
+    /// Models being moved off a node (M6, `ymirctl move`): `(node, model)` gets no new
+    /// requests while what it has finishes.
+    leaving: Mutex<HashSet<(String, String)>>,
+    /// The semantic answer cache (M6), when `[inference.cache] embedding_model` is set.
+    semantic: Option<crate::semantic::Semantic>,
+    /// When each model was last asked for here (M6 cloud-wide swap).
+    demand: crate::placement::Demand,
 }
 
 /// Where a request goes.
@@ -243,6 +284,9 @@ impl Coordinator {
             fair: crate::fair::Fair::new(),
             groups: Mutex::new(crate::group::GroupBook::default()),
             rollouts: RwLock::new(opts.rollouts.clone()),
+            leaving: Mutex::new(HashSet::new()),
+            semantic: opts.semantic.clone().map(crate::semantic::Semantic::new),
+            demand: crate::placement::Demand::default(),
             opts,
         }
     }
@@ -270,6 +314,11 @@ impl Coordinator {
 
     pub(crate) fn node_named(&self, name: &str) -> Option<Arc<dyn ModelNode>> {
         self.node(name)
+    }
+
+    /// When each model was last asked for here (cloud-wide swap's idle unloads).
+    pub fn demand(&self) -> &crate::placement::Demand {
+        &self.demand
     }
 
     pub fn nodes(&self) -> Vec<Arc<dyn ModelNode>> {
@@ -306,6 +355,8 @@ impl Coordinator {
     /// The pool catalog: every model on every node, with its state there.
     pub fn merged_catalog(&self) -> Vec<CatalogRow> {
         let mut by_id: BTreeMap<String, CatalogRow> = BTreeMap::new();
+        // Models some node has without saying its context: theirs stays unreported.
+        let mut unknown_context: HashSet<String> = HashSet::new();
         for node in self.nodes() {
             for s in node.status() {
                 let row = by_id.entry(s.id.clone()).or_insert_with(|| CatalogRow {
@@ -313,9 +364,32 @@ impl Coordinator {
                     nodes: Vec::new(),
                     draining: Vec::new(),
                     embedding: crate::model_node::embeds(&s),
+                    transcribe: false,
+                    speak: false,
+                    speech: None,
                     inputs: Modalities::TEXT,
                     base: s.base.clone(),
+                    origin: None,
+                    license: None,
+                    context: None,
+                    limits: weirdnet_agent::MediaLimits::UNKNOWN,
                 });
+                row.limits = row.limits.tightest(s.limits());
+                row.transcribe |= crate::model_node::transcribes(&s);
+                row.speak |= crate::model_node::speaks(&s);
+                if row.speech.is_none() && crate::model_node::speaks(&s) {
+                    row.speech = s.speech.clone().filter(|p| !p.is_unknown());
+                }
+                match crate::model_node::status_context(&s) {
+                    Some(c) if !unknown_context.contains(&s.id) => row.context = Some(row.context.map_or(c, |r| r.min(c))),
+                    _ => {
+                        unknown_context.insert(s.id.clone());
+                        row.context = None;
+                    }
+                }
+                if row.origin.is_none() && row.license.is_none() {
+                    (row.origin, row.license) = node.origin(&s.id);
+                }
                 row.inputs = row.inputs.union(crate::model_node::inputs_of(&s));
                 row.nodes.push((node.name().to_string(), s.state.clone()));
                 if node.draining() {
@@ -431,13 +505,35 @@ impl Coordinator {
                 } else {
                     AgentState::Loadable
                 };
-                let purpose = if m.embedding { Purpose::Embedding } else { Purpose::Chat };
+                let purpose = if m.embedding {
+                    Purpose::Embedding
+                } else if m.speak {
+                    Purpose::Speak
+                } else if m.transcribe {
+                    Purpose::Transcribe
+                } else {
+                    Purpose::Chat
+                };
                 let ready = states.iter().filter(|s| ***s == ModelState::Ready).count() as u32;
                 let mut c = AgentModel::new(&m.id, purpose, state).with_replicas(ready).with_inputs(m.inputs);
+                if let Some(ctx) = m.context {
+                    c = c.with_context(ctx);
+                }
+                c = c.with_limits(m.limits);
                 if let Some(base) = &m.base {
                     c = c.with_base(base);
                 }
-                if !m.embedding {
+                (c.origin, c.license) = (m.origin.clone(), m.license.clone());
+                if m.speak {
+                    if let Some(p) = &m.speech {
+                        c = c.with_speech(p.clone());
+                    }
+                    // A speaker's license is shown with it (Bragi labels restricted voices).
+                    if c.license.is_none() {
+                        c.license = speaker_license(&m.id, m.speech.as_ref());
+                    }
+                }
+                if !m.embedding && !m.transcribe && !m.speak {
                     c.standin = standin.filter(|s| *s != m.id).map(str::to_string);
                 }
                 c
@@ -456,14 +552,18 @@ impl Coordinator {
         needed: Modalities,
         exclude: &HashSet<String>,
     ) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+        self.demand.touch(model);
         let mut ready: Vec<(Arc<dyn ModelNode>, ModelStatus)> = Vec::new();
-        let mut fallback = None;
+        // Cloud-wide swap (M6): with no replica ready, the cheapest node for a cold load.
+        let mut fallback: Option<(Arc<dyn ModelNode>, ModelStatus)> = None;
+        let mut fallback_rank = None;
         let mut known = false;
         let mut draining = false;
         let mut reserved: Option<String> = None;
         let mut lacking = None;
         for node in self.nodes() {
-            if let Some(s) = node.status().into_iter().find(|s| s.id == model) {
+            let all = node.status();
+            if let Some(s) = all.iter().find(|s| s.id == model).cloned() {
                 known = true;
                 if crate::model_node::embeds(&s) != embedding {
                     return Err(bad_request(if crate::model_node::embeds(&s) {
@@ -471,6 +571,9 @@ impl Coordinator {
                     } else {
                         format!("{model} is not an embedding model")
                     }));
+                }
+                if crate::model_node::speaks(&s) {
+                    return Err(bad_request(format!("{model} is a text-to-speech model; use /v1/audio/speech (or `ymirctl speak`)")));
                 }
                 // Images and audio go only to nodes whose copy of the model takes them.
                 if let Some(what) = crate::model_node::inputs_of(&s).lacking(needed) {
@@ -485,13 +588,17 @@ impl Coordinator {
                     draining = true;
                     continue;
                 }
-                if exclude.contains(node.name()) {
+                if exclude.contains(node.name()) || self.is_leaving(node.name(), model) {
                     continue;
                 }
                 if s.state == ModelState::Ready {
                     ready.push((node.clone(), s.clone()));
                 }
-                fallback.get_or_insert_with(|| (node.clone(), s));
+                let rank = crate::placement::cold_rank(&s, &all, node.local(), node.name());
+                if fallback_rank.as_ref().is_none_or(|r| rank < *r) {
+                    fallback_rank = Some(rank);
+                    fallback = Some((node.clone(), s));
+                }
             }
         }
         let cands: Vec<Candidate> = ready
@@ -586,6 +693,44 @@ impl Coordinator {
             .find(|s| s.id == model)
             .map(|s| crate::model_node::embeds(&s))
             .ok_or_else(|| unknown_model(model))
+    }
+
+    pub(crate) fn is_leaving(&self, node: &str, model: &str) -> bool {
+        self.leaving.lock().unwrap_or_else(|e| e.into_inner()).contains(&(node.to_string(), model.to_string()))
+    }
+
+    /// Moves `model` from one model node to another (M6): loads it on `to` (which needs its own
+    /// copy of the weights), stops routing new requests for it to the source, waits up to `grace`
+    /// for what the source has in flight for it to finish, then unloads it there. The source is
+    /// `from`, or the node where it is loaded. Returns `(from, to)`. If the load on `to` fails,
+    /// nothing changes on the source.
+    pub async fn move_model(&self, model: &str, from: Option<&str>, to: &str, grace: Duration) -> Result<(String, String), RemoteError> {
+        let target = self.node(to).ok_or_else(|| unavailable(format!("no model node `{to}`")))?;
+        if !target.status().iter().any(|s| s.id == model) {
+            return Err(bad_request(format!("{to} has no copy of {model}; pull it there first (ymirctl models pull {model} --node {to})")));
+        }
+        let source = match from {
+            Some(name) => self.node(name).ok_or_else(|| unavailable(format!("no model node `{name}`")))?,
+            None => self
+                .nodes()
+                .into_iter()
+                .find(|n| n.name() != to && n.status().iter().any(|s| s.id == model && s.state != ModelState::Unloaded))
+                .ok_or_else(|| bad_request(format!("{model} is not loaded on another node; use ymirctl load {model} --node {to}")))?,
+        };
+        if source.name() == to {
+            return Err(bad_request(format!("{model} is already on {to}")));
+        }
+        target.load(model, true).await?;
+        let key = (source.name().to_string(), model.to_string());
+        self.leaving.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone());
+        let deadline = tokio::time::Instant::now() + grace;
+        while tokio::time::Instant::now() < deadline && source.status().iter().any(|s| s.id == model && s.in_flight > 0) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let r = source.unload(model).await;
+        self.leaving.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        r?;
+        Ok((source.name().to_string(), to.to_string()))
     }
 
     /// Unloads `model` everywhere it is resident.
@@ -725,9 +870,13 @@ impl Coordinator {
     /// request moves to another node that has the model. After the first token the error goes to
     /// the asker: the app's pool resumes from what it received.
     pub async fn run(&self, p: Prepared, req: &Request, out: &dyn Sink, cancel: &CancelToken) -> Result<Finish, RemoteError> {
-        let (mut node, mut cold) = match p.route {
-            Route::Cached(hit) => return Ok(replay(hit, out)),
-            Route::Node { node, cold } => (node, cold),
+        let (mut node, mut cold) = match &p.route {
+            Route::Cached(hit) => return Ok(replay(hit.clone(), out)),
+            Route::Node { node, cold } => (node.clone(), *cold),
+        };
+        let pending = match self.semantic_lookup(&p, req, out).await {
+            Ok(f) => return Ok(f),
+            Err(pending) => pending,
         };
         let _running = Running::start(&self.running);
         let mut tried: HashSet<String> = HashSet::new();
@@ -738,16 +887,17 @@ impl Coordinator {
         let mut resumes = 0u32;
         loop {
             let dispatch = self.balance.begin(node.name(), &p.model);
-            let (err, sent) = match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw, &mut shown).await {
-                Ok(mut f) => {
-                    dispatch.finish();
-                    if resumes > 0 {
-                        f.meta.resumed_from = Some(req.assistant_prefix.as_ref().map_or(0, |p| p.text.chars().count() as u64));
+            let (err, sent) =
+                match self.attempt(&node, cold, &p.model, req, out, cancel, p.standin.as_deref(), p.raw, &mut shown, pending.as_ref()).await {
+                    Ok(mut f) => {
+                        dispatch.finish();
+                        if resumes > 0 {
+                            f.meta.resumed_from = Some(req.assistant_prefix.as_ref().map_or(0, |p| p.text.chars().count() as u64));
+                        }
+                        return Ok(f);
                     }
-                    return Ok(f);
-                }
-                Err(e) => e,
-            };
+                    Err(e) => e,
+                };
             drop(dispatch);
             if matches!(err, RemoteError::Busy) {
                 self.balance.busy(node.name());
@@ -797,6 +947,7 @@ impl Coordinator {
         standin: Option<&str>,
         raw: bool,
         shown: &mut String,
+        pending: Option<&crate::semantic::Pending>,
     ) -> Result<Finish, (RemoteError, bool)> {
         if cold {
             tracing::info!(model = %model, node = node.name(), "cold start: loading");
@@ -894,6 +1045,9 @@ impl Coordinator {
                     answer.usage = usage;
                     if !raw && req.cache.may_store() && answer.complete() && req.assistant_prefix.is_none() && *shown == answer.text {
                         self.cache.put_rev(model, revision.as_deref(), req, &answer);
+                        if let (Some(sem), Some(pending)) = (&self.semantic, pending) {
+                            sem.store(pending, model, &answer);
+                        }
                     }
                     return Ok(f);
                 }
@@ -902,7 +1056,249 @@ impl Coordinator {
         }
     }
 
+    /// The semantic cache's turn for a request the exact cache missed: `Ok` with the replayed
+    /// answer on a hit, else `Err` with what to store the answer under (`None`: not cached). It
+    /// only uses an embedding model that is already loaded, never cold-starts one, and a failed
+    /// embedding just skips the cache.
+    async fn semantic_lookup(&self, p: &Prepared, req: &Request, out: &dyn Sink) -> Result<Finish, Option<crate::semantic::Pending>> {
+        let Some(sem) = &self.semantic else { return Err(None) };
+        if p.raw || p.standin.is_some() || !(req.cache.may_read() || req.cache.may_store()) {
+            return Err(None);
+        }
+        let Some(c) = crate::semantic::cacheable(req) else { return Err(None) };
+        let Some(rev) = self.cache_revision(&p.model) else { return Err(None) };
+        let embed_model = &sem.opts.embedding_model;
+        let Some(embed_rev) = self.ready_embedding(embed_model) else {
+            tracing::debug!(model = %embed_model, "semantic cache: the embedding model is not loaded; skipped");
+            return Err(None);
+        };
+        let embedding = match self.embed(embed_model, std::slice::from_ref(&c.prompt)).await {
+            Ok((mut v, _, _)) if !v.is_empty() => v.swap_remove(0),
+            Ok(_) => return Err(None),
+            Err(e) => {
+                tracing::debug!(model = %embed_model, "semantic cache: embedding failed, skipped: {e}");
+                return Err(None);
+            }
+        };
+        let scope = sem.scope(&p.model, rev.as_deref(), embed_rev.as_deref(), &c.context);
+        if req.cache.may_read()
+            && let Some((hit, score)) = sem.lookup(&scope, &embedding).await
+        {
+            tracing::debug!(model = %p.model, score, "semantic cache hit");
+            let mut f = replay(hit, out);
+            f.meta.served_by = Some("semantic-cache".into());
+            return Ok(f);
+        }
+        Err(req.cache.may_store().then(|| crate::semantic::Pending { model: p.model.clone(), scope, embedding }))
+    }
+
+    /// The revision of `model` on a node where it is a loaded embedding model, `None` when none.
+    fn ready_embedding(&self, model: &str) -> Option<Option<String>> {
+        self.nodes()
+            .into_iter()
+            .find(|n| !n.draining() && n.status().iter().any(|s| s.id == model && s.state == ModelState::Ready && crate::model_node::embeds(s)))
+            .map(|n| n.revision(model))
+    }
+
+    /// The semantic cache, when `[inference.cache] embedding_model` is set (for `ymird` to
+    /// attach pool mode).
+    pub fn semantic(&self) -> Option<&crate::semantic::Semantic> {
+        self.semantic.as_ref()
+    }
+
+    /// Entries in the semantic cache (0 when it is off).
+    pub fn semantic_entries(&self) -> usize {
+        self.semantic.as_ref().map_or(0, |s| s.len())
+    }
+
     /// The embedding model a request means (`None`/`default`: the first one in the catalog).
+    /// The speech-to-text model for a transcription request (video design, milestone 2): a named
+    /// one must transcribe somewhere in the pool (else a 400 that says so); with none named, the
+    /// warmest transcriber ([`AgentCatalog::route_transcribe`]), or a 400 when the pool has none.
+    pub fn resolve_transcriber(&self, model: Option<&str>) -> Result<String, RemoteError> {
+        let catalog = AgentCatalog::new(0, self.agent_catalog());
+        let model = model.filter(|m| !matches!(*m, "default" | "ymir"));
+        if let Some(m) = model
+            && catalog.find(m).is_none()
+        {
+            return Err(unknown_model(m));
+        }
+        catalog.route_transcribe(model)
+    }
+
+    /// Transcribes with `model`, loading it first if it is cold. Returns the transcript, the
+    /// engine's token counts and the node that answered. A node that fails is skipped for another
+    /// that transcribes with the model. Nothing is cached (the audio and the transcript are
+    /// content) and nothing of either is logged.
+    pub async fn transcribe(
+        &self,
+        model: &str,
+        request: &weirdnet_agent::remote::infer::v2::TranscribeRequest,
+    ) -> Result<(crate::model_node::Transcribed, String), RemoteError> {
+        let mut tried: HashSet<String> = HashSet::new();
+        loop {
+            let (node, status) = self.pick_transcriber(model, &tried)?;
+            let attempt = async {
+                if status.state != ModelState::Ready {
+                    tracing::info!(model = %model, node = node.name(), "cold start: loading");
+                    node.load(model, false).await?;
+                }
+                node.transcribe(model, request).await
+            }
+            .await;
+            let err = match attempt {
+                Ok(t) => return Ok((t, node.name().to_string())),
+                Err(e) => e,
+            };
+            if !retryable(&err) {
+                return Err(err);
+            }
+            tried.insert(node.name().to_string());
+            if self.pick_transcriber(model, &tried).is_err() {
+                return Err(err);
+            }
+            tracing::warn!(model = %model, node = node.name(), "{err}; trying another node");
+        }
+    }
+
+    /// A node whose copy of `model` transcribes: a ready one first, else one that can load it.
+    /// Draining and reserved nodes and those in `exclude` are skipped.
+    fn pick_transcriber(&self, model: &str, exclude: &HashSet<String>) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+        let mut known = false;
+        let mut fallback = None;
+        for node in self.nodes() {
+            let Some(s) = node.status().into_iter().find(|s| s.id == model) else { continue };
+            known = true;
+            if !crate::model_node::transcribes(&s)
+                || node.draining()
+                || node.reserved().is_some()
+                || exclude.contains(node.name())
+                || self.is_leaving(node.name(), model)
+            {
+                continue;
+            }
+            if s.state == ModelState::Ready {
+                return Ok((node, s));
+            }
+            fallback.get_or_insert((node, s));
+        }
+        match fallback {
+            Some(f) => Ok(f),
+            None if !known => Err(unknown_model(model)),
+            None if exclude.is_empty() => Err(bad_request(format!(
+                "model `{model}` does not transcribe audio on any node that takes requests; pick one whose catalog purpose is `transcribe`"
+            ))),
+            None => Err(unavailable(format!("no other node transcribes with {model}"))),
+        }
+    }
+
+    /// The speaker for a speech request (audio design milestone 7): a named one must speak
+    /// somewhere in the pool and cover `needs` (else a 400 that says what it lacks); with none
+    /// named, the warmest speaker that covers them ([`AgentCatalog::route_speak`]). Only the
+    /// speakers `allowed` says yes to are considered (a guest's grant and license rules). A named
+    /// speaker with no profile yet (not in the catalog and never loaded, so its engine hasn't
+    /// said what it speaks) is left to its node, which loads it and checks the request against
+    /// what the engine reports ([`speaker_unknown`]).
+    pub fn resolve_speaker(
+        &self,
+        model: Option<&str>,
+        needs: &weirdnet_agent::speech::SpeechNeeds,
+        allowed: &dyn Fn(&str) -> bool,
+    ) -> Result<String, RemoteError> {
+        let mut models = self.agent_catalog();
+        let model = model.filter(|m| !matches!(*m, "default" | "ymir"));
+        if let Some(m) = model
+            && !models.iter().any(|c| c.id == m)
+        {
+            return Err(unknown_model(m));
+        }
+        models.retain(|c| !c.speaks() || allowed(&c.id));
+        if let Some(m) = model
+            && models.iter().any(|c| c.id == m && speaker_unknown(c))
+        {
+            return Ok(m.to_string());
+        }
+        AgentCatalog::new(0, models).route_speak(model, needs)
+    }
+
+    /// Whether guests of a shared pool may use speaker `model`: this node's own setting for it
+    /// (`[model.local.speak] guests`), else yes unless the license its node publishes (or the
+    /// catalog records) restricts how its speech may be served, as Fish Audio Drama 3's does.
+    pub fn guests_may_speak(&self, model: &str) -> bool {
+        if let Some(open) = self.opts.speak_guests.get(model) {
+            return *open;
+        }
+        let row = self.merged_catalog().into_iter().find(|m| m.id == model);
+        let license = row.as_ref().and_then(|m| m.license.clone()).or_else(|| speaker_license(model, row.as_ref().and_then(|m| m.speech.as_ref())));
+        weirdnet_model::speech::restricting_license(license.as_deref()).is_none()
+    }
+
+    /// Speaks with `model`, loading it first if it is cold. Returns the audio stream and the
+    /// node that answered. A node that fails before the audio starts is skipped for another that
+    /// speaks with the model. Nothing is cached (the text, any reference clip and the audio are
+    /// content) and nothing of them is logged.
+    pub async fn speak(
+        &self,
+        model: &str,
+        request: &weirdnet_agent::remote::infer::v2::SpeakRequest,
+    ) -> Result<(weirdnet_agent::remote::infer::v2::AudioStream, String), RemoteError> {
+        let mut tried: HashSet<String> = HashSet::new();
+        loop {
+            let (node, status) = self.pick_speaker(model, &tried)?;
+            let attempt = async {
+                if status.state != ModelState::Ready {
+                    tracing::info!(model = %model, node = node.name(), "cold start: loading");
+                    node.load(model, false).await?;
+                }
+                node.speak(model, request).await
+            }
+            .await;
+            let err = match attempt {
+                Ok(a) => return Ok((a, node.name().to_string())),
+                Err(e) => e,
+            };
+            if !retryable(&err) {
+                return Err(err);
+            }
+            tried.insert(node.name().to_string());
+            if self.pick_speaker(model, &tried).is_err() {
+                return Err(err);
+            }
+            tracing::warn!(model = %model, node = node.name(), "{err}; trying another node");
+        }
+    }
+
+    /// A node whose copy of `model` speaks: a ready one first, else one that can load it.
+    /// Draining and reserved nodes and those in `exclude` are skipped.
+    fn pick_speaker(&self, model: &str, exclude: &HashSet<String>) -> Result<(Arc<dyn ModelNode>, ModelStatus), RemoteError> {
+        let mut known = false;
+        let mut fallback = None;
+        for node in self.nodes() {
+            let Some(s) = node.status().into_iter().find(|s| s.id == model) else { continue };
+            known = true;
+            if !crate::model_node::speaks(&s)
+                || node.draining()
+                || node.reserved().is_some()
+                || exclude.contains(node.name())
+                || self.is_leaving(node.name(), model)
+            {
+                continue;
+            }
+            if s.state == ModelState::Ready {
+                return Ok((node, s));
+            }
+            fallback.get_or_insert((node, s));
+        }
+        match fallback {
+            Some(f) => Ok(f),
+            None if !known => Err(unknown_model(model)),
+            None if exclude.is_empty() => Err(bad_request(format!(
+                "model `{model}` does not speak (text to speech) on any node that takes requests; pick one whose catalog purpose is `speak`"
+            ))),
+            None => Err(unavailable(format!("no other node speaks with {model}"))),
+        }
+    }
+
     pub fn resolve_embedding(&self, model: Option<&str>) -> Result<String, RemoteError> {
         match model {
             None | Some("default") | Some("ymir") => self
@@ -972,4 +1368,17 @@ fn replay(hit: CachedAnswer, out: &dyn Sink) -> Finish {
     f.meta.cache_hit = true;
     f.meta.served_by = Some("cache".into());
     f
+}
+
+/// A speaker whose profile is not known yet: no node has published one (a speaker outside the
+/// `weirdnet-model` catalog reports its voices once its engine has loaded). A request naming it
+/// is left to the node rather than refused as if the speaker had nothing.
+pub fn speaker_unknown(m: &AgentModel) -> bool {
+    m.speaks() && m.speech.as_ref().is_none_or(weirdnet_agent::speech::SpeechProfile::is_unknown)
+}
+
+/// A speaker's license: what its profile names, else what the catalog records for its id
+/// (`weirdnet-model` 0.5.5 `CatalogEntry::license`).
+fn speaker_license(id: &str, speech: Option<&weirdnet_agent::speech::SpeechProfile>) -> Option<String> {
+    speech.and_then(|p| p.license.clone()).or_else(|| weirdnet_model::hw::find(id).and_then(|e| e.license()).map(str::to_string))
 }

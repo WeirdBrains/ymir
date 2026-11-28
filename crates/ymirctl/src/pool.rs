@@ -10,6 +10,7 @@ use clap::Subcommand;
 use weirdnet_device_link::{HostNode, HostStatus, Pairing, Received, with_link_limits};
 use weirdnet_net::{Keypair, Multiaddr, NodeConfig as NetConfig, PeerHint};
 use ymir_core::control::{self, ControlRequest};
+use ymir_core::guests::{self, GuestGrant};
 use ymir_core::membership::{LinkSettings, Membership, SYNC_TYPE, ServiceRole};
 use ymir_core::{NodeConfig, Paths};
 
@@ -75,6 +76,53 @@ pub enum PoolCmd {
     Addresses,
     /// Revoke a device everywhere this roster reaches.
     Revoke { peer: String },
+    /// Share this pool with another Weirdnet identity (catalog and inference only): records a
+    /// synced guest grant and prints a share link (`wnet-pool1:` token and `weirdnet-pool://`
+    /// link) with the pool's inference nodes to give them. See docs/design/pool-sharing.md.
+    Share {
+        /// The other identity's Weirdnet user id (32 hex characters).
+        user_id: String,
+        /// Your name for them (shown by `pool guests`).
+        #[arg(long, default_value = "")]
+        label: String,
+        /// Only this device of theirs (peer id); repeatable. Default: any device they certified.
+        #[arg(long = "peer", value_name = "PEER_ID")]
+        peers: Vec<String>,
+        /// Only these models (comma-separated). Default: every model in the catalog.
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        /// When the share ends: 30m, 12h, 7d, 2w, or Unix ms. Default: until `pool unshare`.
+        #[arg(long)]
+        expires: Option<String>,
+        /// Only `catalog` or `infer` (comma-separated). Default: both.
+        #[arg(long, value_delimiter = ',')]
+        scopes: Vec<String>,
+        /// A name for the pool in the link (for example "Ymir at home").
+        #[arg(long)]
+        name: Option<String>,
+        /// Another inference node to put in the link (a peer id or a `/p2p/` address); repeatable.
+        /// This node (if it has the inference role) and the cert-only inference nodes are in it already.
+        #[arg(long = "node", value_name = "PEER_OR_ADDR")]
+        nodes: Vec<String>,
+    },
+    /// Stop sharing this pool with an identity: its next request is refused and its catalog
+    /// subscriptions close within seconds, on every node the grant syncs to.
+    Unshare { user_id: String },
+    /// The identities this pool is shared with.
+    Guests {
+        /// Also list revoked and expired shares.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Bragi devices this node can wake (push wake-ups), or wake DEVICE (a peer id or label) so
+    /// it syncs. Through the relay the device keeps a wake connection to; a seed holder only (a
+    /// cert-only node never holds the wake cards). Sending needs the running node.
+    Wake {
+        device: Option<String>,
+        /// Say a connection is waiting, not a message.
+        #[arg(long)]
+        connection: bool,
+    },
     /// Start a new Weirdnet identity on this node, for a cloud of its own.
     Init {
         /// Yes, a new identity, separate from the one Morph holds.
@@ -151,6 +199,62 @@ pub async fn addresses(paths: &Paths, cfg: &NodeConfig, m: &Membership) -> Vec<S
         }
     }
     out
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// What a grant allows, in a few words.
+fn describe(g: &GuestGrant) -> String {
+    let scopes = if g.scopes.is_empty() { "catalog,infer".to_string() } else { g.scopes.join(",") };
+    let models = if g.models.is_empty() { "all models".to_string() } else { g.models.join(",") };
+    let peers = if g.peers.is_empty() { "any device".to_string() } else { format!("{} pinned device(s)", g.peers.len()) };
+    let until = match g.expires_at {
+        Some(t) => format!(", until {t} (Unix ms)"),
+        None => String::new(),
+    };
+    format!("{scopes}, {models}, {peers}{until}")
+}
+
+/// The inference nodes a share link names: this node when it has the inference role, the
+/// cert-only inference nodes in the roster, and `extra` (peer ids or `/p2p/` addresses), each
+/// with the addresses known for it (this node's listen addresses, `[network] peers`).
+async fn share_nodes(paths: &Paths, cfg: &NodeConfig, m: &Membership, extra: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+    let me = m.peer_id().to_string();
+    let known = addresses(paths, cfg, m).await;
+    let addrs_of =
+        |peer: &str| -> Vec<String> { known.iter().filter(|a| PeerHint::from_addr(a).is_ok_and(|h| h.peer_id == peer)).cloned().collect() };
+    let mut nodes: Vec<(String, Vec<String>)> = Vec::new();
+    let mut add = |peer: String, mut addrs: Vec<String>| {
+        if let Some(n) = nodes.iter_mut().find(|(p, _)| *p == peer) {
+            for a in addrs.drain(..) {
+                if !n.1.contains(&a) {
+                    n.1.push(a);
+                }
+            }
+        } else {
+            nodes.push((peer, addrs));
+        }
+    };
+    if cfg.roles.inference {
+        add(me.clone(), addrs_of(&me));
+    }
+    for c in m.roster().active() {
+        if c.peer_id != me && m.grant_of(&c.peer_id).is_some_and(|(_, roles)| roles.iter().any(|r| r == ymir_core::membership::ROLE_INFERENCE)) {
+            add(c.peer_id.clone(), addrs_of(&c.peer_id));
+        }
+    }
+    for e in extra {
+        if let Ok(h) = PeerHint::from_addr(e) {
+            add(h.peer_id.clone(), vec![e.clone()]);
+        } else if e.parse::<weirdnet_net::PeerId>().is_ok() {
+            add(e.clone(), addrs_of(e));
+        } else {
+            bail!("--node {e:?} is neither a peer id nor a /p2p/ address");
+        }
+    }
+    Ok(nodes)
 }
 
 fn read(out: &mut dyn Write, input: &mut dyn BufRead, prompt: &str) -> Result<bool> {
@@ -347,6 +451,110 @@ pub async fn run(paths: &Paths, cfg: &NodeConfig, cmd: PoolCmd, out: &mut dyn Wr
                 let c = m.revoke(&peer)?;
                 writeln!(out, "{} ({}) is revoked", c.label, c.peer_id)?;
             }
+            Ok(())
+        }
+        PoolCmd::Share { user_id, label, peers, models, expires, scopes, name, nodes } => {
+            let m = Membership::open(&dir)?.context("this node is not linked yet; run `ymirctl pool link`")?;
+            if m.is_service() {
+                bail!("this node is linked cert-only; share the pool from a device that holds the identity");
+            }
+            let now = now_ms();
+            let mut g = GuestGrant::new(user_id.trim().to_ascii_lowercase(), now);
+            g.label = label;
+            g.peers = peers;
+            g.models = models.into_iter().filter(|m| !m.is_empty()).collect();
+            g.scopes = scopes.into_iter().filter(|s| !s.is_empty()).collect();
+            g.expires_at = expires.as_deref().map(|e| guests::parse_expiry(e, now)).transpose()?;
+            g.validate()?;
+            let shared = share_nodes(paths, cfg, &m, &nodes).await?;
+            let link = guests::pool_share(&m.user_id(), name.as_deref(), &shared, g.expires_at)?;
+            if daemon_on_weirdnet(paths).await {
+                let r = control::request(&paths.socket(), &ControlRequest::PoolShare { grant: g.clone() }).await?;
+                if !r.ok {
+                    bail!("{}", r.message.unwrap_or_default());
+                }
+            } else {
+                guests::share(&m, &g)?;
+            }
+            writeln!(
+                out,
+                "Shared with {}{}: {}.",
+                g.user_id,
+                if g.label.is_empty() { String::new() } else { format!(" ({})", g.label) },
+                describe(&g)
+            )?;
+            writeln!(out, "Give them this (no secrets in it; the grant is what lets them in):\n")?;
+            writeln!(out, "  {}", link.to_token().map_err(|e| anyhow!("{e}"))?)?;
+            writeln!(out, "  {}\n", link.to_link().map_err(|e| anyhow!("{e}"))?)?;
+            writeln!(
+                out,
+                "{} inference node{} in the link. Revoke with `ymirctl pool unshare {}`.",
+                shared.len(),
+                if shared.len() == 1 { "" } else { "s" },
+                g.user_id
+            )?;
+            Ok(())
+        }
+        PoolCmd::Unshare { user_id } => {
+            let user_id = user_id.trim().to_ascii_lowercase();
+            if daemon_on_weirdnet(paths).await {
+                let r = control::request(&paths.socket(), &ControlRequest::PoolUnshare { user_id }).await?;
+                if !r.ok {
+                    bail!("{}", r.message.unwrap_or_default());
+                }
+                writeln!(out, "{}", r.message.unwrap_or_default())?;
+            } else {
+                let m = Membership::open(&dir)?.context("this node is not linked")?;
+                let g = guests::unshare(&m, &user_id, now_ms())?;
+                writeln!(out, "{} is no longer shared with", g.user_id)?;
+            }
+            Ok(())
+        }
+        PoolCmd::Guests { all } => {
+            let m = Membership::open(&dir)?.context("this node is not linked yet; run `ymirctl pool link`")?;
+            let now = now_ms();
+            let list: Vec<GuestGrant> = guests::all_grants(&m).into_iter().filter(|g| all || g.is_active(now)).collect();
+            if list.is_empty() {
+                writeln!(out, "This pool is not shared with another identity (`ymirctl pool share USER_ID`).")?;
+            }
+            for g in list {
+                let state = if g.revoked_at.is_some() {
+                    "unshared"
+                } else if g.is_active(now) {
+                    "shared"
+                } else {
+                    "expired"
+                };
+                writeln!(out, "  {}  {:<9} {:<16} {}", g.user_id, state, g.label, describe(&g))?;
+            }
+            Ok(())
+        }
+        PoolCmd::Wake { device: None, .. } => {
+            let m = Membership::open(&dir)?.context("this node is not linked")?;
+            if m.is_service() {
+                writeln!(out, "This node is linked cert-only: it never holds the wake cards; wake from one that holds the seed.")?;
+                return Ok(());
+            }
+            let devices = ymir_core::wake::wakeable(&m);
+            if devices.is_empty() {
+                writeln!(out, "No device shares a wake card yet (Bragi 0.15.0 or newer, wake-ups on).")?;
+            }
+            for d in devices {
+                let how = if d.relay.is_some() { "through its relay" } else { "push only (not built here)" };
+                writeln!(out, "{}  {}  {how}", d.label, d.peer_id)?;
+            }
+            Ok(())
+        }
+        PoolCmd::Wake { device: Some(device), connection } => {
+            if !daemon_on_weirdnet(paths).await {
+                bail!("waking a device needs the running node (ymird on Weirdnet)");
+            }
+            let reason = if connection { "connection" } else { "message" }.to_string();
+            let r = control::request(&paths.socket(), &ControlRequest::PoolWake { device, reason }).await?;
+            if !r.ok {
+                bail!("{}", r.message.unwrap_or_default());
+            }
+            writeln!(out, "{}", r.message.unwrap_or_default())?;
             Ok(())
         }
     }

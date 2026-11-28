@@ -12,17 +12,29 @@ use ymir_core::{Daemon, NodeConfig, Paths};
 const MOCK: &str = env!("CARGO_BIN_EXE_ymir-mock-engine");
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks.jsonl");
 
-async fn node(dir: &Path) -> Result<(PathBuf, Daemon)> {
+/// A node serving `teacher` and `other`; with `licensed`, `teacher`'s weights carry a provenance
+/// record with a license (as an upload does), so the pool's catalog reports it.
+async fn node_with(dir: &Path, licensed: bool) -> Result<(PathBuf, Daemon)> {
     let home = dir.join("home");
     let mdir = dir.join("models");
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&mdir)?;
-    for f in ["teacher.gguf", "other.gguf"] {
-        std::fs::write(mdir.join(f), b"GGUF mock")?;
-    }
+    std::fs::write(mdir.join("other.gguf"), b"GGUF mock")?;
+    let teacher = if licensed {
+        let up = mdir.join("uploads/teacher");
+        std::fs::create_dir_all(&up)?;
+        std::fs::write(up.join("teacher.gguf"), b"GGUF mock")?;
+        let rec = serde_json::json!({"format": "weirdnet-provenance/1", "kind": "model", "id": "teacher", "origin": "upload",
+            "revision": "sha256:00", "files": [], "license": "apache-2.0"});
+        std::fs::write(up.join(weirdnet_model::artifact::PROVENANCE_FILE), serde_json::to_vec(&rec)?)?;
+        "uploads/teacher/teacher.gguf"
+    } else {
+        std::fs::write(mdir.join("teacher.gguf"), b"GGUF mock")?;
+        "teacher.gguf"
+    };
     let toml = format!(
         "[node]\nname = \"dataset-node\"\n[roles]\nmodel = true\ninference = true\napp = true\n[model]\nllamacpp = \"system:{MOCK}\"\nvllm = \"off\"\nmodels_dir = \"{}\"\n\
-         [[model.local]]\nid = \"other\"\nfile = \"other.gguf\"\nrole = \"main\"\n[[model.local]]\nid = \"teacher\"\nfile = \"teacher.gguf\"\n\
+         [[model.local]]\nid = \"other\"\nfile = \"other.gguf\"\nrole = \"main\"\n[[model.local]]\nid = \"teacher\"\nfile = \"{teacher}\"\n\
          [inference]\n[inference.alerts]\nprobe_secs = 3600\n[app.bridge]\nport = 0\n",
         mdir.display()
     );
@@ -30,6 +42,10 @@ async fn node(dir: &Path) -> Result<(PathBuf, Daemon)> {
     let paths = Paths::new(&home);
     let daemon = Daemon::start(NodeConfig::load(&paths.config())?, paths).await?;
     Ok((home, daemon))
+}
+
+async fn node(dir: &Path) -> Result<(PathBuf, Daemon)> {
+    node_with(dir, false).await
 }
 
 /// Runs `ymirctl` on a blocking thread (it isn't Send) and returns its output or error.
@@ -219,4 +235,145 @@ async fn eval_scores_models_with_checks_and_a_judge() -> Result<()> {
 
 fn line_of(said: &str, m: &str) -> Vec<String> {
     said.lines().find(|l| l.starts_with(m)).unwrap_or_default().split_whitespace().map(str::to_string).collect()
+}
+
+const DATASET_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks.dataset.jsonl");
+
+/// The synthetic training dataset next to the prompt fixture: hand-written answers in
+/// `ymirctl batch --jsonl`'s output format with its `ymir-dataset/1` manifest, so `ymirctl train
+/// run --dataset` takes it as it is (training plan P3a's first run).
+#[test]
+fn the_fixture_dataset_is_accepted_for_training() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let out = dir.path().join("DATA.jsonl");
+    let rec = ymir_core::train::prepare_dataset(Path::new(DATASET_FIXTURE), false, &out)?;
+    assert_eq!(rec.format, ymir_core::dataset::MANIFEST_FORMAT);
+    assert_eq!((rec.rows_in, rec.rows_used), (5, 4), "the cached repeat is not trained on");
+    assert_eq!(rec.license, "CC0-1.0");
+    assert_eq!(rec.teacher.as_deref(), Some("synthetic-fixture"));
+    let train: Vec<Value> = rows(&out);
+    assert_eq!(train.len(), 4);
+    for r in &train {
+        let turns = r["messages"].as_array().expect("messages");
+        assert_eq!(turns.last().expect("a turn")["role"], "assistant");
+        assert!(turns.iter().any(|t| t["role"] == "user"));
+    }
+    assert_eq!(train[2]["messages"][0]["role"], "system", "a row's system prompt is kept");
+
+    // The manifest stays true to the files next to it.
+    let m: ymir_core::dataset::Manifest =
+        serde_json::from_str(&std::fs::read_to_string(ymir_core::dataset::manifest_path(Path::new(DATASET_FIXTURE)))?)?;
+    let sha =
+        |p: &str| -> Result<String> { Ok(<sha2::Sha256 as sha2::Digest>::digest(std::fs::read(p)?).iter().map(|b| format!("{b:02x}")).collect()) };
+    assert_eq!(m.input_sha256, sha(FIXTURE)?, "the prompt fixture changed: update input_sha256 in the dataset manifest");
+    assert_eq!(m.sources.as_ref().expect("sources").sha256, sha(SOURCES_FIXTURE)?, "the sources fixture changed: update the dataset manifest");
+    assert_eq!((m.rows_in_input, m.rows_usable, m.cache_hits), (5, 4, 1));
+    Ok(())
+}
+
+const LARGE_INPUT_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks-large.jsonl");
+const LARGE_DATASET_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks-large.dataset.jsonl");
+
+/// The larger synthetic dataset: the small one renders to about 256 tokens, under the 513
+/// (2 x 256 + 1) llama-finetune needs for one step at its smallest context, so a real first run
+/// takes this one (1297 tokens with Qwen2.5's chat template, counted by llama-tokenize).
+#[test]
+fn the_large_fixture_dataset_is_accepted_for_training() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let out = dir.path().join("DATA.jsonl");
+    let rec = ymir_core::train::prepare_dataset(Path::new(LARGE_DATASET_FIXTURE), false, &out)?;
+    assert_eq!((rec.rows_in, rec.rows_used), (16, 16));
+    assert_eq!(rec.license, "CC0-1.0");
+    let train: Vec<Value> = rows(&out);
+    let chars: usize =
+        train.iter().flat_map(|r| r["messages"].as_array().expect("messages").iter()).map(|t| t["content"].as_str().expect("content").len()).sum();
+    assert!(chars > 3 * 1295, "well over the small fixture's text ({chars} characters)");
+    assert!(train.iter().any(|r| r["messages"][0]["role"] == "system"));
+
+    let m: ymir_core::dataset::Manifest =
+        serde_json::from_str(&std::fs::read_to_string(ymir_core::dataset::manifest_path(Path::new(LARGE_DATASET_FIXTURE)))?)?;
+    let sha =
+        |p: &str| -> Result<String> { Ok(<sha2::Sha256 as sha2::Digest>::digest(std::fs::read(p)?).iter().map(|b| format!("{b:02x}")).collect()) };
+    assert_eq!(m.input_sha256, sha(LARGE_INPUT_FIXTURE)?, "the large prompt fixture changed: update input_sha256 in its manifest");
+    assert_eq!(m.sources.as_ref().expect("sources").sha256, sha(SOURCES_FIXTURE)?, "the sources fixture changed: update the large manifest");
+    assert_eq!((m.rows_in_input, m.rows_usable, m.cache_hits), (16, 16, 0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_teacher_license_comes_from_the_pool_catalog_when_not_given() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (home, daemon) = node_with(dir.path(), true).await?;
+    let input = dir.path().join("prompts.jsonl");
+    let first: String = std::fs::read_to_string(FIXTURE)?.lines().take(2).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&input, &first)?;
+    let i = input.display().to_string();
+    let o = dir.path().join("data.jsonl").display().to_string();
+    let said = ctl(&home, &["batch", &i, "--jsonl", "--model", "teacher", "--out", &o, "--max-tokens", "64"]).await?;
+    assert!(said.contains("Teacher license: apache-2.0 (the pool's catalog, upload)"), "{said}");
+    let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("data.jsonl.manifest.json"))?)?;
+    assert_eq!(m["teacher"]["license"], "apache-2.0");
+    assert_eq!(m["teacher"]["license_source"], "pool");
+    // `other` has no recorded license: still refused, naming both ways to give one.
+    let o2 = dir.path().join("other.jsonl").display().to_string();
+    let e = ctl(&home, &["batch", &i, "--jsonl", "--model", "other", "--out", &o2]).await.unwrap_err();
+    assert!(format!("{e:#}").contains("--license-from"), "{e:#}");
+    // --license still wins, recorded as the operator's.
+    let o3 = dir.path().join("given.jsonl").display().to_string();
+    ctl(&home, &["batch", &i, "--jsonl", "--model", "teacher", "--out", &o3, "--license", "mit", "--max-tokens", "64"]).await?;
+    let m: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("given.jsonl.manifest.json"))?)?;
+    assert_eq!((m["teacher"]["license"].as_str(), m["teacher"]["license_source"].as_str()), (Some("mit"), Some("operator")));
+    daemon.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seed_prompts_come_from_source_texts_in_two_passes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (home, daemon) = node(dir.path()).await?;
+    let sources = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/decentralized-networks.sources.json");
+    let texts = dir.path().join("texts");
+    std::fs::create_dir_all(&texts)?;
+    let para = "A distributed hash table spreads keys over many peers. Each peer keeps a small table of others, sorted by distance, and a lookup asks ever closer peers until it reaches the key's owner. Peers that leave are replaced as others notice them gone.";
+    std::fs::write(texts.join("dht-notes.txt"), format!("{para}\n\n{para}\n\n{para}"))?;
+    let (t, q) = (texts.display().to_string(), dir.path().join("q.jsonl").display().to_string());
+    let base = ["train", "seed", "questions", "--sources", sources, "--texts", &t, "--out", &q];
+    let e = ctl(&home, &base).await.unwrap_err();
+    assert!(format!("{e:#}").contains("no text for source(s) relay-notes"), "{e:#}");
+    std::fs::write(texts.join("relay-notes.md"), format!("# Relays\n\n{para}"))?;
+    let said = ctl(&home, &[&base[..], &["--chunk-chars", "600"]].concat()).await?;
+    assert!(said.contains("Wrote 3 question rows") && said.contains("dht-notes 2, relay-notes 1"), "{said}");
+    // The rows go through the teacher like any other, sources checked.
+    let qa = dir.path().join("qa.jsonl").display().to_string();
+    let said = ctl(
+        &home,
+        &["batch", &q, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &qa, "--max-tokens", "64"],
+    )
+    .await?;
+    assert!(said.contains("3 sent"), "{said}");
+    assert!(ctl(&home, &["train", "seed", "questions", "--sources", sources, "--texts", &t, "--out", &q]).await.is_err(), "overwrote");
+
+    // Pass 2 on answers that ask questions (the mock engine doesn't).
+    let answers = dir.path().join("answers.jsonl");
+    std::fs::write(
+        &answers,
+        [
+            r#"{"id": "q-dht-notes-001", "source": "dht-notes", "usable": true, "completion": "Question: How does a DHT lookup find a key?\nQuestion: What does each peer keep?"}"#,
+            r#"{"id": "q-relay-notes-001", "source": "relay-notes", "usable": true, "completion": "Question: How does a DHT lookup find a key?"}"#,
+        ]
+        .join("\n"),
+    )?;
+    let p = dir.path().join("prompts.jsonl").display().to_string();
+    let said = ctl(&home, &["train", "seed", "prompts", &answers.display().to_string(), "--out", &p]).await?;
+    assert!(said.contains("Wrote 2 prompt rows") && said.contains("1 duplicate"), "{said}");
+    let out = dir.path().join("data.jsonl").display().to_string();
+    let said = ctl(
+        &home,
+        &["batch", &p, "--jsonl", "--model", "teacher", "--license", "apache-2.0", "--sources", sources, "--out", &out, "--max-tokens", "64"],
+    )
+    .await?;
+    assert!(said.contains("2 sent"), "{said}");
+    assert!(rows(Path::new(&out)).iter().all(|r| r["source"] == "dht-notes"));
+    daemon.shutdown().await;
+    Ok(())
 }

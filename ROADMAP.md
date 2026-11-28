@@ -44,13 +44,13 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## M6 Workload spreading (In progress)
 
-Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, and the pool benchmark are built. Next: moving models between nodes, placement and replication, and a semantic cache.
+Load balancing across replicas, fair sharing between devices, priority classes, batch jobs that fan out across nodes, the pool benchmark, and moving a model between nodes (`ymirctl move`, with the old node finishing first) and placement with replica counts (`[inference.placement]`, one inference node placing under the `ymir.scheduler` lease, its plan published as a signed `ymir.plan` and fenced by term) are built, and so are cloud-wide swap (cold loads where nothing is evicted, idle models unloaded after `idle_unload_secs`) and a semantic answer cache shared across the pool's inference nodes (`[inference.cache] embedding_model`, `mode = "pool"`). Next: model nodes refusing a stale holder's loads (needs a term on node/1 `Load`/`Unload` in `weirdnet-backends`), replication on queue wait and prefix warming.
 
 Weirdnet crates: `weirdnet-agent`, `weirdnet-backends`, `weirdnet-semcache`.
 
 ## M7 Split models (In progress)
 
-A model too big for one machine is split across several with llama.cpp RPC: an opt-in pool policy, private-link-only planning, group up and down, and teardown when a member is lost. Next: vLLM with Ray groups.
+A model too big for one machine is split across several, with llama.cpp RPC or with vLLM on a Ray cluster (`vllm-ray`): an opt-in pool policy, private-link-only planning and binds, group up and down, and teardown when a member is lost. Next: a real GPU run of `vllm-ray` and the big-mode reproduction on server-a and server-b.
 
 Weirdnet crates: `weirdnet-backends`.
 
@@ -62,7 +62,7 @@ Weirdnet crates: none new.
 
 ## M9 Breadth and hardening (In progress)
 
-Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher (`ymirctl update fetch` and `update watch`, which hears announcements from a relay). Next: push wake-ups, BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
+Built: self-update with rollback (pinned root, signed bundles, trial boots), agent tasks (task/1) for Bragi's agent mode, the Windows service, a security review with checks that run, a `[model] callers` guard so a model node can refuse app devices, Inkling 2 Mini, automatic context sizing (fit fixes in 0.3.0 and 0.3.1), MLX mock end-to-end tests, outside MCP servers for tasks, and a bundle fetcher (`ymirctl update fetch` and `update watch`, which hears announcements from a relay). Push wake-ups over the relay wake path: a seed holder syncs Bragi's wake cards (never a cert-only node) and `ymirctl pool wake DEVICE` wakes one. Next: APNs/FCM wake-ups, BSD packages, and MLX-LM for Inkling 2 Mini once mlx-lm#2086 is in a release (vLLM and llama.cpp already serve it).
 
 Weirdnet crates: `weirdnet-update`, `weirdnet-push`, `weirdnet-agent`.
 
@@ -72,9 +72,15 @@ Servers can be linked cert-only: a node certificate and a signed service grant, 
 
 Weirdnet crates: `weirdnet-sync`, `weirdnet-device-link`.
 
+## M11 Sharing a pool with other identities (In progress)
+
+Built: `ymirctl pool share USER_ID` records a synced guest grant for another Weirdnet identity (optional pinned devices, model allowlist, scopes and expiry) and prints a `wnet-pool1:` / `weirdnet-pool://share/` link with the pool's inference nodes; `pool unshare` revokes it on every node at once and `pool guests` lists them. Guests get the catalog and inference only, never conversations, wake cards, tasks, admin, models or training. Tested over the in-process transport; next: a real-network run and the open-link screens in Morph and Bragi.
+
+Weirdnet crates: `weirdnet-agent`.
+
 ## P1 Data generation and evals (Done)
 
-Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests, resume, bench scorers and an optional judge). Left: the teacher license read from the Hugging Face Hub, turning sources into seed prompts, and a job record that stays in sync across nodes.
+Built: `ymirctl batch --jsonl` and `ymirctl eval` (teacher integrity, manifests, resume, bench scorers and an optional judge). The teacher's license comes from `--license`, the Hub repo's model card (`--license-from`) or the pool catalog, and `ymirctl train seed` turns source texts into seed prompts in two passes through the teacher. Left: a job record that stays in sync across nodes.
 
 Weirdnet crates: `weirdnet-agent`.
 
@@ -98,6 +104,6 @@ Weirdnet crates: `weirdnet-agent`, `weirdnet-sync`.
 
 ## P3 Fine-tuning as a pool job (In progress)
 
-P3a is built: `ymirctl train run` fine-tunes a llama.cpp base on one node with the pinned upstream llama.cpp build (a full fine-tune, then a LoRA adapter extracted from it), from a dataset with a recorded source and license. The node's GPU is held for the run with `weirdnet-backends`' new reservation, so its models unload and nothing loads there until the run ends. The llama.cpp trainer (`scripts/trainer.py`: `llama-finetune` at the engine's pinned build, then LoRA extraction by truncated SVD) is built and tested against a fake `llama-finetune`; no real run yet. Next: a first real run on a node the lead clears. A synced job record and resume on another node come later (P3b).
+P3a is built: `ymirctl train run` fine-tunes a llama.cpp base on one node with the pinned upstream llama.cpp build (a full fine-tune, then a LoRA adapter extracted from it), from a dataset with a recorded source and license. The node's GPU is held for the run with `weirdnet-backends`' new reservation, so its models unload and nothing loads there until the run ends. The llama.cpp trainer (`scripts/trainer.py`: `llama-finetune` at the engine's pinned build, then LoRA extraction by truncated SVD) is built and tested against a fake `llama-finetune`; no real run yet. Next: a first real run on a node the lead clears. P3b's Ymir side is built: `train run --job` checkpoints each epoch and `train resume` carries a job on from its last checkpoint, on a local stand-in for the synced job record that `weirdnet-agent` 0.6.0 will provide.
 
 Weirdnet crates: `weirdnet-backends`, `weirdnet-agent`.

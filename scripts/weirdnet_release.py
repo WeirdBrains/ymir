@@ -12,6 +12,8 @@
     release.py taur-check VERSION [DIR]    is the recipe ready for TAUR
     release.py assets VERSION              check the GitHub release has every [[platforms]] asset
     release.py github VERSION [--dry-run] [--notes-file F]   create the GitHub release ([github] files)
+    release.py updates VERSION [--dist DIR] [--out DIR] [--signer PATH] [--upload] [--dry-run]
+                                           build and sign [updates] self-update bundles
     release.py version                     print this script's version
 
 `cut` (the default) follows the collective AGENTS.md order: preflight, bump every version
@@ -53,7 +55,7 @@ try:
 except ImportError:  # Python < 3.11 (e.g. Ubuntu 22.04 runners): mini_toml() below
     tomllib = None
 
-__version__ = "0.3.2"
+__version__ = "0.4.2"
 
 CONFIG = "release.toml"
 ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
@@ -937,6 +939,96 @@ def verify_required_lock(root, r, ver, cksum):
         raise ReleaseError(f"{rel}: {name} {ver} checksum {p.get('checksum')} does not match crates.io {cksum}")
 
 
+def _spec_version(spec):
+    """The version requirement in a dependency spec (`"1.2"`, `{ version = "1.2", ... }` or a table body)."""
+    s = spec.strip()
+    if s.startswith('"'):
+        return s.strip('"')
+    m = re.search(r'(?:^|[{,\s])version\s*=\s*"([^"]*)"', s, re.M)
+    return m.group(1) if m else None
+
+
+def _release_key(v):
+    """(MAJOR, MINOR, PATCH) of a partial or full version (`1`, `1.2`, `1.2.3`, pre-release dropped)."""
+    nums = [int(x) for x in re.match(r"^\d+(?:\.\d+){0,2}", v.strip()).group(0).split(".")]
+    return tuple(nums + [0] * (3 - len(nums))), len(nums)
+
+
+def req_admits(req, ver):
+    """Whether a Cargo version requirement (`1.2.3`, `^1.2`, `~1.2`, `=1.2.3`, `>=1, <2`, `1.*`)
+    admits `ver`. Pre-release requirements must name `ver` exactly."""
+    want = parse_version(ver)[:3]
+    vpre = is_prerelease(ver)
+    for part in [p.strip() for p in req.split(",") if p.strip()]:
+        m = re.match(r"^(=|\^|~|>=|<=|>|<)?\s*(.+)$", part)
+        op, v = m.group(1) or "^", m.group(2).strip()
+        if v == "*":
+            continue
+        if v.endswith(".*"):
+            op, v = "~" if v.count(".") == 2 else "^", v[:-2]
+        if "-" in v or vpre:
+            # Cargo matches pre-releases only against requirements on the same MAJOR.MINOR.PATCH.
+            if op not in ("=", "^", "~", ">=", "<=") or v.split("+")[0] != ver:
+                return False
+            continue
+        key, n = _release_key(v)
+        if op == "=":
+            ok = want[:n] == key[:n]
+        elif op == ">=":
+            ok = want >= key
+        elif op == ">":
+            ok = want > key if n == 3 else want[:n] > key[:n]
+        elif op == "<":
+            ok = want < key
+        elif op == "<=":
+            ok = want <= key if n == 3 else want[:n] <= key[:n]
+        elif op == "~":
+            ok = want >= key and want[:min(n, 2)] == key[:min(n, 2)]
+        else:  # caret
+            lead = next((i for i, x in enumerate(key[:n]) if x), n - 1)
+            ok = want >= key and want[:lead + 1] == key[:lead + 1]
+        if not ok:
+            return False
+    return True
+
+
+def check_requires_offline(root, reqs):
+    """The version comparison a cut makes, without crates.io (validate and --dry-run).
+    pin = "none" (the manifest is not rewritten): every requirement in the manifest must admit the
+    [[requires]] version and Cargo.lock must already have it, from crates.io; otherwise the cut's
+    `cargo update --precise` fails or quietly moves the dependency. Pinned entries: the cut moves
+    the lock to the version, so only a downgrade is refused. Returns notes for the dry run."""
+    notes = []
+    for r, ver, _ in reqs:
+        name, pin = r["crate"], r.get("pin", "exact")
+        if r.get("manifest") and pin == "none":
+            rel = r["manifest"]
+            for _, _, spec in dependency_specs((Path(root) / rel).read_text(encoding="utf-8"), name):
+                req = _spec_version(spec)
+                if req is not None and not req_admits(req, ver):
+                    raise ReleaseError(f"{rel}: {name} asks for {req!r}, which does not admit [[requires]] {ver}; "
+                                       "update release.toml or the manifest")
+        if not r.get("lock"):
+            continue
+        rel = r["lock"]
+        got = [p for p in lock_packages((Path(root) / rel).read_text(encoding="utf-8")) if p.get("name") == name]
+        if pin == "none":
+            try:
+                verify_required_lock(root, r, ver, None)
+            except ReleaseError as e:
+                raise ReleaseError(f"{e} ([[requires]] with pin = \"none\": the lock must already match; "
+                                   f"run `cargo update -p {name} --precise {ver}` or update release.toml)") from None
+            notes.append(f"{name}: {rel} has {ver} from crates.io")
+            continue
+        if len(got) != 1:
+            raise ReleaseError(f"{rel}: expected one {name} entry, found {len(got)}")
+        have = got[0].get("version", "")
+        if parse_version(have) > parse_version(ver):
+            raise ReleaseError(f"{rel}: {name} is {have}; [[requires]] {ver} would downgrade it")
+        notes.append(f"{name}: {rel} has {have}" + ("" if have == ver else f"; the cut moves it to {ver}"))
+    return notes
+
+
 def crate_plan(root, cfg, tag, prev_tag, edits=None):
     """[(path, name, version, action, reason)] for [crates] publish, in the configured order.
     publish = false crates are skipped; a version already on crates.io is skipped (with a warning
@@ -1049,6 +1141,7 @@ def cut(a, root):
         # Read-only checks: run in --dry-run too.
         run_cmds(root, hooks.get("pre"), ctx, henv, "pre hook", False)
     reqs = required_crates(root, cfg, ctx)
+    req_notes = check_requires_offline(root, reqs)
     plan = plan_files(root, cfg, ctx)
     plan_requires(plan, reqs)
     henv = hook_env(env, ctx, dry)
@@ -1069,6 +1162,9 @@ def cut(a, root):
     out(f"{D}{cfg['project']} {old} -> {new} ({part}) on {branch} at {head[:12]}, {date}")
     for r, ver, cksum in reqs:
         out(f"{D}requires {r['crate']} {ver}: on crates.io" + (f" (checksum {cksum[:12]})" if cksum else ""))
+        for n in req_notes:
+            if n.startswith(r["crate"] + ":"):
+                out(f"{D}lock now: {n.split(': ', 1)[1]}")
         if r.get("lock"):
             out(f"{D}lock: {' '.join(lock_update_cmd(r, ver))}; then check {r['lock']}")
     for rel, (o, n) in plan.edits.items():
@@ -1533,14 +1629,20 @@ def taur_version(taurctl, name):
 
 # ---- platforms and release assets ----------------------------------------------------------
 
-OSES = ["linux", "macos", "windows", "android", "ios"]
+OSES = ["linux", "macos", "windows", "android", "ios", "freebsd", "openbsd"]
 ARCHES = ["x86_64", "aarch64", "universal"]
+# macOS is Apple Silicon only (since 0.4.2): Intel Macs (x86_64-apple-darwin) and universal
+# builds, which carry an x86_64 slice, are no longer supported.
+MAC_ARCHES = ["aarch64"]
+MAC_INTEL = re.compile(r"x86_64|x86-64|amd64|\bx64\b|\bintel\b|universal", re.I)
 FORMATS = {
     "linux": ["tar.gz", "zip", "pkg.tar.zst", "deb", "rpm", "nix", "appimage", "flatpak"],
     "macos": ["tar.gz", "zip", "dmg", "app", "pkg", "brew-formula", "brew-cask"],
     "windows": ["zip", "exe", "exe-wix", "msi", "winget"],
     "android": ["apk", "aab"],
     "ios": ["ipa"],
+    "freebsd": ["tar.gz", "pkg"],
+    "openbsd": ["tar.gz", "tgz"],
 }
 
 # Where a release reaches people. github = assets on the GitHub release.
@@ -1550,6 +1652,8 @@ CHANNELS = {
     "windows": ["github", "winget", "microsoft-store"],
     "android": ["github", "google-play", "fdroid", "apk-sideload"],
     "ios": ["app-store", "testflight", "eu-marketplace", "altstore", "adhoc-ipa"],
+    "freebsd": ["github"],
+    "openbsd": ["github"],
 }
 
 
@@ -1567,8 +1671,15 @@ def platform_report(cfg):
         if p.get("opt_out"):
             lines.append(f"  {os_}: opted out ({p['opt_out']})")
             continue
-        arch = p.get("arch", ["x86_64", "aarch64"])
+        arch = p.get("arch", MAC_ARCHES if os_ == "macos" else ["x86_64", "aarch64"])
         bad = [a for a in arch if a not in ARCHES]
+        if os_ == "macos":
+            intel = [a for a in arch if a in ARCHES and a not in MAC_ARCHES]
+            if intel:
+                problems.append(f"macos: arch {intel} is not supported (Apple Silicon only: use {MAC_ARCHES})")
+            intel_assets = [x for x in p.get("assets", []) if MAC_INTEL.search(x)]
+            if intel_assets:
+                problems.append(f"macos: assets {intel_assets} name an Intel or universal build (Apple Silicon only)")
         badf = [f for f in p.get("formats", []) if f not in FORMATS[os_]]
         if bad:
             problems.append(f"{os_}: unknown arch {bad} (use {ARCHES})")
@@ -1579,7 +1690,7 @@ def platform_report(cfg):
         badc = [c for c in p.get("channels", []) if c not in CHANNELS[os_]]
         if badc:
             problems.append(f"{os_}: unknown channels {badc} (use {CHANNELS[os_]})")
-        need = ("aarch64",) if os_ in ("android", "ios") else ("x86_64", "aarch64")
+        need = ("aarch64",) if os_ in ("android", "ios", "macos") else ("x86_64", "aarch64")
         missing_arch = [a for a in need if a not in arch and "universal" not in arch]
         note = f"; no {', '.join(missing_arch)}" + (f" ({p['arch_note']})" if p.get("arch_note") else "") if missing_arch else ""
         ch = p.get("channels", [])
@@ -1589,7 +1700,15 @@ def platform_report(cfg):
     for os_ in OSES:
         if plats and os_ not in seen:
             lines.append(f"  {os_}: not listed (add it, or opt out with a reason)")
+    problems += mac_bundle_problems(cfg)
     return lines, problems
+
+
+def mac_bundle_problems(cfg):
+    """[[updates.bundles]] for macOS must not be Intel (x86_64) or universal builds."""
+    return [f"[[updates.bundles]] {b.get('name')}: macos arch {b.get('arch')!r} is not supported (Apple Silicon only: use 'aarch64')"
+            for b in ((cfg.get("updates") or {}).get("bundles") or [])
+            if b.get("os") == "macos" and MAC_INTEL.search(str(b.get("arch", "")))]
 
 
 def assets(a, root):
@@ -1706,6 +1825,206 @@ def github_release(a, root):
 
 # ---- main ----------------------------------------------------------------------------------
 
+# ---- self-update bundles -------------------------------------------------------------------
+
+UPDATE_VARS = re.compile(r"\{(dir|key|root|pin|os|arch|version|signer)\}")
+
+
+def _update_fill(template, ctx):
+    return UPDATE_VARS.sub(lambda m: str(ctx.get(m.group(1), m.group(0))), template)
+
+
+def update_layout(rules):
+    """`[[updates.bundles]] files = ["bin/ymird=ymird", "lib/x/=x/"]`: SRC=DST pairs, paths in
+    the package below its top directory; a SRC ending in `/` maps a whole directory."""
+    out = []
+    for r in rules:
+        if "=" not in r:
+            raise ReleaseError(f"[[updates.bundles]] files: {r!r} is not SRC=DST")
+        src, dst = (x.strip().lstrip("/") for x in r.split("=", 1))
+        if src.endswith("/") != dst.endswith("/") or ".." in src.split("/") + dst.split("/"):
+            raise ReleaseError(f"[[updates.bundles]] files: {r!r} (both or neither end in /, no ..)")
+        out.append((src, dst))
+    return out
+
+
+def _safe_extract(tar, dest):
+    for m in tar.getmembers():
+        parts = Path(m.name).parts
+        if m.name.startswith("/") or ".." in parts:
+            raise ReleaseError(f"refusing unsafe path in archive: {m.name}")
+    try:
+        tar.extractall(dest, filter="data")
+    except TypeError:
+        tar.extractall(dest)
+
+
+def update_payload(archive, layout, dest):
+    """Unpack ARCHIVE (.tar.gz/.zip, one top directory) and copy LAYOUT into DEST as regular
+    files (symlinks resolved), programs 0755 and the rest 0644, as the bundle's file set."""
+    tmp = Path(tempfile.mkdtemp(prefix="update-src-"))
+    try:
+        if str(archive).endswith(".zip"):
+            import zipfile
+            with zipfile.ZipFile(archive) as z:
+                for n in z.namelist():
+                    if n.startswith("/") or ".." in Path(n).parts:
+                        raise ReleaseError(f"refusing unsafe path in archive: {n}")
+                z.extractall(tmp)
+        else:
+            with tarfile.open(archive) as t:
+                _safe_extract(t, tmp)
+        tops = [p for p in tmp.iterdir()]
+        top = tops[0] if len(tops) == 1 and tops[0].is_dir() else tmp
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True)
+        n = 0
+        for src, dst in layout:
+            s = top / src
+            pairs = []
+            if src.endswith("/"):
+                if not s.is_dir():
+                    raise ReleaseError(f"{Path(archive).name}: no directory {src}")
+                pairs = [(f, dest / dst / f.relative_to(s)) for f in sorted(s.rglob("*")) if not f.is_dir()]
+            else:
+                if not s.exists():
+                    raise ReleaseError(f"{Path(archive).name}: no {src}")
+                pairs = [(s, dest / dst)]
+            for f, d in pairs:
+                d.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(f.resolve(), d)
+                with open(d, "rb") as fh:
+                    head = fh.read(4)
+                exe = os.access(f.resolve(), os.X_OK) or head == b"\x7fELF" or head[:2] == b"#!"
+                os.chmod(d, 0o755 if exe else 0o644)
+                n += 1
+        return n
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def update_tar(bundle_dir, out_file):
+    """A reproducible .tar.gz of BUNDLE_DIR (sorted, owner 0, mtime 0)."""
+    def norm(ti):
+        ti.uid = ti.gid = 0
+        ti.uname = ti.gname = ""
+        ti.mtime = 0
+        return ti
+    paths = [bundle_dir] + sorted(bundle_dir.rglob("*"))
+    with open(out_file, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="") as gz, \
+            tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as t:
+        for p in paths:
+            t.add(p, arcname=str(Path(bundle_dir.name) / p.relative_to(bundle_dir)), recursive=False, filter=norm)
+
+
+def _key_strings(path):
+    """The key file's contents (whole and trimmed), only to redact them from a signer's output."""
+    try:
+        raw = Path(path).read_bytes()[:4096].decode("utf-8", "replace")
+    except OSError:
+        return []
+    return sorted({x for x in (raw, raw.strip()) if len(x) >= 8}, key=len, reverse=True)
+
+
+def _host_target():
+    m = os.uname().machine if hasattr(os, "uname") else ""
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(m.lower(), m)
+    osn = {"linux": "linux", "darwin": "macos", "freebsd": "freebsd", "openbsd": "openbsd"}.get(sys.platform.rstrip("0123456789"), sys.platform)
+    return osn, arch
+
+
+def updates(a, root):
+    """Build and sign the [updates] self-update bundles for VERSION from the release archives in
+    --dist: each [[updates.bundles]] entry unpacks its `asset`, lays out `files`, runs the
+    `sign` command (the project's signer; the key file comes from the `key_env` variable and is
+    never printed: signer output is redacted) and packs NAME.tar.gz into --out, plus a SHA256 list."""
+    cfg = load_config(root, a.config)
+    uc = cfg.get("updates") or {}
+    bundles = uc.get("bundles") or []
+    if not bundles:
+        raise ReleaseError(f"{CONFIG} has no [[updates.bundles]]")
+    mac = mac_bundle_problems(cfg)
+    if mac:
+        raise ReleaseError("; ".join(mac))
+    version = a.version.lstrip("v")
+    parse_version(version)
+    if is_prerelease(version) and not uc.get("prereleases"):
+        raise ReleaseError(f"{version} is a pre-release; [updates] publishes releases only")
+    ctx = {"version": version, "tag": f"{cfg.get('tag_prefix', 'v')}{version}", "project": cfg["project"], **version_ctx(version)}
+    dist = Path(a.dist) if a.dist else root / "dist"
+    outdir = Path(a.out) if a.out else dist
+    key_env = uc.get("key_env", "WEIRDNET_UPDATE_KEY")
+    key = os.environ.get(key_env)
+    if not a.dry_run and (not key or not Path(key).is_file()):
+        raise ReleaseError(f"set {key_env} to the release key file (a path; the key is not printed)")
+    rootf = root / uc["root"] if uc.get("root") else None
+    if not rootf or not rootf.is_file():
+        raise ReleaseError("[updates] root: the signed org root file in the repo is missing")
+    sign = uc.get("sign")
+    if not sign:
+        raise ReleaseError("[updates] sign: the signing command is missing")
+    work = Path(tempfile.mkdtemp(prefix="updates-", dir=outdir if outdir.is_dir() else None))
+    plan = []
+    for b in bundles:
+        name = fill(b["name"], ctx)
+        asset = fill(b["asset"], ctx)
+        hits = sorted(globmod.glob(str(dist / asset)))
+        if len(hits) != 1:
+            raise ReleaseError(f"[[updates.bundles]] {name}: {len(hits)} files match {dist / asset}")
+        plan.append((b, name, Path(hits[0]), work / name.removesuffix(".tar.gz")))
+    signer = a.signer or uc.get("signer", "")
+    host = _host_target()
+    for b, name, archive, bdir in plan:
+        out(f"{'would build' if a.dry_run else 'build'} {name} from {archive.name} ({b['os']}/{b['arch']})")
+    if a.dry_run:
+        shutil.rmtree(work, ignore_errors=True)
+        return 0
+    try:
+        for b, name, archive, bdir in plan:
+            n = update_payload(archive, update_layout(b.get("files") or []), bdir)
+            out(f"  {n} files laid out")
+        if signer.startswith("@"):
+            # "@FILE": FILE from the bundle built for this machine (the release's own signer).
+            mine = [bdir for b, _, _, bdir in plan if (b["os"], b["arch"]) == host]
+            if not mine:
+                raise ReleaseError(f"signer {signer}: no bundle for this machine ({host[0]}/{host[1]}); pass --signer")
+            signer = str(mine[0] / signer[1:])
+        sums = []
+        for b, name, archive, bdir in plan:
+            sctx = {"dir": bdir, "key": key, "root": rootf, "pin": uc.get("pin", ""), "os": b["os"], "arch": b["arch"],
+                    "version": version, "signer": signer}
+            cmd = [_update_fill(x, sctx) for x in sign]
+            shown = " ".join(shlex.quote(x if x != key else f"${key_env}") for x in cmd)
+            out(f"sign {name}: {shown}")
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            msg = (r.stdout + r.stderr).replace(key, f"${key_env}")
+            for secret in _key_strings(key):
+                msg = msg.replace(secret, "<redacted>")
+            msg = msg.strip()
+            if r.returncode != 0:
+                raise ReleaseError(f"signing {name} failed: {msg[-600:]}")
+            if msg:
+                out(f"  {msg.splitlines()[-1]}")
+            dest = outdir / name
+            update_tar(bdir, dest)
+            sums.append(f"{hashlib.sha256(dest.read_bytes()).hexdigest()}  {name}")
+            out(f"  wrote {dest}")
+        sumf = outdir / fill(uc.get("sums", "{project}-{version}-updates.sha256"), ctx)
+        sumf.write_text("\n".join(sums) + "\n", encoding="utf-8")
+        out(f"wrote {sumf}")
+        if a.upload:
+            gh = os.environ.get("WEIRDNET_RELEASE_GH", "gh")
+            files = [str(outdir / n) for _, n, _, _ in plan] + [str(sumf)]
+            r = subprocess.run([gh, "release", "upload", ctx["tag"], "-R", github_slug(root), *files], capture_output=True, text=True)
+            if r.returncode != 0:
+                raise ReleaseError(f"gh release upload: {(r.stderr or r.stdout).strip()[:300]}")
+            out(f"uploaded {len(files)} file(s) to {ctx['tag']}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return 0
+
+
 def find_root(repo):
     r = subprocess.run(["git", "-C", str(repo or "."), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     if r.returncode != 0:
@@ -1765,13 +2084,20 @@ def parser():
     gr.add_argument("version")
     gr.add_argument("--notes-file", help="release notes (default: the version's changelog section)")
     gr.add_argument("--dry-run", action="store_true")
+    up = sub.add_parser("updates", help="build and sign the [updates] self-update bundles for VERSION")
+    up.add_argument("version")
+    up.add_argument("--dist", help="where the release archives are (default: REPO/dist)")
+    up.add_argument("--out", help="where the bundles go (default: --dist)")
+    up.add_argument("--signer", help="the signing program for {signer} (default: [updates] signer)")
+    up.add_argument("--upload", action="store_true", help="upload the bundles to the GitHub release")
+    up.add_argument("--dry-run", action="store_true")
     sub.add_parser("version", help="print the script version")
     return ap
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    cmds = {"cut", "validate", "assets", "github", "crates", "taur", "taur-srcinfo", "taur-check", "version", "-h", "--help"}
+    cmds = {"cut", "validate", "assets", "github", "updates", "crates", "taur", "taur-srcinfo", "taur-check", "version", "-h", "--help"}
     # `cut` is the default subcommand: insert it after the global options.
     i = 0
     while i < len(argv) and argv[i] in ("--repo", "--config"):
@@ -1804,6 +2130,8 @@ def main(argv=None):
             return 0
         if a.cmd == "taur":
             return taur(a, root)
+        if a.cmd == "updates":
+            return updates(a, root)
         if a.cmd == "assets":
             return assets(a, root)
         if a.cmd == "github":
@@ -1818,7 +2146,9 @@ def main(argv=None):
                    "title": "validate", "title_cell": "validate", "project": cfg["project"], "tag_prefix": pfx, "build": "",
                    **version_ctx(new)}
             plan = plan_files(root, cfg, ctx)
-            plan_requires(plan, required_crates(root, cfg, ctx, online=False))
+            reqs = required_crates(root, cfg, ctx, online=False)
+            check_requires_offline(root, reqs)
+            plan_requires(plan, reqs)
             cl = cfg.get("changelog")
             if cl:
                 p = cl.get("path", "CHANGELOG.md")

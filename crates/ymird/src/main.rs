@@ -1,6 +1,7 @@
 //! `ymird`: one daemon for any mix of the model, inference and app roles.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -59,30 +60,47 @@ fn main() -> Result<()> {
         return winservice::run(args);
     }
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let daemon = start(&args).await?;
-        tokio::select! {
-            _ = wait_for_signal() => {}
-            _ = daemon.exit_requested() => {}
+    let restart = rt.block_on(async {
+        let (daemon, paths, update) = start(&args).await?;
+        let restart = Arc::new(tokio::sync::Notify::new());
+        if update.auto {
+            let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+            tokio::spawn(ymir_core::autoupdate::run(paths, update, running, restart.clone()));
         }
+        let restart_now = tokio::select! {
+            _ = wait_for_signal() => false,
+            _ = daemon.exit_requested() => false,
+            _ = restart.notified() => true,
+        };
         daemon.shutdown().await;
-        Ok(())
-    })
+        anyhow::Ok(restart_now)
+    })?;
+    if restart {
+        // The service manager starts `ymirctl update boot` again, which runs the staged release on trial.
+        tracing::info!("exiting for the update");
+        std::process::exit(ymir_core::autoupdate::RESTART_EXIT_CODE);
+    }
+    Ok(())
 }
 
 /// Loads the config and starts the roles; an update on trial passes its health check once they serve.
-async fn start(args: &Args) -> Result<Daemon> {
+async fn start(args: &Args) -> Result<(Daemon, Paths, ymir_core::autoupdate::UpdateSection)> {
     let paths = args.home.clone().map(Paths::new).unwrap_or_else(Paths::from_env);
+    // A release on trial that never comes up exits, so the next start can roll it back.
+    let serving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ymir_core::autoupdate::trial_watchdog(&paths, ymir_core::autoupdate::TRIAL_TIMEOUT, serving.clone());
     let config = args.config.clone().unwrap_or_else(|| paths.config());
     let mut cfg =
         NodeConfig::load(&config).with_context(|| format!("no usable config; run `ymirctl setup` first (looked at {})", config.display()))?;
     if let Some(r) = &args.roles {
         cfg.roles = Roles::parse(r)?;
     }
-    let daemon = Daemon::start(cfg, paths.clone()).await?;
+    let update = cfg.update.clone();
+    let daemon = Daemon::start_at(cfg, paths.clone(), config).await?;
     // Serving: an update on trial passes its health check (see `ymirctl update boot`).
+    serving.store(true, std::sync::atomic::Ordering::SeqCst);
     ymir_core::update::commit_if_on_trial(&paths);
-    Ok(daemon)
+    Ok((daemon, paths, update))
 }
 
 async fn wait_for_signal() {

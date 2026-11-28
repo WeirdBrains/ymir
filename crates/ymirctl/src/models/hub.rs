@@ -143,6 +143,15 @@ impl MlxHub {
         resp.body_mut().read_to_vec().with_context(|| format!("reading {name}"))
     }
 
+    /// The license a repo's model card states ([`ymir_core::dataset::hub_license`]).
+    pub fn license(&self, repo: &str) -> Result<Option<String>> {
+        weirdnet_model::hf::check_repo(repo).map_err(|_| anyhow::anyhow!("`{repo}` is not a repo id (use owner/name)"))?;
+        let mut resp = self.get(&format!("{}/api/models/{repo}", self.base), None)?;
+        self.ok(&resp, repo)?;
+        let text = resp.body_mut().read_to_string().context("reading the repo answer")?;
+        Ok(ymir_core::dataset::hub_license(&serde_json::from_str(&text).context("the Hub's repo answer is not JSON")?))
+    }
+
     pub fn repo(&self, repo: &str) -> Result<RepoInfo> {
         weirdnet_model::hf::check_repo(repo).map_err(|_| anyhow::anyhow!("`{repo}` is not a repo id (use owner/name)"))?;
         let mut resp = self.get(&format!("{}/api/models/{repo}?blobs=true", self.base), None)?;
@@ -154,6 +163,12 @@ impl MlxHub {
 
 /// Free bytes on the disk holding `dir` (which must exist), or `None` where that isn't known.
 pub fn free_bytes(dir: &Path) -> Option<u64> {
+    disk_space(dir).map(|(free, _)| free)
+}
+
+/// Free and total bytes on the disk holding `dir` (which must exist), or `None` where that isn't
+/// known. Free is what an unprivileged user may still write.
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -168,7 +183,9 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
         let s = unsafe { s.assume_init() };
         // The field types differ by platform (u32 on macOS), so the conversion is needed there.
         #[allow(clippy::useless_conversion)]
-        Some(u64::from(s.f_bavail).saturating_mul(u64::from(s.f_frsize)))
+        let frsize = u64::from(s.f_frsize);
+        #[allow(clippy::useless_conversion)]
+        Some((u64::from(s.f_bavail).saturating_mul(frsize), u64::from(s.f_blocks).saturating_mul(frsize)))
     }
     #[cfg(windows)]
     {
@@ -178,10 +195,10 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
             fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
         }
         let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut available = 0u64;
-        // SAFETY: `wide` is a NUL-terminated UTF-16 path; `available` is a valid out pointer and the two optional ones are null.
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
-        (ok != 0).then_some(available)
+        let (mut available, mut total) = (0u64, 0u64);
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path; `available` and `total` are valid out pointers and the last one is null.
+        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, std::ptr::null_mut()) };
+        (ok != 0).then_some((available, total))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -361,6 +378,18 @@ mod tests {
         assert!(MlxHub::new(&m.url, None).repo("a/limited").unwrap_err().to_string().contains("rate limiting"));
         assert!(MlxHub::new(&m.url, None).repo("a/missing").unwrap_err().to_string().contains("not found"));
         assert!(MlxHub::new(&m.url, None).repo("../etc").unwrap_err().to_string().contains("not a repo id"));
+    }
+
+    #[test]
+    fn reads_a_repo_license() {
+        let hub = MockHub::start();
+        hub.route("/api/models/acme/Teacher", 200, r#"{"cardData": {"license": "apache-2.0"}, "tags": ["license:apache-2.0"]}"#);
+        hub.route("/api/models/acme/Bare", 200, r#"{"tags": ["gguf"]}"#);
+        let h = MlxHub::new(&hub.url, None);
+        assert_eq!(h.license("acme/Teacher").unwrap().as_deref(), Some("apache-2.0"));
+        assert_eq!(h.license("acme/Bare").unwrap(), None);
+        assert!(h.license("acme/Missing").is_err());
+        assert!(h.license("not a repo").is_err());
     }
 
     #[test]

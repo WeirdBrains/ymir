@@ -1,11 +1,12 @@
-//! Split models (M7): group jobs over llama.cpp RPC.
+//! Split models (M7): group jobs over llama.cpp RPC or Ray.
 //!
-//! A model too big for one machine is served by a *group*: workers (`rpc-server`) on the other
-//! members, bound to their private link only, and a leader that runs `llama-server --rpc`
-//! against them. The inference node decides (this module's [`plan_group`], run by the
-//! coordinator), the model nodes run it ([`RpcWorkers`], behind `GroupUp`/`GroupDown` of
-//! `/weirdnet-backends/node/1`). Ray and vLLM groups are not here: the `vllm-ray` backend needs
-//! a RoCE cluster that was not available to test on.
+//! A model too big for one machine is served by a *group*. With `llamacpp-rpc`: workers
+//! (`rpc-server`) on the other members, bound to their private link only, and a leader that runs
+//! `llama-server --rpc` against them. With `vllm-ray`: a Ray cluster over the private link (the
+//! leader's `ray start --head`, every other member's `ray start --address`) and the leader's
+//! `vllm serve --distributed-executor-backend ray` on it (see [`crate::ray`]). The inference
+//! node decides (this module's [`plan_group`], run by the coordinator), the model nodes run it
+//! ([`RpcWorkers`], behind `GroupUp`/`GroupDown` of `/weirdnet-backends/node/1`).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -20,10 +21,19 @@ use tokio::process::{Child, Command};
 use weirdnet_agent::remote::RemoteError;
 use weirdnet_backends::node::{GroupPlan, GroupWorkers};
 
-/// The worker kind the plans name.
+/// The worker kind `llamacpp-rpc` plans name.
 pub const WORKER_KIND: &str = "rpc-server";
 /// The group backend: GGUF across any nodes.
 pub const BACKEND: &str = "llamacpp-rpc";
+/// The worker kind `vllm-ray` plans name.
+pub const RAY_WORKER: &str = "ray";
+/// The group backend: vLLM with Ray as its executor, across Linux GPU nodes.
+pub const RAY_BACKEND: &str = "vllm-ray";
+
+/// The worker kind a group backend's plans name.
+pub fn worker_kind(backend: &str) -> &'static str {
+    if backend == RAY_BACKEND { RAY_WORKER } else { WORKER_KIND }
+}
 
 fn default_rpc_port() -> u16 {
     50052
@@ -48,9 +58,13 @@ fn default_min_gbps() -> f64 {
 pub struct SplitModel {
     pub id: String,
     /// GGUF path, absolute or relative to `models_dir`.
+    /// For `engine = "vllm"`: a model directory (absolute or under `models_dir`) or a Hub id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    /// Where the leader's `llama-server` listens (loopback).
+    /// `llamacpp` (default; a `llamacpp-rpc` group) or `vllm` (a `vllm-ray` group).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Where the leader's `llama-server` or `vllm serve` listens (loopback).
     #[serde(default = "default_serve_port")]
     pub serve_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +96,9 @@ pub struct SplitNode {
     /// Models to unload there before it joins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drop: Vec<String>,
+    /// GPUs the group may use there (`vllm-ray` sizing); default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<u32>,
 }
 
 /// The pool policy for one split model (`[[inference.split]]`). Off unless listed.
@@ -99,8 +116,23 @@ pub struct SplitPolicy {
     /// Slowest link accepted, in Gb/s.
     #[serde(default = "default_min_gbps")]
     pub min_link_gbps: f64,
+    /// `vllm-ray`: the head's Ray (GCS) port on its private link; default 6379.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ray_port: Option<u16>,
+    /// `vllm-ray`: `--tensor-parallel-size`; default the fewest GPUs of any member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tensor_parallel: Option<u32>,
+    /// `vllm-ray`: `--pipeline-parallel-size`; default the number of members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_parallel: Option<u32>,
     #[serde(default, rename = "node")]
     pub nodes: Vec<SplitNode>,
+}
+
+impl SplitPolicy {
+    pub fn is_ray(&self) -> bool {
+        self.backend == RAY_BACKEND
+    }
 }
 
 /// A link address that may carry tensor traffic: loopback, a private (RFC 1918) range,
@@ -136,6 +168,8 @@ pub struct Candidate {
     pub group_jobs: bool,
     pub draining: bool,
     pub drop: Vec<String>,
+    /// GPUs it gives the group (`vllm-ray`).
+    pub gpus: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +180,7 @@ pub enum PlanError {
     BadLink(String, String),
     SlowLink(String, f64, f64),
     UnknownSpeed(String),
+    Sizing(String),
 }
 
 impl std::fmt::Display for PlanError {
@@ -157,6 +192,7 @@ impl std::fmt::Display for PlanError {
             PlanError::BadLink(n, m) => write!(f, "{n}: link {m}"),
             PlanError::SlowLink(n, g, min) => write!(f, "{n}: its link ({g} Gb/s) is slower than the {min} Gb/s this model asks for"),
             PlanError::UnknownSpeed(n) => write!(f, "{n}: link speed unknown (set `gbps` on the node)"),
+            PlanError::Sizing(m) => write!(f, "vLLM sizing: {m}"),
         }
     }
 }
@@ -198,7 +234,16 @@ pub fn plan_group(policy: &SplitPolicy, need: u64, cands: &[Candidate]) -> Resul
     if have < need {
         return Err(PlanError::TooSmall { need, have });
     }
+    if policy.is_ray() {
+        sizing(policy, &group)?;
+    }
     Ok(group)
+}
+
+/// `(tensor_parallel, pipeline_parallel)` for a `vllm-ray` group (see [`crate::ray::sizing`]).
+pub fn sizing(policy: &SplitPolicy, group: &[Candidate]) -> Result<(u32, u32), PlanError> {
+    let gpus: Vec<u32> = group.iter().map(|c| c.gpus).collect();
+    crate::ray::sizing(&gpus, policy.tensor_parallel, policy.pipeline_parallel).map_err(PlanError::Sizing)
 }
 
 /// The plan a member receives: the same group, with that member's own link, port and drop list.
@@ -208,10 +253,16 @@ pub fn plan_for(policy: &SplitPolicy, group: &[Candidate], member: &Candidate) -
         .with_drop(member.drop.clone())
         .with_model(policy.id.clone())
         .with_link(member.link.to_string())
-        .with_worker(WORKER_KIND);
+        .with_worker(worker_kind(&policy.backend));
     for c in group {
         plan.extra.insert(format!("link.{}", c.name), c.link.to_string());
         plan.extra.insert(format!("port.{}", c.name), c.port.to_string());
+    }
+    if policy.is_ray() {
+        let (tp, pp) = sizing(policy, group).unwrap_or((1, group.len() as u32));
+        plan.extra.insert("ray.port".into(), policy.ray_port.unwrap_or(crate::ray::DEFAULT_PORT).to_string());
+        plan.extra.insert("vllm.tp".into(), tp.to_string());
+        plan.extra.insert("vllm.pp".into(), pp.to_string());
     }
     plan
 }
@@ -262,17 +313,104 @@ pub struct WorkerConfig {
     /// The key the leader's `llama-server` wants (the wrapped launch sends it).
     pub key: String,
     pub log_dir: Option<PathBuf>,
+    /// `ray`, when this node can be in a `vllm-ray` group.
+    pub ray: Option<PathBuf>,
+    /// More `ray start` arguments (checked by [`crate::ray::check_args`]).
+    pub ray_args: Vec<String>,
+    /// `vllm`, when this node can lead a `vllm-ray` group.
+    pub vllm: Option<PathBuf>,
+    /// `[model] ray_trust_firewall`: allow Ray listeners on all interfaces (see [`crate::ray`]).
+    pub ray_trust_firewall: bool,
+    /// `[model] ray_trusted_ports`: where `ray_trust_firewall` allows them (default
+    /// [`crate::ray::TRUSTED_PORTS`]).
+    pub ray_trusted_ports: Vec<String>,
 }
 
+/// One process of a group, the leader of its own process group: stopping it signals the whole
+/// process group (Ray's raylet and GCS, vLLM's workers), and so does dropping it.
 struct Proc {
     role: &'static str,
     child: Child,
+    /// The process group (its pid), while it may still have members.
+    pgid: Option<i32>,
+    /// A Ray process group: its listeners must stay on the private link.
+    ray_link: Option<IpAddr>,
+}
+
+impl Proc {
+    fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// SIGTERM to the process group, up to 10 s for it to exit, then SIGKILL to what is left.
+    async fn stop(mut self) {
+        // Ray's workers live in process groups of their own: remember them to finish them off.
+        #[cfg(unix)]
+        let tree = match (self.ray_link, self.pgid) {
+            (Some(_), Some(g)) => crate::ray::started(&crate::ray::tree_of(g)),
+            _ => Vec::new(),
+        };
+        #[cfg(unix)]
+        if let Some(g) = self.pgid
+            && self.running()
+        {
+            // SAFETY: plain syscall; `g` is our child's own process group and the child is not reaped.
+            unsafe { libc::killpg(g, libc::SIGTERM) };
+        }
+        #[cfg(not(unix))]
+        let _ = self.child.start_kill();
+        if tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await.is_err() {
+            let _ = self.child.start_kill();
+            let _ = self.child.wait().await;
+        }
+        #[cfg(unix)]
+        if let Some(g) = self.pgid.take() {
+            // Members that outlived the leader (a raylet that ignored SIGTERM).
+            // SAFETY: plain syscall on the group we started, right after its leader exited.
+            unsafe { libc::killpg(g, libc::SIGKILL) };
+        }
+        #[cfg(unix)]
+        if !tree.is_empty() {
+            // Give Ray's own shutdown a moment, then kill what is left of the tree (the same
+            // processes: their start time is checked again, so a reused pid is spared).
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            for (pid, at) in tree {
+                if crate::ray::started(&[pid]).first() == Some(&(pid, at)) {
+                    // SAFETY: plain syscall on a process of the tree we started, still the same one.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Proc {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(g) = self.pgid.take()
+            && self.running()
+        {
+            // SAFETY: plain syscall; the group's leader is our unreaped child.
+            unsafe { libc::killpg(g, libc::SIGKILL) };
+        }
+    }
+}
+
+async fn stop_all(procs: Vec<Proc>) {
+    // Last started first: vLLM before the Ray head.
+    for p in procs.into_iter().rev() {
+        p.stop().await;
+    }
 }
 
 /// Starts and stops a node's part of a group.
 pub struct RpcWorkers {
     cfg: WorkerConfig,
     groups: tokio::sync::Mutex<HashMap<String, Vec<Proc>>>,
+    /// Set by [`RpcWorkers::down_all`]: a start still waiting gives up.
+    stopping: std::sync::atomic::AtomicBool,
+    /// All-interface listeners already logged (role, ports), so a watch tick doesn't repeat them.
+    trusted_logged: std::sync::Mutex<std::collections::HashSet<(&'static str, Vec<u16>)>>,
 }
 
 fn refused(m: impl Into<String>) -> RemoteError {
@@ -285,25 +423,62 @@ fn failed(m: impl Into<String>) -> RemoteError {
 
 impl RpcWorkers {
     pub fn new(cfg: WorkerConfig) -> Self {
-        Self { cfg, groups: tokio::sync::Mutex::new(HashMap::new()) }
+        Self {
+            cfg,
+            groups: tokio::sync::Mutex::new(HashMap::new()),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            trusted_logged: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
     }
 
     /// Whether every process of `group` here is still running.
     pub async fn alive(&self, group: &str) -> bool {
         let mut g = self.groups.lock().await;
         match g.get_mut(group) {
-            Some(procs) => procs.iter_mut().all(|p| matches!(p.child.try_wait(), Ok(None))),
+            Some(procs) => procs.iter_mut().all(|p| p.running() && self.binds_ok(p).is_ok()),
             None => false,
         }
     }
 
-    fn spawn(&self, program: &Path, args: &[String], role: &'static str, group: &str, key: Option<&str>) -> Result<Proc, RemoteError> {
+    /// Stops every group here (the daemon is stopping).
+    pub async fn down_all(&self) {
+        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        let all: Vec<Vec<Proc>> = self.groups.lock().await.drain().map(|(_, v)| v).collect();
+        for procs in all {
+            stop_all(procs).await;
+        }
+    }
+
+    /// For a Ray process: its listeners are on the private link or loopback only.
+    fn binds_ok(&self, p: &Proc) -> Result<(), RemoteError> {
+        let (Some(own), Some(g)) = (p.ray_link, p.pgid) else { return Ok(()) };
+        let ranges = crate::ray::trusted_ranges(&self.cfg.ray_trusted_ports).map_err(refused)?;
+        let trusted = self.cfg.ray_trust_firewall.then_some(ranges.as_slice());
+        match crate::ray::check_listeners(&crate::ray::listeners_of_tree(g), own, trusted) {
+            Ok(wild) => {
+                if !wild.is_empty() {
+                    let ports: Vec<u16> = wild.iter().map(|l| l.port).collect();
+                    let mut seen = self.trusted_logged.lock().unwrap_or_else(|e| e.into_inner());
+                    if seen.insert((p.role, ports.clone())) {
+                        tracing::info!(role = p.role, ports = ?ports, "listening on all interfaces on firewalled ports, allowed by ray_trust_firewall = true: the host firewall must drop these ports off the private link");
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(role = p.role, "{e}");
+                Err(refused(e))
+            }
+        }
+    }
+
+    fn spawn(&self, program: &Path, args: &[String], role: &'static str, group: &str, env: &[(&str, &str)]) -> Result<Proc, RemoteError> {
         let mut cmd = Command::new(program);
         cmd.args(args).stdin(Stdio::null()).kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
-        if let Some(k) = key {
-            cmd.env("LLAMA_API_KEY", k);
+        for (k, v) in env {
+            cmd.env(k, v);
         }
         match &self.cfg.log_dir {
             Some(dir) => {
@@ -317,12 +492,19 @@ impl RpcWorkers {
             }
         }
         let child = cmd.spawn().map_err(|e| failed(format!("starting {}: {e}", program.display())))?;
-        Ok(Proc { role, child })
+        let pgid = if cfg!(unix) { child.id().map(|i| i as i32) } else { None };
+        Ok(Proc { role, child, pgid, ray_link: None })
     }
 
-    async fn wait_tcp(addr: (IpAddr, u16), proc: &mut Proc, within: Duration) -> Result<(), RemoteError> {
+    /// Err once the node is stopping.
+    fn check_stopping(&self) -> Result<(), RemoteError> {
+        if self.stopping.load(std::sync::atomic::Ordering::SeqCst) { Err(unavailable("this node is stopping")) } else { Ok(()) }
+    }
+
+    async fn wait_tcp(&self, addr: (IpAddr, u16), proc: &mut Proc, within: Duration) -> Result<(), RemoteError> {
         let deadline = Instant::now() + within;
         loop {
+            self.check_stopping()?;
             if let Ok(Some(status)) = proc.child.try_wait() {
                 return Err(failed(format!("the {} exited ({status}) before it was ready", proc.role)));
             }
@@ -336,11 +518,12 @@ impl RpcWorkers {
         }
     }
 
-    async fn wait_health(port: u16, key: &str, proc: &mut Proc, within: Duration) -> Result<(), RemoteError> {
+    async fn wait_health(&self, port: u16, key: &str, proc: &mut Proc, within: Duration) -> Result<(), RemoteError> {
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{port}/health");
         let deadline = Instant::now() + within;
         loop {
+            self.check_stopping()?;
             if let Ok(Some(status)) = proc.child.try_wait() {
                 return Err(failed(format!("the {} exited ({status}) before it was ready", proc.role)));
             }
@@ -357,39 +540,39 @@ impl RpcWorkers {
     }
 }
 
-#[async_trait]
-impl GroupWorkers for RpcWorkers {
-    async fn up(&self, me: &str, plan: &GroupPlan) -> Result<(), RemoteError> {
-        if plan.worker.as_deref().is_some_and(|w| w != WORKER_KIND) {
-            return Err(RemoteError::Unsupported {
-                message: format!("this node runs `{WORKER_KIND}` groups, not `{}`", plan.worker.as_deref().unwrap_or("")),
-            });
+impl RpcWorkers {
+    /// This node's private link, which must be the one the plan binds.
+    fn own_link(&self, plan: &GroupPlan, why: &str) -> Result<IpAddr, RemoteError> {
+        let own = self
+            .cfg
+            .private_link
+            .as_deref()
+            .ok_or_else(|| refused(format!("this node has no [model] private_link, so it takes no part in {why}")))?;
+        let ip = parse_link(own).map_err(|e| refused(format!("[model] private_link: {e}")))?;
+        if let Some(asked) = plan.link.as_deref()
+            && asked != own
+        {
+            return Err(refused(format!("the plan binds {asked}, but this node's private link is {own}")));
         }
-        if !plan.members.iter().any(|m| m == me) {
-            return Err(refused(format!("{me} is not a member of group {}", plan.group)));
-        }
-        let mut groups = self.groups.lock().await;
-        if let Some(procs) = groups.get_mut(&plan.group) {
-            if procs.iter_mut().all(|p| matches!(p.child.try_wait(), Ok(None))) {
-                return Ok(());
-            }
-            // A dead remnant: start over.
-            for mut p in groups.remove(&plan.group).unwrap_or_default() {
-                let _ = p.child.start_kill();
-                let _ = p.child.wait().await;
-            }
-        }
+        Ok(ip)
+    }
+
+    fn split(&self, plan: &GroupPlan) -> Result<&SplitModel, RemoteError> {
+        let model = plan.model.as_deref().ok_or_else(|| refused("the plan names no model"))?;
+        self.cfg.splits.iter().find(|s| s.id == model).ok_or_else(|| refused(format!("no [[model.split]] for `{model}` on this node")))
+    }
+
+    async fn up_rpc(&self, me: &str, plan: &GroupPlan) -> Result<Vec<Proc>, RemoteError> {
         if me == plan.leader {
-            let model = plan.model.as_deref().ok_or_else(|| refused("the plan names no model"))?;
-            let split =
-                self.cfg.splits.iter().find(|s| s.id == model).ok_or_else(|| refused(format!("no [[model.split]] for `{model}` on this node")))?;
+            let split = self.split(plan)?;
+            let model = &split.id;
             let bin = self.cfg.llama_server.as_ref().ok_or_else(|| refused("no llama-server on this node"))?;
             let mut endpoints = Vec::new();
             for m in plan.members.iter().filter(|m| *m != me) {
                 let ip = plan.extra.get(&format!("link.{m}")).ok_or_else(|| refused(format!("the plan has no link for {m}")))?;
                 let ip = parse_link(ip).map_err(|e| refused(format!("{m}: {e}")))?;
                 let port = plan.extra.get(&format!("port.{m}")).and_then(|p| p.parse::<u16>().ok()).unwrap_or(default_rpc_port());
-                endpoints.push(if ip.is_ipv6() { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") });
+                endpoints.push(crate::ray::endpoint(ip, port));
             }
             if endpoints.is_empty() {
                 return Err(refused("a group needs at least one worker besides the leader"));
@@ -399,45 +582,187 @@ impl GroupWorkers for RpcWorkers {
             if !path.is_file() {
                 return Err(RemoteError::Unavailable { message: format!("{model}: model file {} is missing", path.display()) });
             }
-            let mut p = self.spawn(bin, &leader_args(split, &path, &endpoints), "leader", &plan.group, Some(&self.cfg.key))?;
-            let ready = Self::wait_health(split.serve_port, &self.cfg.key, &mut p, Duration::from_secs(600)).await;
-            if let Err(e) = ready {
-                let _ = p.child.start_kill();
+            let mut p = self.spawn(bin, &leader_args(split, &path, &endpoints), "leader", &plan.group, &[("LLAMA_API_KEY", &self.cfg.key)])?;
+            if let Err(e) = self.wait_health(split.serve_port, &self.cfg.key, &mut p, Duration::from_secs(600)).await {
+                p.stop().await;
                 return Err(e);
             }
-            groups.insert(plan.group.clone(), vec![p]);
+            Ok(vec![p])
         } else {
-            let own = self
-                .cfg
-                .private_link
-                .as_deref()
-                .ok_or_else(|| refused("this node has no [model] private_link, so it takes no part in a split model"))?;
-            let ip = parse_link(own).map_err(|e| refused(format!("[model] private_link: {e}")))?;
-            if let Some(asked) = plan.link.as_deref()
-                && asked != own
-            {
-                return Err(refused(format!("the plan binds {asked}, but this node's private link is {own}")));
-            }
+            let ip = self.own_link(plan, "a split model")?;
             let port = plan.extra.get(&format!("port.{me}")).and_then(|p| p.parse::<u16>().ok()).unwrap_or(default_rpc_port());
             let bin = self.cfg.rpc_server.as_ref().ok_or_else(|| refused("no rpc-server on this node"))?;
             let mut args = vec!["-H".to_string(), ip.to_string(), "-p".to_string(), port.to_string()];
             args.extend(self.cfg.rpc_args.iter().cloned());
-            let mut p = self.spawn(bin, &args, "worker", &plan.group, None)?;
-            if let Err(e) = Self::wait_tcp((ip, port), &mut p, Duration::from_secs(60)).await {
-                let _ = p.child.start_kill();
+            let mut p = self.spawn(bin, &args, "worker", &plan.group, &[])?;
+            if let Err(e) = self.wait_tcp((ip, port), &mut p, Duration::from_secs(60)).await {
+                p.stop().await;
                 return Err(e);
             }
-            groups.insert(plan.group.clone(), vec![p]);
+            Ok(vec![p])
         }
+    }
+
+    /// A `vllm-ray` member. The leader: the Ray head on its link, every member joined, then
+    /// `vllm serve` on the cluster. Another member: `ray start --address` the head, on its link.
+    async fn up_ray(&self, me: &str, plan: &GroupPlan) -> Result<Vec<Proc>, RemoteError> {
+        if !cfg!(target_os = "linux") {
+            return Err(RemoteError::Unsupported { message: "vllm-ray groups run on Linux only".into() });
+        }
+        let ray = self
+            .cfg
+            .ray
+            .as_ref()
+            .ok_or_else(|| refused("no ray on this node (`ymirctl engines install vllm` installs vLLM with Ray, or set [model] ray)"))?;
+        crate::ray::check_args(&self.cfg.ray_args).map_err(|e| refused(format!("[model] {e}")))?;
+        let ip = self.own_link(plan, "a vllm-ray group (Ray binds it)")?;
+        let port = plan.extra.get("ray.port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(crate::ray::DEFAULT_PORT);
+        if me == plan.leader {
+            let split = self.split(plan)?;
+            if split.engine.as_deref() != Some("vllm") {
+                return Err(refused(format!("[[model.split]] `{}` is not `engine = \"vllm\"`", split.id)));
+            }
+            let vllm = self.cfg.vllm.as_ref().ok_or_else(|| refused("no vllm on this node (`ymirctl engines install vllm`)"))?;
+            let model = self.vllm_model(split)?;
+            let tp = plan.extra.get("vllm.tp").and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
+            let pp = plan.extra.get("vllm.pp").and_then(|v| v.parse::<u32>().ok()).unwrap_or(plan.members.len() as u32);
+            let head = crate::ray::endpoint(ip, port);
+            let link_env = crate::ray::link_env(ip, crate::ray::iface_of(ip).as_deref());
+            let link: Vec<(&str, &str)> = link_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let mut h = self.spawn(ray, &crate::ray::head_args(ip, port, &self.cfg.ray_args), "ray-head", &plan.group, &link)?;
+            h.ray_link = Some(ip);
+            let joined = async {
+                self.wait_tcp((ip, port), &mut h, Duration::from_secs(60)).await?;
+                self.binds_ok(&h)?;
+                self.wait_joined(ray, &head, plan.members.len(), &mut h, Duration::from_secs(180)).await?;
+                self.binds_ok(&h)
+            }
+            .await;
+            if let Err(e) = joined {
+                h.stop().await;
+                return Err(e);
+            }
+            let mut env = vec![("VLLM_API_KEY", self.cfg.key.as_str()), ("RAY_ADDRESS", head.as_str())];
+            env.extend(link.iter().copied());
+            let mut v = match self.spawn(vllm, &crate::ray::vllm_args(split, &model, tp, pp), "leader", &plan.group, &env) {
+                Ok(v) => v,
+                Err(e) => {
+                    h.stop().await;
+                    return Err(e);
+                }
+            };
+            // vLLM's own processes (the engine core and its sockets) are held to the link too.
+            v.ray_link = Some(ip);
+            let ready = async {
+                self.wait_health(split.serve_port, &self.cfg.key, &mut v, Duration::from_secs(1800)).await?;
+                self.binds_ok(&h)?;
+                self.binds_ok(&v)
+            }
+            .await;
+            if let Err(e) = ready {
+                stop_all(vec![h, v]).await;
+                return Err(e);
+            }
+            Ok(vec![h, v])
+        } else {
+            let leader_ip = plan.extra.get(&format!("link.{}", plan.leader)).ok_or_else(|| refused("the plan has no link for the leader"))?;
+            let leader_ip = parse_link(leader_ip).map_err(|e| refused(format!("{}: {e}", plan.leader)))?;
+            let head = crate::ray::endpoint(leader_ip, port);
+            // The leader starts its head at the same time: wait for it.
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while tokio::net::TcpStream::connect((leader_ip, port)).await.is_err() {
+                self.check_stopping()?;
+                if Instant::now() >= deadline {
+                    return Err(unavailable(format!("the Ray head {head} did not come up")));
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let link_env = crate::ray::link_env(ip, crate::ray::iface_of(ip).as_deref());
+            let link: Vec<(&str, &str)> = link_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let mut w = self.spawn(ray, &crate::ray::worker_args(&head, ip, &self.cfg.ray_args), "ray-worker", &plan.group, &link)?;
+            w.ray_link = Some(ip);
+            // `ray start --block` exits at once when it cannot join.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let ok = if w.running() { self.binds_ok(&w) } else { Err(failed(format!("ray start --address {head} exited"))) };
+            if let Err(e) = ok {
+                w.stop().await;
+                return Err(e);
+            }
+            Ok(vec![w])
+        }
+    }
+
+    /// What `vllm serve` gets: a model directory (absolute or under `models_dir`), else a Hub id.
+    fn vllm_model(&self, split: &SplitModel) -> Result<String, RemoteError> {
+        let f = split.file.clone().unwrap_or_else(|| split.id.clone());
+        let p = Path::new(&f);
+        if p.is_absolute() {
+            if !p.exists() {
+                return Err(RemoteError::Unavailable { message: format!("{}: model {} is missing", split.id, p.display()) });
+            }
+            return Ok(f);
+        }
+        let under = self.cfg.models_dir.join(&f);
+        Ok(if under.exists() { under.to_string_lossy().into_owned() } else { f })
+    }
+
+    /// Polls `ray status --address head` until `want` nodes are active.
+    async fn wait_joined(&self, ray: &Path, head: &str, want: usize, head_proc: &mut Proc, within: Duration) -> Result<(), RemoteError> {
+        let deadline = Instant::now() + within;
+        let mut have = 0;
+        loop {
+            self.check_stopping()?;
+            if !head_proc.running() {
+                return Err(failed("the Ray head exited"));
+            }
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                Duration::from_secs(20),
+                Command::new(ray).args(["status", "--address", head]).stdin(Stdio::null()).kill_on_drop(true).output(),
+            )
+            .await
+            {
+                have = crate::ray::active_nodes(&String::from_utf8_lossy(&out.stdout));
+                if have >= want {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(unavailable(format!("{have} of {want} nodes joined the Ray cluster at {head}")));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+#[async_trait]
+impl GroupWorkers for RpcWorkers {
+    async fn up(&self, me: &str, plan: &GroupPlan) -> Result<(), RemoteError> {
+        let ray = match plan.worker.as_deref() {
+            None | Some(WORKER_KIND) => false,
+            Some(RAY_WORKER) => true,
+            Some(other) => {
+                return Err(RemoteError::Unsupported { message: format!("this node runs `{WORKER_KIND}` and `{RAY_WORKER}` groups, not `{other}`") });
+            }
+        };
+        if !plan.members.iter().any(|m| m == me) {
+            return Err(refused(format!("{me} is not a member of group {}", plan.group)));
+        }
+        let mut groups = self.groups.lock().await;
+        if let Some(procs) = groups.get_mut(&plan.group) {
+            if procs.iter_mut().all(|p| p.running()) {
+                return Ok(());
+            }
+            // A dead remnant: start over.
+            stop_all(groups.remove(&plan.group).unwrap_or_default()).await;
+        }
+        let procs = if ray { self.up_ray(me, plan).await? } else { self.up_rpc(me, plan).await? };
+        groups.insert(plan.group.clone(), procs);
         Ok(())
     }
 
     async fn down(&self, group: &str) -> Result<(), RemoteError> {
         let procs = self.groups.lock().await.remove(group).unwrap_or_default();
-        for mut p in procs {
-            let _ = p.child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(10), p.child.wait()).await;
-        }
+        stop_all(procs).await;
         Ok(())
     }
 }
@@ -534,6 +859,7 @@ impl crate::Coordinator {
                 group_jobs: node.group_jobs(),
                 draining: node.draining(),
                 drop: n.drop.clone(),
+                gpus: n.gpus.unwrap_or(1),
             });
         }
         let group = plan_group(policy, need, &cands).map_err(|e| unavailable(format!("{}: {e}", policy.id)))?;
@@ -542,11 +868,13 @@ impl crate::Coordinator {
         }
         let name = format!("split-{}", policy.id);
         let mut started: Vec<Arc<dyn crate::ModelNode>> = Vec::new();
-        // Workers first (the leader needs them listening), all at once; then the leader.
+        // llama.cpp RPC: workers first (the leader needs them listening), all at once; then the
+        // leader. Ray: everyone at once (the leader's head waits for the members to join it).
         let mut order: Vec<&Candidate> = group.iter().skip(1).collect();
         order.push(&group[0]);
+        let batches: Vec<&[&Candidate]> = if policy.is_ray() { vec![&order[..]] } else { vec![&order[..order.len() - 1], &order[order.len() - 1..]] };
         let mut error = None;
-        'start: for batch in [&order[..order.len() - 1], &order[order.len() - 1..]] {
+        'start: for batch in batches {
             let jobs = batch.iter().map(|c| {
                 let node = self.node_named(&c.name);
                 let plan = plan_for(policy, &group, c);
@@ -560,11 +888,25 @@ impl crate::Coordinator {
                     }
                 }
             });
-            for (n, r) in futures::future::join_all(jobs).await {
+            let mut pending: futures::stream::FuturesUnordered<_> = jobs.map(Box::pin).collect();
+            while let Some((n, r)) = futures::StreamExt::next(&mut pending).await {
                 match r {
                     Ok(()) => started.push(n),
                     Err(e) => {
                         error = Some(format!("{}: {e}", n.name()));
+                        if policy.is_ray() {
+                            // Members still waiting for a head that is gone: don't wait for them
+                            // here; take down any that comes up after all.
+                            let group = name.clone();
+                            tokio::spawn(async move {
+                                while let Some((n, r)) = futures::StreamExt::next(&mut pending).await {
+                                    if r.is_ok() {
+                                        let _ = n.group_down(&group).await;
+                                    }
+                                }
+                            });
+                            break;
+                        }
                     }
                 }
             }
@@ -702,6 +1044,7 @@ mod tests {
             group_jobs: true,
             draining: false,
             drop: vec![],
+            gpus: 1,
         }
     }
 
@@ -712,6 +1055,9 @@ mod tests {
             size: "100GiB".into(),
             leader: leader.map(Into::into),
             min_link_gbps: 10.0,
+            ray_port: None,
+            tensor_parallel: None,
+            pipeline_parallel: None,
             nodes: vec![],
         }
     }
@@ -771,6 +1117,7 @@ mod tests {
         let split = SplitModel {
             id: "big".into(),
             file: None,
+            engine: None,
             serve_port: 18080,
             context: Some(4096),
             slots: Some(2),
@@ -808,8 +1155,59 @@ mod tests {
         );
         assert!(matches!(mk(Some("127.0.0.1")).up("stranger", &plan("127.0.0.1")).await, Err(RemoteError::Refused { .. })), "not a member");
         let mut other = plan("127.0.0.1");
-        other.worker = Some("ray".into());
-        assert!(matches!(mk(Some("127.0.0.1")).up("w", &other).await, Err(RemoteError::Unsupported { .. })), "ray is not built");
+        other.worker = Some("mpi".into());
+        assert!(matches!(mk(Some("127.0.0.1")).up("w", &other).await, Err(RemoteError::Unsupported { .. })), "an unknown worker kind");
+    }
+
+    #[test]
+    fn a_ray_plan_carries_the_head_port_and_the_sizing() {
+        let mut c = [cand("lead", 96, "10.0.0.1", Some(100.0)), cand("w1", 48, "10.0.0.2", Some(100.0))];
+        c[0].gpus = 4;
+        c[1].gpus = 2;
+        let mut p = policy(None);
+        p.backend = RAY_BACKEND.into();
+        p.ray_port = Some(6380);
+        let g = plan_group(&p, 100 * GIB, &c).unwrap();
+        let plan = plan_for(&p, &g, &g[1]);
+        assert_eq!(plan.worker.as_deref(), Some(RAY_WORKER));
+        assert_eq!((plan.extra["ray.port"].as_str(), plan.extra["vllm.tp"].as_str(), plan.extra["vllm.pp"].as_str()), ("6380", "2", "2"));
+        p.tensor_parallel = Some(4);
+        assert!(matches!(plan_group(&p, 100 * GIB, &c), Err(PlanError::Sizing(_))), "4 x 2 needs 8 GPUs; there are 6");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_ray_member_needs_ray_its_link_and_clean_args() {
+        let plan = |link: &str| {
+            let mut p = GroupPlan::new("split-x", "lead")
+                .with_members(vec!["lead".into(), "w".into()])
+                .with_model("x")
+                .with_link(link)
+                .with_worker(RAY_WORKER);
+            p.extra.insert("link.lead".into(), "127.0.0.1".into());
+            p.extra.insert("ray.port".into(), "1".into());
+            p
+        };
+        let cfg = |ray: bool, link: Option<&str>, args: Vec<String>| WorkerConfig {
+            ray: ray.then(|| "/bin/true".into()),
+            ray_args: args,
+            private_link: link.map(Into::into),
+            ..Default::default()
+        };
+        let e = RpcWorkers::new(cfg(false, Some("127.0.0.1"), vec![])).up("w", &plan("127.0.0.1")).await.unwrap_err();
+        assert!(e.to_string().contains("no ray"), "{e}");
+        let e = RpcWorkers::new(cfg(true, None, vec![])).up("w", &plan("127.0.0.1")).await.unwrap_err();
+        assert!(e.to_string().contains("private_link"), "{e}");
+        let e = RpcWorkers::new(cfg(true, Some("127.0.0.1"), vec!["--dashboard-host=0.0.0.0".into()])).up("w", &plan("127.0.0.1")).await.unwrap_err();
+        assert!(e.to_string().contains("ray_args"), "{e}");
+        let e = RpcWorkers::new(cfg(true, Some("127.0.0.1"), vec![])).up("w", &plan("10.1.1.1")).await.unwrap_err();
+        assert!(matches!(e, RemoteError::Refused { .. }), "the plan asks for another address: {e}");
+        // The leader needs an `engine = "vllm"` split and vLLM.
+        let mut c = cfg(true, Some("127.0.0.1"), vec![]);
+        c.splits =
+            vec![SplitModel { id: "x".into(), file: None, engine: None, serve_port: 1, context: None, slots: None, gpu_layers: None, args: vec![] }];
+        let e = RpcWorkers::new(c).up("lead", &plan("127.0.0.1")).await.unwrap_err();
+        assert!(e.to_string().contains("engine = \"vllm\""), "{e}");
     }
 
     #[test]

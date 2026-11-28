@@ -23,6 +23,7 @@ from gguf import GGUFReader
 HERE = Path(__file__).resolve().parent
 TRAINER = HERE / "trainer.py"
 FAKE = HERE / "testdata/fake_llama_finetune.py"
+FAKE_TOKENIZE = HERE / "testdata/fake_llama_tokenize.py"
 CHATML = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
 
 sys.path.insert(0, str(HERE))
@@ -35,14 +36,16 @@ def write_model(path, dtype=np.float32, template=CHATML, arch="llama"):
     w.add_name("Tiny")
     if template is not None:
         w.add_chat_template(template)
-    w.add_token_list(["<s>", "</s>", "<|im_end|>", "a"])
+    # Control tokens (type 3) are what llama-finetune with Ymir's parse-special patch tokenizes as specials.
+    w.add_token_list(["<s>", "</s>", "<|im_start|>", "<|im_end|>", "a"])
+    w.add_token_types([3, 3, 3, 3, 1])
     w.add_bos_token_id(0)
-    w.add_eos_token_id(2)
-    w.add_tensor("token_embd.weight", rng.standard_normal((4, 6)).astype(np.float32))
+    w.add_eos_token_id(3)
+    w.add_tensor("token_embd.weight", rng.standard_normal((5, 6)).astype(np.float32))
     w.add_tensor("blk.0.attn_norm.weight", np.ones(6, np.float32))
     for name, shape in (("attn_q", (6, 6)), ("attn_k", (3, 6)), ("ffn_up", (10, 6)), ("ffn_down", (6, 10))):
         w.add_tensor(f"blk.0.{name}.weight", rng.standard_normal(shape).astype(dtype))
-    w.add_tensor("output.weight", rng.standard_normal((4, 6)).astype(np.float32))
+    w.add_tensor("output.weight", rng.standard_normal((5, 6)).astype(np.float32))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -82,10 +85,48 @@ class TrainerTest(unittest.TestCase):
         pin = tomllib.loads((HERE.parent / "packaging/engines/llama.cpp.toml").read_text())["build"]
         self.assertEqual(trainer.PINNED_BUILD, pin, "update PINNED_BUILD in scripts/trainer.py with the engine pin")
 
+    def test_required_patches_match_engine(self):
+        import engine
+
+        self.assertEqual(set(trainer.REQUIRED_PATCHES), set(engine.TRAINER_PATCHES), "the trainer requires exactly what build --trainer applies")
+        for pid, path in zip(engine.TRAINER_PATCHES, engine.trainer_patches()):
+            text = path.read_text()
+            self.assertIn(f'std::printf("{pid}\\n");', text, f"{path.name} names itself as {pid} for --ymir-patches")
+        self.assertIn("+    std::vector<llama_token> tokens  = common_tokenize(ctx, params.prompt, true, /*parse_special =*/ true);", (engine.PATCHES / engine.TRAINER_PATCHES["parse-special"]).read_text())
+
+    def test_parse_build(self):
+        self.assertEqual(trainer.parse_build("version: 1.0.0-dev (build 12628, commit 8a97fa9)\nbuilt with Clang"), "b12628")
+        self.assertEqual(trainer.parse_build("version: 12628 (8a97fa9)"), "b12628", "the format before llama.cpp 1.0")
+        self.assertEqual(trainer.parse_build("version: 1.0.0-dev (build 1, commit 8a97fa9)"), "b1", "a shallow clone without LLAMA_BUILD_NUMBER")
+        self.assertIsNone(trainer.parse_build("usage: llama-finetune ..."))
+
+    def test_unpatched_build_is_refused(self):
+        unpatched = {**self.env, "FAKE_FINETUNE_PATCHES": ""}
+        r, _ = self.run_trainer("version", env=unpatched)
+        self.assertEqual(json.loads(r.stdout)["patches"], [], "version reports what the program carries")
+        r, ev = self.train(env=unpatched)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("without Ymir's parse-special patch", ev[-1]["message"])
+        self.assertIn("engine.py build --trainer", ev[-1]["message"])
+        self.assertFalse(self.record.exists(), "nothing was trained")
+        r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(self.base), "--rank", "2", "--out", str(self.tmp / "a.gguf"), env=unpatched)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("parse-special", ev[-1]["message"])
+        r, ev = self.train(env={**self.env, "FAKE_FINETUNE_PATCHES": "something-else"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("parse-special", ev[-1]["message"])
+
+    def test_special_tokens_train_as_specials(self):
+        r, _ = self.train()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = json.loads(self.record.read_text())
+        self.assertEqual(rec["special_tokens"], ["<|im_start|>", "<|im_end|>"] * 5, "each turn's markers are single special tokens")
+        self.assertNotIn("<s>", rec["special_tokens"])
+
     def test_version(self):
         r, _ = self.run_trainer("version")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), {"interface": 1, "engine": "llama.cpp", "build": "b12628"})
+        self.assertEqual(json.loads(r.stdout), {"interface": 2, "engine": "llama.cpp", "build": "b12628", "patches": ["parse-special"]})
         r, _ = self.run_trainer("version", env={**self.env, "FAKE_FINETUNE_BUILD": "13000"})
         self.assertEqual(json.loads(r.stdout)["build"], "b13000", "version reports the real build, so Ymir's pin check sees it")
         env = {k: v for k, v in self.env.items() if k != "YMIR_LLAMA_FINETUNE"}
@@ -114,6 +155,50 @@ class TrainerTest(unittest.TestCase):
         self.assertEqual(rec["text"], "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nhello<|im_end|>\n<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n4<|im_end|>\n")
         self.assertTrue((self.tmp / "full.gguf").exists())
         self.assertFalse((self.tmp / "full.gguf.train.txt").exists(), "the training text (private data) is removed")
+
+    def test_checkpoints_each_epoch(self):
+        ck = self.tmp / "ck"
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "full.gguf"), "--checkpoint-dir", str(ck))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([p["step"] for p in ev if p["event"] == "progress"], list(range(1, 9)), "steps run on across the per-epoch calls")
+        cps = [e for e in ev if e["event"] == "checkpoint"]
+        self.assertEqual(cps, [{"event": "checkpoint", "dir": "epoch-0001", "epoch": 1, "step": 4}, {"event": "checkpoint", "dir": "epoch-0002", "epoch": 2, "step": 8}])
+        c = json.loads((ck / "epoch-0001/checkpoint.json").read_text())
+        self.assertEqual((c["format"], c["epochs"], c["steps"], c["seed"], c["optimizer"]), ("ymir-train-checkpoint/1", 2, 8, 9, "reset"))
+        self.assertEqual(c["data_sha256"], trainer.sha256_file(self.data))
+        self.assertEqual(c["files"][0]["sha256"], trainer.sha256_file(ck / "epoch-0001/model.gguf"))
+        a = json.loads(self.record.read_text())["args"]
+        self.assertEqual(a[a.index("--epochs") + 1], "1")
+        self.assertEqual(a[a.index("-m") + 1], str(ck / "epoch-0001/model.gguf"), "epoch 2 trains from epoch 1's model")
+        self.assertEqual((self.tmp / "full.gguf").read_bytes(), (ck / "epoch-0002/model.gguf").read_bytes())
+
+    def test_resume(self):
+        ck = self.tmp / "ck"
+        r, _ = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "a.gguf"), "--checkpoint-dir", str(ck))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        first = ck / "epoch-0001"
+        ck2 = self.tmp / "ck2"
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "b.gguf"), "--checkpoint-dir", str(ck2), "--resume", str(first))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([p["step"] for p in ev if p["event"] == "progress"], [5, 6, 7, 8])
+        self.assertEqual([e["epoch"] for e in ev if e["event"] == "checkpoint"], [2])
+        a = json.loads(self.record.read_text())["args"]
+        self.assertEqual(a[a.index("-m") + 1], str(first / "model.gguf"))
+        self.assertIn("carrying on from", " ".join(e["message"] for e in ev if e["event"] == "log"))
+        # Other settings, a changed model file or a finished checkpoint are refused.
+        other = self.tmp / "other.json"
+        other.write_text(json.dumps({"epochs": 2, "learning_rate": 2e-5, "context": 256, "batch": 4, "seed": 9, "rank": 4}))
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(other), "--out", str(self.tmp / "c.gguf"), "--resume", str(first))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("other training data or settings", ev[-1]["message"])
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "c.gguf"), "--resume", str(ck / "epoch-0002"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nothing is left", ev[-1]["message"])
+        with open(first / "model.gguf", "ab") as f:
+            f.write(b"x")
+        r, ev = self.run_trainer("train", "--base", str(self.base), "--data", str(self.data), "--config", str(self.config), "--out", str(self.tmp / "c.gguf"), "--resume", str(first))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("doesn't match its checkpoint", ev[-1]["message"])
 
     def test_train_env_args(self):
         r, _ = self.train(env={**self.env, "YMIR_TRAINER_NGL": "0", "YMIR_TRAINER_ARGS": "--threads 3"})
@@ -146,6 +231,67 @@ class TrainerTest(unittest.TestCase):
         self.data.write_text("\n")
         r, ev = self.train()
         self.assertIn("no conversations", ev[-1]["message"])
+
+    def add_tokenize(self):
+        """Puts the fake llama-tokenize next to the fake llama-finetune, as build --trainer does."""
+        exe = self.tmp / "llama-tokenize"
+        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_TOKENIZE}" "$@"\n')
+        exe.chmod(0o755)
+        self.tok_record = self.tmp / "tokenize.json"
+        return {**self.env, "FAKE_TOKENIZE_RECORD": str(self.tok_record)}
+
+    def test_min_tokens(self):
+        self.assertEqual([trainer.trained_context(c) for c in (1, 64, 256, 257, 512, 4096)], [256, 256, 256, 512, 512, 4096])
+        self.assertEqual([trainer.min_tokens(c) for c in (64, 256, 257, 512)], [513, 513, 1025, 1025])
+
+    def test_short_text_is_refused_before_training(self):
+        env = self.add_tokenize()
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_COUNT": "512"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        msg = ev[-1]["message"]
+        self.assertEqual(ev[-1]["event"], "error")
+        for part in ("renders to 512 tokens", "at least 513 (2 x context + 1)", "about 1 more tokens"):
+            self.assertIn(part, msg)
+        self.assertNotIn("lower --context", msg, "256 is as low as llama.cpp goes")
+        self.assertFalse(self.record.exists(), "llama-finetune is not started")
+        self.assertFalse((self.tmp / "full.gguf.train.txt").exists())
+        rec = json.loads(self.tok_record.read_text())
+        self.assertEqual(rec["args"], ["-m", str(self.base), "--stdin", "--ids", "--log-disable"])
+        self.assertTrue(rec["text"].endswith("4<|im_end|>"), "one trailing newline is dropped, as llama-finetune -f does")
+
+    def test_enough_text_trains(self):
+        env = self.add_tokenize()
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_COUNT": "513"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(ev[-1], {"event": "done"})
+        self.assertIn("513 tokens, 2 windows of 256", " ".join(e.get("message", "") for e in ev))
+
+    def test_context_is_rounded_up_to_256(self):
+        env = self.add_tokenize()
+        self.config.write_text(json.dumps({"epochs": 1, "learning_rate": 1e-5, "context": 300, "batch": 1}))
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_COUNT": "700"})
+        self.assertEqual(r.returncode, 1)
+        msg = ev[-1]["message"]
+        for part in ("renders to 700 tokens", "at least 1025", "context 300 trains as 512", "lower --context (down to 256, which needs 513)"):
+            self.assertIn(part, msg)
+
+    def test_tokenize_failure_is_refused(self):
+        env = self.add_tokenize()
+        r, ev = self.train(env={**env, "FAKE_TOKENIZE_FAIL": "1"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("could not count the training text's tokens", ev[-1]["message"])
+        self.assertFalse(self.record.exists())
+
+    def test_short_text_crash_without_tokenize(self):
+        """A build without llama-tokenize: upstream's crash on a short text becomes the same refusal."""
+        r, ev = self.train(env={**self.env, "FAKE_FINETUNE_SHORT": "1"})
+        self.assertEqual(r.returncode, 1)
+        logs = " ".join(e.get("message", "") for e in ev)
+        self.assertIn("no llama-tokenize next to", logs)
+        msg = ev[-1]["message"]
+        self.assertIn("the dataset is too short", msg)
+        self.assertIn("at least 513 (2 x context + 1)", msg)
+        self.assertFalse((self.tmp / "full.gguf.train.txt").exists())
 
     def test_cancel(self):
         out = self.tmp / "full.gguf"
@@ -205,6 +351,109 @@ class TrainerTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         t = {x.name: np.array(x.data) for x in GGUFReader(adapter).tensors}
         self.assertEqual(t["blk.0.attn_q.weight.lora_a"].shape, (8, 6), "a matrix smaller than the rank is padded, so alpha / rank holds")
+
+    def test_randomized_svd_matches_exact(self):
+        """A fine-tune's difference: a strong low-rank part plus full-rank noise, at a real model's
+        shapes (Qwen2.5-0.5B's ffn and attention)."""
+        rng = np.random.default_rng(3)
+        for m, n in ((4864, 896), (896, 896), (128, 896)):
+            low = rng.standard_normal((m, 24)).astype(np.float32) @ (rng.standard_normal((24, n)).astype(np.float32) * np.geomspace(1, 0.05, 24)[:, None].astype(np.float32))
+            delta = low + rng.standard_normal((m, n)).astype(np.float32) * float(np.linalg.norm(low) / np.sqrt(low.size))
+            delta *= 1e-4
+            ue, ve, ke = trainer.top_svd(delta, 16, ("exact", None))
+            ur, vr, kr = trainer.top_svd(delta, 16, ("cpu", None))
+            self.assertEqual((ur.shape, vr.shape), ((m, 16), (16, n)))
+            self.assertAlmostEqual(kr, ke, delta=1e-3 * ke)
+            err = lambda u, v: np.linalg.norm(delta - u @ v) / np.linalg.norm(delta)
+            self.assertLess(err(ur, vr), err(ue, ve) * 1.001, f"{m}x{n}: within 0.1% of the best rank-16 approximation")
+            np.testing.assert_allclose(np.linalg.norm(ur, axis=0), np.linalg.norm(ue, axis=0), rtol=5e-3)
+
+    def test_randomized_svd_is_exact_on_low_rank(self):
+        rng = np.random.default_rng(4)
+        delta = (rng.standard_normal((600, 5)) @ rng.standard_normal((5, 300))).astype(np.float32)
+        u, v, kept = trainer.top_svd(delta, 16, ("cpu", None))
+        np.testing.assert_allclose(u @ v, delta, atol=1e-4)
+        self.assertAlmostEqual(kept, 1.0, places=5)
+        u2, v2, _ = trainer.top_svd(delta, 16, ("cpu", None))
+        np.testing.assert_array_equal(u, u2, "the same sketch every time")
+
+    def test_svd_device_choice(self):
+        old = os.environ.get("YMIR_TRAINER_SVD")
+        self.addCleanup(lambda: os.environ.__setitem__("YMIR_TRAINER_SVD", old) if old is not None else os.environ.pop("YMIR_TRAINER_SVD", None))
+        os.environ["YMIR_TRAINER_SVD"] = "exact"
+        self.assertEqual(trainer.svd_device()[0], "exact")
+        os.environ["YMIR_TRAINER_SVD"] = "cpu"
+        self.assertEqual(trainer.svd_device()[0], "cpu")
+        os.environ["YMIR_TRAINER_SVD"] = "gpu-please"
+        with self.assertRaises(trainer.Refusal):
+            trainer.svd_device()
+        os.environ["YMIR_TRAINER_SVD"] = "auto"
+        self.assertIn(trainer.svd_device()[0], ("cuda", "cpu"))
+        try:
+            import torch
+
+            has_cuda = torch.cuda.is_available()
+        except ImportError:
+            has_cuda = False
+        os.environ["YMIR_TRAINER_SVD"] = "cuda"
+        if has_cuda:
+            self.assertEqual(trainer.svd_device()[0], "cuda")
+        else:
+            with self.assertRaises(trainer.Refusal) as e:
+                trainer.svd_device()
+            self.assertIn("pip install torch", str(e.exception))
+
+    @unittest.skipUnless(os.environ.get("YMIR_TEST_CUDA"), "set YMIR_TEST_CUDA=1 with a CUDA build of torch")
+    def test_cuda_svd_matches_cpu(self):
+        import torch
+
+        rng = np.random.default_rng(5)
+        delta = (rng.standard_normal((4864, 40)) @ rng.standard_normal((40, 896)) + 0.3 * rng.standard_normal((4864, 896))).astype(np.float32)
+        uc, vc, kc = trainer.top_svd(delta, 16, ("cpu", None), seed=7)
+        ug, vg, kg = trainer.top_svd(delta, 16, ("cuda", torch), seed=7)
+        self.assertAlmostEqual(kg, kc, delta=1e-4)
+        np.testing.assert_allclose(ug @ vg, uc @ vc, atol=1e-3 * float(np.abs(uc @ vc).max()))
+
+    def test_extract_modes_agree(self):
+        self.train()
+        tuned = self.tmp / "full.gguf"
+        out = {}
+        for mode, threads in (("exact", "1"), ("cpu", "3")):
+            adapter = self.tmp / f"adapter-{mode}.gguf"
+            r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(adapter), env={**self.env, "YMIR_TRAINER_SVD": mode, "YMIR_TRAINER_THREADS": threads})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("on the CPU", " ".join(e.get("message", "") for e in ev))
+            out[mode] = {t.name: np.array(t.data) for t in GGUFReader(adapter).tensors}
+        for k in out["exact"]:
+            np.testing.assert_allclose(out["cpu"][k], out["exact"][k], atol=1e-6)
+        r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(self.tmp / "x.gguf"), env={**self.env, "YMIR_TRAINER_SVD": "bogus"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("YMIR_TRAINER_SVD", ev[-1]["message"])
+        r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(tuned), "--rank", "4", "--out", str(self.tmp / "x.gguf"), env={**self.env, "YMIR_TRAINER_THREADS": "many"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("YMIR_TRAINER_THREADS", ev[-1]["message"])
+
+    def test_threaded_extract_keeps_order(self):
+        """Matrices finish out of order on the thread pool; the adapter's tensors come out in the base's."""
+        rng = np.random.default_rng(6)
+
+        class T:
+            def __init__(self, name, data):
+                self.name, self.data, self.shape, self.tensor_type = name, data, data.shape[::-1], gguf.GGMLQuantizationType.F32
+
+        class R:
+            def __init__(self, tensors):
+                self.tensors = tensors
+
+        names = [f"blk.{i}.ffn_up.weight" for i in range(12)]
+        base = [T(n, rng.standard_normal((40 + 7 * i, 30)).astype(np.float32)) for i, n in enumerate(names)]
+        tuned = [T(t.name, t.data + np.outer(rng.standard_normal(t.data.shape[0]), rng.standard_normal(30)).astype(np.float32)) for t in base]
+        serial = list(trainer.lora_tensors(R(base), R(tuned), 2, ("cpu", None), threads=1))
+        threaded = list(trainer.lora_tensors(R(base), R(tuned), 2, ("cpu", None), threads=4))
+        self.assertEqual([x[0] for x in threaded], names)
+        for a, b in zip(serial, threaded):
+            np.testing.assert_array_equal(a[1], b[1])
+            np.testing.assert_array_equal(a[2], b[2])
 
     def test_extract_refusals(self):
         r, ev = self.run_trainer("extract-lora", "--base", str(self.base), "--tuned", str(self.base), "--rank", "4", "--out", str(self.tmp / "a.gguf"))

@@ -26,6 +26,9 @@ pub struct NodeConfig {
     /// Fine-tuning on this node (training plan P3a): the trainer and the build it is pinned to.
     #[serde(default, skip_serializing_if = "crate::train::TrainSection::is_default")]
     pub train: crate::train::TrainSection,
+    /// Hands-off self-update (`ymir_core::autoupdate`): on by default where an update root is pinned.
+    #[serde(default, skip_serializing_if = "crate::autoupdate::UpdateSection::is_default")]
+    pub update: crate::autoupdate::UpdateSection,
 }
 
 /// `[network]`. Weirdnet runs once this node has an identity (`ymirctl pool init`, or a link
@@ -203,11 +206,27 @@ pub struct ModelSection {
     /// linked device, an app included; set it to the inference nodes' peer ids so apps must go through them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
-    /// Let the owner's linked devices search, pull, list and remove models on this node over Weirdnet
-    /// (`ymirctl models --node`, `/weirdnet-backends/models/1`). Pulled models are served in memory
-    /// only (`node.toml` is never edited remotely). `false` turns the protocol off.
+    /// Let the owner's linked devices search, pull, upload, list and remove models on this node over
+    /// Weirdnet (`ymirctl models --node`, `/weirdnet-backends/models/1`). Pulled models are served in
+    /// memory only; an upload is also saved here unless the uploader passes `--no-persist`
+    /// (`/ymir/uploads/1`). `false` turns both protocols off.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub remote_manage: bool,
+    /// Take model uploads from the owner's linked devices (`ymirctl models upload --node`,
+    /// `/ymir/uploads/1` and models/1 uploads). `false` refuses every upload (`not-allowed`, "uploads
+    /// are off on this node") while pulls, listing and removals keep working; `remote_manage = false`
+    /// turns all of it off instead. Uploads placed on this machine itself are not affected.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub upload: bool,
+    /// Free space an upload must leave on the models directory's filesystem, such as `50GiB`.
+    /// Unset: the larger of 10% of the filesystem and 20 GiB. Set: exactly this much.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_keep_free: Option<String>,
+    /// The engine an uploaded full model must suit: `llamacpp` (GGUF), `vllm` (safetensors) or
+    /// `mlx` (MLX weights). Unset: llama.cpp, unless `llamacpp` is `off`; then vLLM, unless that is
+    /// `off` too; then MLX. Adapters and projectors follow their base model's engine instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_engine: Option<String>,
     /// `managed` | `system:/path/to/llama-server` | `off`.
     #[serde(default = "managed")]
     pub llamacpp: String,
@@ -218,9 +237,33 @@ pub struct ModelSection {
     /// More `rpc-server` arguments (such as `-d CPU` or `-t 8`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rpc_args: Vec<String>,
-    /// `auto` (only where supported) | `system:/path/to/vllm` | `off`.
+    /// `auto` (the venv `ymirctl engines install vllm` makes, else `PATH`) |
+    /// `system:/path/to/vllm` | `image:NAME` | `off`.
     #[serde(default = "auto")]
     pub vllm: String,
+    /// vLLM-Omni's `vllm`, for `backend = "vllm-omni"` speakers: `auto` (the venv `ymirctl
+    /// engines install vllm-omni` makes, `<home>/engines/vllm-omni`, else `vllm` on `PATH`) |
+    /// `system:/path/to/vllm` (a vLLM with the `vllm-omni` package) | `off`. Configured only
+    /// when a model uses it.
+    #[serde(default = "auto", skip_serializing_if = "is_auto")]
+    pub vllm_omni: String,
+    /// Ray, for `vllm-ray` split models: `auto` (the managed vLLM venv, else `PATH`) |
+    /// `system:/path/to/ray` | `off`.
+    #[serde(default = "auto", skip_serializing_if = "is_auto")]
+    pub ray: String,
+    /// More `ray start` arguments (such as `--num-gpus=2`); never the bind flags Ymir sets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ray_args: Vec<String>,
+    /// Allow Ray listeners on all interfaces. Ray has no authentication and its GCS ignores
+    /// `--node-ip-address`, so a `vllm-ray` group is refused unless this says a host firewall
+    /// drops Ray's ports on every interface but the private link.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ray_trust_firewall: bool,
+    /// The ports the host firewall drops off the private link (`"6390-6399"`, `"10001"`), where
+    /// `ray_trust_firewall` allows all-interface listeners; default 6390-6399 and 10000-10999. An
+    /// all-interface listener on any other port is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ray_trusted_ports: Vec<String>,
     /// MLX-LM's `mlx_lm.server`, for `backend = "mlx"` (Apple Silicon): `managed` (the venv
     /// `ymirctl setup` installs, else on `PATH`) | `system:/path/to/mlx_lm.server` | `off`.
     #[serde(default = "managed", skip_serializing_if = "is_managed")]
@@ -247,6 +290,14 @@ fn is_yes(b: &bool) -> bool {
     *b
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_auto(s: &str) -> bool {
+    s == "auto"
+}
+
 fn is_managed(s: &str) -> bool {
     s == "managed"
 }
@@ -259,10 +310,18 @@ impl Default for ModelSection {
             private_link: None,
             callers: Vec::new(),
             remote_manage: true,
+            upload: true,
+            upload_keep_free: None,
+            upload_engine: None,
             llamacpp: managed(),
             rpc_server: managed(),
             rpc_args: Vec::new(),
             vllm: auto(),
+            vllm_omni: auto(),
+            ray: auto(),
+            ray_args: Vec::new(),
+            ray_trust_firewall: false,
+            ray_trusted_ports: Vec::new(),
             mlx: managed(),
             models_dir: None,
             local: Vec::new(),
@@ -275,7 +334,8 @@ impl Default for ModelSection {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LocalModel {
     pub id: String,
-    /// `llamacpp` (default), `mlx` (Apple Silicon) or `vllm`.
+    /// `llamacpp` (default), `mlx` (Apple Silicon), `vllm` or `vllm-omni` (text to speech through
+    /// vLLM-Omni, `role = "speak"` only; see `[model] vllm_omni`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,7 +347,12 @@ pub struct LocalModel {
     pub revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_group: Option<String>,
-    /// `main`, `standin` or `embedding`; default `chat`.
+    /// `main`, `standin`, `embedding` or `transcribe` (speech to text: Voxtral through llama.cpp
+    /// with its audio projector, Whisper through vLLM; served over infer/2 `Transcribe` and
+    /// published with catalog/1 purpose `transcribe`), or `speak` (text to speech: Kokoro,
+    /// VoxCPM2, Fish Audio Drama 3 or Qwen3-TTS through llama.cpp with its projector, Qwen3-TTS
+    /// through vLLM-Omni; served over infer/2 `Speak` and published with catalog/1 purpose
+    /// `speak`, see `[model.local.speak]`); default `chat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// GGUF path (absolute, or relative to `models_dir`), an MLX weights directory (likewise) or
@@ -333,6 +398,39 @@ pub struct LocalModel {
     /// base with adapters listed takes more at run time without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_slots: Option<u32>,
+    /// Media and request limits for this model on this hardware, for limits the node can't
+    /// measure (`limits = { max_images = 8, image_tokens = 256, image_edge = 896 }`; also
+    /// `image_patch`, `audio_max_seconds`, `audio_tokens_per_minute`, `max_request_bytes`).
+    /// Published in the capability record and catalog/1 (`weirdnet-agent` `MediaLimits`). Unset
+    /// fields stay unknown: there are no defaults in code (video design, milestone 1).
+    #[serde(default, skip_serializing_if = "weirdnet_agent::MediaLimits::is_unknown")]
+    pub limits: weirdnet_agent::MediaLimits,
+    /// The model reads video parts whole (`video_url`: Qwen2.5-VL, Qwen3-VL and the like on
+    /// vLLM, or a wrapped server declared as vLLM). The operator says so: no engine reports it.
+    /// Published as catalog/1 `inputs.video` (with the `video_*` limits above), so Bragi sends
+    /// whole clips when they fit and frames otherwise (video design, Phase 2). vLLM only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub video: bool,
+    /// Speech settings for a `role = "speak"` model (`[model.local.speak]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speak: Option<SpeakSettings>,
+}
+
+/// `[model.local.speak]`: what a speaking model may do on this node. The profile fields
+/// (`presets`, `languages`, `formats`, `max_input_chars`, `max_reference_seconds`,
+/// `max_reference_bytes`, `max_output_seconds`, `max_voices`, `script_speakers`, `clone`, ...,
+/// `weirdnet-agent`'s `SpeechProfile`) only narrow what the model's catalog entry and its
+/// engine say: fewer voices or languages, smaller limits. A setting that widens them is refused
+/// at startup (`weirdnet-backends` `ModelLaunch::check_speech`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeakSettings {
+    /// Whether guests of a shared pool may use this speaker (still only when their grant lists
+    /// it). Default: yes, unless the model's license restricts how its speech may be served
+    /// (Fish Audio Drama 3's `fish-audio-community`), which needs `guests = true` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
+    #[serde(flatten)]
+    pub profile: weirdnet_agent::speech::SpeechProfile,
 }
 
 /// A LoRA adapter on a `[[model.local]]` base, served as its own model id (for example
@@ -363,9 +461,60 @@ pub struct LocalAdapter {
     pub base_quant: Option<String>,
 }
 
+impl ModelSection {
+    /// What an upload must leave free on the models directory's filesystem ([`Self::upload_keep_free`]).
+    pub fn keep_free(&self) -> weirdnet_backends::models::KeepFree {
+        match self.upload_keep_free.as_deref().and_then(weirdnet_model::hw::parse_size) {
+            Some(bytes) => weirdnet_backends::models::KeepFree::new(0, bytes),
+            None => weirdnet_backends::models::KeepFree::default(),
+        }
+    }
+
+    /// The engine an uploaded full model must suit ([`Self::upload_engine`]).
+    pub fn upload_engine(&self) -> EngineKind {
+        match self.upload_engine.as_deref() {
+            Some("vllm") => EngineKind::Vllm,
+            Some("mlx") => EngineKind::Mlx,
+            Some(_) => EngineKind::Llamacpp,
+            None if self.llamacpp != "off" => EngineKind::Llamacpp,
+            None if self.vllm != "off" => EngineKind::Vllm,
+            None if self.mlx != "off" => EngineKind::Mlx,
+            None => EngineKind::Llamacpp,
+        }
+    }
+}
+
 impl LocalModel {
     pub fn is_embedding(&self) -> bool {
         self.role.as_deref() == Some("embedding")
+    }
+
+    /// Whether it has the transcription role (`role = "transcribe"`, video design milestone 2).
+    pub fn is_transcriber(&self) -> bool {
+        self.role.as_deref() == Some("transcribe")
+    }
+
+    /// Whether it has the speech role (`role = "speak"`, audio design milestone 7).
+    pub fn is_speaker(&self) -> bool {
+        self.role.as_deref() == Some("speak")
+    }
+
+    /// The license that restricts how this model's speech may be served, if any: its catalog
+    /// entry's (Fish Audio Drama 3), else the one its speech settings name.
+    pub fn restricting_license(&self) -> Option<String> {
+        let cataloged = weirdnet_model::hw::find(&self.id).and_then(|e| e.license());
+        let set = self.speak.as_ref().and_then(|s| s.profile.license.as_deref());
+        weirdnet_model::speech::restricting_license(cataloged).or_else(|| weirdnet_model::speech::restricting_license(set))
+    }
+
+    /// Whether guests of a shared pool may use this speaker: `[model.local.speak] guests`, else
+    /// yes unless its license is restricted ([`Self::restricting_license`]). Always yes for a
+    /// model that doesn't speak (the grant's allowlist decides).
+    pub fn guests_may_speak(&self) -> bool {
+        if !self.is_speaker() {
+            return true;
+        }
+        self.speak.as_ref().and_then(|s| s.guests).unwrap_or_else(|| self.restricting_license().is_none())
     }
 }
 
@@ -433,9 +582,22 @@ pub struct InferenceSection {
     /// Models that may be split across model nodes (M7). Off unless listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<crate::group::SplitPolicy>,
+    /// Placement and replication (M6): models to keep loaded on a number of model nodes.
+    #[serde(default, skip_serializing_if = "crate::placement::PlacementPolicy::is_empty")]
+    pub placement: crate::placement::PlacementPolicy,
     /// Versioned rollouts (training plan P4b): a name, its versions and their traffic weights.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rollout: Vec<crate::rollout::Rollout>,
+    /// Let the owner's linked devices read and change these rollouts over Weirdnet
+    /// (`/ymir/rollouts/1`: Bragi, `ymirctl models rollout --inference`), with the same rules as
+    /// `ymirctl models rollout` here; changes are saved in this file unless the caller asks not to.
+    /// `false` turns the protocol off.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub remote_rollouts: bool,
+    /// Which linked devices may do that, by peer id (as `[train] callers`). Empty (the default):
+    /// any linked device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollout_callers: Vec<String>,
 }
 
 fn standin_after() -> String {
@@ -458,7 +620,10 @@ impl Default for InferenceSection {
             standin_warm: true,
             alerts: weirdnet_alerts::AlertsConfig::default(),
             split: Vec::new(),
+            placement: Default::default(),
             rollout: Vec::new(),
+            remote_rollouts: true,
+            rollout_callers: Vec::new(),
         }
     }
 }
@@ -473,8 +638,58 @@ pub struct CacheSection {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_url: Option<String>,
+    /// Cosine distance (0 = the same meaning) under which a stored answer stands in for a prompt
+    /// in the semantic cache.
     #[serde(default = "threshold")]
     pub threshold: f32,
+    /// The embedding model (an id in the pool's catalog) the semantic cache embeds prompts with.
+    /// Unset: exact matches only. It is used only while loaded somewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    /// How long a semantic-cache entry may stand in (`24h`).
+    #[serde(default = "ttl")]
+    pub ttl: String,
+    /// At most this many semantic-cache entries; the least recently used go first.
+    #[serde(default = "entries")]
+    pub entries: usize,
+}
+
+fn ttl() -> String {
+    "24h".into()
+}
+
+fn entries() -> usize {
+    1024
+}
+
+impl CacheSection {
+    /// The semantic cache's settings, `None` when it is off (no embedding model, or `mode = "off"`).
+    pub fn semantic(&self) -> Option<crate::semantic::SemanticOptions> {
+        let model = self.embedding_model.clone().filter(|m| !m.trim().is_empty() && self.mode != "off")?;
+        Some(crate::semantic::SemanticOptions {
+            embedding_model: model,
+            similarity: 1.0 - self.threshold,
+            ttl: parse_duration(&self.ttl).ok(),
+            max_entries: self.entries,
+            pool: self.mode == "pool",
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !matches!(self.mode.as_str(), "off" | "local" | "pool") {
+            bail!("[inference.cache] mode must be off, local or pool, not {:?}", self.mode);
+        }
+        if !(0.0..=1.0).contains(&self.threshold) {
+            bail!("[inference.cache] threshold is a cosine distance from 0 to 1, not {}", self.threshold);
+        }
+        if parse_duration(&self.ttl).is_err() {
+            bail!("[inference.cache] ttl {:?} is not a duration (like 24h)", self.ttl);
+        }
+        if !(1..=1_000_000).contains(&self.entries) {
+            bail!("[inference.cache] entries must be 1 to 1000000, not {}", self.entries);
+        }
+        Ok(())
+    }
 }
 
 fn local() -> String {
@@ -491,7 +706,7 @@ fn threshold() -> f32 {
 
 impl Default for CacheSection {
     fn default() -> Self {
-        Self { mode: local(), backend: embedded(), redis_url: None, threshold: threshold() }
+        Self { mode: local(), backend: embedded(), redis_url: None, threshold: threshold(), embedding_model: None, ttl: ttl(), entries: entries() }
     }
 }
 
@@ -536,6 +751,10 @@ pub struct BridgeSection {
     /// Always on 127.0.0.1; there is no address setting.
     #[serde(default = "bridge_port")]
     pub port: u16,
+    /// Largest request body the bridge accepts, in bytes (`weirdnet-openai`'s 32 MiB when unset).
+    /// A larger one gets a 413 that names this setting; `/v1/models` reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
 }
 
 fn bridge_port() -> u16 {
@@ -544,7 +763,7 @@ fn bridge_port() -> u16 {
 
 impl Default for BridgeSection {
     fn default() -> Self {
-        Self { port: bridge_port() }
+        Self { port: bridge_port(), max_request_bytes: None }
     }
 }
 
@@ -572,6 +791,13 @@ impl NodeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.inference.placement.validate()?;
+        self.inference.cache.validate()?;
+        for c in &self.inference.rollout_callers {
+            if c.parse::<weirdnet_net::PeerId>().is_err() {
+                bail!("[inference] rollout_callers: `{c}` is not a peer id (list the device's peer id, as the pool's device list shows it)");
+            }
+        }
         for c in &self.model.callers {
             if c.parse::<weirdnet_net::PeerId>().is_err() {
                 bail!(
@@ -579,6 +805,16 @@ impl NodeConfig {
                      are no longer accepted; list the device's peer id instead (replace the label with the peer id of that linked device, as the pool's device list shows it)"
                 );
             }
+        }
+        if let Some(k) = &self.model.upload_keep_free
+            && weirdnet_model::hw::parse_size(k).is_none()
+        {
+            bail!("[model] upload_keep_free: `{k}` is not a size (such as `50GiB`)");
+        }
+        if let Some(e) = &self.model.upload_engine
+            && !matches!(e.as_str(), "llamacpp" | "vllm" | "mlx")
+        {
+            bail!("[model] upload_engine: `{e}` is not `llamacpp`, `vllm` or `mlx`");
         }
         let mut seen = std::collections::HashSet::new();
         for m in &self.model.local {
@@ -591,10 +827,47 @@ impl NodeConfig {
             if let Some(b) = &m.backend
                 && !BACKENDS.contains(&b.as_str())
             {
-                bail!("model `{}`: unknown backend `{b}` (llamacpp, mlx or vllm)", m.id);
+                bail!("model `{}`: unknown backend `{b}` (llamacpp, mlx, vllm or vllm-omni)", m.id);
             }
             if m.backend.as_deref() == Some("mlx") && m.is_embedding() && !EngineKind::Mlx.capabilities().embeddings {
                 bail!("model `{}`: MLX-LM's server has no embeddings endpoint; use backend = \"llamacpp\" for embedding models", m.id);
+            }
+            // Text to speech (audio design milestone 7, `weirdnet-backends` 0.4.10). A catalog
+            // speaker without the role would start as a chat model, so the role is required.
+            let catalog_speaker = weirdnet_model::hw::find(&m.id).is_some_and(|e| e.speaks());
+            if catalog_speaker && !m.is_speaker() {
+                bail!("model `{}` is a text-to-speech model: set role = \"speak\"", m.id);
+            }
+            if m.backend.as_deref() == Some("vllm-omni") && !m.is_speaker() {
+                bail!("model `{}`: backend = \"vllm-omni\" serves text to speech only (role = \"speak\")", m.id);
+            }
+            if m.speak.is_some() && !m.is_speaker() {
+                bail!("model `{}`: [model.local.speak] is for role = \"speak\" models", m.id);
+            }
+            if m.is_speaker() {
+                if !matches!(m.backend.as_deref(), None | Some("llamacpp" | "vllm-omni")) {
+                    bail!("model `{}`: role = \"speak\" needs backend llamacpp (with the model's projector) or vllm-omni", m.id);
+                }
+                if !m.lora.is_empty() || m.lora_slots.is_some() {
+                    bail!("model `{}`: a speaking model takes no LoRA adapters", m.id);
+                }
+                if m.video {
+                    bail!("model `{}`: a speaking model reads no video", m.id);
+                }
+            }
+            if m.video {
+                if m.backend.as_deref() != Some("vllm") {
+                    bail!(
+                        "model `{}`: video = true needs backend = \"vllm\" (llama.cpp and MLX-LM take no video parts; Bragi sends them frames)",
+                        m.id
+                    );
+                }
+                if m.is_embedding() || m.is_transcriber() {
+                    bail!("model `{}`: video = true is for chat models", m.id);
+                }
+            }
+            if m.backend.as_deref() == Some("mlx") && m.is_transcriber() {
+                bail!("model `{}`: role = \"transcribe\" needs backend llamacpp (with an audio projector) or vllm, not mlx", m.id);
             }
             if let Some(t) = &m.idle_ttl {
                 parse_duration(t).with_context(|| format!("model `{}`: idle_ttl", m.id))?;
@@ -670,6 +943,20 @@ impl NodeConfig {
                 "[[model.local]] image: every unwrapped vLLM model on this node must use the same image (the supervisor has one vLLM program); wrap a server you started if you need more than one"
             );
         }
+        // Speakers: the engine and projector they need, and operator settings that only narrow
+        // what the catalog says (`weirdnet-backends` 0.4.10 `ModelLaunch::check_speech`).
+        if self.model.local.iter().any(LocalModel::is_speaker) {
+            for l in self.launches() {
+                l.check_speech().map_err(|e| {
+                    let hint = if l.engine == EngineKind::Llamacpp && e.contains("projector") {
+                        " (`ymirctl models pull ID` fetches a catalog speaker's projector; else set mmproj)"
+                    } else {
+                        ""
+                    };
+                    anyhow::anyhow!("model {e}{hint}")
+                })?;
+            }
+        }
         crate::mcp_servers::validate(&self.inference.agent.mcp)?;
         self.validate_splits()?;
         crate::rollout::validate(&self.inference.rollout).context("[[inference.rollout]]")?;
@@ -689,9 +976,16 @@ impl NodeConfig {
             crate::group::parse_link(l).map_err(|e| anyhow::anyhow!("model.private_link: {e}"))?;
         }
         let mut ids = std::collections::HashSet::new();
+        crate::ray::check_args(&self.model.ray_args).map_err(|e| anyhow::anyhow!("model.{e}"))?;
         for s in &self.model.split {
             if s.id.is_empty() || s.id.contains(char::is_whitespace) {
                 bail!("model.split id `{}` must be non-empty and have no spaces", s.id);
+            }
+            if let Some(e) = &s.engine
+                && e != "llamacpp"
+                && e != "vllm"
+            {
+                bail!("model.split `{}`: engine `{e}` is not `llamacpp` or `vllm`", s.id);
             }
             if !ids.insert(&s.id) || self.model.local.iter().any(|m| m.id == s.id) {
                 bail!("model `{}` is listed twice (split models are not also [[model.local]])", s.id);
@@ -699,8 +993,11 @@ impl NodeConfig {
         }
         let mut seen = std::collections::HashSet::new();
         for p in &self.inference.split {
-            if p.backend != crate::group::BACKEND {
-                bail!("inference.split `{}`: backend `{}` is not built (only `{}`)", p.id, p.backend, crate::group::BACKEND);
+            if p.backend != crate::group::BACKEND && p.backend != crate::group::RAY_BACKEND {
+                bail!("inference.split `{}`: backend `{}` is not `{}` or `{}`", p.id, p.backend, crate::group::BACKEND, crate::group::RAY_BACKEND);
+            }
+            if p.tensor_parallel == Some(0) || p.pipeline_parallel == Some(0) || p.nodes.iter().any(|n| n.gpus == Some(0)) {
+                bail!("inference.split `{}`: tensor_parallel, pipeline_parallel and gpus are at least 1", p.id);
             }
             if !seen.insert(&p.id) {
                 bail!("inference.split `{}` is listed twice", p.id);
@@ -732,7 +1029,11 @@ impl NodeConfig {
 
     /// The main chat model: the first with `role = "main"`, else the first chat model.
     pub fn main_model(&self) -> Option<&LocalModel> {
-        self.model.local.iter().find(|m| m.role.as_deref() == Some("main")).or_else(|| self.model.local.iter().find(|m| !m.is_embedding()))
+        self.model
+            .local
+            .iter()
+            .find(|m| m.role.as_deref() == Some("main"))
+            .or_else(|| self.model.local.iter().find(|m| !m.is_embedding() && !m.is_transcriber() && !m.is_speaker()))
     }
 
     /// The cold-start stand-in: `inference.standin`, else the model with `role = "standin"`.
@@ -746,6 +1047,8 @@ impl NodeConfig {
             standin_after: parse_duration(&self.inference.standin_after).unwrap_or(std::time::Duration::from_secs(10)),
             splits: self.inference.split.clone(),
             rollouts: self.inference.rollout.clone(),
+            semantic: self.inference.cache.semantic(),
+            speak_guests: self.model.local.iter().filter(|m| m.is_speaker()).map(|m| (m.id.clone(), m.guests_may_speak())).collect(),
         }
     }
 
@@ -769,6 +1072,14 @@ impl NodeConfig {
         if let Some(p) = resolve_vllm(&self.model, paths) {
             out.push(EngineConfig::vllm(p));
         }
+        if self.model.local.iter().any(|m| m.backend.as_deref() == Some("vllm-omni")) {
+            match resolve_vllm_omni(&self.model, paths) {
+                Some(p) => out.push(EngineConfig::vllm_omni(p)),
+                None => tracing::warn!(
+                    "models use vllm-omni but vLLM-Omni is not installed (run `ymirctl engines install vllm-omni`); they will fail to load"
+                ),
+            }
+        }
         out
     }
 
@@ -788,6 +1099,11 @@ impl NodeConfig {
             models_dir: self.models_dir(),
             key,
             log_dir: Some(paths.logs()),
+            ray: resolve_ray(&self.model, paths),
+            ray_args: self.model.ray_args.clone(),
+            vllm: resolve_vllm(&self.model, paths),
+            ray_trust_firewall: self.model.ray_trust_firewall,
+            ray_trusted_ports: self.model.ray_trusted_ports.clone(),
         }
     }
 
@@ -798,7 +1114,8 @@ impl NodeConfig {
             .split
             .iter()
             .map(|s| {
-                let mut l = ModelLaunch::new(&s.id, EngineKind::Llamacpp, s.file.clone().unwrap_or_default());
+                let engine = if s.engine.as_deref() == Some("vllm") { EngineKind::Vllm } else { EngineKind::Llamacpp };
+                let mut l = ModelLaunch::new(&s.id, engine, s.file.clone().unwrap_or_default());
                 l.context = s.context;
                 l.slots = s.slots;
                 l.wrap = Some(weirdnet_backends::Wrap { url: format!("http://127.0.0.1:{}", s.serve_port), api_key: Some(key.to_string()) });
@@ -815,6 +1132,31 @@ impl NodeConfig {
         models.chain(adapters).collect()
     }
 
+    /// `(id, origin, license)` for each `[[model.local]]` model and LoRA adapter whose origin is
+    /// known, for the capability record (and so the pool catalog). A `provenance.json` beside the
+    /// weights (an upload, or a trained adapter) says both; else weights under `models_dir`
+    /// (`ymirctl models pull`, a catalog model) or a Hub id are `hub`, with no license. A file
+    /// elsewhere without a record, and a `wrap`ped server, say nothing.
+    pub fn origins(&self) -> Vec<(String, Option<String>, Option<String>)> {
+        let dir = self.models_dir();
+        let mut out = Vec::new();
+        for (m, l) in self.model.local.iter().zip(self.launches()) {
+            if m.wrap.is_none() {
+                let (o, lic) = origin_of(&l.source, &dir);
+                if o.is_some() || lic.is_some() {
+                    out.push((m.id.clone(), o, lic));
+                }
+            }
+            for a in &l.adapters {
+                let (o, lic) = origin_of(&a.path, &dir);
+                if o.is_some() || lic.is_some() {
+                    out.push((a.id.clone(), o, lic));
+                }
+            }
+        }
+        out
+    }
+
     /// Launch specs for `[[model.local]]`.
     pub fn launches(&self) -> Vec<ModelLaunch> {
         let dir = self.models_dir();
@@ -825,6 +1167,7 @@ impl NodeConfig {
                 let backend = m.backend.as_deref().unwrap_or("llamacpp");
                 let engine = match backend {
                     "vllm" => EngineKind::Vllm,
+                    "vllm-omni" => EngineKind::VllmOmni,
                     "mlx" => EngineKind::Mlx,
                     _ => EngineKind::Llamacpp,
                 };
@@ -844,8 +1187,13 @@ impl NodeConfig {
                 l.context = m.context;
                 l.slots = m.slots;
                 l.gpu_layers = m.gpu_layers;
+                l.limits = m.limits;
                 l.swap_group.clone_from(&m.swap_group);
                 l.embedding = m.is_embedding();
+                l = l.with_transcribe(m.is_transcriber()).with_speak(m.is_speaker()).with_video(m.video);
+                if let Some(s) = &m.speak {
+                    l = l.with_speech(s.profile.clone());
+                }
                 l.extra_args.clone_from(&m.args);
                 // A context flag in `args` is what the engine would run with (it comes last), so it
                 // is the context: one flag on the command line, and the same number advertised.
@@ -860,7 +1208,7 @@ impl NodeConfig {
                     && m.wrap.is_none()
                     && !m.is_embedding()
                     && !has_own
-                    && let Some(p) = crate::vision::resolve(&m.id, m.mmproj.as_deref(), &dir)
+                    && let Some(p) = crate::vision::resolve(&m.id, m.mmproj.as_deref(), &dir).or_else(|| speaker_projector(m, &dir))
                 {
                     l.extra_args.extend(["--mmproj".to_string(), p.to_string_lossy().into_owned()]);
                 }
@@ -893,8 +1241,23 @@ impl NodeConfig {
     }
 }
 
+/// Where the weights at `source` (a path, or a Hub id) came from, and their license; see
+/// [`NodeConfig::origins`].
+fn origin_of(source: &str, models_dir: &Path) -> (Option<String>, Option<String>) {
+    let p = Path::new(source);
+    let record_dir = if p.is_dir() { Some(p) } else { p.parent() };
+    if let Some(rec) = record_dir.filter(|d| !d.as_os_str().is_empty()).and_then(weirdnet_model::artifact::Provenance::read) {
+        return (Some(rec.origin).filter(|o| !o.is_empty()), rec.license);
+    }
+    let hub_id = !p.is_absolute() && !p.exists() && source.matches('/').count() == 1;
+    if p.starts_with(models_dir) || hub_id {
+        return (Some(weirdnet_agent::remote::catalog::ORIGIN_HUB.to_string()), None);
+    }
+    (None, None)
+}
+
 /// The `[[model.local]]` backends.
-pub const BACKENDS: &[&str] = &["llamacpp", "mlx", "vllm"];
+pub const BACKENDS: &[&str] = &["llamacpp", "mlx", "vllm", "vllm-omni"];
 
 /// Where an MLX model's weights are: `file` (a directory, absolute or under `models_dir`, or a Hub
 /// id), else the catalog model's MLX weights under `models_dir/mlx/`.
@@ -908,6 +1271,17 @@ fn mlx_source(m: &LocalModel, dir: &Path) -> String {
             None => dir.join("mlx").join(&m.id).to_string_lossy().into_owned(),
         },
     }
+}
+
+/// A catalog speaker's projector (its codec and voices, `weirdnet-model` `CatalogEntry::projector`)
+/// in `dir`, when `mmproj` is unset and the file is there (`ymirctl models pull ID` fetches it).
+fn speaker_projector(m: &LocalModel, dir: &Path) -> Option<PathBuf> {
+    if !m.is_speaker() || m.mmproj.is_some() {
+        return None;
+    }
+    let p = weirdnet_model::hw::find(&m.id)?.projector()?;
+    let path = weirdnet_model::ModelStore::new(dir).path(&p);
+    std::fs::metadata(&path).is_ok_and(|md| md.len() > 0).then_some(path)
 }
 
 /// `600` (seconds), `30s`, `10m`, `2h` or `1d`.
@@ -931,7 +1305,7 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
 
 /// `auto` or `managed` uses a container image when `[model] vllm = "image:..."` or a local
 /// vLLM model sets `image` and is not wrapped.
-fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+pub fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
     let setting = model.vllm.trim();
     if setting == "off" {
         return None;
@@ -956,7 +1330,32 @@ fn resolve_vllm(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
             }
         };
     }
-    resolve_engine(setting, "vllm", &paths.engines().join("vllm").join("bin").join("vllm"))
+    let managed = crate::vllm::bin_in(&crate::vllm::venv(&paths.engines()), "vllm");
+    if setting == "auto" && managed.is_file() {
+        return Some(managed);
+    }
+    resolve_engine(setting, "vllm", &managed)
+}
+
+/// vLLM-Omni's `vllm`: `auto` (or `managed`) is the venv `ymirctl engines install vllm-omni`
+/// made, else `vllm` on `PATH`; `system:PATH`; `off`.
+pub fn resolve_vllm_omni(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+    let managed = crate::vllm::bin_in(&crate::vllm_omni_install::venv(&paths.engines()), "vllm");
+    match model.vllm_omni.trim() {
+        "auto" | "managed" if managed.is_file() => Some(managed),
+        "auto" | "managed" => find_in_path("vllm"),
+        other => resolve_engine(other, "vllm", &managed),
+    }
+}
+
+/// `ray`: `auto` (or `managed`) is the managed vLLM venv's, else `PATH`'s.
+pub fn resolve_ray(model: &ModelSection, paths: &Paths) -> Option<PathBuf> {
+    let managed = crate::vllm::bin_in(&crate::vllm::venv(&paths.engines()), "ray");
+    match model.ray.trim() {
+        "off" => None,
+        s if s.starts_with("system:") => Some(PathBuf::from(&s["system:".len()..])),
+        _ => Some(managed).filter(|p| p.is_file()).or_else(|| find_in_path("ray")),
+    }
 }
 
 /// The image unwrapped vLLM models agree on, if any.
@@ -1110,6 +1509,59 @@ mod tests {
     }
 
     #[test]
+    fn origins_come_from_provenance_records_else_the_models_dir_or_a_hub_id() {
+        let models = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let rec = |dir: &Path, kind: &str, id: &str, origin: &str, license: Option<&str>| {
+            std::fs::create_dir_all(dir).unwrap();
+            let mut r = serde_json::json!({"format": "weirdnet-provenance/1", "kind": kind, "id": id, "origin": origin, "revision": "sha256:00", "files": []});
+            if let Some(l) = license {
+                r["license"] = l.into();
+            }
+            std::fs::write(dir.join(weirdnet_model::artifact::PROVENANCE_FILE), serde_json::to_vec(&r).unwrap()).unwrap();
+        };
+        rec(&models.path().join("uploads/up"), "model", "up", "upload", Some("MIT"));
+        rec(&models.path().join("adapters/tune"), "adapter", "tune", "train", Some("Apache-2.0"));
+        std::fs::write(elsewhere.path().join("own.gguf"), b"x").unwrap();
+        let text = format!(
+            r#"
+            [model]
+            models_dir = '{m}'
+            [[model.local]]
+            id = "up"
+            file = "uploads/up/up.gguf"
+            [[model.local.lora]]
+            id = "up+tune"
+            file = "adapters/tune/tune.gguf"
+            [[model.local]]
+            id = "pulled"
+            file = "pulled-Q4_K_M.gguf"
+            [[model.local]]
+            id = "own"
+            file = '{e}/own.gguf'
+            [[model.local]]
+            id = "big"
+            backend = "vllm"
+            file = "org/big"
+            [[model.local]]
+            id = "wrapped"
+            wrap = "http://127.0.0.1:8000"
+            "#,
+            m = models.path().display(),
+            e = elsewhere.path().display()
+        );
+        let cfg: NodeConfig = toml::from_str(&text).unwrap();
+        let got = cfg.origins();
+        let of = |id: &str| got.iter().find(|(i, ..)| i == id).map(|(_, o, l)| (o.as_deref(), l.as_deref()));
+        assert_eq!(of("up"), Some((Some("upload"), Some("MIT"))));
+        assert_eq!(of("up+tune"), Some((Some("train"), Some("Apache-2.0"))));
+        assert_eq!(of("pulled"), Some((Some("hub"), None)));
+        assert_eq!(of("big"), Some((Some("hub"), None)));
+        assert_eq!(of("own"), None, "a file elsewhere without a record says nothing");
+        assert_eq!(of("wrapped"), None);
+    }
+
+    #[test]
     fn lora_adapters_on_a_local_model() {
         let cfg: NodeConfig = toml::from_str(
             r#"
@@ -1164,8 +1616,132 @@ mod tests {
         assert!(bad(&|c| c.model.local[0].lora[0].scale = Some(f32::INFINITY)).contains("finite"));
         assert!(bad(&|c| c.model.local[0].backend = Some("mlx".into())).contains("llamacpp or vllm"));
         assert!(bad(&|c| c.model.local[0].role = Some("embedding".into())).contains("embedding"));
+        assert!(
+            bad(&|c| {
+                c.model.local[0].lora.clear();
+                c.model.local[0].backend = Some("mlx".into());
+                c.model.local[0].role = Some("transcribe".into());
+            })
+            .contains("transcribe")
+        );
         assert!(bad(&|c| c.model.local[0].wrap = Some("http://127.0.0.1:9000".into())).contains("wrapped"));
         assert!(bad(&|c| c.model.local[0].lora[0].file = String::new()).contains("file is required"));
+    }
+
+    #[test]
+    fn speakers_launch_with_the_speak_role() {
+        let d = tempfile::tempdir().unwrap();
+        let mmproj = d.path().join("mmproj-tts.gguf");
+        std::fs::write(&mmproj, b"x").unwrap();
+        // A llama.cpp speaker with its projector, and a vLLM-Omni one narrowed to two voices.
+        let cfg: NodeConfig = toml::from_str(&format!(
+            r#"
+            [model]
+            vllm_omni = "system:/opt/omni/bin/vllm"
+            [[model.local]]
+            id = "tts"
+            file = "/m/tts.gguf"
+            role = "speak"
+            mmproj = "{}"
+            [[model.local]]
+            id = "qwen3-tts-0.6b-customvoice"
+            backend = "vllm-omni"
+            role = "speak"
+            file = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+            [model.local.speak]
+            presets = ["vivian", "ryan"]
+            max_input_chars = 2000
+            "#,
+            mmproj.display()
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        let l = cfg.launches();
+        assert!(l[0].speak && l[0].engine == EngineKind::Llamacpp && l[0].extra_args.contains(&"--mmproj".to_string()));
+        assert_eq!(l[0].purpose(), weirdnet_agent::remote::catalog::Purpose::Speak);
+        assert!(l[1].speak && l[1].engine == EngineKind::VllmOmni);
+        assert_eq!(l[1].speech.presets.as_deref(), Some(&["vivian".to_string(), "ryan".to_string()][..]));
+        assert_eq!(l[1].speech.max_input_chars, Some(2000));
+        let engines = cfg.engines(&Paths::new(d.path().to_path_buf()));
+        assert!(
+            engines.iter().any(|e| e.kind == EngineKind::VllmOmni && e.program == Path::new("/opt/omni/bin/vllm")),
+            "vLLM-Omni configured from [model] vllm_omni"
+        );
+        // Round trip: the speak table survives a save.
+        let back: NodeConfig = toml::from_str(&cfg.to_toml().unwrap()).unwrap();
+        assert_eq!(back.model.local[1].speak, cfg.model.local[1].speak);
+    }
+
+    #[test]
+    fn speakers_are_checked_against_their_engines_and_catalog() {
+        let refused = |toml_text: &str, want: &str| {
+            let cfg: NodeConfig = toml::from_str(toml_text).unwrap();
+            let e = cfg.validate().unwrap_err().to_string();
+            assert!(e.contains(want), "{toml_text}: {e}");
+        };
+        // A catalog speaker by id, with no role (it would start as a chat model).
+        refused("[[model.local]]\nid = \"kokoro-82m\"\nfile = \"/m/kokoro.gguf\"\n", "set role = \"speak\"");
+        // llama.cpp speaks only with the projector.
+        refused("[[model.local]]\nid = \"tts\"\nfile = \"/m/tts.gguf\"\nrole = \"speak\"\nmmproj = \"off\"\n", "projector");
+        refused("[[model.local]]\nid = \"tts\"\nbackend = \"vllm\"\nrole = \"speak\"\n", "llamacpp");
+        refused("[[model.local]]\nid = \"tts\"\nbackend = \"mlx\"\nrole = \"speak\"\n", "llamacpp");
+        refused("[[model.local]]\nid = \"chat\"\nbackend = \"vllm-omni\"\n", "text to speech only");
+        refused("[[model.local]]\nid = \"chat\"\n[model.local.speak]\nguests = true\n", "role = \"speak\" models");
+        // Settings only narrow: a voice the catalog doesn't list widens the profile.
+        refused(
+            "[[model.local]]\nid = \"qwen3-tts-0.6b-customvoice\"\nbackend = \"vllm-omni\"\nrole = \"speak\"\n[model.local.speak]\npresets = [\"nobody\"]\n",
+            "widen",
+        );
+        refused(
+            "[[model.local]]\nid = \"qwen3-tts-0.6b-customvoice\"\nbackend = \"vllm-omni\"\nrole = \"speak\"\nargs = [\"--allowed-local-media-path\", \"/\"]\n",
+            "local media",
+        );
+        // Transcribers and chat models from the same catalog are unaffected.
+        let cfg: NodeConfig = toml::from_str("[[model.local]]\nid = \"gemma-4-e4b\"\n").unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn restricted_speakers_are_closed_to_guests_by_default() {
+        let model = |toml_text: &str| -> LocalModel { toml::from_str::<NodeConfig>(toml_text).unwrap().model.local.remove(0) };
+        let drama = model("[[model.local]]\nid = \"fish-audio-drama-3\"\nrole = \"speak\"\n");
+        assert_eq!(drama.restricting_license().as_deref(), Some("fish-audio-community"));
+        assert!(!drama.guests_may_speak(), "a restricted license: guests off unless the operator opens it");
+        let opened = model("[[model.local]]\nid = \"fish-audio-drama-3\"\nrole = \"speak\"\n[model.local.speak]\nguests = true\n");
+        assert!(opened.guests_may_speak());
+        let kokoro = model("[[model.local]]\nid = \"kokoro-82m\"\nrole = \"speak\"\n");
+        assert!(kokoro.restricting_license().is_none() && kokoro.guests_may_speak(), "apache-2.0: open by default");
+        let closed = model("[[model.local]]\nid = \"kokoro-82m\"\nrole = \"speak\"\n[model.local.speak]\nguests = false\n");
+        assert!(!closed.guests_may_speak(), "the operator may close any speaker");
+        // A license named in the settings counts too.
+        let own = model("[[model.local]]\nid = \"tts\"\nrole = \"speak\"\n[model.local.speak]\nlicense = \"fish-audio-research\"\n");
+        assert!(!own.guests_may_speak());
+    }
+
+    #[test]
+    fn video_models_need_vllm() {
+        let cfg: NodeConfig = toml::from_str(
+            r#"
+            [[model.local]]
+            id = "qwen3-vl-8b"
+            backend = "vllm"
+            file = "Qwen/Qwen3-VL-8B-Instruct"
+            video = true
+            limits = { video_max_seconds = 60, video_max_bytes = 50000000, video_frames_per_minute = 120 }
+            "#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let l = &cfg.launches()[0];
+        assert!(l.video && l.capabilities().video);
+        assert_eq!(l.limits.video_max_seconds, Some(60));
+        assert_eq!(l.limits.video_max_bytes, Some(50_000_000));
+        assert_eq!(l.limits.video_frames_per_minute, Some(120));
+        assert!(l.capabilities().inputs().video);
+        for bad in ["[[model.local]]\nid = \"g\"\nvideo = true\n", "[[model.local]]\nid = \"g\"\nbackend = \"mlx\"\nvideo = true\n"] {
+            let cfg: NodeConfig = toml::from_str(bad).unwrap();
+            assert!(cfg.validate().unwrap_err().to_string().contains("backend = \"vllm\""));
+        }
     }
 
     #[test]

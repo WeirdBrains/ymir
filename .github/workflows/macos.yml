@@ -1,6 +1,7 @@
-# macOS: Apple Silicon serves chat models with MLX-LM (ymir_core::mlx), Intel Macs with llama.cpp.
+# macOS: Apple Silicon serves chat models with MLX-LM (ymir_core::mlx). macOS is Apple Silicon only;
+# Intel (x86_64) Macs are no longer built or tested (dropped after v0.23.0).
 #
-# `setup` is a dry run on both: it checks the backend setup picks and the node.toml it writes, with
+# `setup` is a dry run: it checks the backend setup picks and the node.toml it writes, with
 # no downloads. `mlx` then installs the pinned mlx-lm with uv, downloads the smallest catalog
 # model's MLX weights (SmolLM2 135M, 148 MB) and chats with it through ymird. Hosted runners may
 # not expose Metal to MLX, so that job reports but does not fail the run.
@@ -29,8 +30,6 @@ jobs:
         include:
           - runner: macos-15
             backend: mlx
-          - runner: macos-15-intel
-            backend: llamacpp
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -47,18 +46,13 @@ jobs:
           ctl() { target/debug/ymirctl --home "$RUNNER_TEMP/home" "$@" --memory-budget 6GiB --reserve 1GiB; }
           out=$(ctl setup --dry-run --name ci)
           echo "$out"
-          if [ "${{ matrix.backend }}" = mlx ]; then
-            # MLX is the backend (the MLX-LM line is only printed for it). A 6 GiB budget picks the Gemma
-            # models, which take images, and MLX-LM's server is text-only, so they and the embedding
-            # model stay on llama.cpp (the unit tests cover the text-only models on MLX).
-            echo "$out" | grep -q 'MLX-LM: not installed'
-            echo "$out" | grep -q 'gemma-4-e4b \[main\] llamacpp'
-            echo "$out" | grep -q 'embedding\] llamacpp'
-            if ctl setup --dry-run --backend llamacpp | grep -q 'backend = "mlx"'; then echo "--backend llamacpp still used MLX"; exit 1; fi
-          else
-            if echo "$out" | grep -q 'backend = "mlx"'; then echo "Intel Mac got MLX"; exit 1; fi
-            if ctl setup --dry-run --backend mlx; then echo "--backend mlx accepted on Intel"; exit 1; fi
-          fi
+          # MLX is the backend (the MLX-LM line is only printed for it). A 6 GiB budget picks the Gemma
+          # models, which take images, and MLX-LM's server is text-only, so they and the embedding
+          # model stay on llama.cpp (the unit tests cover the text-only models on MLX).
+          echo "$out" | grep -q 'MLX-LM: not installed'
+          echo "$out" | grep -q 'gemma-4-e4b \[main\] llamacpp'
+          echo "$out" | grep -q 'embedding\] llamacpp'
+          if ctl setup --dry-run --backend llamacpp | grep -q 'backend = "mlx"'; then echo "--backend llamacpp still used MLX"; exit 1; fi
 
   mlx:
     name: MLX-LM with a real model (Apple Silicon)

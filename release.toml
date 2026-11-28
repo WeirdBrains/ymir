@@ -1,5 +1,5 @@
 # Ymir release config for weirdnet-project-helpers (scripts/weirdnet_release.py, vendored; never edit it here).
-helpers = "0.3.2"
+helpers = "0.4.2"
 project = "ymir"
 require_message = true
 next = [
@@ -37,10 +37,57 @@ replace = '\g<1>{version}"'
 [changelog]
 path = "CHANGELOG.md"
 
-[[requires]]                    # live LoRA changes, and engine launches that survive a taken port, need this release
+[[requires]]                    # model uploads (models/1 Upload, WritePolicy, Pulled::revision), U8's origins (set_model_origin, placement hooks), U10's WritePolicy::uploads and StoredEntry constructors; Capabilities::limits (LF-43); measured limits, set_limits_store, Supervisor::transcribe (video M2); speech out: ModelLaunch::speak/speech/check_speech, Supervisor::speak, ModelStatus::speech, EngineKind::VllmOmni, EngineConfig::vllm_omni; native video: ModelLaunch::video (0.4.10)
 crate = "weirdnet-backends"
-version = "0.4.3"
+version = "0.4.10"
 manifest = "Cargo.toml"         # the workspace dependency keeps its features; checked, not rewritten
+lock = "Cargo.lock"
+
+[[requires]]                    # catalog/1 CatalogModel::origin and license (U8, Weirdnet request D); feature jobs: JobBoard (P3b); MediaLimits, CatalogModel::limits (LF-43); guests: GuestAuth, SharedPoolAuth, PoolShare, connect_shared (M11); Purpose::Transcribe, infer/2 Transcribe (video M2); speech out: Purpose::Speak, SpeechProfile, infer/2 Speak, InferHost::open_speak, Pool::speak (0.5.11)
+crate = "weirdnet-agent"
+version = "0.5.11"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # streams released when dropped (U10); pinned with weirdnet-backends
+crate = "weirdnet-net"
+version = "0.8.3"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+
+[[requires]]                    # the synced job board's log and leases (P3b), per-type keys (0.8.3) and type-scoped sealed records for cert-only inference nodes (0.8.4), one session for every type (pull_types_shared, 0.8.5)
+crate = "weirdnet-sync"
+version = "0.8.5"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # the semantic answer cache (SemanticCache, M6) and its pool mode (PooledSemanticCache, the `pool` feature, 0.2.3)
+crate = "weirdnet-semcache"
+version = "0.2.3"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # artifact inspection, Provenance and ModelStore::import for uploads; limits::measure and ModelStore::record_limits (video M2); the text-to-speech catalog (Purpose::Speak, CatalogEntry::speech/license/restricted) and Consent::accepting_license (0.5.5)
+crate = "weirdnet-model"
+version = "0.5.5"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # the loopback bridge: /v1/audio/speech and /v1/audio/transcriptions, /v1/models weirdnet.speech and weirdnet.inputs, chat video_url parts (0.2.5, on weirdnet-agent 0.5.11)
+crate = "weirdnet-openai"
+version = "0.2.5"
+manifest = "Cargo.toml"
+lock = "Cargo.lock"
+pin = "none"
+
+[[requires]]                    # WAV and PCM, 16 kHz normalization, silence-aware transcription plans, realign, SRT/VTT and the hardened ffmpeg runner (audio milestones 1 to 4); TextPlan for speech later
+crate = "weirdnet-media"
+version = "0.1.0"
+manifest = "Cargo.toml"
 lock = "Cargo.lock"
 pin = "none"
 
@@ -90,6 +137,9 @@ files = [
   "dist/ymir-cuda-{version}-*-pc-windows-msvc.zip",
   "dist/ymir-{version}-*.msi",
   "dist/YmirSetup-{version}.exe",
+  # FreeBSD (M9), from the Release workflow's VM job (x86_64 only).
+  "dist/ymir-{version}-x86_64-unknown-freebsd.tar.gz",
+  "dist/ymir-{version}-x86_64-unknown-freebsd.pkg",
 ]
 sums = "SHA256SUMS"
 
@@ -101,6 +151,10 @@ channels = ["github", "taur", "nix"]
 assets = [
   "ymir-{version}-x86_64-unknown-linux-gnu.tar.gz",
   "ymir-{version}-aarch64-unknown-linux-gnu.tar.gz",
+  "ymir-{version}-linux-x86_64.update.tar.gz",
+  "ymir-{version}-linux-aarch64.update.tar.gz",
+  "ymir-cuda-{version}-linux-x86_64.update.tar.gz",
+  "ymir-cuda-{version}-linux-aarch64.update.tar.gz",
   "ymir_{debver}-1_amd64.deb",
   "ymir_{debver}-1_arm64.deb",
   "ymir-{version}-1.x86_64.rpm",
@@ -119,10 +173,11 @@ assets = [
 
 [[platforms]]
 os = "macos"
-arch = ["x86_64", "aarch64"]
+arch = ["aarch64"]
+arch_note = "Apple Silicon only; Intel Macs dropped after v0.23.0"
 formats = ["tar.gz", "zip", "brew-formula"]
 channels = ["github", "homebrew"]
-assets = ["ymir-{version}-*-apple-darwin.tar.gz"]
+assets = ["ymir-{version}-aarch64-apple-darwin.tar.gz", "ymir-{version}-macos-aarch64.update.tar.gz"]
 
 [[platforms]]
 os = "windows"
@@ -132,9 +187,69 @@ channels = ["github"]
 assets = ["ymir-{version}-*-pc-windows-msvc.zip", "ymir-cuda-{version}-x86_64-pc-windows-msvc.zip", "YmirSetup-{version}.exe"]
 
 [[platforms]]
+os = "freebsd"
+arch = ["x86_64"]
+arch_note = "built in a FreeBSD VM on GitHub's x86_64 runners; no aarch64 FreeBSD runner"
+formats = ["tar.gz", "pkg"]
+channels = ["github"]
+assets = ["ymir-{version}-x86_64-unknown-freebsd.tar.gz", "ymir-{version}-x86_64-unknown-freebsd.pkg"]
+
+[[platforms]]
+os = "openbsd"
+opt_out = "not built yet: no OpenBSD CI runner or VM job (FreeBSD comes first, M9)"
+
+[[platforms]]
 os = "android"
 opt_out = "a serving daemon can't run in the background on mobile (Android needs a foreground service and thermals make it impractical)"
 
 [[platforms]]
 os = "ios"
 opt_out = "a serving daemon can't run in the background on mobile (iOS forbids it)"
+
+# Signed self-update bundles (`scripts/weirdnet_release.py updates VERSION --upload`), what
+# `ymirctl update stage` takes. Signed on the release machine, never in CI: WEIRDNET_UPDATE_KEY is
+# the path of the release key file. The updater tells bundles apart by OS and CPU only, so the
+# CUDA builds are separate bundles a node is pointed at on purpose. seq = MAJOR*10^6 + MINOR*10^3
+# + PATCH (ymirctl's default), so it rises with versions.
+[updates]
+root = "packaging/updates/root.env"
+pin = "ac3d19b0ee9c99435b7c0142e360a4019fe03ca4fc85b6bc949372c92fd0d0b2"
+key_env = "WEIRDNET_UPDATE_KEY"
+signer = "@ymirctl"
+sign = ["{signer}", "update", "sign-bundle", "{dir}", "--key", "{key}", "--root", "{root}", "--pin", "{pin}",
+        "--version", "{version}", "--os", "{os}", "--arch", "{arch}", "--notes", "Ymir {version}"]
+
+[[updates.bundles]]
+name = "ymir-{version}-linux-x86_64.update.tar.gz"
+asset = "ymir-{version}-x86_64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "x86_64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-{version}-linux-aarch64.update.tar.gz"
+asset = "ymir-{version}-aarch64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "aarch64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-cuda-{version}-linux-x86_64.update.tar.gz"
+asset = "ymir-cuda-{version}-x86_64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "x86_64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-cuda-{version}-linux-aarch64.update.tar.gz"
+asset = "ymir-cuda-{version}-aarch64-unknown-linux-gnu.tar.gz"
+os = "linux"
+arch = "aarch64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]
+
+[[updates.bundles]]
+name = "ymir-{version}-macos-aarch64.update.tar.gz"
+asset = "ymir-{version}-aarch64-apple-darwin.tar.gz"
+os = "macos"
+arch = "aarch64"
+files = ["bin/ymird=ymird", "bin/ymirctl=ymirctl", "lib/ymir/llama.cpp/=llama.cpp/"]

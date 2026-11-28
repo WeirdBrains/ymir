@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Ymir's llama.cpp trainer: the program `[train] trainer` points at (training plan P3a).
 
-It speaks Ymir's trainer interface 1 (crates/ymir-core/src/train.rs) around upstream llama.cpp at
+It speaks Ymir's trainer interface 2 (crates/ymir-core/src/train.rs) around upstream llama.cpp at
 the build pinned in packaging/engines/llama.cpp.toml (the one scripts/engine.py ships):
 
     trainer.py version
     trainer.py train --base BASE.gguf --data DATA.jsonl --config CONFIG.json --out FULL.gguf
+                     [--checkpoint-dir DIR] [--resume CKPT]
     trainer.py extract-lora --base BASE.gguf --tuned FULL.gguf --rank N --out ADAPTER.gguf
+
+Checkpoints (interface 2, training plan P3b): upstream llama-finetune at the pin saves the model only
+when it ends, with no optimizer state, so with --checkpoint-dir `train` runs it one epoch at a time,
+each from the last epoch's model, and writes DIR/epoch-NNNN/ (model.gguf and checkpoint.json) after
+each. The learning rate is constant at the pin (no -lr-min), and upstream doesn't shuffle, so an epoch
+trains on the same sequences in the same order either way; AdamW's moments start again each epoch
+(checkpoint.json says `"optimizer": "reset"`). --resume CKPT carries on after CKPT's epoch, and is
+refused for a checkpoint of other data or settings.
 
 `train` is a full fine-tune with upstream `llama-finetune`: every weight of an F32 GGUF base (the
 only kind upstream trains), on the dataset's conversations rendered with the base's own chat
@@ -17,18 +26,28 @@ llama.cpp loads on the base, any quantization of it included (`--lora`, training
 Upstream's release archives don't carry `llama-finetune`; build it at the pin with
 `python3 scripts/engine.py build --trainer --out DIR`. This program finds it in
 $YMIR_LLAMA_FINETUNE, next to itself, in ../lib/ymir/llama.cpp, or on PATH, and refuses any build
-but the pinned one.
+but the pinned one, or one without Ymir's patches (REQUIRED_PATCHES, applied by `build --trainer`
+from packaging/engines/patches/; the patched program names them with `--ymir-patches`).
 
 Needs Python 3.11+, numpy and gguf 0.19.0 (llama.cpp's gguf-py at the pin), and jinja2 for chat
 templates: `pip install -r scripts/trainer-requirements.txt`. With them in a venv, set
 YMIR_TRAINER_PYTHON (under [train.env] in node.toml) to its python and this program runs itself
 there.
 
+Before training, the rendered text is counted with `llama-tokenize` from the same build (next to
+llama-finetune, or $YMIR_LLAMA_TOKENIZE): upstream's llama-finetune needs at least 2 x context + 1
+tokens, with the context rounded up to a multiple of 256 as llama.cpp does, and crashes on less, so
+a shorter dataset is refused with its count (see min_tokens).
+
 Environment: YMIR_TRAINER_NGL (llama-finetune -ngl, default all; 0 trains on the CPU),
-YMIR_TRAINER_ARGS (extra llama-finetune arguments, shell-quoted).
+YMIR_TRAINER_ARGS (extra llama-finetune arguments, shell-quoted), YMIR_TRAINER_SVD (where
+extract-lora's SVD runs: auto, cuda, cpu or exact; see svd_device), YMIR_TRAINER_THREADS (matrices
+extract-lora takes at a time on the CPU, default min(4, CPUs)). With PyTorch (a CUDA build) in
+the trainer's venv, extract-lora runs on the GPU; without it, on the CPU.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -37,15 +56,23 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-INTERFACE = 1
+INTERFACE = 2
+CHECKPOINT_FORMAT = "ymir-train-checkpoint/1"
 ENGINE = "llama.cpp"
 HERE = Path(__file__).resolve().parent
 PIN_FILE = HERE.parent / "packaging/engines/llama.cpp.toml"
 # The pin when this program is installed without the repository; test_trainer.py checks it
 # against PIN_FILE.
 PINNED_BUILD = "b12628"
+# Ymir's patches the pinned llama-finetune must carry (scripts/engine.py TRAINER_PATCHES; the
+# patched program prints these ids for `--ymir-patches`). parse-special: the training text is
+# tokenized with parse_special = true, so chat-template special tokens train as special tokens
+# (upstream b12628 tokenizes them as text). Drop it when upstream releases the fix (tracked: draft
+# ggml-org/llama.cpp#31258) and the pin moves past it.
+REQUIRED_PATCHES = ("parse-special",)
 
 
 def pinned_build():
@@ -93,6 +120,61 @@ def need_deps():
 # ---------------------------------------------------------------------------------------------
 # llama-finetune
 
+# llama.cpp rounds a context up to a multiple of this (src/llama-context.cpp, GGML_PAD(n_ctx, 256)).
+CONTEXT_PAD = 256
+# What upstream's llama-finetune prints when the text is too short for one datapoint: the size_t
+# underflow in common_opt_dataset_init (common/common.cpp) trips ggml_new_tensor's assert.
+SHORT_TEXT_CRASH = ("ggml_opt_dataset_init", "INT64_MAX / ne[i]")
+
+
+def trained_context(context):
+    """The context llama-finetune trains at for `-c context`."""
+    return max(CONTEXT_PAD, -(-int(context) // CONTEXT_PAD) * CONTEXT_PAD)
+
+
+def min_tokens(context):
+    """The fewest tokens llama-finetune trains on at `context`: it cuts the text into windows of the
+    trained context n every n/2 tokens, (tokens - n - 1) // (n/2) of them, and holds 5% back for
+    validation, so one training step needs two windows: 2n + 1 tokens."""
+    return 2 * trained_context(context) + 1
+
+
+def short_text(count, context):
+    """The refusal for a text of `count` tokens (None: unknown) at `context`."""
+    n, need = trained_context(context), min_tokens(context)
+    have = f"renders to {count} tokens" if count is not None else "is too short"
+    rounded = f"; context {context} trains as {n}, since llama.cpp rounds it up to a multiple of {CONTEXT_PAD}" if n != int(context) else ""
+    more = f" (about {need - count} more tokens)" if count is not None else ""
+    lower = f", or a lower --context (down to {CONTEXT_PAD}, which needs {min_tokens(CONTEXT_PAD)})" if n > CONTEXT_PAD else ""
+    return Refusal(f"the dataset {have}, and llama-finetune needs at least {need} (2 x context + 1) for one training step{rounded}: add conversations{more}{lower}")
+
+
+def find_tokenize(finetune):
+    """llama-tokenize from the same build: $YMIR_LLAMA_TOKENIZE, else next to llama-finetune."""
+    env = os.environ.get("YMIR_LLAMA_TOKENIZE")
+    if env:
+        return Path(env)
+    name = "llama-tokenize.exe" if os.name == "nt" else "llama-tokenize"
+    p = Path(finetune).parent / name
+    return p if p.exists() else None
+
+
+def count_tokens(exe, base, text):
+    """The tokens llama-finetune makes of `text`, counted by llama-tokenize on the base's vocabulary:
+    special tokens parsed, BOS as the base wants, escapes processed, and one trailing newline
+    dropped, as llama-finetune's -f does (common/arg.cpp)."""
+    if text.endswith("\n"):
+        text = text[:-1]
+    try:
+        r = subprocess.run([str(exe), "-m", str(base), "--stdin", "--ids", "--log-disable"], input=text.encode("utf-8"), capture_output=True, timeout=600)
+    except OSError as e:
+        raise Refusal(f"running {exe}: {e}") from e
+    out = r.stdout.decode("utf-8", "replace")
+    m = re.search(r"^\[([0-9,\s]*)\]\s*$", out, re.M)
+    if r.returncode != 0 or not m:
+        raise Refusal(f"{exe} could not count the training text's tokens: {(out + r.stderr.decode('utf-8', 'replace')).strip()[-300:]!r}")
+    return len([t for t in m.group(1).split(",") if t.strip()])
+
 
 def find_finetune():
     name = "llama-finetune.exe" if os.name == "nt" else "llama-finetune"
@@ -108,22 +190,47 @@ def find_finetune():
     raise Refusal("no llama-finetune: build it at the pin (python3 scripts/engine.py build --trainer --out DIR) and set YMIR_LLAMA_FINETUNE to it")
 
 
+def parse_build(text):
+    """The llama.cpp build in `--version` output, or None: `version: 1.0.0-dev (build 12628, commit
+    abc1234)` (b12628's format) or the older `version: 12628 (abc1234)`, both -> b12628."""
+    m = re.search(r"\(build (\d+),", text) or re.search(r"version:\s*(\d+)\s*\(", text)
+    return f"b{m.group(1)}" if m else None
+
+
 def finetune_build(exe):
-    """The build `llama-finetune --version` reports (`version: 12628 (abc1234)` -> b12628)."""
+    """The build `llama-finetune --version` reports."""
     try:
         r = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=60)
     except OSError as e:
         raise Refusal(f"running {exe} --version: {e}") from e
-    m = re.search(r"version:\s*(\d+)", r.stdout + r.stderr)
-    if not m:
+    build = parse_build(r.stdout + r.stderr)
+    if not build:
         raise Refusal(f"{exe} --version printed no build ({(r.stdout + r.stderr).strip()[:200]!r})")
-    return f"b{m.group(1)}"
+    return build
+
+
+def finetune_patches(exe):
+    """The Ymir patches `llama-finetune --ymir-patches` names; none for an unpatched build (upstream
+    refuses the unknown argument)."""
+    try:
+        r = subprocess.run([str(exe), "--ymir-patches"], capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        raise Refusal(f"running {exe} --ymir-patches: {e}") from e
+    if r.returncode != 0:
+        return []
+    return [line.strip() for line in r.stdout.splitlines() if re.fullmatch(r"[a-z0-9-]+", line.strip())]
 
 
 def check_pin(exe):
     build, pin = finetune_build(exe), pinned_build()
     if build != pin:
         raise Refusal(f"{exe} is llama.cpp {build}, and this trainer is pinned to {pin} (packaging/engines/llama.cpp.toml); build the pinned one")
+    missing = [p for p in REQUIRED_PATCHES if p not in finetune_patches(exe)]
+    if missing:
+        raise Refusal(
+            f"{exe} is llama.cpp {build} without Ymir's {', '.join(missing)} patch (packaging/engines/patches); "
+            "build it with python3 scripts/engine.py build --trainer"
+        )
     return build
 
 
@@ -140,6 +247,8 @@ class Progress:
         self.epoch = 0
         self.last = None
         self.val_loss = None
+        self.loss = None
+        self.imax = 0
 
     def feed(self, chunk):
         m = PROGRESS.match(chunk)
@@ -151,6 +260,7 @@ class Progress:
             return None
         if imax <= 0:
             return None
+        self.imax, self.loss = imax, loss
         step = min(self.epoch, self.epochs - 1) * imax + idata
         if idata >= imax:
             self.epoch += 1
@@ -189,7 +299,7 @@ def run_finetune(cmd, progress):
                 emit("progress", **ev)
             elif not PROGRESS.match(line):
                 print(line, flush=True)  # not an event: goes to the run's log
-                tail = (tail + [line])[-20:]
+                tail = (tail + [line])[-40:]
     if buf.strip():
         print(buf.decode("utf-8", "replace"), flush=True)
     code = proc.wait()
@@ -279,9 +389,70 @@ def read_rows(path):
 # Commands
 
 
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_checkpoint(ckpt, data_sha, config_sha, epochs):
+    """The checkpoint folder `ckpt`, checked against this run's data and settings, and its files."""
+    path = Path(ckpt) / "checkpoint.json"
+    try:
+        c = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise Refusal(f"{path}: {e}")
+    if c.get("format") != CHECKPOINT_FORMAT:
+        raise Refusal(f"{path} is not a {CHECKPOINT_FORMAT} checkpoint")
+    if c.get("data_sha256") != data_sha or c.get("config_sha256") != config_sha:
+        raise Refusal(f"{ckpt} is a checkpoint of other training data or settings")
+    if int(c.get("epochs", 0)) != epochs or not 0 < int(c.get("epoch", 0)) < epochs:
+        raise Refusal(f"{ckpt} is at epoch {c.get('epoch')} of {c.get('epochs')}; nothing is left to carry on for {epochs} epochs")
+    for f in c.get("files", []):
+        p = Path(ckpt) / f["path"]
+        if ".." in Path(f["path"]).parts or not p.is_file() or p.stat().st_size != f["bytes"] or sha256_file(p) != f["sha256"]:
+            raise Refusal(f"{p} doesn't match its checkpoint")
+    model = Path(ckpt) / c["model"]
+    if not model.is_file():
+        raise Refusal(f"{ckpt} has no model {c['model']}")
+    return c, model
+
+
+def write_checkpoint(cdir, epoch, epochs, progress, seed, data_sha, config_sha):
+    model = cdir / "model.gguf"
+    c = {
+        "format": CHECKPOINT_FORMAT,
+        "epoch": epoch,
+        "epochs": epochs,
+        "step": epoch * progress.imax,
+        "steps": epochs * progress.imax,
+        "loss": progress.loss,
+        "seed": seed,
+        "data_sha256": data_sha,
+        "config_sha256": config_sha,
+        "model": "model.gguf",
+        "optimizer": "reset",
+        "files": [{"path": "model.gguf", "sha256": sha256_file(model), "bytes": model.stat().st_size}],
+    }
+    tmp = cdir / "checkpoint.json.tmp"
+    tmp.write_text(json.dumps(c, indent=1))
+    os.replace(tmp, cdir / "checkpoint.json")
+    emit("checkpoint", dir=cdir.name, epoch=epoch, step=c["step"])
+
+
+def link_or_copy(src, dst):
+    Path(dst).unlink(missing_ok=True)
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)
+
+
 def cmd_version(_a):
     exe = find_finetune()
-    print(json.dumps({"interface": INTERFACE, "engine": ENGINE, "build": finetune_build(exe)}), flush=True)
+    print(json.dumps({"interface": INTERFACE, "engine": ENGINE, "build": finetune_build(exe), "patches": finetune_patches(exe)}), flush=True)
     return 0
 
 
@@ -309,20 +480,56 @@ def cmd_train(a):
         f.write(text)
     if int(hyper.get("batch", 1)) != 1:
         log(f"llama-finetune {build} trains one {ctx}-token sequence per step; batch {hyper['batch']} is not used")
-    cmd = [
-        str(exe), "-m", str(a.base), "-f", str(corpus), "-o", str(out),
-        "-c", str(ctx), "-b", str(ctx), "-ub", str(ctx),
-        "--epochs", str(epochs), "-lr", repr(float(hyper["learning_rate"])),
-        "--seed", str(int(hyper.get("seed", 0))),
-        "-ngl", os.environ.get("YMIR_TRAINER_NGL", "all"), "-fa", "off",
-        *shlex.split(os.environ.get("YMIR_TRAINER_ARGS", "")),
-    ]
+    seed = int(hyper.get("seed", 0))
+
+    def finetune_cmd(model, n_epochs, output):
+        return [
+            str(exe), "-m", str(model), "-f", str(corpus), "-o", str(output),
+            "-c", str(ctx), "-b", str(ctx), "-ub", str(ctx),
+            "--epochs", str(n_epochs), "-lr", repr(float(hyper["learning_rate"])),
+            "--seed", str(seed),
+            "-ngl", os.environ.get("YMIR_TRAINER_NGL", "all"), "-fa", "off",
+            *shlex.split(os.environ.get("YMIR_TRAINER_ARGS", "")),
+        ]
+
+    data_sha, config_sha = sha256_file(a.data), sha256_file(a.config)
+    start, model = 0, Path(a.base)
+    if a.resume:
+        c, model = read_checkpoint(a.resume, data_sha, config_sha, epochs)
+        start = int(c["epoch"])
+        log(f"carrying on from {a.resume} after epoch {start} of {epochs} (the optimizer's state starts again)")
     log(f"llama-finetune {build}: {len(rows)} conversations, {len(text)} characters, {epochs} epoch(s), context {ctx}")
     progress = Progress(epochs)
+    progress.epoch = start
     try:
-        code, tail = run_finetune(cmd, progress)
+        tok = find_tokenize(exe)
+        if tok:
+            count = count_tokens(tok, a.base, text)
+            if count < min_tokens(ctx):
+                raise short_text(count, ctx)
+            log(f"{count} tokens, {(count - trained_context(ctx) - 1) // (trained_context(ctx) // 2)} windows of {trained_context(ctx)}")
+        else:
+            log(f"no llama-tokenize next to {exe}, so the text's length is not checked first (rebuild with scripts/engine.py build --trainer)")
+        if a.checkpoint_dir:
+            # One epoch at a time, a checkpoint after each.
+            code, tail = 0, []
+            for e in range(start + 1, epochs + 1):
+                cdir = Path(a.checkpoint_dir) / f"epoch-{e:04d}"
+                cdir.mkdir(parents=True, exist_ok=True)
+                progress.epoch = e - 1
+                code, tail = run_finetune(finetune_cmd(model, 1, cdir / "model.gguf"), progress)
+                if code != 0 or not (cdir / "model.gguf").exists():
+                    break
+                write_checkpoint(cdir, e, epochs, progress, seed, data_sha, config_sha)
+                model = cdir / "model.gguf"
+            if code == 0 and model != Path(a.base) and model.exists():
+                link_or_copy(model, out)
+        else:
+            code, tail = run_finetune(finetune_cmd(model, epochs - start, out), progress)
     finally:
         corpus.unlink(missing_ok=True)
+    if code != 0 and any(any(s in line for s in SHORT_TEXT_CRASH) for line in tail):
+        raise short_text(None, ctx)
     if code != 0 or not out.exists():
         raise Refusal(f"llama-finetune exited with {code}" + (f": {tail[-1]}" if tail else ""))
     if progress.val_loss is not None:
@@ -331,39 +538,154 @@ def cmd_train(a):
     return 0
 
 
-def lora_tensors(base, tuned, rank):
-    """(name, lora_a, lora_b, kept) for each matrix the fine-tune changed; kept is the share of
-    the change's energy the rank keeps."""
+# extract-lora's SVD. A truncated, randomized SVD (Halko, Martinsson and Tropp 2011): the top `rank`
+# directions from a sketch of rank + OVERSAMPLE columns, sharpened by POWER_ITERS power iterations,
+# in float32. It costs O(m n (rank + OVERSAMPLE)) per matrix instead of a full SVD's O(m n min(m, n)),
+# and matches the exact top singular values to within 0.5% (the change kept to 0.1%) on fine-tune differences
+# (test_trainer.py checks it). A matrix whose smaller side is at most 4 sketches wide (such as 128 x 896
+# key and value projections) takes the exact SVD: it is cheap there, and a sketch gains little.
+OVERSAMPLE = 16
+POWER_ITERS = 5
+SVD_CHOICES = ("auto", "cuda", "cpu", "exact")
+
+
+def svd_device():
+    """Where extract-lora's SVD runs, from $YMIR_TRAINER_SVD: `auto` (the default: CUDA through
+    PyTorch when it is installed and sees a GPU, else the CPU), `cuda` (refused without one), `cpu`
+    (the randomized SVD with numpy) or `exact` (a full float64 SVD on the CPU, the slow reference).
+    Returns (kind, torch module or None, description)."""
+    choice = os.environ.get("YMIR_TRAINER_SVD", "auto").strip().lower() or "auto"
+    if choice not in SVD_CHOICES:
+        raise Refusal(f"YMIR_TRAINER_SVD is {choice!r}; it takes one of {', '.join(SVD_CHOICES)}")
+    if choice in ("auto", "cuda"):
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            return "cuda", torch, f"CUDA ({torch.cuda.get_device_name(0)}, torch {torch.__version__})"
+        if choice == "cuda":
+            why = "PyTorch is not installed in the trainer's Python" if torch is None else f"torch {torch.__version__} sees no CUDA GPU"
+            raise Refusal(f"YMIR_TRAINER_SVD=cuda, but {why}; pip install torch (a CUDA build) into the trainer's venv, or unset it")
+    if choice == "exact":
+        return "exact", None, "the CPU (exact SVD)"
+    return "cpu", None, "the CPU"
+
+
+def sketch(n, cols, seed):
+    """The random test matrix, the same on every device (numpy's generator, seeded)."""
     import numpy as np
+
+    return np.random.default_rng(seed).standard_normal((n, cols), dtype=np.float32)
+
+
+def top_svd(delta, rank, device=("cpu", None), seed=0):
+    """(U[:, :r] * S[:r], Vt[:r], kept) for the top r = min(rank, ...) singular directions of `delta`
+    (float32, [out, in]); kept is the share of its energy (squared Frobenius norm) they hold."""
+    import numpy as np
+
+    kind, torch = device
+    m, n = delta.shape
+    small = min(m, n)
+    energy = float(np.einsum("ij,ij->", delta, delta, dtype=np.float64))
+    cols = min(rank + OVERSAMPLE, small)
+    if kind == "exact" or small <= 4 * cols:
+        U, S, Vt = np.linalg.svd(delta.astype(np.float64), full_matrices=False)
+        r = min(rank, S.shape[0])
+        us, vt, s = (U[:, :r] * S[:r]).astype(np.float32), Vt[:r].astype(np.float32), S[:r]
+    elif kind == "cuda":
+        with torch.no_grad():
+            A = torch.from_numpy(delta).to("cuda")
+            Q = torch.linalg.qr(A @ torch.from_numpy(sketch(n, cols, seed)).to("cuda")).Q
+            for _ in range(POWER_ITERS):
+                Q = torch.linalg.qr(A.T @ Q).Q
+                Q = torch.linalg.qr(A @ Q).Q
+            Ub, S, Vt = torch.linalg.svd((Q.T @ A).double(), full_matrices=False)
+            r = min(rank, S.shape[0])
+            U = Q.double() @ Ub[:, :r]
+            us = (U * S[:r]).float().cpu().numpy()
+            vt = Vt[:r].float().cpu().numpy()
+            s = S[:r].cpu().numpy()
+            del A, Q
+    else:
+        Q, _ = np.linalg.qr(delta @ sketch(n, cols, seed))
+        for _ in range(POWER_ITERS):
+            Q, _ = np.linalg.qr(delta.T @ Q)
+            Q, _ = np.linalg.qr(delta @ Q)
+        Ub, S, Vt = np.linalg.svd((Q.T @ delta).astype(np.float64), full_matrices=False)
+        r = min(rank, S.shape[0])
+        us = ((Q.astype(np.float64) @ Ub[:, :r]) * S[:r]).astype(np.float32)
+        vt, s = Vt[:r].astype(np.float32), S[:r]
+    kept = min(1.0, float((np.asarray(s, np.float64) ** 2).sum()) / energy) if energy else 1.0
+    return us, vt, kept
+
+
+def extract_threads():
+    """extract-lora's worker threads ($YMIR_TRAINER_THREADS, default min(4, CPUs)). Each matrix runs
+    on one thread with a single-threaded BLAS: OpenBLAS's own threads spin and thrash on a busy
+    machine (a 4864x896 SVD took 30 s with 16 of them under load, 1 s with 1-4)."""
+    try:
+        n = int(os.environ.get("YMIR_TRAINER_THREADS", "0"))
+    except ValueError:
+        raise Refusal(f"YMIR_TRAINER_THREADS is {os.environ['YMIR_TRAINER_THREADS']!r}; it takes a number of threads")
+    return n if n > 0 else max(1, min(4, os.cpu_count() or 1))
+
+
+def single_threaded_blas():
+    """Before numpy loads: one BLAS thread per matrix (extract-lora parallelizes over matrices)."""
+    for var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+def lora_tensors(base, tuned, rank, device=("cpu", None), threads=1):
+    """(name, lora_a, lora_b, kept) for each matrix the fine-tune changed, in the base's order; kept
+    is the share of the change's energy the rank keeps. On the CPU, `threads` matrices at a time."""
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor
     from gguf.quants import dequantize
 
     tuned_by_name = {t.name: t for t in tuned.tensors}
-    for t in base.tensors:
+    jobs = []
+    for i, t in enumerate(base.tensors):
         if len(t.shape) != 2 or not t.name.startswith("blk."):
             continue  # norms, biases, embeddings and the output head stay as the base has them
         u = tuned_by_name.get(t.name)
         if u is None:
             raise Refusal(f"the tuned model has no {t.name}")
-        b = dequantize(t.data, t.tensor_type).astype(np.float32)
-        w = dequantize(u.data, u.tensor_type).astype(np.float32)
-        if w.shape != b.shape:
-            raise Refusal(f"{t.name} is {list(w.shape)} in the tuned model and {list(b.shape)} in the base")
-        delta = w - b
+        if tuple(u.shape) != tuple(t.shape):
+            raise Refusal(f"{t.name} is {list(u.shape)} in the tuned model and {list(t.shape)} in the base")
+        jobs.append((i, t, u))
+
+    def one(job):
+        i, t, u = job
+        delta = dequantize(u.data, u.tensor_type).astype(np.float32)
+        delta -= dequantize(t.data, t.tensor_type).astype(np.float32)
         if not np.any(delta):
-            yield t.name, None, None, 1.0
-            continue
-        U, S, Vt = np.linalg.svd(delta.astype(np.float64), full_matrices=False)
-        r = min(rank, S.shape[0])
-        energy = float((S**2).sum())
-        kept = float((S[:r] ** 2).sum()) / energy if energy else 1.0
+            return t.name, None, None, 1.0
+        us, vt, kept = top_svd(delta, rank, device, seed=i)
+        r = us.shape[1]
         lora_b = np.zeros((delta.shape[0], rank), np.float32)
         lora_a = np.zeros((rank, delta.shape[1]), np.float32)
-        lora_b[:, :r] = U[:, :r] * S[:r]
-        lora_a[:r] = Vt[:r]
-        yield t.name, lora_a, lora_b, kept
+        lora_b[:, :r] = us
+        lora_a[:r] = vt
+        return t.name, lora_a, lora_b, kept
+
+    if device[0] == "cuda" or threads <= 1:
+        yield from map(one, jobs)
+        return
+    with ThreadPoolExecutor(threads) as pool:
+        # Submitted a window ahead, so only that many differences are in memory at once.
+        pending = []
+        for job in jobs:
+            pending.append(pool.submit(one, job))
+            if len(pending) > threads * 2:
+                yield pending.pop(0).result()
+        for f in pending:
+            yield f.result()
 
 
 def cmd_extract(a):
+    single_threaded_blas()
     need_deps()
     import gguf
     from gguf import GGUFReader
@@ -378,6 +700,10 @@ def cmd_extract(a):
     if field_str(tuned, "general.architecture") != arch:
         raise Refusal(f"{a.tuned} is not a fine-tune of {a.base} (architecture {field_str(tuned, 'general.architecture')} vs {arch})")
     total = sum(1 for t in base.tensors if len(t.shape) == 2 and t.name.startswith("blk."))
+    kind, torch, where = svd_device()
+    threads = extract_threads()
+    log(f"extracting a rank {a.rank} adapter from {total} matrices on {where}" + (f", {threads} at a time" if kind != "cuda" and threads > 1 else ""))
+    started = time.monotonic()
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     w = gguf.GGUFWriter(str(out), arch)
@@ -390,7 +716,7 @@ def cmd_extract(a):
         w.add_name(f"{name} LoRA")
     done = changed = 0
     kept_sum = 0.0
-    for tname, la, lb, kept in lora_tensors(base, tuned, a.rank):
+    for tname, la, lb, kept in lora_tensors(base, tuned, a.rank, (kind, torch), threads):
         done += 1
         if la is not None:
             w.add_tensor(f"{tname}.lora_a", la)
@@ -404,7 +730,7 @@ def cmd_extract(a):
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    log(f"rank {a.rank} adapter for {changed} of {total} matrices; it keeps {100 * kept_sum / changed:.1f}% of the fine-tune's change on average")
+    log(f"rank {a.rank} adapter for {changed} of {total} matrices; it keeps {100 * kept_sum / changed:.1f}% of the fine-tune's change on average ({time.monotonic() - started:.1f} s)")
     emit("done")
     return 0
 
@@ -416,6 +742,8 @@ def main(argv=None):
     p = sub.add_parser("train")
     for k in ("--base", "--data", "--config", "--out"):
         p.add_argument(k, required=True)
+    p.add_argument("--checkpoint-dir")
+    p.add_argument("--resume")
     p = sub.add_parser("extract-lora")
     for k in ("--base", "--tuned", "--out"):
         p.add_argument(k, required=True)

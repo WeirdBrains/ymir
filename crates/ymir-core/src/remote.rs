@@ -24,7 +24,7 @@ use weirdnet_agent::pool::{EventSink, LinkedNodes, NetDialer, Pool, PoolEvent, P
 use weirdnet_agent::remote::infer::v2::{EmbedRequest, Request};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Caller, Dialer, RemoteError};
-use weirdnet_agent::serve::{RosterAuth, Server, Serving};
+use weirdnet_agent::serve::{GuestAuth, GuestScope, RosterAuth, Server, Serving, SharedPoolAuth};
 use weirdnet_backends::models::{ModelsClient, ModelsServer, ModelsService};
 use weirdnet_backends::node::{Capability, MODEL_NODE_APP, NodeClient, NodeServer, NodeServerOptions, NodeService, Update, Verifier};
 use weirdnet_backends::{Chunk, ChunkStream, EngineKind, ModelHost, ModelStatus, RawInferDialer, Supervisor};
@@ -32,7 +32,7 @@ use weirdnet_net::{Multiaddr, PeerId, WEIRDNET};
 
 use crate::context::ContextStore;
 use crate::coordinator::Coordinator;
-use crate::host::{ContextAccess, ContextSync, InferenceHost, LiveCatalog, catalog_feed};
+use crate::host::{ContextAccess, ContextSync, Guests, InferenceHost, LiveCatalog, catalog_feed};
 use crate::membership::{Membership, SyncNode};
 use crate::model_node::{BoxFuture, Embedded, ModelNode};
 use crate::models::{Directory, ModelsHub, Target};
@@ -62,8 +62,20 @@ pub fn role_auth(m: &Membership, allow: &[String]) -> Arc<dyn Authorize> {
     })
 }
 
+/// The inference role's callers: the user's linked devices (the roster), and guests of other
+/// Weirdnet identities the pool is shared with ([`crate::guests`]), read live from the synced
+/// grants. Only catalog/1 and infer/2 (infer/1) take this; every other protocol stays on
+/// [`roster_auth`].
+pub fn guests(m: &Arc<Membership>) -> Guests {
+    let roster = Arc::new(RosterAuth::new(&WEIRDNET, m.user_key(), m.roster_view()));
+    let grants = crate::guests::grant_view(m);
+    let guest_auth = Arc::new(GuestAuth::new(&WEIRDNET, &m.user_key(), crate::guests::policy(grants.clone())));
+    Guests { auth: Arc::new(SharedPoolAuth::new(roster).with_guests(guest_auth)), grants }
+}
+
 /// Serves the inference role on `node`: infer/1, infer/2 and catalog/1 to the user's linked
-/// devices, announced as an inference node. Dropping the server stops serving.
+/// devices and the guests the pool is shared with, announced as an inference node. Dropping the
+/// server stops serving.
 pub fn serve(
     node: &Arc<SyncNode>,
     coord: Arc<Coordinator>,
@@ -73,9 +85,10 @@ pub fn serve(
     admission: Admission,
 ) -> Result<(Server, Arc<LiveCatalog>), RemoteError> {
     let auth = roster_auth(m);
-    let feed = catalog_feed(coord.clone(), auth.clone(), Duration::from_secs(1));
+    let guests = guests(m);
+    let feed = catalog_feed(coord.clone(), guests.auth.scoped(GuestScope::Catalog), Duration::from_secs(1));
     let access = store.map(|store| ContextAccess { store, sync: Some(ContextSync { membership: m.clone(), node: Arc::downgrade(node), hints }) });
-    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth).with_context(access));
+    let host: Arc<dyn InferHost> = Arc::new(InferenceHost::new(coord, auth).with_context(access).with_guests(Some(guests)));
     let server = Server::start(node, Serving { infer: Some((host, admission)), catalog: Some(feed.clone()), announce: true })?;
     Ok((server, feed))
 }
@@ -92,6 +105,11 @@ impl Default for RemoteOptions {
     fn default() -> Self {
         Self { find_wait: Duration::from_secs(3), accept_timeout: Duration::from_secs(10) }
     }
+}
+
+/// A dialer over `node` that knows `hints`' addresses.
+pub fn net_dialer(node: &Arc<SyncNode>, hints: &[(PeerId, Vec<Multiaddr>)]) -> NetDialer<Vec<u8>, Vec<u8>> {
+    dialer(node, hints)
 }
 
 fn dialer(node: &Arc<SyncNode>, hints: &[(PeerId, Vec<Multiaddr>)]) -> NetDialer<Vec<u8>, Vec<u8>> {
@@ -148,7 +166,14 @@ pub fn serve_model(
 /// Whether `peer` announces [`MODEL_NODE_APP`]: connects to it first if needed and waits up to `wait`
 /// to learn what it announces.
 pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec<Multiaddr>, wait: Duration) -> bool {
+    announces(node, peer, addrs, wait, MODEL_NODE_APP).await
+}
+
+/// Whether `peer` announces `app`: connects to it first if needed and waits up to `wait` for
+/// its apps.
+pub async fn announces(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec<Multiaddr>, wait: Duration, app: &str) -> bool {
     let n = node.clone();
+    let app = app.to_string();
     tokio::task::spawn_blocking(move || {
         let mut apps = n.peer_apps(peer);
         if apps.is_none() {
@@ -159,25 +184,58 @@ pub async fn announces_model_node(node: &Arc<SyncNode>, peer: PeerId, addrs: Vec
                 apps = n.peer_apps(peer);
             }
         }
-        apps.is_some_and(|a| a.iter().any(|a| a == MODEL_NODE_APP))
+        apps.is_some_and(|a| a.contains(&app))
     })
     .await
     .unwrap_or(false)
 }
 
-/// Serves `/weirdnet-backends/models/1` on `node`: the owner (the user's linked, unrevoked devices;
+/// Serves `/weirdnet-backends/models/1` on `net`'s node: the owner (the user's linked, unrevoked devices;
 /// [`roster_auth`]) searches the Hugging Face Hub, sees what fits this node, pulls models into
 /// `store` (and serves them through `supervisor` without a restart when the request says so),
-/// lists and removes what is on disk. Nothing here edits `node.toml`. Dropping the server stops it.
+/// lists and removes what is on disk, and takes uploads under `policy` (any linked device; the
+/// free space to keep), and copies uploads from the owner's other nodes. Nothing here edits `node.toml` (an upload's entry is saved by
+/// `/ymir/uploads/1`, [`serve_uploads`]). Dropping the server stops it.
+/// Where [`serve_models`] records what it places: the node's capability record, and this
+/// machine's own model node when it has one (U8).
+pub struct PlacedInfo {
+    pub record: Arc<weirdnet_backends::node::NodeService>,
+    pub local: Option<Arc<crate::model_node::LocalModelNode>>,
+}
+
 pub fn serve_models(
-    node: &Arc<SyncNode>,
+    net: &crate::daemon::Network,
     supervisor: Supervisor,
-    m: &Membership,
     store: weirdnet_model::ModelStore,
     budget: weirdnet_model::hw::Budget,
     engine: EngineKind,
+    policy: weirdnet_backends::models::WritePolicy,
+    info: PlacedInfo,
 ) -> Result<(ModelsServer, Arc<ModelsService>), RemoteError> {
-    let service = Arc::new(ModelsService::new(store, supervisor, roster_auth(m)).with_budget(budget).with_engine(engine));
+    let PlacedInfo { record, local } = info;
+    // The peer dialer lets this node copy an upload from another of the owner's nodes (U6).
+    let (node, m) = (&net.node, &net.membership);
+    let service = Arc::new(
+        ModelsService::new(store, supervisor, roster_auth(m))
+            .with_budget(budget)
+            .with_engine(engine)
+            .with_write_policy(policy)
+            .with_peer_dialer(Arc::new(dialer(node, &net.hints)), Some(encode_cert(&m.our_cert())))
+            // Each upload, peer copy and Hub pull puts its revision, origin and license in the
+            // capability record (U8), and the origin on this machine's own model node.
+            .with_node_info(record)
+            .on_placed(move |p| {
+                // The client gets the serving error too; the files stay in the store (for example
+                // a projector for an embedding or wrapped model), so the operator hears of it here.
+                if let Some(e) = &p.serve_error {
+                    tracing::warn!(id = %p.id(), via = ?p.via, "placed in the model store but not served: {e}");
+                }
+                if let Some(n) = &local {
+                    let (origin, license) = p.origin_and_license();
+                    n.set_origin(p.served_as().unwrap_or(p.id()), origin, license);
+                }
+            }),
+    );
     let server = ModelsServer::start(node, service.clone())?;
     Ok((server, service))
 }
@@ -238,7 +296,79 @@ pub fn models_hub(
     let client = ModelsClient::new(Arc::new(dialer(node, hints))).with_cert(Some(encode_cert(&m.our_cert())));
     let dir = Arc::new(NetDirectory::new(node.clone(), m.clone(), hints.clone(), opts.find_wait, name));
     let me = Target { peer: node.peer_id().to_string(), label: name.to_string(), local: true };
-    ModelsHub::new(local.map(|s| (me, s)), dir, client)
+    let uploads = crate::upload_net::UploadsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())));
+    let rollouts = crate::rollouts_net::RolloutsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())));
+    ModelsHub::new(local.map(|s| (me, s)), dir, client).with_uploads(uploads).with_rollouts(rollouts)
+}
+
+/// The `ymird` side of `ymirctl train run --node`: runs on the user's other model nodes over
+/// `/ymir/train/1`, presenting this device's certificate.
+pub fn train_hub(node: &Arc<SyncNode>, m: &Arc<Membership>, hints: &Hints, opts: &RemoteOptions, name: &str) -> crate::train_net::TrainHub {
+    let dir = Arc::new(NetDirectory::new(node.clone(), m.clone(), hints.clone(), opts.find_wait, name));
+    crate::train_net::TrainHub::new(dir, Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())))
+}
+
+/// Fetches training bundles (`/ymir/blobs/1`) from the user's other devices into `blobs`,
+/// presenting this device's certificate.
+pub fn blobs_client(node: &Arc<SyncNode>, m: &Membership, hints: &Hints, blobs: Arc<crate::train_job::LocalBlobs>) -> crate::blobs_net::BlobsClient {
+    crate::blobs_net::BlobsClient::new(Arc::new(dialer(node, hints)), Some(encode_cert(&m.our_cert())), blobs, m.peer_id().to_string())
+}
+
+/// Serves `/ymir/blobs/1` on `node`: this node's training bundles, for the user's linked devices.
+pub fn serve_blobs(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    blobs: Arc<crate::train_job::LocalBlobs>,
+) -> Result<crate::blobs_net::BlobsServer, RemoteError> {
+    crate::blobs_net::BlobsServer::start(node, Arc::new(crate::blobs_net::BlobsService::new(blobs, roster_auth(m))))
+}
+
+/// Serves `/ymir/train/1` on `node` (`[train] remote = true`): runs for the user's linked devices,
+/// narrowed to `[train] callers`.
+pub fn serve_train(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    paths: crate::Paths,
+    cfg: crate::NodeConfig,
+) -> Result<crate::train_net::TrainServer, RemoteError> {
+    let auth = role_auth(m, &cfg.train.callers);
+    let service = Arc::new(crate::train_net::TrainService::new(paths, cfg, auth));
+    crate::train_net::TrainServer::start(node, service)
+}
+
+/// Serves `/ymir/train-status/1` on a model node: its runs and jobs, read-only, for any linked
+/// device (like models/1).
+pub fn serve_train_status(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    paths: crate::Paths,
+    cfg: crate::NodeConfig,
+    jobs: Option<Arc<dyn crate::train_job::JobStore>>,
+) -> Result<crate::train_net::TrainStatusServer, RemoteError> {
+    let service = Arc::new(crate::train_net::TrainStatusService::new(paths, cfg, roster_auth(m)).with_jobs(jobs));
+    crate::train_net::TrainStatusServer::start(node, service)
+}
+
+/// Serves `/ymir/uploads/1` on `node` next to models/1: after an upload, the uploader's `ymird`
+/// has this node record the entry's revision and (unless `--no-persist`) save it in node.toml.
+/// Any linked device, like models/1.
+pub fn serve_uploads(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    service: crate::upload_net::UploadsService,
+) -> Result<crate::upload_net::UploadsServer, RemoteError> {
+    crate::upload_net::UploadsServer::start(node, Arc::new(service.with_auth(roster_auth(m))))
+}
+
+/// Serves `/ymir/rollouts/1` on an inference node: the owner's linked devices (narrowed to
+/// `allow`, `[inference] rollout_callers`) read and change its rollouts.
+pub fn serve_rollouts(
+    node: &Arc<SyncNode>,
+    m: &Membership,
+    allow: &[String],
+    service: crate::rollouts_net::RolloutsService,
+) -> Result<crate::rollouts_net::RolloutsServer, RemoteError> {
+    crate::rollouts_net::RolloutsServer::start(node, Arc::new(service.with_auth(role_auth(m, allow))))
 }
 
 /// When a model node's stream counts as stalled: no frame for 5 s, or 3x the recent gap between
@@ -358,6 +488,10 @@ impl ModelNode for RemoteModelNode {
         self.record()?.models.into_iter().find(|m| m.status.id == model)?.revision
     }
 
+    fn origin(&self, model: &str) -> crate::model_node::Origin {
+        self.record().and_then(|c| c.models.into_iter().find(|m| m.status.id == model)).map(|m| (m.origin, m.license)).unwrap_or_default()
+    }
+
     fn load<'a>(&'a self, model: &'a str, force: bool) -> BoxFuture<'a, Result<(), RemoteError>> {
         Box::pin(async move {
             self.permitted()?;
@@ -464,6 +598,64 @@ impl ModelNode for RemoteModelNode {
             self.permitted()?;
             let e = self.pool.embed(EmbedRequest::new(input.to_vec()).with_model(model), &CancelToken::new()).await?;
             Ok((e.vectors, e.usage.map_or(0, |u| u.prompt_tokens)))
+        })
+    }
+
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::TranscribeRequest,
+    ) -> BoxFuture<'a, Result<crate::model_node::Transcribed, RemoteError>> {
+        Box::pin(async move {
+            self.permitted()?;
+            let t = self.pool.transcribe(request.clone().with_model(model), &CancelToken::new()).await?;
+            Ok((t.transcript, t.usage))
+        })
+    }
+
+    /// Speech from the model node over infer/2 `Speak`, relayed piece by piece as it comes (the
+    /// remote request is cancelled when the asker drops the stream).
+    fn speak<'a>(
+        &'a self,
+        model: &'a str,
+        request: &'a weirdnet_agent::remote::infer::v2::SpeakRequest,
+    ) -> BoxFuture<'a, Result<weirdnet_agent::remote::infer::v2::AudioStream, RemoteError>> {
+        use weirdnet_agent::remote::infer::v2::AudioStream;
+        Box::pin(async move {
+            self.permitted()?;
+            let mut r = request.clone();
+            r.model = Some(model.to_string());
+            let cancel = CancelToken::new();
+            let mut remote = self.pool.speak_stream(r, &cancel).await?;
+            let (sink, stream) = AudioStream::channel(8);
+            let header = remote.header();
+            tokio::spawn(async move {
+                let _guard = CancelOnDrop(cancel);
+                if sink.start(header).await.is_err() {
+                    return;
+                }
+                loop {
+                    match remote.next().await {
+                        Ok(Some(bytes)) => {
+                            if sink.audio(bytes).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = sink.fail(e).await;
+                            return;
+                        }
+                    }
+                }
+                if let Some(u) = remote.usage() {
+                    let _ = sink.usage(u).await;
+                }
+                if let Some(m) = remote.meta() {
+                    let _ = sink.meta(m.clone()).await;
+                }
+            });
+            Ok(stream)
         })
     }
 }

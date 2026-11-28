@@ -2,6 +2,751 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-27 16:10 EST: M6 pool-mode semantic cache on `weirdnet-semcache` 0.2.3 (on main)
+
+Follows the Weirdnet lead's `weirdnet-semcache` 0.2.3 (`pool` feature). Built on the dev box with mocks and loopback Weirdnet nodes on branch `m6-placement-swap-cache`, rebased onto `3291afd` (v0.23.0, Intel macOS dropped, M7 Pass 2 fixes) and committed straight to main; no live node touched. Details in [DESIGN](docs/DESIGN.md#shared-semantic-cache).
+
+- **Crate:** `weirdnet-semcache = { version = "0.2.3", features = ["pool"] }` (Cargo.toml, Cargo.lock, `release.toml` `[[requires]]` 0.2.3).
+- **Cache layer** ([semantic.rs](crates/ymir-core/src/semantic.rs)): `Semantic` keeps its entries in a shared `Arc<SemanticCache>` (the shard) and, once `attach_pool`ed, goes through `PooledSemanticCache` (`lookup` async; `store` in the background, `settle` waits for it; `remove_scope` everywhere; `status()` → `CacheStatus` with `PoolCounters`). `SemanticOptions::pool` from `[inference.cache] mode = "pool"`; `local` never attaches.
+- **Weirdnet wiring** ([semcache_net.rs](crates/ymir-core/src/semcache_net.rs), [daemon.rs](crates/ymir-core/src/daemon.rs)): serves `cache.host()` on `/weirdnet-semcache/shared/1` with `pool::serve` behind `roster_auth` narrowed to the members (`members_auth`), announces `ymir-semcache-pool-<hash of embedding model>` (Weirdnet app names allow only a-z, 0-9 and -), follows members every 10 s (roster devices announcing it, plus self; `set_nodes`). `remote::announces` generalizes `announces_model_node`; `remote::net_dialer` is public. Cert-only inference links need no grant change (a stream protocol, not a sync type).
+- **Status:** `StatusReport::cache` and a `Semantic cache:` block in `ymirctl status` (mode, entries, members, unreachable, counters).
+- **Tests:** [semantic_pool.rs](crates/ymir-core/tests/semantic_pool.rs) (3: cross-node replay home → L1, replica write, scope removal everywhere, replica fallback with the home cut off, degraded miss under 2 s with both owners cut off, no transport call alone); [m6_semcache_pool.rs](crates/ymir-testkit/tests/m6_semcache_pool.rs) (three cert-only inference nodes over Weirdnet: members found, an entry found from every node, the seed holder refused as a non-member, lookups quick with the home stopped); `semcache_net` and `semantic` unit tests. Checks: fmt, clippy `-D warnings`, `cargo test --workspace --no-fail-fast` green (68 suites, 463 passed, 0 failed, 7 ignored), `gen_roadmap.py --check`, `check_links.py`.
+- **Not done:** sharing the exact cache (`with_exact`), moving entries on membership changes / `ask_replica_on_miss`, persisting entries, Redis. M6 still open: model-node fencing (waits on a term in `weirdnet-backends` node/1 `Load`/`Unload`), replication on queue wait, prefix warming.
+- **Next:** M6 model-node fencing once `weirdnet-backends` carries a lease term on node/1 `Load`/`Unload`; replication on queue wait; prefix warming.
+
+## 2026-11-27 16:10 EST: M6 published placement plan with fencing, cloud-wide swap (on main)
+
+Michael (11-27, t71u): "Then keep moving". Built on the dev box with mocks on branch `m6-placement-swap-cache` off v0.23.0, rebased onto `3291afd` and committed straight to main with the pool-mode cache above; no live node touched. Details in [DESIGN](docs/DESIGN.md#m6-status-built-2026-11-19-partly) and "Cloud-wide swap and placement".
+
+- **Plan and fencing** ([placement.rs](crates/ymir-core/src/placement.rs) `PlanBook`, `Lead`, `Fence`, `PlacementPlan`, `Coordinator::place_round`; [daemon.rs](crates/ymir-core/src/daemon.rs) `placement_book`; [membership.rs](crates/ymir-core/src/membership.rs) `PLAN_TYPE = "ymir.plan"` (sealed), `publish_plan`, `current_plan`): the lease holder publishes `{models: {id: {want, nodes}}, swapped_out}` under `placement` when the round changed it; before the round and each step it checks `still_holds(term)` and a `FenceGuard` over plan terms seen. `ServiceRole::Inference` grants list `ymir.plan`; sync passes with context also pull it. Older cert-only inference links: publishing fails (warned) until relinked.
+- **Cloud-wide swap** (`cold_rank` used by `Coordinator::pick`'s cold fallback; `Demand` touched in `pick`; `idle_unloads`; `[inference.placement] idle_unload_secs`, at least 60, and `is_empty` now counts it, so the placement task also starts for swap alone).
+- **Tests:** `placement::tests` (9), [tests/placement_plan.rs](crates/ymir-core/tests/placement_plan.rs) (5: publish on change only, stale/lost/mid-round fencing, cold load without eviction, idle swap keeps main/managed/busy), `m6_scheduler_lease.rs` extended (plan crosses Weirdnet, old holder refused after takeover), `m6_placement.rs` green. Checks: fmt, clippy `-D warnings`, `cargo test --workspace --no-fail-fast`: 64 of 66 suites ok in the full parallel run; `p3b` `on_the_synced_board_a_run_that_loses_its_lease_stops_and_writes_nothing_more` (a known load flake) and `train_board` `a_lapsed_board_claim_is_taken_over_after_the_wait` failed there on lease timing, then passed as whole files (8/8, 3/3). `gen_roadmap.py --check`, `check_links.py` ok.
+- **Weirdnet gaps (not worked around):** (1) model-node fencing needs a term on `weirdnet-backends` node/1 `Load`/`Unload` (or an `Authorize` hook that sees the command) so `NodeService` can run a `FenceGuard`; (2) the shared semantic cache needs a pool mode in `weirdnet-semcache` (sharding plus a lookup/insert protocol, or a storage trait backed by synced records). (3) Minor: node records carry no last-request time, so idle detection sees only this inference node's requests plus `in_flight` at each round.
+- **Not done (M6):** the two gaps above, replication on queue wait, prefix warming, memory bin-packing, a `ymirctl` view of the published plan.
+- **Next:** ask the Weirdnet lead for gap (1); gap (2) is closed by `weirdnet-semcache` 0.2.3 (entry above).
+
+## 2026-11-27 15:30 EST: M7 Pass 2 findings and fixes (on main)
+
+Michael (11-27): "Then keep moving". The 0.22.1 re-run on m1 + m2 (results in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only), "Re-run with 0.22.1"): text works and no LAN or Tailscale listener was left, but the vision encoder still hit the PTX error (vLLM's own CUDA 13.2 kernels on a CUDA 13.0 driver), and two all-interface listeners (42477, 44217) were outside the firewalled ranges. Built on the dev box; no live node touched for this change.
+
+- **Listener check** ([ray.rs](crates/ymir-core/src/ray.rs) `check_listeners`, `trusted_ranges`; [group.rs](crates/ymir-core/src/group.rs)): with `ray_trust_firewall`, all-interface listeners pass only on `[model] ray_trusted_ports` (default 6390-6399, 10000-10999); a bad range refuses the group.
+- **Port pinning** (`PINNED_PORTS`, `VLLM_BASE_PORT`): Ray's agent, manager and worker ports in 10001-10899 unless `ray_args` sets them; `VLLM_PORT=10900`; default `ray_port` 6390.
+- **Installer** ([vllm_install.rs](crates/ymir-core/src/vllm_install.rs), [engines.rs](crates/ymirctl/src/engines.rs)): `vllm_cuda` recorded (version tag or `NIGHTLY_DEFAULT_CUDA` 13.2), a warning when newer than the driver (dry run and install), `--vllm-cuda cuNNN` for a nightly variant index.
+- **Tests:** ray unit tests (inside vs outside the trusted ranges, edges, custom ranges, bad specs, pinned args, operator args win), vllm_install (CUDA tags, mismatch, variant plan), [engines.rs tests](crates/ymirctl/tests/engines.rs) (warning, `--vllm-cuda cu130`), [m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs) 3/3.
+
+**Not tested:** the pinned ports and `VLLM_PORT` on real GPUs (a process that still takes a random all-interface port now gets the group refused, and the log names it).
+
+**Next:** a GPU re-run of the pinned ports; vision needs a CUDA 13.2 driver on m1 + m2 or a CUDA 13.0 vLLM build with Inkling.
+
+## 2026-11-27 15:10 EST: drop Intel (x86_64) macOS (on main)
+
+Michael (11-27, t82u): "We should drop support for Mac OS x86_64. Make that adjustment in the shared release and [AGENTS.md](AGENTS.md)". Branch `drop-macos-x86_64` off `291af7b` (v0.23.0, the last release with an Intel Mac build); rebased onto `6ca27f3` after v0.23.0 published and committed straight to main. The shared side (`weirdnet-project-helpers`, collective [AGENTS.md](https://github.com/WeirdBrains/weirdnet-agents/blob/main/AGENTS.md)) is the Weirdnet lead's.
+
+- **Release:** `release.yml` macOS matrix is `aarch64-apple-darwin` only; `release.toml` macOS `arch = ["aarch64"]` with an `arch_note`, assets without the x86_64 tarball or `macos-x86_64.update.tar.gz`, and that update bundle removed (5 bundles now).
+- **Packaging:** Homebrew formula arm64-only (`depends_on arch: :arm64`); llama.cpp `macos-x64` pin and `engine.py` layout entry removed.
+- **CI:** `macos.yml` no longer runs the `macos-15-intel` setup dry run.
+- **Docs:** [AGENTS.md](AGENTS.md) (supported targets), [DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` Removed, site guide/hardware pages, whitepaper table, `mlx.rs` doc comment.
+- **Checks:** `cargo fmt --check`, `weirdnet_release.py validate`, `test_engine.py` 6/6, `engine.py list`, `check_links.py`. No Rust logic changed (doc comment only), so no clippy/test run.
+- **Helpers:** vendored `release.py` 0.4.2 (`bb93629`, which refuses x86_64/universal macOS in `[[platforms]]` and `[[updates.bundles]]`); `release.toml` pins `helpers = "0.4.2"`.
+- **Signing:** alien-blue's `sign-release.sh` no longer downloads `ymir-$V-x86_64-apple-darwin.tar.gz`; its update-bundle step has no per-target list (it builds what the tag's `release.toml` `[[updates.bundles]]` lists, now 5).
+
+**Next:** v0.24.0 is the first release without an Intel Mac build.
+
+## 2026-11-27 15:05 EST: v0.23.0 released
+
+**Release:** [v0.23.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.23.0) (release commit 291af7b on 5b77934; Release run 46042359473 green, CI 46042359823, macOS 46042359574 and Pages 46042359576 green on 291af7b, FreeBSD 46036160780 green on 5b77934): M11 cross-identity pool sharing (`ymirctl pool share` / `unshare` / `guests`, `weirdnet-agent` 0.5.9 guests limited to catalog/1 and infer/2) and video milestone 2 (`role = "transcribe"` models routed over infer/2 `Transcribe` with failover, limits measured at load with `weirdnet-backends` 0.4.9 and `weirdnet-model` 0.5.4). 44 files on GitHub: leak scan 33 files, 0 hits (sums ok 32), then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.23.0` EXIT 0); `weirdnet_release.py assets 0.23.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 10ddf97 on main; TAUR ymir-bin and ymir-cuda-bin 0.23.0-1 (dry-run first). Committed straight to main (no PRs). No live nodes touched.
+
+- On the way: alien-blue's `/mnt/ext1` disk was at about 95% IO pressure from another agent's cargo test, so the artifact download crawled; the publish was rerun with the download on the NVMe root (`pub-nvme-0230.sh`, the same steps and `leak-scan.sh` as `pub.sh`). The `/v1/audio/transcriptions` bridge still waits on `weirdnet-openai`, and transcription has not been run against a live Voxtral or Whisper server.
+
+**Next:** the M7 Pass 2 follow-ups: `ray_trust_firewall` should enforce the trusted port ranges (two Ray ports on m1 fell outside them), and `engines install vllm` should check the vLLM wheel's CUDA build as well as PyTorch's (vision on driver 580 needs a cu130 vLLM build or a newer driver).
+## 2026-11-27 11:17 EST: video milestone 2, transcription role and route, measured limits (on main)
+
+Michael (11-27, t68u): "Keep going on Ymir roadmap". Built on the dev box with mocks (branch `video-m2` off `fac5d21`), rebased onto M11 pool sharing (`790a734`) and committed straight to main; no live node touched. Details in [video.md](docs/design/video.md#milestone-2-what-was-built-2026-11-27-mocks-only).
+
+- **Crates:** `weirdnet-agent` 0.5.9 (also what `pool-sharing` needs), `weirdnet-backends` 0.4.9, `weirdnet-model` 0.5.4.
+- **Config** ([config.rs](crates/ymir-core/src/config.rs)): `role = "transcribe"` → `ModelLaunch::with_transcribe`; MLX refused; never the main model.
+- **Route** ([host.rs](crates/ymir-core/src/host.rs) `open_transcribe`, [coordinator.rs](crates/ymir-core/src/coordinator.rs) `resolve_transcriber`/`transcribe`/`pick_transcriber`, [model_node.rs](crates/ymir-core/src/model_node.rs) `ModelNode::transcribe`, [remote.rs](crates/ymir-core/src/remote.rs)): catalog purpose `transcribe`, 400 without a transcriber, failover, no cache, no content in logs.
+- **Measured limits** ([daemon.rs](crates/ymir-core/src/daemon.rs)): `set_limits_store(models dir)`; `context_tokens` preferred for catalog/1 `context` and `ymirctl status` (`(measured)`); status JSON gains `context_tokens` and purpose `transcribe`.
+- **Mock engine:** `/props` n_ctx, vLLM `max_model_len`, `/v1/audio/transcriptions`.
+- **Tests:** [transcribe.rs](crates/ymir-testkit/tests/transcribe.rs) 2/2, config validation; fmt, clippy `-D warnings`, workspace tests, link check.
+- **Not done:** bridge `/v1/audio/transcriptions` (needs `weirdnet-openai`), `ymirctl transcribe`, a real Voxtral/Whisper run.
+
+**Next:** ships in v0.23.0 with M11 pool sharing; then a real Voxtral or Whisper run, and the bridge `/v1/audio/transcriptions` once `weirdnet-openai` has it.
+
+## 2026-11-27 10:37 EST: M11 sharing a pool with other identities (on main)
+
+Michael (11-27, t65u/t66u): share pools with other Weirdnet identities (Morph's m3talsmith profile `5e452f1b…` vs the Ymir pool `08e2b657…`), and have the Weirdnet lead implement the crate side. Built on `weirdnet-agent` 0.5.9 (`fa038ee`). Built on the dev box with mocks; no live node touched. Design: [docs/design/pool-sharing.md](docs/design/pool-sharing.md).
+
+- **Grants** ([guests.rs](crates/ymir-core/src/guests.rs)): `GuestGrant` JSON in `ymir.pool` as `guest/<user_id>` (label, pinned `peers`, `models` allowlist, `scopes`, `expires_at`, `revoked_at`); `share`/`unshare`/`all_grants`, `policy` (a `GuestPolicy` that reads grants live), `pool_share` (a `PoolShare`).
+- **Host** ([host.rs](crates/ymir-core/src/host.rs), [remote.rs](crates/ymir-core/src/remote.rs)): `remote::guests(m)` = `SharedPoolAuth(RosterAuth).with_guests(GuestAuth(policy))`; `InferenceHost::with_guests` uses `authorize_for(Infer)`, refuses guests `Input::Context` (`guest-context`) and models outside the allowlist (`guest-model`); the catalog feed uses `scoped(Catalog)` and `CatalogFeed::rechecking()` (`LiveCatalog::recheck`). `roster_auth`/`role_auth` (models, train, tasks, wake, admin) unchanged.
+- **CLI** ([pool.rs](crates/ymirctl/src/pool.rs), [control.rs](crates/ymir-core/src/control.rs)): `ymirctl pool share|unshare|guests`, through `ymird` (`PoolShare`/`PoolUnshare` control requests) when it is on Weirdnet.
+- **Tests:** guests unit tests 7/7; [pool_sharing.rs](crates/ymir-core/tests/pool_sharing.rs) 2/2 (second identity via `connect_shared`: refused before the grant, catalog + chat after, context refused, roster-only auth refuses the guest, allowlist, peer pinning with a second guest device, unshare refuses the next chat and closes a live catalog subscription within 5 s, expiry); existing remote.rs tests; fmt, clippy `-D warnings`, link check.
+
+**Not tested:** real networks and relays; Morph/Bragi "open share link" screens (their side). **Next:** ships in v0.23.0 with video Milestone 2; then a real two-identity run over real networks.
+
+## 2026-11-27 10:40 EST: v0.22.1 released
+
+**Release:** [v0.22.1](https://github.com/WeirdBrains/ymir/releases/tag/v0.22.1) (release commit fac5d21 on 49f61fd; Release run 46009619619 green, CI 46009618777, macOS 46009618590 and Pages 46009619015 green on fac5d21, FreeBSD 46002234634 green on 49f61fd): the M7 fixes from the first real GPU run. The `vllm-ray` listener check follows Ray's whole process tree, Ray and vLLM workers are pinned to the private link (`VLLM_HOST_IP`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`), trusted all-interface listeners are logged at info, and `ymirctl engines install vllm` picks a PyTorch CUDA build the driver can run (`--torch-backend` overrides), checks it after installing, and accepts `Inkling2LoopForConditionalGeneration`. 44 files on GitHub: leak scan 33 files, 0 hits (sums ok 32), then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.22.1` EXIT 0); `weirdnet_release.py assets 0.22.1` ok for linux, macos, windows and both FreeBSD files. Arch recipes on main; TAUR ymir-bin and ymir-cuda-bin 0.22.1-1 (dry-run first). Committed straight to main (no PRs). No live nodes touched.
+
+- On the way: Windows CI failed twice on test-only code (a loopback-name assertion, then `std::os::unix` in `ymir-mock-ray`), fixed in c5b5bf3 and 49f61fd; the first cut attempt stopped on a flaky `m3` network-timing test (passes alone) before committing; alien-blue's artifact download ran at about 0.57 MB/s, so `pub.sh` took about an hour.
+
+**Next:** re-verify on m1 + m2 with 0.22.1: the driver-matched install (PyPI's CUDA 13.0 PyTorch on driver 580), `vllm-ray` with Inkling 2 Mini, text and vision with the Python frontend, no LAN or Tailscale listeners under the new check, clean teardown, `node.toml` restored.
+
+## 2026-11-27 07:00 EST: v0.22.1 fixes from the M7 real run (on main)
+
+Michael (11-27, t64u): "Let's fix the bugs you found." Built on the dev box with mocks; no live node touched for this commit. Details in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only) ("Security boundary", "Installing vLLM and Ray").
+
+- **Listener check follows the process tree** ([ray.rs](crates/ymir-core/src/ray.rs) `tree_in`/`tree_of`/`listeners_of_tree`, [group.rs](crates/ymir-core/src/group.rs)): every member of the started process's group plus, transitively, every child in any process group or session (Ray's workers, vLLM's workers, NCCL, torch.distributed). The leader's `vllm serve` tree is checked after ready and on watch ticks. `stop` kills what is left of the tree, checking each pid's start time.
+- **Link pinning:** Ray head, member `ray start` and `vllm serve` get `VLLM_HOST_IP`, `NCCL_SOCKET_IFNAME==IFACE` and `GLOO_SOCKET_IFNAME=IFACE` (interface from the link address via `if-addrs`).
+- **Trusted all-interface listeners** are logged at info, once per (role, ports).
+- **Installer** ([vllm_install.rs](crates/ymir-core/src/vllm_install.rs), [engines.rs](crates/ymirctl/src/engines.rs)): driver CUDA from `nvidia-smi`; CUDA 13+ → PyPI PyTorch (cu130 build, no `--torch-backend`); 12.6–12.9 → `cu126`/`cu128`/`cu129` with `--version` (nightly refused); older refused; `--torch-backend` overrides. Post-install `torch.version.cuda` ≤ driver CUDA or the install fails. Record gains `driver_cuda`, `torch_backend`, `torch`, `torch_cuda`. Inkling check accepts `Inkling2LoopForConditionalGeneration`.
+- **Tests:** [m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs) 3/3 (new: a mock worker in its own process group listening on 0.0.0.0 is refused and stopped with the group; the head gets the link env), ray/vllm_install unit tests (tree following, link env, driver parsing, backend choice, CUDA mismatch), [engines.rs tests](crates/ymirctl/tests/engines.rs) 2/2 (dry run shows driver/PyTorch, record, mismatch failure, override). fmt, clippy `-D warnings`, workspace tests, link check.
+
+**Next:** cut v0.22.1, then re-verify on m1 + m2 (driver-matched install, text and vision with the Python frontend, no stray listeners).
+
+## 2026-11-27 06:29 EST: M7 `vllm-ray` with Inkling 2 Mini on real GPUs (m1 + m2)
+
+Michael (11-27) approved a live GPU run. It worked, and it found a security gap in the listener check (open; see below). Results and settings are in [DESIGN](docs/DESIGN.md#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only) ("Real GPU run").
+
+- **Nodes:** m1 and m2 (DGX Spark GB10, 128 GB unified, driver 580 / CUDA 13.0, ymird 0.22.0 via self-update), link 10.100.40.0/24 on `enp1s0f1np1`. starbase was left out (NVML driver/library mismatch, 60 GB).
+- **Backups first:** `node.toml.bak-20261127-0606-pre-m7` on both, `/root/nft-ruleset-20261127-0606-pre-m7.nft` and `/root/iptables-20261127-0606-pre-m7.rules`. Firewall: `table inet ymir_ray` (copy in `/root/ymir-ray.nft`) drops TCP/UDP 6390-6399 and 10000-10999 except on `lo` and the two private links. It was applied with a 5-minute automatic rollback, which was cancelled once SSH, Tailscale, the link and Weirdnet were checked. It is **not persistent** (gone at reboot).
+- **Installer, for real:** `ymirctl engines install vllm --uv ~llm/.local/bin/uv` installed vLLM `0.34.1rc1.dev273+gef706a1b8` and Ray 2.60.1 into `/var/lib/llm/ymir/engines/vllm` on both; the record says nightly and Inkling. Inkling 2 Mini weights: `hf download thinkingmachines/Inkling-2-Mini` into `/srv/models/huggingface` on both (19 GB each, about 2.5 min).
+- **Run:** `group up` at 06:20:51, up at 06:23:51. `ray status`: 2 active nodes, 2/2 GPU in the placement group. Chats through the pool (`ymirctl chat --model inkling-2-mini-ray`): "pong" in 7.0 s, a 3-sentence answer in 11.0 s, about 400 words in 20.5 s; vLLM reported 52.5 tokens/s generation. `group down`: 20.6 s, then no Ray or vLLM process on either node; only m1's stand-in `llama-server` was still on the GPU.
+- **What it took (all in DESIGN):** tp 2 / pp 1 (no PP for Inkling), `size` above one node's `memory`, a Python-frontend wrapper (the Rust frontend fails on Inkling), text only (torch cu132 PTX vs driver 580), `ray_port` 6390 (Redis has 6379 on m1).
+- **Security gap (open):** the listener check sees only the `ray start` process group. Ray's workers (vLLM, NCCL, torch.distributed) listened on all interfaces outside the pinned ports, on m1's LAN address (192.168.1.218) and on m2's Tailscale address (100.92.9.99). The group was not refused. The run was kept short and torn down. Fix next: check Ray's workers by session or process tree, pin them to the link (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `VLLM_HOST_IP`), log trusted listeners at info. Until then don't use `ray_trust_firewall`.
+- **Installer follow-ups:** choose a torch CUDA build the driver can run (580 → cu130), not the newest; check the checkpoint's own architecture (`Inkling2LoopForConditionalGeneration`) as well.
+- **Left on the nodes:** both `node.toml` files restored from the backups (the test config is in `node.toml.m7-test-20261127`); the managed venv, uv in `~llm/.local/bin`, the Inkling weights, the `vllm-pyfrontend` wrapper and the runtime nft table stay. m2's `ymird.service` reports its unit file changed on disk; that was there before this run.
+
+## 2026-11-26 18:38 EST: v0.22.0 released
+
+**Release:** [v0.22.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.22.0) (release commit 70ff1e9 on e704ad8; Release run 45905897897 green, CI, macOS, Pages and FreeBSD green on e704ad8): M7 vLLM with Ray groups (`backend = "vllm-ray"`, private link only, mocks only), `ymirctl engines install vllm` (a managed vLLM nightly that runs Inkling 2 Mini, plus Ray), and video limits in catalog/1 (LF-43). 44 files on GitHub: leak scan 33 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.22.0` EXIT 0); `weirdnet_release.py assets 0.22.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 1847744 on main; TAUR ymir-bin and ymir-cuda-bin 0.22.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched. The dev box was replaced mid-release (about 17:20 EST) and its alien-blue key had to be re-authorized; nothing was lost.
+
+**Next:** a real GPU test of `vllm-ray` and of the vLLM nightly with Inkling 2 Mini waits on Michael picking hardware. When vLLM 0.35.0 is on PyPI, the installer can drop the nightly default.
+
+## 2026-11-26 16:59 EST: vLLM installer defaults to a nightly that runs Inkling 2 Mini (on main)
+
+Michael (11-26): "Make sure it is a version of vLLM that can run Inkling 2 mini". No live node touched.
+
+- Requirement, verified 2026-11-26: Inkling 2 Mini needs vLLM with [vllm#69028](https://github.com/vllm-project/vllm/pull/69028) (merged 2026-11-21, `ab18334`). No release has it: PyPI's newest is 0.34.0 (2026-11-16), which lacks it, and the [recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) says "vLLM 0.35.0+ nightly" (nightly wheel or `vllm/vllm-openai:nightly`). The nightly index then served `0.34.1rc1.dev231+g43108ffcc`, 341 commits past `ab18334`, whose registry has `InklingForCausalLM` and `InklingForConditionalGeneration`. The recipe pins no `transformers` or Ray version.
+- [vllm_install.rs](crates/ymir-core/src/vllm_install.rs): the default install adds `--extra-index-url https://wheels.vllm.ai/nightly` (uv `--prerelease=allow`, pip `--pre`); `--version V` installs a PyPI release and `--index-url` replaces the nightly. After installing it runs the venv's Python against vLLM's `ModelRegistry` and records `inkling` and `nightly` in `ymir-install.json`; a nightly install without Inkling fails, a pinned release without it says so.
+- [vllm.rs](crates/ymir-core/src/vllm.rs): `managed_with_inkling`, so ymird's Inkling preflight accepts the managed venv's `vllm` (numbered below 0.35.0) when the record says Inkling. `INKLING_MIN_VERSION` stays 0.35.0 for other binaries.
+- Docs: [DESIGN](docs/DESIGN.md) ("Inkling 2 Mini" and "Installing vLLM and Ray"), site ymirctl docs `#engines`, README, CHANGELOG.
+
+**Checks:** tests/engines.rs 2/2 (pinned 0.34.0 records no Inkling; default nightly records Inkling and passes `ensure_inkling`; status), vllm unit tests, fmt, clippy `-D warnings`, workspace tests, link check.
+
+**Not tested:** a real nightly download (PyTorch-sized; not run in tests or CI), the ROCm nightly index.
+
+## 2026-11-26 16:30 EST: `ymirctl engines install vllm` (on main)
+
+Michael (11-26): "Also, make installing vLLM easy with Ymir". Built on the dev box; no live node touched.
+
+- [vllm_install.rs](crates/ymir-core/src/vllm_install.rs) and [engines.rs](crates/ymirctl/src/engines.rs): `ymirctl engines install|upgrade|status|uninstall vllm`. It makes a venv at `<home>/engines/vllm` (uv `venv --python 3.12` plus `pip install --torch-backend=auto|cpu`, else `python3 -m venv` plus pip, refusing Python outside 3.10 to 3.13) and installs `vllm[==V] ray`. The accelerator is detected (nvidia-smi, rocminfo or /opt/rocm, else CPU) or set with `--accel`; ROCm and CPU need `--index-url`, since PyPI's vLLM wheels are CUDA builds. Flags: `--version`, `--uv`, `--python`, `--reinstall`, `--force` (non-Linux), `--dry-run`. After installing it checks `vllm --version` and `ray --version` and writes `ymir-install.json`. Uninstall removes the venv only when that record is there.
+- Discovery was wired in 04ef62d: `vllm = "auto"` and `ray = "auto"` use `engines/vllm/bin/` before `PATH`. `ymirctl setup` now points at the installer when vLLM is missing.
+- Docs: README, site ymirctl docs (`#engines`, and the group section names `vllm-ray`), DESIGN, CHANGELOG.
+
+**Checks:** [tests/engines.rs](crates/ymirctl/tests/engines.rs) 2/2 (fake `uv` and `python3`: dry run makes nothing; install, record, discovery by `resolve_vllm`/`resolve_ray`/`worker_config`, explicit settings win, status, upgrade without a new venv, uninstall, a foreign dir left alone, Python 3.8 refused, CPU without an index refused), 8 unit tests, fmt, clippy `-D warnings`, workspace tests (63 suites green), link check.
+
+**Not tested:** a real install (it downloads PyTorch; not run in tests or CI), the ROCm and CPU wheel indexes.
+
+## 2026-11-26 16:14 EST: M7 vLLM with Ray groups (on main, mocks only)
+
+Michael (11-26): "Let's start on the Ray groups then!" Built on the dev box only; m1, m2 and starbase not touched.
+
+- [ray.rs](crates/ymir-core/src/ray.rs) and `RpcWorkers::up_ray` in [group.rs](crates/ymir-core/src/group.rs): `[[inference.split]] backend = "vllm-ray"` plans worker kind `ray`, with `ray.port`, `vllm.tp` and `vllm.pp` in the plan. All members get `GroupUp` at once. The leader runs `ray start --head --block` on its `private_link`, waits for every member's `ray start --block --address` (`ray status`), then runs `vllm serve --distributed-executor-backend ray` on loopback (key in `VLLM_API_KEY`). Sizing: tensor parallel is the fewest GPUs of any member (`gpus` per node, default 1), pipeline parallel is the member count; both can be overridden, and the planner refuses a `TP x PP` that does not fit.
+- Security: Ray binds the link only, `ray_args` may not touch the bind flags, and Ymir lists each Ray process group's TCP listeners (`/proc`) after start, join and vLLM ready, and on every watch tick. Anything off the link or loopback refuses the group and tears it down. Real Ray's GCS listens on all interfaces anyway, so a real cluster needs a host firewall plus `[model] ray_trust_firewall = true` (off by default). **Michael decides** on that flag and the firewall when he picks hardware. Linux only.
+- Teardown: every group process leads its own process group; stop = SIGTERM to the group, 10 s, SIGKILL; dropping a handle kills the group; `ymird` shutdown stops all groups (and a start still waiting gives up). If the leader fails, the coordinator stops waiting on members and takes down any that come up later.
+- `[model] vllm = "auto"` and new `ray = "auto"` prefer the managed venv `engines/vllm/bin/` before `PATH`. The `ymirctl` installer for that venv comes next.
+- Mocks: [ymir-mock-ray](crates/ymir-testkit/src/bin/ymir-mock-ray.rs) (head with a child in its process group; `--mock-bind-any` listens on 0.0.0.0 like the GCS); the mock engine now also acts as `vllm serve` (Ray executor: refuses when the cluster has fewer nodes than `--pipeline-parallel-size`).
+
+**Checks:** fmt, clippy `-D warnings`, `ymir-core` lib 201, [m7_ray.rs](crates/ymir-testkit/tests/m7_ray.rs) 2/2 (up, chat, down, member lost, all-interface bind refused; the head's child gone each time), `m7.rs` 1/1, full workspace run (60 of 61 suites; `m5` `an_inference_node_dying_mid_answer_is_resumed_with_the_full_context` failed once under load with `no-epoch-key`, then m5 passed 4/4), link check. Docs: DESIGN (new "M7 vLLM with Ray groups" section, security), CHANGELOG, ROADMAP/roadmap.toml/site roadmap, whitepaper.
+
+**Not tested:** real Ray and vLLM (versions, NCCL over RoCE, real `ray start --block` under SIGTERM), UDP listeners.
+
+## 2026-11-26 15:10 EST: video milestone 1, context and media limits in catalog/1 (merged `feature/video-upload`, LF-43)
+
+Michael (11-26): "Let's do the video uploads". Bragi samples clips into frames sized from the limits Ymir reports and refuses when they are missing (Bragi merged the same day), so Ymir's part is milestone 1 of [docs/design/video.md](docs/design/video.md): report limits, never invent them. Weirdnet Lead published weirdnet-agent 0.5.7 (`MediaLimits`, `CatalogModel::limits`), weirdnet-backends 0.4.8 (`Capabilities::limits`, `ModelLaunch::limits`, `ModelStatus::limits`) and weirdnet-openai 0.2.4 (`Bridge::with_max_request_bytes`, 413 with `x-weirdnet-max-request-bytes`, `/v1/models` `weirdnet.limits`) for this; Cargo.toml and release.toml `[[requires]]` bumped.
+
+- [model_node.rs](crates/ymir-core/src/model_node.rs): `request_context(engine, context, slots)`, the context one request can count on (llama.cpp's `--ctx-size` split over its slots), `None` when none is set; `limits_line` for status text.
+- [coordinator.rs](crates/ymir-core/src/coordinator.rs): `CatalogRow::context` is the smallest across the nodes that have the model, `None` when any of them doesn't say; `CatalogRow::limits` folds every node's `ModelStatus::limits()` with `MediaLimits::tightest` from `UNKNOWN`, so a field nobody reports stays absent. catalog/1 entries carry both (`with_context`, `with_limits`).
+- [config.rs](crates/ymir-core/src/config.rs): `[model.local] limits = { max_images = 8, image_tokens = 256, image_edge = 896 }` goes into `ModelLaunch::limits`; `[bridge] max_request_bytes` feeds `Bridge::with_max_request_bytes` in [daemon.rs](crates/ymir-core/src/daemon.rs) (unset keeps the crate default).
+- [ymirctl status](crates/ymirctl/src/lib.rs): `context N per request` / `context not reported`, `limits: ...` / `media limits not reported` for chat models.
+- Tests in [tests/nodes.rs](crates/ymir-core/tests/nodes.rs): `the_catalog_reports_the_context_a_request_can_count_on_and_never_invents_one`, `the_catalog_reports_the_strictest_media_limits_and_leaves_unknown_ones_out`. Docs: DESIGN "Limits for media", [video.md](docs/design/video.md) status, CHANGELOG.
+
+**Checks:** on alien-blue, after merging main v0.21.0: `cargo fmt --all --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --no-fail-fast` 61 suites, 410 passed, 1 failed, 7 ignored. The failure was `m5` `an_inference_node_dying_mid_answer_is_resumed_with_the_full_context` (`refused: no-epoch-key` while warming up) with the box at load 60 to 97 from other work; `m5` alone then passed 4/4. The run before had `conversations_sync_and_any_inference_node_answers_from_them` fail the same way once and pass alone; the same m5 load flake as on 10:45. The new catalog tests pass. `release_requires` caught release.toml still asking for agent 0.5.6 and backends 0.4.7; both are bumped.
+
+**Next:** transcription route (milestone 2); the remaining Weirdnet asks (`weirdnet-media`, a video part and modality, a transcription call, `weirdnet-mcp` content blocks, an ffmpeg recipe).
+
+## 2026-11-26 15:05 EST: v0.21.0 released
+
+**Release:** [v0.21.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.21.0) (release commit 6f087b3 on 5e2b602; Release run 45870102685, green, the first with the FreeBSD job): M6 semantic answer cache (`weirdnet-semcache` 0.2.2), one sync session per device (`weirdnet-sync` 0.8.5 `pull_types_shared`), M9 FreeBSD rc.d service and `x86_64-unknown-freebsd` `.tar.gz` and `.pkg` (helpers 0.4.1 FreeBSD `[[platforms]]`). 44 files on GitHub: leak scan 33 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.21.0` EXIT 0; no FreeBSD update bundle, FreeBSD is GitHub-only); `weirdnet_release.py assets 0.21.0` ok for linux, macos, windows and both FreeBSD files. Arch recipes 614d11b on main; TAUR ymir-bin and ymir-cuda-bin 0.21.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched. `pub.sh`'s download ran at ~0.5 MB/s on alien-blue for most of the afternoon, so the publish took about 2 h.
+
+**Next:** M7 vLLM with Ray groups waits on Michael (GPU hardware; Ray has no auth). M9: OpenBSD (opted out in `release.toml`), GhostBSD and DragonFly not started; a FreeBSD self-update bundle and aarch64 FreeBSD are not built. M6: pool-mode semantic cache, Redis backend, persisting entries.
+
+## 2026-11-26 10:45 EST: M6 semantic answer cache; one sync session per device (merged `feature/semcache`)
+
+- [semantic.rs](crates/ymir-core/src/semantic.rs) on `weirdnet-semcache` 0.2.2 `SemanticCache`: `[inference.cache] embedding_model = "ID"` (plus `threshold`, a cosine distance, default 0.12; `ttl` `24h`; `entries` 1024) adds a semantic layer behind the exact cache in `Coordinator::run`. Cacheable: one user turn after any system messages, text only, no tools, no prefix, no stand-in. Scope: model + weights revision + embedding model + its revision + SHA-256 of system prompt, sampling, seed, response format, adapter scale. The embedding model is used only while loaded (never cold-started); a failed embedding skips the cache. Hits are `served_by = "semantic-cache"`; `cache: bypass` / `refresh` apply. `[inference.cache]` is now validated. Tests: [tests/semantic.rs](crates/ymir-core/tests/semantic.rs) (4) and 3 unit tests.
+- [membership.rs](crates/ymir-core/src/membership.rs): `tick` pulls roster, conversations, wake cards and training jobs in one session per device with `weirdnet_sync::pull_types_shared` (0.8.5), not one `pull_from_shared` per type. `release.toml` `[[requires]]`: weirdnet-sync 0.8.5, weirdnet-semcache 0.2.2 (the `release_requires` test caught the stale one).
+- Bragi main b4383e7 has the same sync change (no release cut).
+
+**Checks:** fmt, clippy `-D warnings`, `cargo test --workspace --no-fail-fast`: 59 of 61 suites ok in the full parallel run; `m5` `conversations_sync_and_any_inference_node_answers_from_them` and `p3b` `on_the_synced_board_a_run_that_loses_its_lease_stops_and_writes_nothing_more` failed once there under load, then passed alone (2/2 each) and as whole files (m5 4/4, p3b 8/8 twice). Watch them on CI. Docs: CHANGELOG, DESIGN (cache section, config example, M6 status, gaps), ROADMAP/roadmap.toml/site roadmap, site docs `#semantic-cache`.
+
+**Not built:** the pool-mode (shared, sharded) semantic cache, the Redis backend, persisting entries across restarts.
+
+## 2026-11-26 10:30 EST: M9 FreeBSD service and packages (merged `wip/freebsd`)
+
+- [service.rs](crates/ymir-core/src/service.rs): `Os::FreeBsd`. `service install --system --run-as USER` writes `/usr/local/etc/rc.d/ymird` (rc.subr; `daemon(8) -r -R 5 -u USER` runs `ymird --home DIR`, output to `state/logs/ymird.log`), runs `sysrc ymird_enable=YES` and `service ymird restart`; stop/start/status go through `service ymird`; uninstall stops it, `sysrc -x ymird_enable` and removes the script. User scope is refused (FreeBSD has no per-user services). The system node folder defaults to `/var/db/ymir`. Unit test checks the script with `sh -n`.
+- [scripts/package.py](scripts/package.py): `--target x86_64-unknown-freebsd` (or aarch64) writes `ymir-V-TRIPLE.tar.gz`, and with `pkg` on the host a `ymir-V-TRIPLE.pkg` (`pkg create`, message pointing at `misc/llama-cpp`). No bundled engine for FreeBSD.
+- [.github/workflows/freebsd.yml](.github/workflows/freebsd.yml): FreeBSD 14.2 VM (cross-platform-actions 0.29.0): build, test `ymir-core` lib and `ymirctl`, package, `pkg add`, then the rc.d service as user `ymir` through a chat with the mock engine, stop (no engine left), uninstall, `pkg delete`. Runs on dispatch and on pushes to main that touch those files.
+
+**Checks:** fmt, clippy `-D warnings`, `ymir-core` lib (188) and `ymirctl` tests on the box; `package.py` with fake binaries (tar.gz made, pkg skipped: no `pkg` on Linux). A FreeBSD build cannot be cross-checked from Linux (aws-lc-sys needs a FreeBSD sysroot), so the VM job is the first real FreeBSD build. Docs: CHANGELOG, DESIGN BSD gap, README, site docs.
+
+**Next:** the FreeBSD job's first run; then FreeBSD in the Release workflow and `release.toml` platforms. OpenBSD, GhostBSD and DragonFly not started.
+
+## 2026-11-26 10:25 EST: v0.20.0 released
+
+**Release:** [v0.20.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.20.0) (release commit 7cec694 on 1a934ac, the `--no-ff` merges of `docs/bragi-status-0.15` ddb2210, `feature/push-wake` 77d35dc and `feature/m6-placement` 1a934ac; Release run 45838670704, green): M6 `ymirctl move` (also the `ymir_move_model` MCP tool), placement with replica counts under the `ymir.scheduler` lease (`[inference.placement]`), and push wake-ups of Bragi devices from seed holders. 42 files on GitHub: leak scan 31 files, 0 hits, then 4 Arch `.sig`s and 6 signed update bundles plus their sums (`sign-release.sh 0.20.0` EXIT 0); `weirdnet_release.py assets 0.20.0` ok. Arch recipes f9bf1cd on main; TAUR ymir-bin and ymir-cuda-bin 0.20.0-1 (dry-run first). Committed straight to main (Michael: no PRs). No live nodes touched.
+
+**Next:** M9 FreeBSD (rc.d service, `package.py` tar.gz/pkg, FreeBSD VM CI job) and the M6 semantic cache (`weirdnet-semcache` 0.2.2) with one sync session per device (`weirdnet-sync` 0.8.5 `pull_types_shared`), merging to main next.
+
+## 2026-11-26 09:00 EST: v0.19.0 released
+
+**Release:** [v0.19.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.19.0) (release commit c72762d on 0a3e0b0, the `--no-ff` merge of `feature/blobs`; Release run 45824407253, green): training files over Weirdnet (P3b blob transfer, `/ymir/blobs/1`): another node resumes a board job with its dataset and checkpoint fetched from the devices that hold them, each file checked against its manifest, and registers itself as a holder. The cut ran every check before pushing (fmt, clippy, 55 test suites). The leak scan of dist found nothing (31 files, 0 hits); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles with their sums (42 files); the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.19.0-1; their recipes are on this branch (`chore/release-0.19.0`).
+
+**Known flake:** `train_board.rs` `a_lapsed_board_claim_is_taken_over_after_the_wait` failed once on CI (45795286711, add1902, Linux): the cut-off device kept renewing its lease. Likely cause: a paused weirdnet-net node still dials out to addresses it remembers, and a resumed `/tcp/0` listener can get its old port back, so the test's `isolate()` did not cut it off. Fix on `fix/board-isolate` (875955a): `isolate()` brings the other devices back on addresses the cut-off one never saw; train_board 3/3 locally, going through CI after this release. Separately, main's push CI 45815845665 (79b55b6) failed once on Windows only with the runner's disk full in kvfit's sparse test files (NTFS does not keep `set_len` files sparse); the rerun passed.
+
+**Next:** merge `fix/board-isolate` once green. Two-node training on real nodes waits for Michael.
+
+## 2026-11-26 08:50 EST: M6 placement and replication, `ymir_move_model`, a daemon test for `ymirctl move` (branch `feature/m6-placement`, LD-3)
+
+- [placement.rs](crates/ymir-core/src/placement.rs): `[inference.placement] replicas = { MODEL = N }` (`every_secs`, default 15). `plan` takes one step per model per round: load on the node with its own copy and the fewest loaded models (skipping draining, reserved, being-moved, failed and swap-group-evicting nodes), or unload an idle extra (never one with answers in flight, never below N). `Coordinator::place_once` / `spawn_placement`. Counts of 0 or over 64 are refused in `NodeConfig::validate`.
+- Who places ([daemon.rs](crates/ymir-core/src/daemon.rs) `placement_leader`): a cert-only inference node (`ymir.inference` grant) votes on and stands for the `ymir.scheduler` lease (`Membership::enable_scheduler_voter`, terms in `voter.cbor`; a service grant has one role, so it never needs the training voter too) and places while `Elector::handle()` is valid; a seed holder places only while `scheduler_voters() == 0`; `scheduler_eligible = false` never places. Without Weirdnet it places alone.
+- [mcp.rs](crates/ymirctl/src/mcp.rs): `ymir_move_model` (MUTATES THE POOL, `confirm: true`, `grace` capped at 600 s), hidden by `--read-only`.
+- **Tests:** `placement::tests` (5); [m6_move.rs](crates/ymir-testkit/tests/m6_move.rs) (daemons: the move waits about 2.9 s for a slow answer on the source, which finishes whole; refusals change nothing; the MCP tool refuses without confirm and moves it back); [m6_placement.rs](crates/ymir-testkit/tests/m6_placement.rs) (three model nodes: two replicas come up, stay at two for 8 s, a drain brings up the third, a resume settles back to two; 3 of 3 runs); [m6_scheduler_lease.rs](crates/ymir-testkit/tests/m6_scheduler_lease.rs) (two cert-only inference nodes: one holder, the other takes over with a higher term). The daemon helpers from `m6.rs` moved to [tests/common/pool.rs](crates/ymir-testkit/tests/common/pool.rs). Checks: fmt, clippy `-D warnings`, `cargo test --workspace` (59 suites green), links.
+- **Not done (M6):** publishing the plan (`publish_plan` under a sealed `ymir.plan` type; cert-only inference grants would need to list it), fencing loads/unloads on model nodes (`FenceGuard`), lease participation for seed-holding inference nodes (they need an `ymir.inference` grant), cloud-wide swap, prefix warming, the semantic cache (needs `weirdnet-semcache`; asked of the Weirdnet lead).
+- **M7 audit (vLLM with Ray groups):** the protocol is ready (`GroupUp`/`GroupDown` in weirdnet-backends 0.4.7 carry a worker kind string; `RpcWorkers::up` answers `Unsupported` for `ray`), so no crate change is needed for the plumbing. To build: a Ray worker kind (`ray start --head` on the leader, `ray start --address` on members, bound to the private link), a vLLM leader (`vllm serve --distributed-executor-backend ray` with tensor/pipeline sizes from `plan_group`), teardown like RPC groups, and a mock `ray`/`vllm` for the testkit. Risk: Ray has no authentication of its own (GCS, dashboard and worker ports would let anyone on the link run code), so it must stay private-link-only with the ports fenced, which needs an owner decision. A real check needs two GPU machines on a fast private link (server-a/server-b or a RoCE pair), so it waits for Michael.
+- **M9 audit (BSD packages):** not built. Needs a FreeBSD CI job (a VM, as Bragi's `platforms.yml` `freebsd` job), `scripts/package.py` support for a FreeBSD `tar.gz` and a `pkg` (`+MANIFEST`), an `rc.d` script in `ymirctl service install` (systemd, launchd and Windows only today), and `llamacpp = "system:..."` from FreeBSD's `misc/llama-cpp` port (upstream publishes no BSD builds; no vLLM). OpenBSD: `tar.gz` only. A cross `cargo check --target x86_64-unknown-freebsd` from Linux stops at `aws-lc-sys` (C, via `weirdnet-net` → libp2p-quic → quinn → aws-lc-rs) without a FreeBSD sysroot, so the build check belongs in the FreeBSD VM job; Bragi's FreeBSD job already builds the same `weirdnet-net` stack natively.
+- **Not merged:** Ymir main is LD-1's until v0.19.0 is DONE.
+
+## 2026-11-26 08:10 EST: moving a model between nodes, M6 (branch `feature/move-model`, LD-3)
+
+- [coordinator.rs](crates/ymir-core/src/coordinator.rs): `Coordinator::move_model(model, from, to, grace)`: loads on `to` (refused when `to` has no copy), takes `(source, model)` out of `pick` (`leaving`), waits until the source reports nothing in flight for the model (at most `grace`), unloads it there. `ControlRequest::Move` and `ymirctl move MODEL --to NODE [--from NODE] [--grace SECS]`.
+- **Test:** [crates/ymir-core/tests/move_model.rs](crates/ymir-core/tests/move_model.rs): a request running on the source finishes there, a request during the move goes to the target, the source unloads after; refused for a target without a copy, a model loaded nowhere, the same node, an unknown node, and a failed load on the target (the source keeps serving). clippy `-D warnings` on the workspace, ymirctl tests.
+- **M6 audit (rest):** placement and replication need a lease and a synced plan; weirdnet-sync 0.8.4 has leases now (the training board uses them), so a placement plan is buildable without a crate change. The semantic cache needs an embedding-keyed cache in `weirdnet-semcache` (0.2.1 has only the exact cache): a Weirdnet crate change.
+- **Not done:** a daemon-level test of `ymirctl move` over loopback; an MCP tool for it. Not merged: Ymir main is LD-1's for v0.19.0.
+
+## 2026-11-26 07:45 EST: push wake-ups, Ymir side (branch `feature/push-wake`, LD-3)
+
+- [membership.rs](crates/ymir-core/src/membership.rs): `WAKE_TYPE = "bragi.wake"`, configured (sealed) on full devices only; a sync pass pulls it from full devices every `WAKE_PULL_EVERY` (2 min: each type pulled is a sync session of its own), and `refresh_wake_cards` makes the next pass pull again. `ServiceRole::types` never lists it and `service_bundle` refuses a grant that would (unit test `no_service_grant_lists_the_wake_cards`).
+- [wake.rs](crates/ymir-core/src/wake.rs): `DeviceWake` (the record Bragi 0.15.0 writes), `wakeable` (active full devices' cards; empty on a cert-only node), `wake` (seals with the card's key, delivers through the device's relay on `/weirdnet/wake/1`), `find` (peer id or label).
+- `ymirctl pool wake [DEVICE] [--connection]`: lists offline from the identity; sending goes through the running node (`ControlRequest::PoolWake`).
+- **Test:** [crates/ymir-testkit/tests/wake.rs](crates/ymir-testkit/tests/wake.rs): a seed holder, a full "Bragi" device and a cert-only inference node on loopback with a stand-in wake relay: the card reaches the holder by `tick`, the inference grant has no `bragi.wake`, its pull is refused and it holds none, a wake before the device subscribes is `Offline`, after it is `Delivered` and opens with the device's key, a withdrawn card leaves nothing to wake. clippy `-D warnings` on the workspace.
+- **Not done:** `ymird` waking a device on its own (when an agent task or a training job finishes for it) — needs a decision on which events; APNs/FCM; a check against the public relay (does it serve `/weirdnet/wake/1`?). Not merged: Ymir main is LD-1's for v0.19.0.
+
+## 2026-11-26 07:05 EST: training files over Weirdnet, P3b blob transfer (branch `feature/blobs`)
+
+- [blobs_net.rs](crates/ymir-core/src/blobs_net.rs): `/ymir/blobs/1` (CBOR): `BlobAsk { cert, root }`; the holder answers `Bundle { manifest_name, manifest }`, each listed file's bytes as 48 KiB `Chunk`s in manifest order, `Done` (or `Missing` / `Refused`). `BlobsService` (roster auth: the owner's linked devices) and `BlobsServer`; `BlobsClient::ensure(root, holders)` checks the manifest against the root, takes the file list from the manifest (paths inside the bundle only), checks each file's size and sha256 while writing into a staging folder in the store, gives up on a holder after 60 s of silence and tries the next, and stores only a whole bundle (`LocalBlobs::put_checked`); staging is removed either way.
+- [train_job.rs](crates/ymir-core/src/train_job.rs): `Ctx.fetch` (`BlobFetch`); before a run, the dataset from the job's owner or its checkpoint's holders and the last checkpoint from its holders; a fetch failure fails the attempt as retryable. A node that resumes from a checkpoint it did not hold adds itself to the holders (`JobStore::set_holders`: file store, board via `Claim::set_holders`, control socket). `LocalBlobs::bundle` / `staging` / `put_checked`.
+- [daemon.rs](crates/ymir-core/src/daemon.rs), [remote.rs](crates/ymir-core/src/remote.rs), [control.rs](crates/ymir-core/src/control.rs), [train_jobs_ctl.rs](crates/ymir-core/src/train_jobs_ctl.rs): every networked `ymird` serves its training store on `/ymir/blobs/1` and holds a `BlobsClient` into it; `JobCall::Fetch` / `SetHolders`; `cli_ctx` gives `ymirctl train` the daemon as its fetcher.
+- Tests: blobs_net unit tests (a lying holder: flipped byte, long file, short file, a manifest for another root; refusal, unknown root, fallback past an unreachable holder and a liar to a good one, no staging left); [tests/train_blobs.rs](crates/ymir-testkit/tests/train_blobs.rs): three ymirds on 127.0.0.1 with separate homes and stores (a seed holder and two cert-only model nodes): gpu1 posts a 3-epoch job and loses its GPU after epoch 1; gpu2 resumes it through its ymird, which fetches the dataset and the epoch-1 checkpoint from gpu1 (gpu2's store had neither), registers gpu2 as a holder, and finishes it; the holder sees it done (~66 s, mostly the voters' 60 s restart grace).
+
+**Checks:** workspace clippy `-D warnings`; blobs_net 3/3, train_blobs 1/1, p3b, train_daemon, train_isolation, train_board (see the CI runs below).
+
+**Not done:** a broken transfer starts the bundle again (no partial resume); no bandwidth cap or progress events; fetched bundles stay in the store until it is cleaned like any other; nodes on 0.18.0 or older don't serve `/ymir/blobs/1` (the fetch fails over to the next holder, else the attempt is retried). Two-node training on real nodes waits for Michael. No live nodes were touched.
+
+## 2026-11-26 06:45 EST: v0.18.0 released
+
+**Release:** [v0.18.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.18.0) (release commit 35188d7 on add1902; Release run 45802019717, green): training jobs on the synced job board between nodes (P3b), `ymird` holding the board for `ymirctl train`, model nodes granted `["ymir.pool", "ymir.train"]` voting on and claiming jobs without access to conversations, and the fix for concurrent saves of a device's Weirdnet state (the `p2.rs` failure under load), on weirdnet-sync 0.8.4. The cut ran every check before pushing (54 test suites); its first try stopped before the commit because `release.toml`'s default `CARGO_TARGET_DIR` was not writable on the build machine, and the second set its own. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles with their sums (42 files); the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.18.0-1; their recipes are on this branch (`chore/release-0.18.0`).
+
+**Next:** P3b blob transfer: a job's dataset and checkpoints fetched over Weirdnet from the devices that hold them, so another node resumes a board job without copying files by hand.
+
+## 2026-11-26 04:05 EST: v0.17.0 released
+
+**Release:** [v0.17.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.17.0) (release commit 90f71fb on 8bfe741; Release run 45776523009, green): model-upload U10, `[model] upload = false`, on weirdnet-backends 0.4.7 and weirdnet-net 0.8.3. The jobboard work waits for the next release. The cut ran its checks before pushing; its first try stopped on one failure of `p2.rs` (`only_marked_conversations_are_exported_and_withdrawal_is_reported`: the pool roster's directory missing) while the build machine was heavily loaded, which passed three times alone and on the second try. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the signed update bundles with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.17.0-1; their recipes are on this branch (`chore/release-0.17.0`).
+
+**Next:** v0.18.0 with the training lead's jobboard (weirdnet-sync 0.8.4).
+
+## 2026-11-26 03:35 EST: model nodes on the job board, ymird holds it (branch `feature/jobboard`)
+
+- weirdnet-sync 0.8.4 (Cargo.toml, Cargo.lock, release.toml `[[requires]]`): per-type keys for service devices (0.8.3) and type-scoped sealed records (0.8.4). On 0.8.3 alone m10 failed: the model node's grant lacked `ymir.pool` (refused `type-not-granted`, fixed here) and a cert-only inference node could not open sealed `ymir.context` records (fixed in weirdnet-sync 0.8.4).
+- [membership.rs](crates/ymir-core/src/membership.rs): `TRAIN_TYPE` (`ymir.train`, unsealed); `ServiceRole::Model` grants `["ymir.pool", "ymir.train"]`; a cert-only device syncs the pool and every type in its grant; full devices serve `ymir.train`; the sync pass pulls it with peers that hold it; `enable_train_voter(_with)` (model role and `ymir.train` in the grant; limits from the job policy; terms in `voter.cbor`).
+- [daemon.rs](crates/ymir-core/src/daemon.rs): the model role's voter at network start; `Network.jobs`, a `BoardJobStore` with hint-addressed leases, for the control socket and `/ymir/train-status/1`.
+- [train_jobs_ctl.rs](crates/ymir-core/src/train_jobs_ctl.rs): `ControlRequest::Jobs { call }` / `ControlResponse.job`; `ControlJobStore` (the `JobStore` over the socket; claims only as the daemon's own peer id, renewing in ymird); `cli_ctx` for `ymirctl train` (board when ymird is up on Weirdnet, else the file store). `TrainStatus::read_with` in [train_net.rs](crates/ymir-core/src/train_net.rs).
+- Tests: [tests/train_isolation.rs](crates/ymir-testkit/tests/train_isolation.rs) (a cert-only model node syncs, votes on and claims a job the seed holder posted; no epoch key and no `ymir.context` key; its context pull fails; a sealed context entry handed to it does not open), [tests/train_daemon.rs](crates/ymir-testkit/tests/train_daemon.rs) (two ymirds on 127.0.0.1: post on the holder, claim, renew, checkpoint and finish on the cert-only model node over the control socket, `train status` lists it; ~64 s, mostly the voter's 60 s restart grace).
+
+**Checks:** workspace clippy `-D warnings`; m10 2/2, p3b 8/8, p3a_remote 2/2, train_board 3/3, train_isolation 1/1 (3 runs), train_daemon 1/1; CI 45782530375 and macOS 45782535575 green on 93414c4, Pages 45784606192 green on cc4252b (a rustdoc link fix).
+
+**Not done:** datasets and checkpoints stay in the writing node's `LocalBlobs`, so another node resumes a board job only if it has those files; blob transfer over Weirdnet is the follow-up after 0.18.0. Already linked cert-only model nodes keep their old roster-only grant until re-linked from a seed holder. No live nodes were touched.
+
+## 2026-11-26 01:45 EST: training jobs on the synced job board (branch `feature/jobboard`)
+
+- [crates/ymir-core/src/train_board.rs](crates/ymir-core/src/train_board.rs): `BoardJobStore`, Ymir's `JobStore` over `weirdnet-agent` 0.5.6's `JobBoard<TrainJob>` (records, policies, checkpoint pointers and claim errors mapped; digests as plain hex; live claims kept by job id, renewing themselves).
+- [crates/ymir-core/src/train_job.rs](crates/ymir-core/src/train_job.rs): `claim`, `finish`, `fail` and `release` are async; `ClaimError::NoQuorum`, retried for `CLAIM_QUORUM_WAIT` (30 s) when a run claims its job.
+- weirdnet-agent 0.5.6 (`jobs`), weirdnet-sync 0.8.2, on top of weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (one copy of each); `SyncState.voter` in [membership.rs](crates/ymir-core/src/membership.rs).
+- Tests: [tests/common/board.rs](crates/ymir-testkit/tests/common/board.rs), three linked devices on in-memory nodes with the model role and voters; [tests/train_board.rs](crates/ymir-testkit/tests/train_board.rs) (a claim held elsewhere, a retryable failure and its back-off, the next device resuming from the last checkpoint, release and the owner's resume, a takeover after a lapsed lease with the stale holder fenced; the same moves on `FileJobStore`); [tests/p3b.rs](crates/ymir-testkit/tests/p3b.rs) runs `train_job` with the mock trainer on the board: a job lost after an epoch carried on by another device, Ctrl-C pausing, a run that loses its lease stopping.
+
+**Checks:** workspace clippy `-D warnings`; `cargo fmt --check`; p3b 8/8 (7 s), train_board 3/3 (17 s), each three times; `train_job` unit tests 7/7; p3a_remote 2/2.
+
+**Not done:** model nodes don't use the board. Their grant is roster only (no sync types), and with weirdnet-sync 0.8.2 a grant with `ymir.train` would hand them the epoch keys that also open `ymir.context`. weirdnet-sync 0.8.3 (per-type keys) comes first; then the grant, the voter on model nodes in the daemon and `train run --job` on the board. The blobs (datasets, checkpoints) still move by the node's own store.
+
+## 2026-11-26 01:10 EST: model-upload U10: `[model] upload = false` on weirdnet-backends 0.4.7 (branch `feature/upload-switch`)
+
+**What changed:** weirdnet-backends 0.4.7 and weirdnet-net 0.8.3 (919204a, the bump alone, which `feature/jobboard` builds on). `[model] upload` (default on; `false` passes `WritePolicy::with_uploads(false)`, so uploads are refused with `not-allowed` while pulls, listing and removals work). The refusal reads "that node has `[model] upload = false`" (`upload_net::UPLOADS_OFF`); `--node auto` tries the nodes with room from the most room down and passes over one with uploads off. `upload::local::entries` uses `StoredEntry::list` (no more serde). `/ymir/uploads/1` takes 16 streams (was 64). Docs: CHANGELOG, the plan ("U10"), DESIGN, the site's ymirctl page.
+
+**Checks:** fmt; clippy `--workspace --all-targets -D warnings`; `ymir-core` unit tests (`upload_net`, including the setting's round trip); `models_pool.rs` (a node with `upload = false` searches, pulls, serves and removes, and refuses an upload with the hint), `models_upload.rs` (`--node auto` passes over that node), `models_upload_formats.rs`, `models_upload_pool.rs`, `rollouts_net.rs`; the full workspace in CI.
+
+**Not tested:** across real machines.
+
+**Next:** merge when CI, macOS and Pages are green; v0.17.0 with `feature/jobboard` (agreed with the training lead).
+
+## 2026-11-26 00:43 EST: v0.16.0 released
+
+**Release:** [v0.16.0](https://github.com/WeirdBrains/ymir/releases/tag/v0.16.0) (release commit 9c6c86b on 149dfe9; Release run 45758480177, green). It folds in what would have been 0.15.5: model-upload U9 (directories and projectors without `--node`, `--node auto`, `--rollout --inference`), resumable training jobs (P3b), the teacher license from the Hub or the pool catalog, `train seed questions|prompts` and training status over `/ymir/train-status/1`. The cut ran its checks (fmt, clippy `-D warnings`, `cargo test --workspace --locked`) before pushing. The leak scan of dist found nothing (31 files); the GitHub release has 31 files plus the four gpg signatures of the Arch packages and the six signed update bundles (`com.weirdbrains.ymir-stable-16000`) with their sums; the assets check passes. TAUR has ymir-bin and ymir-cuda-bin 0.16.0-1; their recipes are on this branch (`chore/release-0.16.0`).
+
+**Next:** adopt weirdnet-backends 0.4.7 and weirdnet-net 0.8.3: `[model] upload = false` with `WritePolicy::with_uploads`, `StoredEntry` built with its constructors instead of serde, and the streams limit back down now that dropped streams are released promptly.
+
+## 2026-11-25 22:15 EST: training status over Weirdnet (branch `feature/train-status`)
+
+- `/ymir/train-status/1` (`ymir_core::train_net::{TrainStatus, RunSummary, JobSummary, StatusReply}`), served by every
+  model node on Weirdnet for any linked device (`remote::serve_train_status`), and `TrainHub::status`;
+  `ControlRequest::TrainStatus`; `ymirctl train status [--node X] [--json]`. For Bragi's training view.
+- Tests: `p3a_remote.rs` (status from an app-only device, of a node with and without `[train] remote`), `p3b.rs` (jobs).
+
+## 2026-11-25 22:05 EST: teacher license lookup and seed prompts (branch `feature/teacher-license`)
+
+- `batch --jsonl` without `--license`: `--license-from OWNER/NAME` reads the Hub repo's model card
+  (`MlxHub::license`, `ymir_core::dataset::hub_license`; the token goes to the public Hub only), else the pool
+  catalog's `weirdnet.license` (`catalog_license`). `Generate.license_source` records `operator`, `hub:REPO` or `pool`.
+- `ymirctl train seed questions|prompts` (`ymir_core::seed`): source texts to question rows, answers to prompt rows.
+- Tests: `dataset.rs` (pool-catalog license, both seed passes through the mock pool), unit tests in `seed.rs`,
+  `dataset.rs`, `models/hub.rs`. Built on `feature/p3b-resume`.
+
+## 2026-11-25 22:02 EST: model-upload U9: directories and projectors without --node, `--node auto`, rollouts on another inference node (branch `feature/upload-auto-node`)
+
+Michael asked at 9:33 PM ET for `ymirctl models upload` of folders and vision projectors without `--node`, with the node picked automatically (this machine if it serves models, else the pool node with room after 10% or 20 GiB free), and for the `--rollout --inference` gap to be closed.
+
+**What changed**
+- `ymirctl models upload DIR|PROJECTOR` without `--node`: with the model role here, placed in this machine's models directory (`ymir_core::upload::local::place`: staged beside the store, hash-checked, moved in with its provenance, keeping `[model] upload_keep_free` free as the node does) and saved in node.toml by the code `/ymir/uploads/1` uses (`upload_net::save_entry`, split out of `UploadsService`); it serves after a restart. Without the model role it goes to `--node auto`. `--projector-for` no longer needs `--node`.
+- `--node auto` for uploads (`ModelsHub::upload_auto`): the other model node with the most room after what it keeps free; none with room is an error with each node's numbers. The choice is printed.
+- `--rollout NAME --inference NODE` (`RolloutArgs::inference`): version number, incumbent, add and share all on that inference node over `/ymir/rollouts/1`, saved there unless `--no-persist`.
+- `/ymir/uploads/1` accepts 64 streams at once (was 8): a finished stream can stay counted for a while, and nine uploads in a row hit the limit in the tests.
+- Docs: CHANGELOG, the plan ("U9 as built"), the site's ymirctl page.
+
+**Checks:** `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` (CHECKS). End to end: `models_upload_formats.rs` (a directory placed and saved on a model node without `--node`; the same projector again already there; from a machine without the model role, sent to the node with the most room), `models_upload.rs` (`--node auto`), `models_upload_pool.rs` (`--node auto --stage` refused), `rollouts_net.rs` (an upload joins `support` on `inf` as `support@2` at 20%, saved there and not here).
+
+**Not tested:** across real machines; MLX directories (macOS nodes).
+
+**Not built:** `[model] upload = false` (uploads off, everything else on): `WritePolicy` in weirdnet-backends 0.4.5 has no switch for uploads alone (its `auth` also covers pulls and removals, `max_upload = 0` would read as `too-big`), so this needs a small Weirdnet request; `--serve` as a flag (uploads always serve; `--store-only` would be the useful opposite). `--node auto` does not look at engines: a directory sent to a llama.cpp node is refused there as before.
+
+**Next:** merge after CI; release 0.16.0.
+
+## 2026-11-25 21:50 EST: P3b Ymir side, resumable training jobs (branch `feature/p3b-resume`)
+
+**What changed:** trainer interface 2 (`train --checkpoint-dir DIR` writes `epoch-NNNN/` with `checkpoint.json`, `ymir-train-checkpoint/1`; `--resume CKPT`), spoken by the mock trainer and `scripts/trainer.py` (one `llama-finetune --epochs 1` per epoch: the pinned build saves weights only at the end and has no optimizer state, so AdamW restarts each epoch; no shuffle and a constant learning rate keep the data order and schedule the same). `ymir_core::train_job`: the job record, lease with fencing term, attempts, back-off and checkpoint pointer as the `JobStore` trait asked of `weirdnet-agent` 0.6.0, with `FileJobStore` and `LocalBlobs` standing in on one node; `start`/`resume` drive a run under a claim (renew, publish checkpoints, finish, fail with or without retry, pause on Ctrl-C, stop on a lost lease) after `check_resumable` (trainer build, base revision, `--from`, adapter id, `[train] resume`). `ymirctl train run --job`, `train jobs`, `train resume JOB`, `train job pause|unpause|cancel JOB`. Docs: [training.md](docs/design/training.md) (P3b), [DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), site.
+
+**Checks:** `cargo clippy -p ymir-core -p ymirctl -p ymir-testkit --all-targets -D warnings`; `cargo test -p ymir-core --lib train` (7 new store tests); `tests/p3b.rs` (5, three runs in a row), `p3a`, `p3a_remote`, `p3a_llamacpp` (with the trainer venv); `scripts/test_trainer.py` (28). Not tested: a real `llama-finetune` with checkpoints (no run cleared), Windows/macOS (CI).
+
+**Left:** swap the stand-ins for `weirdnet-agent` 0.6.0's `JobBoard<TrainJob>` and a blob fetch from the holders over Weirdnet; let a `[train] resume = true` node take over stalled jobs by itself; enforce `needs`. The request went to the lead on 2026-11-25 and is summarised, with the lead's plan, in [training.md](docs/design/training.md)'s P3b section.
+
+## 2026-11-25 18:40 EST: v0.15.4 released; first hands-off self-update confirmed
+
+**Release:** [v0.15.4](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.4) (Release run 45711728332, green). `ymirctl update status` now shows the self-update settings and the last feed check. The assets check passes, including the six signed update bundles (`com.weirdbrains.ymir-stable-15004`) and the gpg-signed Arch packages. The leak scan of dist found nothing.
+
+**Self-update test:** a node on 0.15.3 with `[update] interval = "10m"` found 0.15.4 on the GitHub feed about 7 minutes after the bundles were uploaded. It staged the bundle, exited for the update, started 0.15.4 on trial and committed it 5 seconds later, with no manual steps. The test interval was then removed, so the node is back on the 6h default. Arch recipes are on this branch; TAUR follows.
+
+## 2026-11-25 18:00 EST: v0.15.3 released (self-updating ymird)
+
+**Release:** [v0.15.3](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.3) (Release run 45700519266, green). The assets check passes, including the six signed `.update.tar.gz` bundles (update id `com.weirdbrains.ymir-stable-15003`) and the gpg-signed Arch packages. The leak scan of dist found nothing. ymird now checks its feed (default `github:WeirdBrains/ymir`, every 6h) and stages and restarts onto a newer signed release by itself; see `[update]` in DESIGN. Arch recipes are on this branch; TAUR follows.
+
+## 2026-11-25 15:20 EST: hands-off self-update (branch `feature/auto-update`)
+
+**What changed:** `ymir_core::autoupdate`, `[update]` in node.toml (`auto = true`, `channel = "stable"`, `interval = "6h"`, `feed = "github:WeirdBrains/ymir"`, `variant = "auto"`, `restart = true`).
+- `ymird` checks the feed two to five minutes after it starts, then every interval. When it finds a newer release it downloads this machine's `.update.tar.gz` (plain or CUDA, matching the running engine) and unpacks it safely into `updates/incoming/`.
+- It stages the bundle through `Updater::stage`, which does all the signature checks. Then, under a service manager and when started through `update boot`, it shuts down and exits 75 so the service restarts it into the trial.
+- A trial that isn't serving within 15 minutes exits 1, and the second failed start rolls back.
+- `ymirctl update boot` now sets `YMIR_UPDATE_BOOT`. `ymirctl update check` runs one check by hand.
+- DESIGN and CHANGELOG are updated.
+
+**Checks:** 7 new `autoupdate` tests: settings, feed URLs, asset names, CUDA detection, unsafe archives, a local feed staging a signed bundle end to end, and a foreign-signed bundle refused. CI is green on all three OSes (run 45684801350, before merging main).
+
+**Left:** release it, then confirm on a real node that a later release is taken without a hand.
+
+## 2026-11-25 15:00 EST: v0.15.2 released with signed update bundles
+
+**Release:** [v0.15.2](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.2) (Release run 45681998536, all green). The assets check passes, including the six `.update.tar.gz` bundles (plain and CUDA Linux x86_64/aarch64, macOS x86_64/aarch64, update id `com.weirdbrains.ymir-stable-15002`) and `ymir-0.15.2-updates.sha256`. The Arch packages are gpg-signed. The leak scan of dist found nothing. Arch recipes are on this branch; TAUR follows.
+
+## 2026-11-25 14:56 EST: model upload U8, origin and license in the pool catalog (branch `feature/catalog-origin`)
+
+**What changed:** Weirdnet request D shipped (weirdnet-agent 0.5.4, weirdnet-backends 0.4.5, weirdnet-openai 0.2.3), so U8 is built. Model nodes put each model's origin (`hub`, `upload`, `train`) and license in their capability record: at start from node.toml (`NodeConfig::origins`: a `provenance.json` beside the weights, else `hub` for weights under `models_dir` or a Hub id), and on every upload, peer copy and Hub pull through `ModelsService::with_node_info` plus a hook for this machine's own model node (`LocalModelNode::set_origin`). `/ymir/uploads/1` also sets them and stays for Bragi 0.10 and older `ymirctl`. A placement stored but not served (the projector edge the lead named) is logged as a warning; the uploader already gets the error and the files stay. Inference nodes copy origin and license into catalog/1 (`ModelNode::origin`, `CatalogRow`), so `/v1/models` shows `weirdnet.origin`/`license`; `ymirctl models` prints them after the state and the MCP `ymir_models` tool returns them. `release.toml` requires weirdnet-backends 0.4.5 and weirdnet-agent 0.5.4. Docs: the plan ("U8 as built"), DESIGN, CHANGELOG, the site's ymirctl page. Bragi tags uploaded and trained models in its picker (Bragi branch `feature/catalog-origin`).
+
+**Checks:** fmt; clippy `-D warnings`; `cargo test --workspace --locked` 347 passed, 0 failed, 7 ignored. New tests: `NodeConfig::origins` (an upload, a trained adapter, a pulled file, a Hub id, a file elsewhere, a wrapped server), the merged catalog across two nodes (`the_catalog_says_where_each_model_came_from`), end to end in `models_upload` (an upload to another node shows `upload`/`mit` in the inference node's catalog; its configured file shows `hub`), and `ymirctl models` lines. Not tested: a real Hub pull firing the hook (covered by weirdnet-backends' own tests), and MLX.
+
+**Note:** the v0.15.2 release flow branched `chore/release-0.15.2` in the same checkout while this work was there, so its merge (c9c9078) brought the U8 commits (0ab6e67, e462558) to main before this branch's CI finished; this branch (rebuilt in its own worktree, same content) adds this entry and links the v0.15.2 entry's release URL, which the Pages link check refused. U8 ships in the next Ymir release after 0.15.2.
+
+## 2026-11-25 14:05 EST: signed update bundles in the release flow (branch `feature/update-bundles`)
+
+**What changed:** `ymirctl update sign-bundle` (`ymir_core::update_publish`) signs a bundle directory with a release key. It refuses a key the root doesn't delegate for `com.weirdbrains.ymir`/`stable` or a root with the wrong pin, and verifies the result as a node would before writing `manifest.env` and `roots/1.env`. It never prints the key. Helpers 0.4.0 is vendored; it adds `weirdnet_release.py updates VERSION [--upload]`, configured in `release.toml [updates]`, which builds the plain and CUDA Linux bundles and the macOS bundles from the release archives. The org root is `packaging/updates/root.env`. The release workflow only checks the plan (the key is not a CI secret). DESIGN and CHANGELOG are updated.
+
+**Release flow addition:** after `github VERSION`, on the release machine: `WEIRDNET_UPDATE_KEY=<release key file> python3 scripts/weirdnet_release.py updates VERSION --dist dist --upload`, then `assets VERSION`. The signer is the release's own x86_64 `ymirctl`. A node takes a bundle with: download, unpack, `ymirctl update stage DIR`, restart the service.
+
+**Checks:** `ymir-core` update tests (14, 4 new) and clippy pass on Linux. An end-to-end run with the real key signed 0.15.1 archives (seq 15001), `update trust` + `update stage` accepted it in a scratch home, and the old 0.1.0 `ymirctl update boot` picked the staged release. Helpers: 50 tests.
+
+## 2026-11-25 12:00 EST: v0.15.1 released, signed and on TAUR
+
+**v0.15.1** (release commit c0b5f6b, tag v0.15.1, cut with `weirdnet_release.py cut --patch` on main cc9f216 after CI was green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 340 passed, 0 failed, 7 ignored): the trainer refuses a dataset too short for llama-finetune, `build --trainer` adds llama-tokenize, the larger synthetic fixture, and the fast `extract-lora` (randomized SVD, CUDA through torch, a thread pool). The Release workflow passed on the tag; its artifacts were checked against `SHA256SUMS` (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.1) has 35 files (`assets 0.15.1` ok, latest), with detached `.sig` files for the four Arch packages (WeirdBrains Muninn packages key, each "Good signature"). `weirdnet_release.py taur 0.15.1 --yes` published `ymir-bin` and `ymir-cuda-bin` 0.15.1-1. The Arch recipes carry the v0.15.1 tarball hashes (branch `chore/release-0.15.1`).
+
+## 2026-11-25 08:35 EST: v0.15.0 released, signed and on TAUR
+
+**v0.15.0** (release commit 6b042db, tag v0.15.0, cut with `weirdnet_release.py cut --minor` on main 9010783 after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 339 passed, 0 failed, 7 ignored): canary percentages (`ymirctl models rollout add --canary PCT`, `rollout weight NAME@N --canary PCT`, `models upload --rollout --canary PCT`, any 0 to 100, not capped, decision 8) and U7 (more upload formats). The Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` from its own artifact), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.15.0) has 35 files (`assets 0.15.0` ok): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.15.0 --yes` published `ymir-bin` 0.15.0-1 and `ymir-cuda-bin` 0.15.0-1. The Arch recipes carry the v0.15.0 tarball hashes (this branch, `chore/release-0.15.0`). Bragi 0.10.0 has the matching percentage field in its upload dialog.
+
+**Next:** U8, once Weirdnet request D lands.
+
+## 2026-11-25 10:20 EST: fast LoRA extraction (branch `feature/fast-lora-extract`)
+
+The first real run's `extract-lora` (Qwen2.5-0.5B, rank 16, 168 matrices) took 79 minutes on a machine at load ~40. Measured there: a 4864 x 896 float64 SVD took 29.7 s with OpenBLAS's default 16 threads under that load, 4.8 s with 8, 0.86 s with 4 and 1.0 s with 1, so most of the time was BLAS threads spinning, not the SVD.
+
+**What changed** ([scripts/trainer.py](scripts/trainer.py))
+- `top_svd`: a randomized, truncated SVD (sketch of rank + 16, 5 power iterations, float32; seeded per matrix, so runs repeat); exact for matrices whose smaller side is at most 4 sketches wide. On CUDA through PyTorch when the venv has a CUDA build (`svd_device`, `YMIR_TRAINER_SVD` = auto, cuda, cpu, exact).
+- `lora_tensors` runs `YMIR_TRAINER_THREADS` matrices at a time (default min(4, CPUs)) with one BLAS thread each (`single_threaded_blas`, set before numpy loads), in the base's order, a bounded window in memory.
+- The final log line gives the extraction time; [trainer-requirements.txt](scripts/trainer-requirements.txt) names torch as optional.
+- Docs: training plan (trainer section), CHANGELOG (Unreleased, Changed).
+
+**Timings** (the run's full model was not kept, so a stand-in: the f32 base plus the run's adapter plus full-rank noise of the same size, the real shapes; load ~30 from other jobs on the machine; rank 16):
+- before (the old code), exact float64 SVD, 16 BLAS threads: 1704 s (28 min; the real run took 79 min at load ~40)
+- after, exact SVD on 4 threads: 45.2 s
+- after, CPU (randomized, 4 threads): 8.2 s (17.4 s wall with loading and writing)
+- after, GPU (torch 2.11 cu128, RTX 3060): 4.4 s (21.5 s wall)
+- quality: the kept share 53.0% in every mode; the randomized adapter's residual is within 0.03% of the exact one's on the worst matrices.
+
+**Checks:** `python3 scripts/test_trainer.py` 26 passed, 1 skipped (the CUDA comparison, run with `YMIR_TEST_CUDA=1` on a GPU machine: 4 passed on the test machine's RTX 3060 with torch 2.11 cu128); new tests: randomized vs exact at the model's shapes, exact on low rank and repeatable, device choice and refusals, modes agree through the CLI, threaded order.
+
+**Next:** merge after CI; a patch release.
+
+## 2026-11-25 08:20 EST: the trainer refuses a too-short dataset; a larger fixture (branch `feature/trainer-short-corpus`)
+
+The first real `train run` (context 256, then 64) crashed in upstream `llama-finetune` with `GGML_ASSERT(INT64_MAX / ne[i] > current_nelements)` in `ggml_opt_dataset_init`: the small fixture renders to 256 tokens, and upstream needs 2n + 1 for one step, n being the context rounded up to a multiple of 256 (`common_opt_dataset_init` computes `(tokens - n - 1) / (n/2)` in size_t, which underflows on less).
+
+**What changed**
+- [scripts/trainer.py](scripts/trainer.py): `trained_context`, `min_tokens`, `count_tokens` (llama-tokenize `--stdin --ids` on the base's vocabulary, the trailing newline dropped as llama-finetune's `-f` does) and `short_text`; `train` counts before starting llama-finetune and refuses with the count and the shortfall. Without `llama-tokenize` next to llama-finetune (or `$YMIR_LLAMA_TOKENIZE`) it logs that and turns upstream's crash into the same refusal.
+- [scripts/engine.py](scripts/engine.py): `build --trainer` also builds and keeps `llama-tokenize`.
+- New fixture: [decentralized-networks-large.jsonl](crates/ymir-testkit/tests/fixtures/decentralized-networks-large.jsonl) (batch input), [decentralized-networks-large.dataset.jsonl](crates/ymir-testkit/tests/fixtures/decentralized-networks-large.dataset.jsonl) and its manifest: 16 hand-written conversations, CC0-1.0, the same sources file. With Qwen2.5-0.5B-Instruct's chat template it is 1297 tokens (the small one 255), counted with a real `llama-tokenize` at b12628 and the new `count_tokens`.
+- Docs: training plan (trainer section, the fixtures in decision 3), CHANGELOG (Unreleased).
+
+**Checks:** `python3 scripts/test_trainer.py` 20 passed (new: `test_min_tokens`, `test_short_text_is_refused_before_training`, `test_enough_text_trains`, `test_context_is_rounded_up_to_256`, `test_tokenize_failure_is_refused`, `test_short_text_crash_without_tokenize`; new fake `scripts/testdata/fake_llama_tokenize.py`); `python3 scripts/test_engine.py` 6 passed; `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 340 passed, 0 failed, 7 ignored (new: testkit `the_large_fixture_dataset_is_accepted_for_training`). `p3a_llamacpp` with the trainer venv is left to CI.
+
+**Not tested:** a training run with the large fixture (not rerun yet, waiting for Michael's OK).
+
+**Next:** merge after CI; then a first real run on the large fixture once approved.
+
+## 2026-11-25 07:31 EST: canary percentages (branch `feature/canary-percent`); the 0.15.0 cut was stopped for it
+
+Michael asked at 7:24 AM ET for a canary percentage such as 20 or 50 (decision 8 in [docs/design/model-upload.md](docs/design/model-upload.md)). The 0.15.0 cut that was running then was stopped before it committed, tagged or pushed anything (its version edits were reverted), so the release includes this.
+
+**What changed**
+- [crates/ymir-core/src/rollout_edit.rs](crates/ymir-core/src/rollout_edit.rs): `Change::Share { name, version, percent }`: the version gets exactly `percent` (0 to 100), the other versions with traffic the rest by their present weights (largest remainder, adding up to 100). Not capped at `CANARY_MAX`; an eval in the gate, when given, must pass (`force` skips it). Raw weights keep the gate.
+- ymirctl: `models rollout add ... --canary PCT` (an add at weight 0, then the share) and `models rollout weight NAME@N --canary PCT`, both also with `--inference NODE` (one `/ymir/rollouts/1` request per change); `models upload ... --rollout NAME --canary PCT` is a percentage now.
+- Docs: decision 8, DESIGN, training plan, CHANGELOG (Added and Changed), the site's ymirctl page.
+
+**Checks:** `cargo fmt --check`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 339 passed, 0 failed, 7 ignored (new: `rollout_edit` share tests, ymirctl `add_and_weight_take_a_named_percentage`; testkit `models_upload` and `rollouts_net` use `--canary 20`/`50` and check the split).
+
+**Next:** full checks, merge, CI on main, then cut 0.15.0 (with U7 and this) and Bragi 0.10.0 (percentage field), sign, TAUR.
+
+## 2026-11-25 05:55 EST: model upload U7, more formats (branch `feature/upload-formats`); U8 blocked on Weirdnet request D
+
+Slice U7 of [docs/design/model-upload.md](docs/design/model-upload.md): over `--node`, an upload also takes a safetensors directory (for vLLM), an MLX directory, a PEFT LoRA directory (on a vLLM base) and a GGUF vision projector (`--projector-for MODEL`). Weirdnet already reads, places and serves these (weirdnet-model 0.5.3, weirdnet-backends 0.4.4, locked); no Weirdnet crate edited. Details in the plan's "U7 as built".
+
+**What changed**
+- [crates/ymir-core/src/upload.rs](crates/ymir-core/src/upload.rs): `inspect_outgoing` and `Outgoing`; `provenance_for`; local refusals now point at `--node`.
+- [crates/ymir-core/src/config.rs](crates/ymir-core/src/config.rs): `[model] upload_engine` (validated), used by [daemon.rs](crates/ymir-core/src/daemon.rs) for models/1's engine.
+- [crates/ymir-core/src/upload_net.rs](crates/ymir-core/src/upload_net.rs): `Register.projector_for` (optional); `UploadsService` saves `backend = "vllm"` (absolute path) and `"mlx"` entries, PEFT adapters on the base, and a projector as the model's `mmproj` ([config_edit.rs](crates/ymir-core/src/config_edit.rs) `set_mmproj`).
+- ymirctl: `models upload PATH --node X [--projector-for MODEL]`, the checks before sending, the format in the first line (`GGUF model (llama)`).
+- Docs: the plan (U7 section and as built, U8 blocked), DESIGN, CHANGELOG, the site's ymirctl page.
+
+**Checks:** `cargo fmt`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 336 passed, 0 failed, 7 ignored (new: testkit `models_upload_formats`, unit tests for `inspect_outgoing`, `upload_engine`, `set_mmproj`).
+
+**Not tested:** real vLLM, MLX or llama.cpp with the uploaded files (mock engine); MLX end to end (MLX nodes are macOS); local uploads of directories and projectors (not built).
+
+**U8:** blocked. It needs request D (`CatalogModel::origin` and `license` in weirdnet-agent catalog/1), which weirdnet-agent 0.5.2 does not have. The request is drafted for Michael to send; nothing changed for U8.
+
+**Next:** merge, release 0.15.0; Bragi's copy fallback (branch `feature/upload-copy-fallback`) and Bragi 0.10.0.
+
+## 2026-11-25 05:36 EST: v0.14.0 released, signed and on TAUR
+
+**v0.14.0** (release commit 560283b, tag v0.14.0, cut with `weirdnet_release.py cut --minor` on main 42707ce after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 332 passed, 0 failed): uploads to a pool (U6: `ymirctl models upload FILE --node all|A,B [--stage NODE]`, sent once and copied node to node). The Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` from its own artifact), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.14.0) has 35 files (`assets 0.14.0` ok, marked latest): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.14.0 --yes` published `ymir-bin` 0.14.0-1 and `ymir-cuda-bin` 0.14.0-1. The Arch recipes carry the v0.14.0 tarball hashes (this branch). Bragi 0.9.0's desktop upload dialog copies uploads on to other nodes with the same Weirdnet call.
+
+## 2026-11-25 04:33 EST: model upload U6, pools (branch `feature/upload-pools`)
+
+Slice U6 of [docs/design/model-upload.md](docs/design/model-upload.md): upload once, the other nodes copy it from that node, on Weirdnet's `ModelsClient::replicate` and `Pull::from_peer` (weirdnet-backends 0.4.4, already locked); no Weirdnet crate edited. Details in the plan's "U6 as built".
+
+**What changed**
+- [crates/ymir-core/src/models.rs](crates/ymir-core/src/models.rs): `ModelsHub::upload_pool` (targets, the space check first, the stage, `replicate`, each copy recorded, the fallback upload from this device); `register` and `has` split out of `upload`.
+- [crates/ymir-core/src/upload_net.rs](crates/ymir-core/src/upload_net.rs): `UploadOp.stage`, `UploadReport.copied_from` and `sent_instead` (serde defaults).
+- [crates/ymir-core/src/remote.rs](crates/ymir-core/src/remote.rs): `serve_models` takes the `Network` and sets the peer dialer.
+- ymirctl: `models upload --node all|A,B [--stage NODE]` and its output.
+- Docs: the plan (U6 section and as built), DESIGN, CHANGELOG, the site's ymirctl page.
+
+**Checks:** `cargo fmt`; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 332 passed, 0 failed, 7 ignored (new: `models_upload_pool`, also run 4 more times on its own, all passed).
+
+**Not tested:** against real nodes on different machines; a stage on an older Ymir (the fallback is tested with a node that can't reach the stage).
+
+**Next:** merge, release 0.14.0; a pool target in Bragi if small.
+
+## 2026-11-25 04:02 EST: v0.13.0 released, signed and on TAUR
+
+**v0.13.0** (release commit 2ef42b8, tag v0.13.0, cut with `weirdnet_release.py cut --minor` on main 33764a5 after CI, macOS and Pages were green there; the cut's checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 331 passed, 0 failed): rollouts over Weirdnet (`/ymir/rollouts/1`, `ymirctl models rollout ... --inference NODE [--no-persist]`). CI, macOS, Pages and the Release workflow passed on the tag. Artifacts were downloaded into `dist/` (the full `SHA256SUMS` is the `SHA256SUMS` artifact's; each platform artifact carries a partial one), checked against those sums (30 files) and scanned unpacked: no host names, tailnet names, private IPs or home paths. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.13.0) has 35 files (`assets 0.13.0` ok, marked latest): the 30 release files, `SHA256SUMS`, and detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; sums matching). `weirdnet_release.py taur 0.13.0 --yes` published `ymir-bin` 0.13.0-1 and `ymir-cuda-bin` 0.13.0-1. The Arch recipes carry the v0.13.0 tarball hashes (this branch). Bragi 0.8.0's desktop upload dialog uses the new protocol (noted in the plan's "as built").
+
+## 2026-11-25 03:03 EST: rollouts over Weirdnet, `/ymir/rollouts/1` (branch `feature/rollouts-net`)
+
+The follow-up to model-upload U4, so Bragi and `ymirctl` on another device can put an upload into an inference node's rollout. Decisions of 2026-11-25 2:51 AM ET (made by llm dev from Michael's upload answers; he can override them) are in [docs/design/model-upload.md](docs/design/model-upload.md): any linked device, narrowed by `[inference] rollout_callers`; above the canary share the request carries eval rows or `force`; every operation remotely, rollback included; saved in node.toml by default, with an opt-out. Details in the plan's "`/ymir/rollouts/1` as built".
+
+**Changed:** `ymir_core::rollout_edit` (the rules, moved from `ymirctl`, behaviour unchanged), `ymir_core::rollouts_net` (service, server, client), `[inference] remote_rollouts` and `rollout_callers`, `ControlRequest::RemoteRollouts`, `ymirctl models rollout ... --inference NODE [--no-persist]`. Docs: CHANGELOG, DESIGN, the plan, the site's ymirctl page.
+
+**Checks:** fmt; clippy `--workspace --all-targets -D warnings`; `cargo test --workspace --locked` 331 passed, 0 failed, 7 ignored, including the new testkit `rollouts_net` (three daemons over 127.0.0.1).
+
+**Not tested:** across real machines; `models upload --rollout` with `--inference` (not built: `--rollout` still applies on this machine).
+
+**Next:** the rollout section in Bragi's upload dialog; release Ymir 0.13.0 and Bragi.
+
+## 2026-11-25 02:40 EST: model upload U4 in Bragi 0.7.0 (docs, branch `docs/u4-bragi-upload`)
+
+Correction: the entry below headed 01:43 EST was written at 01:37 EST.
+
+CI and Pages are green on main 377ccb3 (the `fix/no-wixpdb` merge). The Linux CI job first failed in `ymir-testkit --test ctxplan` (`a_load_from_elsewhere_is_followed...`, unchanged since it last passed); a rerun of the failed job passed, and the test passed six times in a row on the box, so it is recorded as a flake, not fixed.
+
+Slice U4 of [docs/design/model-upload.md](docs/design/model-upload.md) is built in Bragi 0.7.0: an upload dialog on the desktop Models screen over models/1, with Ymir 0.12.0's `/ymir/uploads/1` record. Details in the plan's "U4 as built"; the B7 line and status in [docs/DESIGN.md](docs/DESIGN.md) are updated. Rollouts are not set from Bragi yet: the result shows the `ymirctl ... --rollout` commands.
+
+**Not tested:** Bragi against a real Ymir node over the network.
+
+**Next:** `/ymir/rollouts/1` so Bragi can add an upload to a rollout; then a rollout section in Bragi's dialog.
+
+## 2026-11-25 01:43 EST: v0.12.0 released, signed and on TAUR
+
+**v0.12.0** (release commit d5db03d, tag v0.12.0, cut with `weirdnet_release.py cut --minor` on main ba00557 after CI, macOS and Pages were green there; the cut's own checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 327 passed, 0 failed): model uploads join rollouts (U3). CI, macOS and the Release workflow passed on the tag. Artifacts were downloaded into `dist/`, checked against the workflow's sums and scanned (Linux, CUDA Linux, macOS, Windows: no host names or home paths). The Windows installer job also produced `YmirSetup-0.12.0.wixpdb` (a WiX debug database), which was left out; `fix/no-wixpdb` stops the workflow producing it. The first `github 0.12.0` upload timed out (HTTP 408) and was re-run with `--clobber`. The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.12.0) has 35 files (`assets 0.12.0` ok): the 31 release files with `SHA256SUMS`, plus detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key (each "Good signature"; the packages' SHA-256s match the workflow's). `weirdnet_release.py taur 0.12.0 --yes` published `ymir-bin` 0.12.0-1 and `ymir-cuda-bin` 0.12.0-1. The Arch recipes carry the v0.12.0 tarball hashes (this branch).
+
+## 2026-11-25 00:21 EST: model upload U3, `ymirctl models upload ... --rollout NAME` (branch `feature/model-upload-rollout`)
+
+Slice U3 of [docs/design/model-upload.md](docs/design/model-upload.md), on P4b's rollouts; no Weirdnet crate edited. Details in the plan's "U3 as built".
+
+**What changed**
+- [crates/ymirctl/src/models/upload_rollout.rs](crates/ymirctl/src/models/upload_rollout.rs) (new): `--rollout NAME`, `--canary W`, `--eval ROWS`, `--judge MODEL`, `--force` on `models upload --node`. The next version N comes from this machine's rollouts (live, else node.toml); without `--name` the id becomes `ID-rN`. After the node serves the upload, `rollout add NAME@N --weight 0`; an adapter loaded on its base's next start gets the "waits at weight 0" note. `--canary` runs `rollout weight` through the P4b gate, after `ymirctl eval` on the new model and the incumbent's when `--eval` is given (skipped when nothing has traffic). A refusal leaves the version at weight 0 and says so. `--rollout` without `--node` is refused.
+- [crates/ymirctl/src/models/rollout.rs](crates/ymirctl/src/models/rollout.rs): `rollout list` prints each version's origin, license, base and dataset hash from the pool's `models list --node all` (best effort, 10 s).
+- [crates/ymir-core/src/control.rs](crates/ymir-core/src/control.rs): status rows (`NodeModel`) carry `revision`, the weights' revision the node reports.
+- Tests: `models_upload.rs` now reads the uploaded revision back from the pool (closes the U2 gap) and runs three `--rollout support` uploads (first `--canary 100` with no incumbent; `--canary 50` refused, stays at 0; `--canary 5` passes; `rollout list` shows provenance; no `--node` refused). Unit tests for next version, incumbent, ids and the provenance line.
+- Docs: plan "U3 as built", [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), the site's ymirctl page.
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` 327 passed, 0 failed, 7 ignored; `site/tool/check_links.py`, `gen_roadmap.py --check`.
+
+**Not tested**: `--eval` end to end (no testkit model answers; the gate itself has P4b's tests); the adapter "waits at weight 0" note; `rollout list` provenance for trained adapters (base and dataset: unit test only).
+
+**Not built**: `--inference NAME|all` (rollouts stay per inference node, agreed 2026-11-25); `--replace` (U2 refuses other files under a taken id, so a version's model cannot be swapped).
+
+**Next**: U4 (Bragi desktop upload, decision 6) or U6 (pools, waits on Weirdnet requests B and C).
+
+## 2026-11-24 23:58 EST: v0.11.0 released, signed and on TAUR
+
+**v0.11.0** (release commit 8ff1654, tag v0.11.0, cut with `weirdnet_release.py cut --minor` on main bc665df after CI and Pages were green there; the cut's own checks: fmt, clippy `-D warnings`, `cargo test --workspace --locked` 325 passed, 0 failed): model uploads to other nodes (U2) on `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4. CI, macOS and the Release workflow passed on the tag. Artifacts were downloaded into `dist/`, checked against the workflow's sums and scanned (Linux, macOS, Windows archives: no host names or home paths). The [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.11.0) has 35 files (`assets 0.11.0` ok): the 31 release files with `SHA256SUMS`, plus detached `.sig` files for the four Arch packages, signed with the WeirdBrains Muninn packages key as v0.8.0/v0.9.0 (each "Good signature"; the packages' SHA-256s match the workflow's). `weirdnet_release.py taur 0.11.0` published `ymir-bin` 0.11.0-1 and `ymir-cuda-bin` 0.11.0-1. The Arch recipes carry the v0.11.0 tarball hashes (this branch).
+
+## 2026-11-24 23:05 EST: model upload U2, `ymirctl models upload FILE --node X` (branch `feature/model-upload-remote`)
+
+Slice U2 of [docs/design/model-upload.md](docs/design/model-upload.md) on `weirdnet-backends` 0.4.4's models/1 upload; no Weirdnet crate edited. Details in the plan's "U2 as built".
+
+**What changed**
+- [crates/ymirctl/src/models/upload.rs](crates/ymirctl/src/models/upload.rs) `remote_op`: with `--node`, checks and hashes the file (or a run's adapter, `--from-run`, found in RUN_DIR when FILE is left out), builds its `Provenance` and an `Upload` that serves. `--no-persist` is an alias of `--no-register`. Output in [remote.rs](crates/ymirctl/src/models/remote.rs) (`upload`, `uploaded`, `adapter_uploaded`: a llama.cpp adapter is used from its base's next start; never "live").
+- [crates/ymir-core/src/models.rs](crates/ymir-core/src/models.rs): `ModelsOp::Upload`, `Outcome::Uploaded`, `ModelsHub::upload` (one named remote node; resumes; progress never goes back; `exists` with the same revision counts as already there; then registers). `ModelsHub::with_uploads`.
+- [crates/ymir-core/src/upload_net.rs](crates/ymir-core/src/upload_net.rs) (new): `/ymir/uploads/1`. `UploadsService` (on model nodes with `remote_manage`, any linked device) checks the stored entry's revision, calls `NodeService::set_model_info(id, Some(revision), quant)` and saves the entry in node.toml unless `--no-persist`; `UploadsClient`; refusal wording.
+- [crates/ymir-core/src/config_edit.rs](crates/ymir-core/src/config_edit.rs) (new): node.toml edits moved from `ymirctl` (`stanza`, `local_model`, `append_model`, `add_adapter`, `save`); `ymirctl` calls them.
+- `[model] upload_keep_free` (default: the larger of 10% and 20 GiB) feeds the node's `WritePolicy`; `serve_models` takes the policy. `Daemon::start_at(cfg, paths, config)` so a saved upload edits the file ymird was started with (`ymird --config`).
+- Tests: [crates/ymir-testkit/tests/models_upload.rs](crates/ymir-testkit/tests/models_upload.rs) (three real daemons on 127.0.0.1: laptop and two model nodes) covers a model sent, stored with provenance (`uploaded_by` the laptop) and saved with its revision; the same files again; other files under a taken id (`exists`); a cut-off upload resumed; an adapter with `--no-persist` (node.toml byte-identical) and saved (`base_revision` from the base); a wrong-architecture adapter; `no-space`; `--node` naming this device or `all`. Unit tests: `remote_op` with `--from-run`, `upload_keep_free`, refusal wording, JSON round trips.
+- Docs: plan "U2 as built", [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md), the site's ymirctl page.
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` 325 passed, 0 failed, 7 ignored; `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps --locked`; `site/tool/check_links.py`, `gen_roadmap.py --check`.
+
+**Not tested**: the pool seeing the recorded revision (`set_model_info` is called; no test reads the capability record back); multi-GB uploads and real links; Ctrl-C from a terminal (the test cuts the stream by sending a short local file); a duplicate upload at the same time (`Busy`); a node with an older ymird (no `/ymir/uploads/1`); `--from-run --node` end to end (unit test only); a vLLM node (uploads are GGUF only).
+
+**For Weirdnet (requests through m3talsmith)**: an "upload placed" hook on `ModelsService` (or `Upload { set_info, persist }` handled in the crate) would let apps drop their own register protocol.
+
+**Next**: U3 (`--rollout`), U4 (Bragi dialog), U6 (pools, now unblocked by `replicate`).
+
+## 2026-11-24 23:03 EST: v0.10.0 released; the first real P3a run's node is configured, the run waits on a restart
+
+**v0.10.0** (release commit 8721d41, tag v0.10.0): `train run --node` and the trainable dataset fixture. CI, macOS and the Release workflow passed on 8721d41; the [release](https://github.com/WeirdBrains/ymir/releases/tag/v0.10.0) has 31 files (`assets` ok). The Arch recipes carry the v0.10.0 tarball hashes (this commit). The upload was interrupted once and left a draft with 25 files; the 6 missing files were uploaded and the draft published, nothing re-cut. Package signatures and TAUR: see the next entry or the report (the GPU node downloads the packages slowly).
+
+**First real P3a run (approved once by m3talsmith, as was adding the model role and `[train]` to one GPU node):**
+- That node's node.toml has a timestamped backup and two changes only: `model = true`, and a `[train]` section (the v0.9.0 `scripts/trainer.py`, `build = "b12628"`, `[train.env]` with the trainer's venv python, the patched `llama-finetune` built with `engine.py build --trainer`, CPU only since that node has no CUDA toolkit or Vulkan headers, and `YMIR_TRAINER_NGL = "0"`). `ymirctl train check` (0.8.0) passes: b12628, patch `parse-special`. A throwaway copy of the config starts ymird 0.8.0 with the model role and no models, so a later restart is safe.
+- A base is in that node's models directory: Qwen2.5-0.5B-Instruct F16 GGUF (Apache-2.0, sha256 checked against the Hub) and an F32 copy of it for `--from` (every tensor F32; a test chat on it answered).
+- Not run, two steps outside what was approved: ymird there is a systemd user service, so loading the model role needs `systemctl --user restart ymird`; and `train run --base` takes a `[[model.local]]` id, so node.toml also needs a `[[model.local]]` entry for the F16 base (not approved yet).
+
+## 2026-11-24 22:37 EST: weirdnet-model 0.5.3 / weirdnet-backends 0.4.4; upload code on weirdnet-model (branch `feature/weirdnet-model-0.5.3`)
+
+The Weirdnet lead released `weirdnet-model` 0.5.3 and `weirdnet-backends` 0.4.4 (crates.io) with the model upload pieces Ymir asked for. This moves U1/U5's interim code onto them; behaviour is kept.
+
+**What changed**
+- `Cargo.toml`/`Cargo.lock`: `weirdnet-model` 0.5.3, `weirdnet-backends` 0.4.4; [release.toml](release.toml) `[[requires]]` for both.
+- [crates/ymir-core/src/upload.rs](crates/ymir-core/src/upload.rs): `inspect` checks Ymir's rules (one GGUF model or LoRA; symlinks, split shards, projectors and other adapter types refused) and hashes with `artifact::inspect_with`; `Inspected` holds the `Artifact`. `import` copies into a staging directory beside the models directory (`<models_dir>.importing/`, outside the store; the system temp directory if that can't be made), then `ModelStore::import` places it whole with `provenance.json` and `adapter.json`. The record is `weirdnet_model::artifact::Provenance` (`weirdnet-provenance/1`); `architecture` goes in its extra fields. `provenance(item, spec)` builds the record (also for uploads over Weirdnet next). `keep_free` is `KeepFree::default().of(total)`. Ymir's own `Provenance`, `BaseRecord`, `RecordKind`, `ArtifactKind`, `revision_of` and `adapter.json` writer are gone.
+- [crates/ymir-core/src/train.rs](crates/ymir-core/src/train.rs): `import_spec` maps a run onto `ProvenanceBase`, `ProvenanceDataset` (format, hash, rows used, `rows_in`/`rows_used` counts, the license) and `ProvenanceTrainer` (name, build, run); the rest of the run (dataset name, teacher, node, settings, steps, loss) goes in the `ymir_train` extra field.
+- One layout change: an uploaded model goes to `models_dir/<id>/` (the store's layout, as uploads over Weirdnet) instead of `models_dir/uploads/<id>/`. Models uploaded there before stay, and uploading the same bytes again still answers "already there". Old `ymir-provenance/1` records read as `Provenance` (tested).
+- Tests: core upload tests on the new types (the source left alone, no staging left, the store lists the entry with its record, the legacy layout); ymirctl and `p3a` assertions on the new record fields.
+- Docs: the plan ("Switched to Weirdnet"), [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --no-fail-fast` 320 passed, 0 failed, 7 ignored; `p3a_llamacpp` with `YMIR_TEST_TRAINER_PYTHON` (the real trainer script's adapter imports through `weirdnet-model`); `site/tool/check_links.py`.
+
+**Not tested**: multi-GB files (three reads: hash, copy, the store's check); a staging directory on another filesystem than the models directory (the store copies then).
+
+**Next**: U2, `ymirctl models upload FILE --node X` over models/1.
+
+## 2026-11-24 21:45 EST: `train run --node` (P3a option C) and a trainable dataset fixture
+
+**Dataset fixture (merged d871bc9):** `crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl` (5 synthetic rows: 4 usable, 1 cached duplicate marked unusable) with its `ymir-dataset/1` manifest (teacher `synthetic-fixture`, CC0-1.0, input and sources hashes of the existing fixtures). `tests/dataset.rs` checks that `train::prepare_dataset` takes it (4 rows trained) and that the manifest's hashes and counts match. The 21:45 entry's run command named the batch prompt input, which has no manifest; it now names this file.
+
+**`ymirctl train run --node X`:** a run on another of the owner's model nodes from any linked device (an app-only one in the test), on published crates only (`weirdnet-net` 0.8.2 generic streams, `weirdnet-agent` 0.5.2 channels and roster auth; no Weirdnet crate edited). Ymir's own protocol `/ymir/train/1` (`crates/ymir-core/src/train_net.rs`), served by the model role only with the new `[train] remote = true` (default off), to linked, unrevoked devices, narrowed by `[train] callers`. The asking `ymird` resolves the node on the roster and sends the dataset and manifest inline (24 MiB cap); the node runs `train::run` in process (so it reserves itself through its own `ymird`) and streams lines back over the new streamed control request `Train`. Closing the stream (Ctrl-C) cancels the run. `--add` is refused with `--node`; `--from` must be inside the node's models directory; the adapter is served with `models adapter serve --node`.
+- Tests: `tests/p3a_remote.rs` (three real daemons on 127.0.0.1 with the mock trainer: an opted-out node refuses, the opted-in one trains and reserves in its ymird, node.toml unchanged, the sent dataset removed, refusals for a reused id, `--add`, a bad `--from`, an unknown and the local device; dropping the caller cancels the run and frees the GPU), plus unit tests in `train_net` (refused caller, file names and `--from` paths).
+- Not tested: a real node and trainer; the cap near 24 MiB; a revoked device (covered by `RosterAuth`, as models/1).
+- Missing for the rest (P3b): the run lives only as long as the caller's stream. A run that outlives the caller, shows up on every device and resumes on another node needs `weirdnet-agent`'s synced job record, which is not published.
+
+**Left:** the first real P3a run still needs a GPU model node with `[train]` (and `remote = true` to start it from another device) and the patched trainer; the agent may not edit node.toml.
+
+## 2026-11-24 21:45 EST: v0.9.0 signatures and TAUR; first real P3a run blocked
+
+**v0.9.0, finished:** the four Arch packages are signed with the WeirdBrains Muninn packages key (detached `.sig`, verified "Good signature") and uploaded to the [v0.9.0 release](https://github.com/WeirdBrains/ymir/releases/tag/v0.9.0) next to their packages (now 35 files); `weirdnet_release.py taur 0.9.0` published `ymir-bin` 0.9.0-1 and `ymir-cuda-bin` 0.9.0-1. This closes the "Left" items of the v0.9.0 entry below.
+
+**First real P3a run (approved once by m3talsmith, 2026-11-24): not run, blocked.**
+- `ymirctl train run` runs on the node it is called on; there is no `--node` for it yet (only `train reserve` takes one). The only machine the agent can reach is an app-only node: no model or inference role, no `[train]` in node.toml, so `train check` says "no trainer is set", and `ymirctl nodes` there lists no model nodes. Its own GPU (12 GB) isn't a Ymir model node.
+- The agent may not edit node.toml. A run needs either shell access to one GPU model node, or that node's owner to add `[train]` (`trainer` = `scripts/trainer.py` from v0.9.0 in a venv with `scripts/trainer-requirements.txt`, `build = "b12628"`) and build the patched trainer there (`python3 scripts/engine.py build --trainer --out DIR`, then `YMIR_LLAMA_FINETUNE` under `[train.env]`), and an F32 GGUF of a small base on that node (`--from`). Then: `ymirctl train check`, `ymirctl train run --base ID --dataset crates/ymir-testkit/tests/fixtures/decentralized-networks.dataset.jsonl --epochs 1 --context 256` (corrected 2026-11-24: `decentralized-networks.jsonl` is the batch prompt input and has no manifest; the trainable fixture is `decentralized-networks.dataset.jsonl` with its `.manifest.json`, added after this entry), and `ymirctl nodes` plus a chat to confirm serving came back.
+- Alternative for later: `train run --node X`, so a run can be started from any linked device (training plan "Next").
+
+## 2026-11-24 16:45 EST: v0.9.0 released
+
+`release: v0.9.0` (`94c1c29`, tag [`v0.9.0`](https://github.com/WeirdBrains/ymir/releases/tag/v0.9.0)) under "Just release", cut with `scripts/weirdnet_release.py` on main `536f4ec` after CI was green there (Linux, macOS, Windows; Windows needed a second attempt in the MSI step) and the release checks passed locally (fmt, clippy `-D warnings`, `cargo test --workspace` 314 passed, 0 failed). It carries the trainer's parse-special patch and build-number fix (`0b4cf61`), model upload U1 and U5, the M9 bundle fetcher and the Windows bench sandbox. The tag's CI, macOS and Release workflows passed ([Release run 45483965006](https://github.com/WeirdBrains/ymir/actions/runs/45483965006)). The GitHub release has 31 files with `SHA256SUMS`; `weirdnet_release.py assets 0.9.0` is ok. Artifacts scanned (Linux, macOS and Windows archives): only CI runner paths, no host names or home paths.
+
+This branch records the v0.9.0 tarball hashes in `packaging/arch/ymir-bin` and `ymir-cuda-bin` (`taur-check 0.9.0` ready for both).
+
+**Left, not possible from the dev box:** publishing to TAUR (`weirdnet_release.py taur 0.9.0`; `taurctl` and its login are on the maintainer's machine) and the detached `.pkg.tar.zst.sig` signatures v0.8.0 had (the signing key is local there). crates.io does not apply (`[crates] publish = []`). The Homebrew formula still has placeholder sums, as before.
+
+## 2026-11-24 15:18 EST: model upload U5, trainer outputs on the upload path (branch `feature/model-upload-trainer-output`)
+
+Slice U5 of [docs/design/model-upload.md](docs/design/model-upload.md), next after U1 in the approved order.
+
+**What changed**
+- [crates/ymir-core/src/train.rs](crates/ymir-core/src/train.rs): `train run` imports its adapter with `upload::import` (origin `train`) into `models_dir/adapters/ID/ID.gguf` with `provenance.json` and `adapter.json`, instead of moving it to `adapters/ID.gguf`; the run's copy is removed. New `train::import_spec(record, adapter, ms)` builds the record (base id/revision/quant, the dataset record, the trainer with run, node, hyperparameters, steps and loss). `AdapterRecord` gains `revision` (serde default, so older `run.json` files still read). The adapter id must now pass `upload::check_id`; an old flat `adapters/ID.gguf` still blocks the id.
+- [crates/ymir-core/src/upload.rs](crates/ymir-core/src/upload.rs): `ImportSpec` gains `dataset` and `trainer` and derives `Default`.
+- [crates/ymirctl/src/train.rs](crates/ymirctl/src/train.rs): `--add` (and the printed `adapter add` line) use the content revision, falling back to the run id for older records; prints the provenance path.
+- [crates/ymirctl/src/models/upload.rs](crates/ymirctl/src/models/upload.rs): `--from-run RUN_DIR`, FILE optional with it. Reads `run.json` (format, `done`, an adapter), checks the file's SHA-256 against the record, defaults the base and id from the run, refuses a base here at another revision than the run trained on, and imports with the run's record.
+- [crates/ymir-testkit/src/bin/ymir-mock-trainer.rs](crates/ymir-testkit/src/bin/ymir-mock-trainer.rs): `extract-lora` writes a real (tensorless) GGUF LoRA header, since the import reads it.
+- Tests: `p3a` checks the new layout, the provenance record and the content revision in node.toml; `p3a_llamacpp` paths; two new ymirctl tests (`upload_from_a_run_*`: a copied run with its record, the same bytes already here, a wrong SHA-256, another base revision, an unfinished run, a missing run.json).
+- Docs: the plan ("U5 as built", status), [docs/design/training.md](docs/design/training.md), [docs/DESIGN.md](docs/DESIGN.md), [CHANGELOG.md](CHANGELOG.md).
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked` 314 passed, 0 failed, 7 ignored; `p3a_llamacpp` with `YMIR_TEST_TRAINER_PYTHON` set to a venv with `scripts/trainer-requirements.txt` (the real trainer script's adapter imports); `site/tool/check_links.py`.
+
+**Not tested**: a real training run on a GPU; a run copied between two real nodes.
+
+**Behaviour change**: new runs register the content revision, not the run id. Existing node.toml entries and adapters are untouched.
+
+**Left**: `train run --add --rollout NAME` waits for U3. Nothing in U5 needs `weirdnet-model` 0.5.3 / `weirdnet-backends` 0.4.4; at the switch-over `import_spec` maps onto their `Provenance`. Not released: Ymir's release is signed on the release machine, which is offline.
+
+**Next**: U2 (upload to one node over Weirdnet), once Weirdnet requests A and B ship.
+
+## 2026-11-24 15:00 EST: llama-finetune parses special tokens (branch `feature/trainer-parse-special`)
+
+m3talsmith's updated decision 7: patch `llama-finetune` in Ymir's trainer build to tokenize with `parse_special = true`, stay on b12628, and drop the patch when upstream releases the fix (tracked: draft ggml-org/llama.cpp#31258). This replaces the "no local patch" answer in the entry below.
+
+**What changed**
+- [packaging/engines/patches/llama-finetune-parse-special.patch](packaging/engines/patches/llama-finetune-parse-special.patch): `examples/training/finetune.cpp` only. `common_tokenize(ctx, params.prompt, true, /*parse_special =*/ true)`, and `llama-finetune --ymir-patches` prints `parse-special` (upstream refuses that argument, so an unpatched build is told apart).
+- [scripts/engine.py](scripts/engine.py): `TRAINER_PATCHES`, `build_plan` (the steps of `build`: the patches, with `--trainer` only, before cmake), `apply_patch` (`git apply --check` first; a reused `--work` tree that has it is left alone; exits if it doesn't apply), `engine.toml` gets `trainer_patches`. A build without `--trainer` is unchanged, and `llama-server`/`rpc-server` compile from unpatched sources either way.
+- [scripts/trainer.py](scripts/trainer.py): `REQUIRED_PATCHES = ("parse-special",)`; `check_pin` (train and extract-lora) refuses a `llama-finetune` at the pin without it; `version` adds `"patches"` (Ymir's `TrainerVersion` ignores the extra field; `build` stays `b12628`, so `[train] build` in node.toml is unchanged).
+- Found with a real build: at b12628 `--version` prints `version: 1.0.0-dev (build N, commit X)`, and N counts commits, so `engine.py build`'s shallow clone reported `build 1` and `trainer.py` read `version: 1` as b1: a real `build --trainer` could never pass the pin check. `engine.py build` now passes `-DLLAMA_BUILD_NUMBER` from the pin (every build, serving too, which only changes the version line), and `trainer.py parse_build` reads both the 1.0 format and the older `version: 12628 (X)`. The fake prints the 1.0 format.
+- The fake `llama-finetune` answers `--ymir-patches` (`FAKE_FINETUNE_PATCHES`, empty acts unpatched) and records the base's control tokens it tokenized as specials. The test base has `<|im_start|>`/`<|im_end|>` as control tokens.
+- Tests: new [scripts/test_engine.py](scripts/test_engine.py) (stdlib: the trainer build applies the patch before cmake, a serving build applies none, the patch touches only `finetune.cpp`, `engine.toml` names it, and the patch applies to the pinned upstream `finetune.cpp` read from GitHub, then is seen as applied on a reused tree). [scripts/test_trainer.py](scripts/test_trainer.py) adds: required patches match engine.py's and each patch names its id; an unpatched build is refused for train and extract-lora (nothing runs); the special tokens of every turn train as single tokens. CI runs `test_engine.py` in the trainer step.
+- Docs: [docs/design/training.md](docs/design/training.md) (decision 7 updated, the special-token bullet, tests), [CHANGELOG.md](CHANGELOG.md) (Changed).
+
+**Checks**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -D warnings`; `cargo test --workspace --locked`; `p3a_llamacpp` with `YMIR_TEST_TRAINER_PYTHON`; `python3 scripts/test_engine.py` 5 passed; `scripts/test_trainer.py` 14 passed; the patch applies with `git apply --check` to a b12628 checkout (8a97fa9), and the patched `finetune.cpp` passes `clang++ -std=c++17 -fsyntax-only` against b12628's headers; `site/tool/check_links.py`.
+
+**Real build** (box, CPU only, clang, `--no-cpu-variants`): `engine.py build --trainer` cloned b12628, applied the patch (and said "already applied" on the reused `--work`), built `llama-server`, `rpc-server` and `llama-finetune`; `engine.toml` has `trainer_patches = ["parse-special"]`; `llama-finetune --ymir-patches` prints `parse-special`; `trainer.py version` gives `{"interface": 1, "engine": "llama.cpp", "build": "b12628", "patches": ["parse-special"]}`. The same binary rebuilt without the patch exits 1 on `--ymir-patches`, and `trainer.py` refuses it ("without Ymir's parse-special patch").
+
+**Not tested**: a real training run (no model downloaded); tokenization of specials was checked with the fake, not a real vocabulary; GPU builds.
+
+**Next**: when upstream releases a `llama-finetune` that parses specials, move the pin (`scripts/engine.py pin bNNNN`, `PINNED_BUILD`), delete the patch, its `TRAINER_PATCHES`/`REQUIRED_PATCHES` entries and the fake's `--ymir-patches`, and redo the Inkling checks for serving.
+
+## 2026-11-24 14:50 EST: model upload U1, local `ymirctl models upload` (branch `feature/model-upload-local`)
+
+The plan ([docs/design/model-upload.md](docs/design/model-upload.md)) was approved by the lead (order U1, U5, U2, U3,
+U4, U6, U7, U8; merged to main in 5ad1242) and m3talsmith answered its seven questions at 2:22 PM ET; the plan now
+records them under "Decisions" (every linked device may upload, license optional, no caps but 10 percent or 20 GiB
+kept free, uploads saved to node.toml by default, Bragi desktop first, private Hub repo as the stopgap), the Weirdnet
+lead's accepted shapes for A to C (`weirdnet-model` 0.5.3, `weirdnet-backends` 0.4.4, not built yet) and the
+switch-over to them.
+
+**What changed**
+- `ymir_core::upload` (interim, marked to move to `weirdnet-model`): `inspect` a GGUF model or LoRA (refuses
+  projectors, split shards, symlinks, non-GGUF, other adapter types), `import` (hash while copying into a hidden
+  temp file, sync, hard-link into place without replacing; `provenance.json`, and `adapter.json` for adapters in
+  `weirdnet-model`'s shape), `revision_of`, `check_adapter_base`, `check_license` (optional), `keep_free`.
+- `ymirctl models upload FILE [--name] [--adapter-for BASE] [--license] [--role] [--no-register] [--dir]`: adds the
+  entry to node.toml by default with the upload's revision (adapters through the same validated edit as `models adapter
+  add`, with `base_revision`/`base_quant`); says a llama.cpp adapter serves after a restart or the base's next load;
+  `--node` refused until U2. `hub::disk_space` (free and total) backs `free_bytes`.
+- Docs: DESIGN ("Uploading a model trained elsewhere"), the plan ("U1 as built", "Decisions", "Stopgap until U2"),
+  CHANGELOG.
+
+**Checks run**: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo
+test --workspace --locked --no-fail-fast`: 312 passed, 0 failed, 7 ignored. New tests: 11 in `upload::tests`
+(ymir-core) and 5 `models::tests::upload_*` (ymirctl), all on synthetic GGUF headers in temp dirs; the CLI tests pass
+the disk figures in, so they don't depend on the machine's free space.
+
+**Not tested**: a real fine-tuned model or adapter served after upload; Windows and macOS (CI runs on push to main).
+
+**What's left / next**: U5 (`--from-run`, `train run` writing `provenance.json`), then U2 once `weirdnet-model` 0.5.3
+and `weirdnet-backends` 0.4.4 are published. Roadmap entry not added yet.
+
+## 2026-11-24 14:30 EST: model upload plan (branch `feature/model-upload-plan`, not merged)
+
+m3talsmith asked for uploading models to Ymir through ymirctl and Bragi; the main use case is fine-tuning off the
+network and putting the result into the pool. Plan only, for the project lead's review before any code:
+[docs/design/model-upload.md](docs/design/model-upload.md). It covers what can be uploaded (GGUF models and splits,
+mmproj projectors, GGUF LoRA, PEFT adapters, safetensors for vLLM, MLX directories), a provenance record (base,
+dataset manifest, license, revision from the content hash), a chunked, resumable, SHA-256-checked `Upload` command on
+models/1, staging plus node-to-node replication for pools, a write grant for uploads, validation, quotas and disk
+checks, how an upload joins a P4b rollout at weight 0 behind the eval gate, P3a outputs on the same path
+(`--from-run`), the ymirctl and Bragi UX, requests A to D for the Weirdnet lead, risks and the slice order (U1 local
+upload with provenance first).
+
+**Checks run**: docs only; no code changed, no build. Surveyed `weirdnet-model` 0.5.2 (`ModelStore`, adapters, GGUF
+headers, download), `weirdnet-backends` 0.4.3 (models/1, `StoredEntry`, `ModelsService`), `weirdnet-agent` 0.5.2
+(`RosterAuth::require_roles`), `weirdnet-net` 0.8.2 stream limits, and Bragi main (Models screen, pools, rollouts,
+cert-only links).
+
+**What's left / next**: the lead's review and m3talsmith's answers to the plan's open questions; then U1. Requests A and
+B go to the Weirdnet lead once the plan is confirmed.
+
+## 2026-11-24 14:30 EST: trainer pin decision, white paper link (branch `feature/trainer-pin-decision`)
+
+**What changed** (docs only): [docs/design/training.md](docs/design/training.md) links the white paper's training section ([docs/whitepaper/sections/10-training.tex](docs/whitepaper/sections/10-training.tex)) instead of saying it is not in the repository, and records m3talsmith's decisions of 2026-11-24: 7, move the llama.cpp pin to a build whose `llama-finetune` parses special tokens, with no local patch; 8, "Just release".
+
+**Upstream check (2026-11-24):** no llama.cpp build fixes it. `examples/training/finetune.cpp` calls `common_tokenize(ctx, params.prompt, true)` with `parse_special` left at its default `false` at b12628, at the latest build b12680 and at `v1.0.0`; the file's last change is ggml-org/llama.cpp#20834 (2026-07-23). The only fix in flight is draft ggml-org/llama.cpp#31258 (its chat path tokenizes with `parse_special = true`), not merged. **The pin stays at b12628**; nothing in `scripts/trainer.py`, `packaging/engines/llama.cpp.toml`, CI or packaging changed.
+
+**Coupling:** the trainer and the bundled serving engine share the one pin in `packaging/engines/llama.cpp.toml` (`engine.py build --trainer` builds `llama-finetune` there; `trainer.py` refuses another build), so the move also moves serving and needs the Inkling checks redone. `weirdnet-backends` has no llama.cpp pin (only b12628 in comments and its HANDOFF), so no Weirdnet request.
+
+**Checks:** `site/tool/check_links.py`, `site/tool/gen_roadmap.py --check`, and every relative link in the training plan resolves. Also reworded the usage-stop entry's local-state line, which named a machine and a home path (check_links failed on it). No code changed, so no cargo run.
+
+**Not done:** a test that the trainer's text tokenizes specials as specials: it needs a `llama-finetune` that parses them (or a real tokenizer), which no upstream build has. When #31258 or another fix is released: `scripts/engine.py pin bNNNN`, update `PINNED_BUILD`, the fake `llama-finetune`, the tests and docs that say b12628, and add a tokenization check against a tiny vocab fixture.
+
+## 2026-11-24 13:25 EST: state at a usage stop (open branches, what's left)
+
+**On main (ac8aa63, CI green on Linux, macOS, Windows):** the llama.cpp trainer wrapper (feafb07), the Windows bench sandbox (e8923bf), the M9 bundle fetcher (b202a74), Infra's v0.8.0 PKGBUILD hashes (b99aabc). Release-ready: ac8aa63.
+
+**Open branches, all pushed:**
+- `fix/rollout-list-no-inference` (1 commit on ac8aa63): `ymirctl models rollout list` on a running node without the inference role said "ymird is not running here"; it now says the node has no inference role (the ControlResponse refusal is told apart from a dead socket). Unit test + `p4b.rs` e2e against a model-only ymird. CI 45455967977 green on all three OSes. **Left: merge (`--no-ff`) and push.**
+- `chore/helpers-0.3.3` (1 commit): vendors weirdnet-project-helpers 0.3.3 (validate and `--dry-run` compare `[[requires]]` versions offline) and pins `helpers = "0.3.3"`. `validate` passes, and fails with requires 0.4.2 against Cargo.toml 0.4.3. CI 45456634158 (Linux, macOS green; Windows pending at writing). **Left: merge once Windows is green.**
+- `feat/m9-bsd-packages`: FreeBSD `.pkg` + rc.d service, FreeBSD/OpenBSD `tar.gz`, `engine.py` without ggml-rpc RDMA on BSD, manual `bsd.yml`. Already merged in: main up to ac8aa63 and the fetcher. In the FreeBSD VM: cargo build, engine from source, package, `pkg add`, binaries, user and home all work. **Left: `service ymird start` did not come up** (run 45451131242: no `ymirctl status` in 60 s). The rc.d pidfile fix and failure diagnostics (syslog, ps, foreground ymird) are in run 45454646555, still running at writing; read its log, fix, re-run. **Before merging: remove the TEMPORARY `push:` trigger at the top of `.github/workflows/bsd.yml`.** HANDOFF/DESIGN/CHANGELOG entries for BSD are on the branch (the HANDOFF "RESULT" placeholder needs the final run result).
+- Older local branches pushed so nothing is only on a machine (already merged or superseded, kept for reference): `feat/m10-cert-only`, `feat/p2-training-export`, `feat/p3a-trainer`, `fix/p2-tombstones`, `fix/post-031`, `deps/backends-0.4.2`, `fix/pages-doc-links`, `fix/plan-total-and-requires`, `fix/test-port-race`, `p4a-slots-base-revision`, `weirdnet-live-adapters`.
+
+**Blocked / decisions:**
+- OpenBSD: its rust package is 1.81 (7.6), the workspace needs 1.99, and rustup has no OpenBSD.
+- MLX-LM for Inkling 2 Mini: mlx-lm#2086 is still an open draft (checked 2026-11-24); latest mlx-lm 0.32.2.
+- P3a trainer: upstream `llama-finetune` tokenizes with `parse_special=false`, so chat-template special tokens train as text. Decided 2026-11-24: patched in the trainer build (`feature/trainer-parse-special`) until upstream releases a fix (draft ggml-org/llama.cpp#31258).
+- Bench on macOS: macOS refuses both memory limits, so code answers are left unscored there. Allow scoring with CPU, file and process limits only?
+- Publishing update bundles and announcements needs the release script and the org keys.
+- The whitepaper roadmap line (docs/whitepaper/sections/12-roadmap.tex) still says the fetcher is next; it is Michael's file.
+
+**Local state:** the dev box's own Ymir checkout has a stash "local: release.yml aarch64 on 24.04 + CUDA check in docker" (main already has the 24.04-arm runner; compare before dropping). The phase log is kept off-repo on the dev box.
 
 ## 2026-11-24: M9 bundle fetcher (branch `feat/m9-bundle-fetcher`)
 

@@ -66,7 +66,7 @@ try {
     $defs = @("-d", "ProductVersion=$msiVersion", "-d", "LicenseRtf=$licenseRtf", "-d", "MsiX64=$((Resolve-Path $MsiX64).Path)")
     if ($MsiArm64) { $defs += @("-d", "MsiArm64=$((Resolve-Path $MsiArm64).Path)") }
     & $wix.Source build -nologo -acceptEula wix7 -arch x64 -ext "WixToolset.BootstrapperApplications.wixext/$WixVersion" @defs `
-      -o $exe (Join-Path $PSScriptRoot "bundle.wxs")
+      -pdbtype none -o $exe (Join-Path $PSScriptRoot "bundle.wxs")
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (!(Test-Path -LiteralPath $exe)) { Write-Error "wix build reported success but $exe is missing"; exit 1 }
     Write-Host "Setup created at $exe"

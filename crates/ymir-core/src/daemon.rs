@@ -20,6 +20,11 @@ pub struct Network {
     pub membership: Arc<Membership>,
     pub node: Arc<SyncNode>,
     pub hints: remote::Hints,
+    /// The synced training job board (P3b), for `ymirctl train run --job` on this box.
+    pub jobs: Option<Arc<crate::train_board::BoardJobStore>>,
+    /// This node's training bundles (datasets, checkpoints), served on `/ymir/blobs/1`, and the
+    /// client that fetches others' into it.
+    pub blobs: Option<(Arc<crate::train_job::LocalBlobs>, Arc<crate::blobs_net::BlobsClient>)>,
 }
 
 impl Network {
@@ -29,6 +34,14 @@ impl Network {
             return Ok(None);
         }
         let Some(m) = Membership::open(&paths.pool())? else { return Ok(None) };
+        // A model node votes on the training job board's claims once its grant has the jobs.
+        if cfg.roles.model {
+            match m.enable_train_voter() {
+                Ok(true) => tracing::info!("training jobs: voting on {}/ claims", crate::membership::TRAIN_TYPE),
+                Ok(false) => tracing::debug!("training jobs: no {} grant, not voting", crate::membership::TRAIN_TYPE),
+                Err(e) => tracing::warn!("training jobs: the lease voter: {e:#}"),
+            }
+        }
         let m = Arc::new(m);
         let ncfg = cfg.network.node_config(&cfg.name())?;
         let hints = cfg.network.hints()?;
@@ -36,7 +49,30 @@ impl Network {
         let node =
             tokio::task::spawn_blocking(move || weirdnet_sync::start_node(key, ncfg, state)).await?.map_err(|e| anyhow!("starting Weirdnet: {e}"))?;
         tracing::info!(peer = %node.peer_id(), user = %m.user_id(), devices = m.roster().active().count(), "Weirdnet: on");
-        Ok(Some(Self { membership: m, node: Arc::new(node), hints }))
+        let node = Arc::new(node);
+        let jobs = {
+            let hints = hints.clone();
+            let leases = weirdnet_sync::Leases::new(node.clone(), m.state())
+                .with_addrs(move |p| hints.iter().find(|(h, _)| h.to_string() == p).map(|(_, a)| a.clone()).unwrap_or_default());
+            match crate::train_board::BoardJobStore::open(&weirdnet_agent::jobs::SyncHandle::from_leases(leases), m.peer_id().to_string()) {
+                Ok(b) => Some(Arc::new(b)),
+                Err(e) => {
+                    tracing::warn!("training jobs: the synced board: {e:#}");
+                    None
+                }
+            }
+        };
+        let blobs = match crate::train_job::LocalBlobs::for_node(paths, cfg) {
+            Ok(b) => {
+                let b = Arc::new(b);
+                Some((b.clone(), Arc::new(remote::blobs_client(&node, &m, &hints, b))))
+            }
+            Err(e) => {
+                tracing::warn!("training files: {e:#}");
+                None
+            }
+        };
+        Ok(Some(Self { membership: m, node, hints, jobs, blobs }))
     }
 
     /// Sync passes against the user's other devices every `every` (roster changes, revocations).
@@ -58,6 +94,75 @@ impl Network {
     }
 }
 
+/// Who places models from this inference node, and where its plan goes: alone with no
+/// Weirdnet; with the `ymir.scheduler` lease held, on a cert-only inference node (which also
+/// votes on it), publishing the plan under `ymir.plan`; or, on one that holds the seed, while
+/// no cert-only inference node exists to hold the lease (unfenced, unpublished).
+fn placement_book(network: Option<&Network>, serving: &mut Vec<Box<dyn std::any::Any + Send + Sync>>) -> Box<dyn crate::placement::PlanBook> {
+    use crate::placement::{Alone, Lead, PLAN_NAME, PlacementPlan, PlanBook, PublishedPlan};
+    use weirdnet_sync::Term;
+
+    struct Seed(Arc<crate::membership::Membership>);
+    impl PlanBook for Seed {
+        fn lead(&self) -> Lead {
+            if self.0.scheduler_voters() == 0 { Lead::Alone } else { Lead::No }
+        }
+        fn still_holds(&self, _: Term) -> bool {
+            false
+        }
+        fn current(&self) -> Option<PublishedPlan> {
+            read_plan(&self.0)
+        }
+        fn publish(&self, _: Term, _: &PlacementPlan) -> anyhow::Result<PublishedPlan> {
+            anyhow::bail!("a seed holder places without the lease and publishes no plan")
+        }
+    }
+
+    struct Held {
+        m: Arc<crate::membership::Membership>,
+        elector: Arc<weirdnet_sync::Elector>,
+    }
+    impl PlanBook for Held {
+        fn lead(&self) -> Lead {
+            self.elector.handle().map_or(Lead::No, |h| Lead::Held(h.term()))
+        }
+        fn still_holds(&self, term: Term) -> bool {
+            self.elector.handle().is_some_and(|h| h.term() == term && h.is_valid())
+        }
+        fn current(&self) -> Option<PublishedPlan> {
+            read_plan(&self.m)
+        }
+        fn publish(&self, term: Term, plan: &PlacementPlan) -> anyhow::Result<PublishedPlan> {
+            let h = self.elector.handle().filter(|h| h.term() == term).ok_or_else(|| anyhow::anyhow!("the lease at term {term} is gone"))?;
+            let p = self.m.publish_plan(PLAN_NAME, &h, &serde_json::to_vec(plan)?)?;
+            Ok(PublishedPlan { term: p.term, version: p.version, signer: p.signer, plan: plan.clone() })
+        }
+    }
+
+    fn read_plan(m: &crate::membership::Membership) -> Option<PublishedPlan> {
+        let p = m.current_plan(PLAN_NAME)?;
+        Some(PublishedPlan { term: p.term, version: p.version, signer: p.signer, plan: serde_json::from_slice(&p.body).unwrap_or_default() })
+    }
+
+    let Some(net) = network else { return Box::new(Alone(true)) };
+    let m = net.membership.clone();
+    if !m.scheduler_candidate() {
+        tracing::info!("placement: this node holds the seed, so it places only while no cert-only inference node holds the scheduler lease");
+        return Box::new(Seed(m));
+    }
+    if let Err(e) = m.enable_scheduler_voter() {
+        tracing::warn!("placement: the scheduler lease voter: {e:#}; not placing");
+        return Box::new(Alone(false));
+    }
+    let Ok(name) = weirdnet_sync::LeaseName::new(crate::placement::SCHEDULER_LEASE) else { return Box::new(Alone(false)) };
+    let hints = net.hints.clone();
+    let leases = weirdnet_sync::Leases::new(net.node.clone(), m.state())
+        .with_addrs(move |p| hints.iter().find(|(h, _)| h.to_string() == p).map(|(_, a)| a.clone()).unwrap_or_default());
+    let elector = Arc::new(leases.elect(name, weirdnet_sync::LeaseConfig::for_role(crate::membership::ROLE_INFERENCE)));
+    serving.push(Box::new(elector.clone()));
+    Box::new(Held { m, elector })
+}
+
 pub struct Daemon {
     pub name: String,
     pub bridge_addr: Option<SocketAddr>,
@@ -73,6 +178,8 @@ pub struct Daemon {
     network: Option<Network>,
     /// Woken by a `shutdown` control request.
     exit: Arc<tokio::sync::Notify>,
+    /// This node's part of split-model groups, stopped on shutdown.
+    group_workers: Option<Arc<RpcWorkers>>,
 }
 
 /// (device, inode) of a file, to tell our socket from a successor's.
@@ -92,6 +199,13 @@ impl Daemon {
     /// Starts the enabled roles. Returns once the control socket and the bridge are listening;
     /// models load on first use or on `ymirctl load`.
     pub async fn start(cfg: NodeConfig, paths: Paths) -> Result<Self> {
+        let config = paths.config();
+        Self::start_at(cfg, paths, config).await
+    }
+
+    /// [`Daemon::start`] with `cfg` read from `config` (`ymird --config`): an upload saved into
+    /// this node's config (`/ymir/uploads/1`) edits that file.
+    pub async fn start_at(cfg: NodeConfig, paths: Paths, config: std::path::PathBuf) -> Result<Self> {
         cfg.validate()?;
         paths.ensure_state().with_context(|| format!("creating {}", paths.state().display()))?;
         let name = cfg.name();
@@ -143,6 +257,13 @@ impl Daemon {
             launches.extend(cfg.split_launches(&key));
             let sup = Supervisor::new(engines, launches.clone(), SupervisorOptions { log_dir: Some(paths.logs()), ..Default::default() });
             supervisor = Some(sup.clone());
+            // Limits measured at load (GGUF and projector headers) are kept next to the model files,
+            // so a model not loaded since a restart still reports its image and audio figures
+            // (video design, milestone 1/2). Reading them back touches the disk: off the runtime.
+            {
+                let (sup, store) = (sup.clone(), weirdnet_model::ModelStore::new(cfg.models_dir()));
+                tokio::task::spawn_blocking(move || sup.set_limits_store(Some(store))).await.ok();
+            }
             // A training run (or an operator) holds this node's GPU: start no model until it ends.
             if let Some(lock) = crate::train::held(&paths) {
                 sup.reserve(&lock.holder).await.map_err(|e| anyhow!("reserving for {}: {e}", lock.holder))?;
@@ -155,6 +276,9 @@ impl Daemon {
             let node = Arc::new(LocalModelNode::new(&name, sup, &launches));
             node.set_planner(planner);
             node.set_revisions(cfg.revisions().into_iter().map(|(id, rev, _)| (id, rev)));
+            for (id, origin, license) in cfg.origins() {
+                node.set_origin(&id, origin, license);
+            }
             let workers: Arc<RpcWorkers> = Arc::new(RpcWorkers::new(cfg.worker_config(&paths, key)));
             node.set_group_workers(workers.clone());
             group_workers = Some(workers);
@@ -196,6 +320,12 @@ impl Daemon {
         });
         if let Some(net) = &network {
             tasks.push(net.sync_loop(std::time::Duration::from_secs(cfg.network.sync_secs.max(1)), stop_rx.clone()));
+            if let Some((blobs, _)) = &net.blobs {
+                match remote::serve_blobs(&net.node, &net.membership, blobs.clone()) {
+                    Ok(server) => serving.push(Box::new(server)),
+                    Err(e) => tracing::warn!("serving training files on Weirdnet: {e}"),
+                }
+            }
             if let Some(c) = &coordinator {
                 let (server, feed) = remote::serve(
                     &net.node,
@@ -208,12 +338,29 @@ impl Daemon {
                 .map_err(|e| anyhow!("serving the inference role on Weirdnet: {e}"))?;
                 serving.push(Box::new(server));
                 serving.push(Box::new(feed));
+                if cfg.inference.remote_rollouts {
+                    let svc = crate::rollouts_net::RolloutsService::new(paths.config(), c.clone());
+                    let server = remote::serve_rollouts(&net.node, &net.membership, &cfg.inference.rollout_callers, svc)
+                        .map_err(|e| anyhow!("serving rollouts on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                }
                 if cfg.inference.agent.enabled {
                     let auth = remote::roster_auth(&net.membership);
                     let t = crate::tasks::serve(&net.node, c.clone(), auth, &cfg.node.name, &cfg.inference.agent)
                         .await
                         .map_err(|e| anyhow!("serving agent tasks on Weirdnet: {e}"))?;
                     tasks.push(t);
+                }
+                // Pool mode for the semantic cache (M6): shared with the other inference nodes
+                // that embed with the same model.
+                if let Some(sem) = c.semantic().filter(|s| s.opts.pool) {
+                    match crate::semcache_net::start(sem, &net.node, &net.membership, &net.hints, ropts.find_wait) {
+                        Ok(p) => {
+                            serving.push(Box::new(p));
+                            tracing::info!(embedding = %sem.opts.embedding_model, "semantic cache: shared with the pool's inference nodes");
+                        }
+                        Err(e) => tracing::warn!("semantic cache: pool mode off, staying local: {e}"),
+                    }
                 }
                 let d = remote::discover_model_nodes(
                     c.clone(),
@@ -238,6 +385,7 @@ impl Daemon {
                     );
                     (hw, budget)
                 });
+                let accelerated = hw.gpus.iter().any(|g| g.accel != weirdnet_model::hw::Accel::Cpu);
                 let (server, service) = remote::serve_model(
                     &net.node,
                     sup.clone(),
@@ -259,17 +407,55 @@ impl Daemon {
                 for (id, rev, quant) in cfg.revisions() {
                     service.set_model_info(&id, Some(rev), quant);
                 }
+                for (id, origin, license) in cfg.origins() {
+                    service.set_model_origin(&id, origin, license);
+                }
+                let node_service = service.clone();
                 serving.push(Box::new(server));
                 serving.push(Box::new(service));
                 if cfg.model.remote_manage {
                     // The owner's devices manage this node's model files (models/1); a pulled model is
-                    // added to the supervisor in memory. node.toml is never touched from here.
+                    // added to the supervisor in memory. An upload is also recorded and, unless the
+                    // uploader says `--no-persist`, saved in node.toml (/ymir/uploads/1).
                     let store = crate::models::store(cfg.models_dir(), &paths.state());
-                    let (server, svc) =
-                        remote::serve_models(&net.node, sup.clone(), &net.membership, store, budget, weirdnet_backends::EngineKind::Llamacpp)
-                            .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
+                    let policy =
+                        weirdnet_backends::models::WritePolicy::default().with_keep_free(cfg.model.keep_free()).with_uploads(cfg.model.upload);
+                    let (server, svc) = remote::serve_models(
+                        net,
+                        sup.clone(),
+                        store,
+                        budget,
+                        cfg.model.upload_engine(),
+                        policy,
+                        remote::PlacedInfo { record: node_service.clone(), local: model_node.clone() },
+                    )
+                    .map_err(|e| anyhow!("serving model management on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                    let uploads = crate::upload_net::UploadsService::new(config.clone(), cfg.models_dir(), svc.clone(), node_service, accelerated);
+                    let server =
+                        remote::serve_uploads(&net.node, &net.membership, uploads).map_err(|e| anyhow!("serving uploads on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                    let server = remote::serve_train_status(
+                        &net.node,
+                        &net.membership,
+                        paths.clone(),
+                        cfg.clone(),
+                        net.jobs.clone().map(|j| j as Arc<dyn crate::train_job::JobStore>),
+                    )
+                    .map_err(|e| anyhow!("serving training status on Weirdnet: {e}"))?;
                     serving.push(Box::new(server));
                     models_service = Some(svc);
+                }
+                if cfg.train.remote {
+                    // The owner's devices start runs here (`ymirctl train run --node`); node.toml is
+                    // never touched from here.
+                    let server = remote::serve_train(&net.node, &net.membership, paths.clone(), cfg.clone())
+                        .map_err(|e| anyhow!("serving training runs on Weirdnet: {e}"))?;
+                    serving.push(Box::new(server));
+                    if cfg.train.callers.is_empty() {
+                        tracing::warn!("training: any linked device may start a run on this node; set [train] callers to narrow it");
+                    }
+                    tracing::info!("training: taking runs from the user's devices on Weirdnet ({})", crate::train_net::TRAIN_PROTOCOL);
                 }
                 tracing::info!(
                     "model role: serving the user's inference nodes on Weirdnet{}",
@@ -290,6 +476,13 @@ impl Daemon {
                     Err(e) => tracing::warn!(model = %standin, "stand-in not warm: {e}"),
                 }
             }));
+        }
+
+        // Placement and replication (M6): one inference node at a time keeps the listed models
+        // loaded on their number of model nodes (see `placement`).
+        if let (Some(c), false, true) = (&coordinator, cfg.inference.placement.is_empty(), cfg.inference.scheduler_eligible) {
+            let book = placement_book(network.as_ref(), &mut serving);
+            tasks.push(c.spawn_placement(cfg.inference.placement.clone(), book));
         }
 
         let mut alerter = None;
@@ -330,9 +523,7 @@ impl Daemon {
             let pool = Arc::new(pool);
             app_pool = Some(pool.clone());
             let token = crate::token::load_or_create(&paths)?;
-            let bridge = weirdnet_openai::Bridge::bind(weirdnet_openai::BridgeOptions::new(cfg.app.bridge.port, token))
-                .await
-                .with_context(|| format!("binding the bridge on 127.0.0.1:{}", cfg.app.bridge.port))?;
+            let bridge = bind_bridge(&cfg.app.bridge, token).await?;
             let addr = bridge.local_addr()?;
             bridge_addr = Some(addr);
             let mut rx = stop_rx.clone();
@@ -361,13 +552,16 @@ impl Daemon {
             alerter,
             network: network.as_ref().map(|n| (n.membership.clone(), n.node.clone())),
             models: network.as_ref().map(|n| Arc::new(remote::models_hub(&n.node, &n.membership, &n.hints, &ropts, &name, models_service))),
+            train: network.as_ref().map(|n| Arc::new(remote::train_hub(&n.node, &n.membership, &n.hints, &ropts, &name))),
+            jobs: network.as_ref().and_then(|n| n.jobs.clone().map(|j| (j, n.membership.peer_id().to_string()))),
+            blobs: network.as_ref().and_then(|n| n.blobs.as_ref().map(|(_, c)| c.clone())),
             context,
             pool: app_pool,
             exit: exit.clone(),
         });
         tasks.push(tokio::spawn(control::serve(listener, handler, stop_rx)));
         tracing::info!(node = %name, roles = ?roles.names(), "ymird started");
-        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper, serving, network, exit })
+        Ok(Self { name, bridge_addr, coordinator, paths, supervisor, stop, tasks, socket_id, reaper, serving, network, exit, group_workers })
     }
 
     /// Resolves when a `shutdown` control request arrives (`ymirctl service stop` on a Windows
@@ -397,6 +591,10 @@ impl Daemon {
                 let _ = tokio::task::spawn_blocking(move || node.stop()).await;
             }
         }
+        // Group processes (rpc-server, Ray, the leader's vLLM) with their whole process groups.
+        if let Some(w) = &self.group_workers {
+            w.down_all().await;
+        }
         if let Some(s) = &self.supervisor {
             s.shutdown().await;
         }
@@ -425,4 +623,19 @@ fn preflight_vllm(cfg: &NodeConfig, engines: &[weirdnet_backends::EngineConfig],
         anyhow::bail!("{}", crate::vllm::inkling_unsupported_message(None));
     };
     crate::vllm::ensure_inkling(&eng.program, false)
+}
+
+/// The app role's loopback OpenAI bridge (`weirdnet-openai`), bound but not serving: `[app.bridge]`
+/// `port` on 127.0.0.1 and `max_request_bytes` (the crate's 32 MiB when unset), which bounds every
+/// body, `/v1/audio/speech` (a `data:` reference clip included) and `/v1/audio/transcriptions`
+/// uploads too. Its routes are the crate's: `/v1/models`, chat, completions, embeddings,
+/// `/v1/audio/speech` and `/v1/audio/transcriptions` (0.2.5), all over the pool it serves.
+pub async fn bind_bridge(section: &crate::config::BridgeSection, token: String) -> Result<weirdnet_openai::Bridge> {
+    let bridge = weirdnet_openai::Bridge::bind(weirdnet_openai::BridgeOptions::new(section.port, token))
+        .await
+        .with_context(|| format!("binding the bridge on 127.0.0.1:{}", section.port))?;
+    Ok(match section.max_request_bytes {
+        Some(n) => bridge.with_max_request_bytes(usize::try_from(n).unwrap_or(usize::MAX)),
+        None => bridge,
+    })
 }

@@ -5,12 +5,15 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 pub mod bench;
+pub mod engines;
 pub mod eval;
 pub mod mcp;
 pub mod mcp_servers;
 pub mod models;
 pub mod pool;
+pub mod speak;
 pub mod train;
+pub mod transcribe;
 pub mod update_fetch;
 
 use anyhow::{Context, Result, bail};
@@ -69,6 +72,40 @@ pub enum UpdateCmd {
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
     },
+    /// Publisher side: sign a bundle directory (a plain file set with `ymird` at the top) with a
+    /// release key, writing `manifest.env` and the org root as `roots/1.env`. The key file holds
+    /// the seed as 64 hex characters and is never printed. The result is checked as a node
+    /// would check it before anything is written.
+    SignBundle {
+        dir: PathBuf,
+        /// The release key file.
+        #[arg(long)]
+        key: PathBuf,
+        /// The signed org root file.
+        #[arg(long)]
+        root: PathBuf,
+        /// The root fingerprint the root file must have.
+        #[arg(long)]
+        pin: Option<String>,
+        /// The release version (default: this ymirctl's).
+        #[arg(long)]
+        version: Option<String>,
+        /// The update's seq (default: from the version, MAJOR*10^6 + MINOR*10^3 + PATCH).
+        #[arg(long)]
+        seq: Option<u64>,
+        #[arg(long, default_value = "linux")]
+        os: String,
+        #[arg(long)]
+        arch: String,
+        #[arg(long, default_value = "")]
+        notes: String,
+        /// How many days the manifest can be staged for.
+        #[arg(long, default_value_t = 90)]
+        valid_days: u64,
+    },
+    /// Check the `[update]` feed once and stage a newer release for this machine (what `ymird`
+    /// does on its own every `[update] interval`). The running ymird takes it at its next start.
+    Check,
     /// What is pinned, the good release, a trial under way, and releases marked bad.
     Status,
     /// Choose what to start (the good release, a candidate on trial, or a rollback) and print its path;
@@ -93,6 +130,12 @@ pub enum Cmd {
     },
     /// Detect the hardware, pick a backend and models that fit, and write node.toml.
     Setup(SetupArgs),
+    /// Engines Ymir manages: `engines install vllm` puts vLLM and Ray in a venv ymird finds on its
+    /// own; `status`, `upgrade`, `uninstall`.
+    Engines {
+        #[command(subcommand)]
+        cmd: engines::EnginesCmd,
+    },
     /// Self-update: pin the org root, stage a signed bundle, start with rollback.
     Update {
         #[command(subcommand)]
@@ -116,6 +159,20 @@ pub enum Cmd {
     },
     /// Unload a model everywhere it is loaded.
     Unload { model: String },
+    /// Move a loaded model to another model node: it loads there (the node needs its own copy;
+    /// `ymirctl models pull`), new requests go there, and it unloads from the old node once
+    /// what it has finishes (at most --grace seconds).
+    Move {
+        model: String,
+        /// The node to move it to (see `ymirctl nodes`).
+        #[arg(long)]
+        to: String,
+        /// The node to move it from (default: where it is loaded).
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long, default_value_t = 60)]
+        grace: u64,
+    },
     /// The model nodes the pool routes to.
     Nodes,
     /// Stop sending a model node new requests; it finishes what it has. `--resume` undoes it.
@@ -152,6 +209,12 @@ pub enum Cmd {
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
     },
+    /// Speech to text through the pool: an audio or video file (or stdin) to text, JSON, SRT or
+    /// VTT. `--chunk auto` cuts long audio at silences to the transcriber's reported length.
+    Transcribe(transcribe::TranscribeArgs),
+    /// Text to speech through the pool: text, a file, stdin or a multi-speaker script, with a
+    /// preset, designed or cloned voice; long text is split, spoken and stitched.
+    Speak(speak::SpeakArgs),
     /// Split models: a model too big for one node, served by a group of nodes over a private link.
     Group {
         #[command(subcommand)]
@@ -237,9 +300,15 @@ pub struct BatchJsonlArgs {
     #[arg(long, requires = "jsonl")]
     pub out: Option<PathBuf>,
     /// The teacher model's license (an SPDX id such as `apache-2.0`), recorded in the manifest.
-    /// Some licenses forbid training on a model's outputs: check before you generate.
+    /// Some licenses forbid training on a model's outputs: check before you generate. Without it,
+    /// the license comes from `--license-from`, else from the pool's catalog when it knows the
+    /// teacher's (a model pulled from the Hub or uploaded with one).
     #[arg(long, requires = "jsonl")]
     pub license: Option<String>,
+    /// Read the teacher's license from this Hugging Face repo's model card (OWNER/NAME): the
+    /// repo the teacher's weights came from.
+    #[arg(long, requires = "jsonl", conflicts_with = "license")]
+    pub license_from: Option<String>,
     /// Accept `--license unknown`.
     #[arg(long, requires = "jsonl")]
     pub allow_unknown_license: bool,
@@ -291,7 +360,7 @@ pub enum ServiceCmd {
         /// Start through `ymirctl update boot`, so a staged update gets a trial and a rollback.
         #[arg(long)]
         managed_updates: bool,
-        /// With --system on Linux and macOS: the account ymird runs as (default: $SUDO_USER).
+        /// With --system on Linux, macOS and FreeBSD: the account ymird runs as (default: $SUDO_USER).
         #[arg(long)]
         run_as: Option<String>,
     },
@@ -449,6 +518,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
     match cli.cmd {
         Cmd::Hw { json } => hw(out, json),
         Cmd::Setup(args) => setup_cmd(&paths, args, out, input).await,
+        Cmd::Engines { cmd } => engines::run(&paths, cmd, out),
         Cmd::Status { json } => status(&paths, out, json).await,
         Cmd::Models { cmd: None } => models(&paths, out).await,
         Cmd::Models { cmd: Some(cmd) } => models::run(&paths, out, input, cmd).await,
@@ -458,8 +528,10 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
             let o = update_fetch::watch::Options { relay, fetch, once, wait: std::time::Duration::from_secs(wait_secs) };
             update_fetch::watch::run(&paths, out, o).await
         }
+        Cmd::Update { cmd: UpdateCmd::Check } => update_check(&paths, out).await,
         Cmd::Update { cmd } => update_cmd(&paths, out, cmd),
         Cmd::Unload { model } => admin(&paths, out, ControlRequest::Unload { model }).await,
+        Cmd::Move { model, to, from, grace } => admin(&paths, out, ControlRequest::Move { model, to, from, grace_secs: grace }).await,
         Cmd::Nodes => nodes(&paths, out).await,
         Cmd::Drain { node, resume } => admin(&paths, out, ControlRequest::Drain { node, on: !resume }).await,
         Cmd::Context { cmd } => context_cmd(&paths, out, cmd).await,
@@ -486,6 +558,8 @@ pub async fn run(cli: Cli, out: &mut dyn Write, input: &mut dyn BufRead) -> Resu
         Cmd::Chat { model, system, temperature, max_tokens, wait, adapter_scale, prompt } => {
             chat(&paths, out, input, model, system, temperature, max_tokens, wait, adapter_scale, prompt).await
         }
+        Cmd::Transcribe(args) => transcribe::run(&paths.socket(), args, out, input).await,
+        Cmd::Speak(args) => speak::run(&paths.socket(), args, out, input, speak::stdout_is_tty()).await,
         Cmd::Batch { file, model, concurrency, retries, jsonl } if jsonl.jsonl => {
             batch_jsonl(&paths, out, file, model, concurrency, retries, jsonl).await
         }
@@ -623,7 +697,9 @@ async fn setup_cmd(paths: &Paths, args: SetupArgs, out: &mut dyn Write, input: &
     }
     match &p.vllm {
         Some(v) => writeln!(out, "vLLM: {}", v.display())?,
-        None if p.hardware.vllm_supported() => writeln!(out, "vLLM: not installed (optional; GGUF models use llama.cpp)")?,
+        None if p.hardware.vllm_supported() => {
+            writeln!(out, "vLLM: not installed (optional; GGUF models use llama.cpp; `ymirctl engines install vllm` adds vLLM and Ray)")?
+        }
         None => {}
     }
     writeln!(out, "Models:")?;
@@ -929,9 +1005,38 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
             extra.push_str(", wrapped");
         }
         if let Some(c) = m.capabilities {
-            let media: Vec<&str> = [(c.vision, "images"), (c.audio, "audio")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect();
+            let media: Vec<&str> =
+                [(c.vision, "images"), (c.audio, "audio"), (c.video, "video")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect();
             if !media.is_empty() {
                 extra.push_str(&format!(", takes {}", media.join(" and ")));
+            }
+            if c.transcribe {
+                extra.push_str(", transcribes (speech to text)");
+            }
+            if c.speak {
+                extra.push_str(&format!(", speaks (text to speech){}", speech_line(m.speech.as_ref())));
+                if let Some(l) = &m.license {
+                    extra.push_str(&format!(", license {l}"));
+                }
+                match m.guests {
+                    Some(false) => extra.push_str(", not for guests"),
+                    Some(true) if m.license.as_deref().is_some_and(|l| weirdnet_model::speech::restricting_license(Some(l)).is_some()) => {
+                        extra.push_str(", guests allowed (guests = true)")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if m.capabilities.is_none_or(|c| c.chat && !c.speak) && m.base.is_none() {
+            let measured = if m.context_tokens.is_some_and(|c| c > 0) { " (measured)" } else { "" };
+            let ctx = m.context_tokens.filter(|c| *c > 0).or_else(|| ymir_core::model_node::request_context(m.engine, m.context, m.slots));
+            match ctx {
+                Some(c) => extra.push_str(&format!(", context {c} per request{measured}")),
+                None => extra.push_str(", context not reported"),
+            }
+            match m.capabilities.and_then(|c| ymir_core::model_node::limits_line(&c.limits)) {
+                Some(l) => extra.push_str(&format!(", limits: {l}")),
+                None => extra.push_str(", media limits not reported"),
             }
         }
         if let Some(s) = m.last_load_secs {
@@ -949,6 +1054,9 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
     if !s.alerts.is_empty() {
         writeln!(out, "Alerts: {}", s.alerts.join(", "))?;
     }
+    if let Some(c) = &s.cache {
+        write_cache(out, c)?;
+    }
     match &s.network {
         Some(n) => {
             let linked = n.devices.iter().filter(|d| d.active && !d.me).count();
@@ -960,6 +1068,59 @@ async fn status(paths: &Paths, out: &mut dyn Write, json: bool) -> Result<()> {
         None => writeln!(out, "Weirdnet: off (link with `ymirctl pool link`)")?,
     }
     Ok(())
+}
+
+fn write_cache(out: &mut dyn Write, c: &ymir_core::semantic::CacheStatus) -> Result<()> {
+    write!(out, "Semantic cache: {} ({}), {} entries here", c.mode, c.embedding_model, c.entries)?;
+    if c.mode == "pool" {
+        write!(out, ", {} member{}", c.members.len(), if c.members.len() == 1 { "" } else { "s" })?;
+        if !c.down.is_empty() {
+            write!(out, ", {} unreachable", c.down.len())?;
+        }
+    }
+    writeln!(out)?;
+    if let Some(st) = &c.stats {
+        writeln!(
+            out,
+            "  hits: {} local copy, {} own shards, {} other nodes; {} misses ({} degraded); {} errors, {} timeouts",
+            st.l1_hits, st.shard_hits, st.peer_hits, st.misses, st.degraded, st.peer_errors, st.timeouts
+        )?;
+    }
+    Ok(())
+}
+
+/// What a speaker does, for `ymirctl status`: `: 54 voices (af_heart, ...), clones, 24 kHz`.
+pub fn speech_line(p: Option<&weirdnet_agent::speech::SpeechProfile>) -> String {
+    let Some(p) = p else { return String::new() };
+    let mut parts = Vec::new();
+    match p.presets.as_deref() {
+        Some([one]) => parts.push(format!("voice {one}")),
+        Some(v) if !v.is_empty() => {
+            let shown: Vec<&str> = v.iter().take(3).map(String::as_str).collect();
+            let more = if v.len() > 3 { ", ..." } else { "" };
+            parts.push(format!("{} voices ({}{more})", v.len(), shown.join(", ")));
+        }
+        _ => {}
+    }
+    if p.design {
+        parts.push("designs voices".into());
+    }
+    if p.clone.is_some() {
+        parts.push("clones".into());
+    }
+    if let Some(n) = p.script_speakers {
+        parts.push(format!("scripts of up to {n} speakers"));
+    }
+    if let Some(l) = &p.languages {
+        parts.push(format!("{} languages", l.len()));
+    }
+    if let Some(hz) = p.sample_rate {
+        parts.push(format!("{} kHz", f64::from(hz) / 1000.0));
+    }
+    if let Some(c) = p.max_input_chars {
+        parts.push(format!("up to {c} characters"));
+    }
+    if parts.is_empty() { String::new() } else { format!(": {}", parts.join(", ")) }
 }
 
 fn write_nodes(out: &mut dyn Write, nodes: &[control::NodeSummary]) -> Result<()> {
@@ -1043,15 +1204,24 @@ pub(crate) async fn bridge(paths: &Paths) -> Result<BridgeClient> {
 async fn models(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     let v = bridge(paths).await?.models().await?;
     for m in v["data"].as_array().into_iter().flatten() {
-        let ready = match m["weirdnet"]["state"].as_str() {
-            Some("warm") => "ready",
-            Some("busy") => "ready (busy)",
-            Some("loading") => "loading",
-            _ => "on disk",
-        };
-        writeln!(out, "{:<24} {:<10} {}", m["id"].as_str().unwrap_or("?"), m["weirdnet"]["purpose"].as_str().unwrap_or(""), ready)?;
+        writeln!(out, "{}", pool_line(m))?;
     }
     Ok(())
+}
+
+/// One `ymirctl models` line for a `/v1/models` entry: id, purpose, state, and where it came
+/// from with its license when the pool knows (`upload, MIT`; U8).
+fn pool_line(m: &serde_json::Value) -> String {
+    let w = &m["weirdnet"];
+    let ready = match w["state"].as_str() {
+        Some("warm") => "ready",
+        Some("busy") => "ready (busy)",
+        Some("loading") => "loading",
+        _ => "on disk",
+    };
+    let from: Vec<&str> = [w["origin"].as_str(), w["license"].as_str()].into_iter().flatten().collect();
+    let line = format!("{:<24} {:<10} {:<13} {}", m["id"].as_str().unwrap_or("?"), w["purpose"].as_str().unwrap_or(""), ready, from.join(", "));
+    line.trim_end().to_string()
 }
 
 async fn for_training(paths: &Paths) -> Result<Vec<ymir_core::context::RawConversation>> {
@@ -1202,9 +1372,48 @@ async fn chat(
     Ok(())
 }
 
+async fn update_check(paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    use ymir_core::autoupdate::{self as au, Outcome};
+    let cfg = NodeConfig::load(&paths.config()).map(|c| c.update).unwrap_or_default();
+    cfg.validate()?;
+    let http = reqwest_client()?;
+    // The version and build of the ymird that runs here decide what is newer and which bundle.
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let exe = std::env::current_exe().unwrap_or_default();
+    let o = au::check_once(paths, &cfg, &running, &exe, &http).await;
+    au::record(paths, &au::describe(&o));
+    match o? {
+        Outcome::UpToDate { latest } => writeln!(out, "up to date: the feed's latest is {latest}")?,
+        Outcome::Skipped(why) => writeln!(out, "nothing taken: {why}")?,
+        Outcome::Staged { update_id, version } => writeln!(out, "staged {update_id} {version}; it runs on trial at the next start")?,
+    }
+    Ok(())
+}
+
+fn reqwest_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("ymirctl/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
 fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> {
     use ymir_core::update::{Boot, Updater};
     let now = weirdnet_update::Timestamp::now();
+    if let UpdateCmd::SignBundle { dir, key, root, pin, version, seq, os, arch, notes, valid_days } = cmd {
+        use ymir_core::update_publish as p;
+        let version = semver::Version::parse(version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")))?;
+        let seq = match seq {
+            Some(s) => s,
+            None => p::seq_for(&version)?,
+        };
+        let spec = p::BundleSpec { version, seq, platform: p::platform(&os)?, arch: p::arch(&arch)?, notes, valid_secs: valid_days * 86_400 };
+        let k = p::read_key(&key)?;
+        let root_env = std::fs::read(&root).with_context(|| format!("reading {}", root.display()))?;
+        let s = p::sign_bundle(&dir, &k, &root_env, pin.as_deref(), &spec, now)?;
+        writeln!(out, "signed {} {} ({} files, {} bytes) for {os}/{arch} under root {}", s.update_id, spec.version, s.files, s.bytes, s.pin)?;
+        return Ok(());
+    }
     let mut u = Updater::open(paths, now)?;
     match cmd {
         UpdateCmd::Trust { pin, root } => {
@@ -1246,7 +1455,9 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
                 f.update.manifest.version
             )?;
         }
+        UpdateCmd::SignBundle { .. } => unreachable!("handled before the updater opens"),
         UpdateCmd::Watch { .. } => bail!("`update watch` runs in the async dispatcher"),
+        UpdateCmd::Check => bail!("`update check` runs in the async dispatcher"),
         UpdateCmd::Status => {
             let s = u.status();
             writeln!(out, "root: {}", if s.trusted { "pinned" } else { "not pinned" })?;
@@ -1254,6 +1465,16 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             writeln!(out, "health: {:?}", s.health)?;
             if !s.bad.is_empty() {
                 writeln!(out, "marked bad: {}", s.bad.join(", "))?;
+            }
+            let cfg = NodeConfig::load(&paths.config()).map(|c| c.update).unwrap_or_default();
+            writeln!(
+                out,
+                "self-update: {}",
+                if cfg.auto { format!("on, every {} from {}", cfg.interval, cfg.feed) } else { "off ([update] auto = false)".into() }
+            )?;
+            if let Some(c) = ymir_core::autoupdate::last_check(paths) {
+                let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).saturating_sub(c.at);
+                writeln!(out, "last check: {} ({}m ago)", c.result, ago / 60)?;
             }
         }
         UpdateCmd::Boot { exec, installed, args } => {
@@ -1271,7 +1492,7 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                let e = std::process::Command::new(&path).args(&args).exec();
+                let e = std::process::Command::new(&path).args(&args).env(ymir_core::autoupdate::BOOT_ENV, "1").exec();
                 bail!("starting {}: {e}", path.display());
             }
             #[cfg(not(unix))]
@@ -1282,6 +1503,33 @@ fn update_cmd(paths: &Paths, out: &mut dyn Write, cmd: UpdateCmd) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// The teacher's license and where it came from: `--license` (the operator), `--license-from`
+/// (the Hub repo's model card), or the pool's catalog.
+async fn teacher_license(paths: &Paths, out: &mut dyn Write, teacher: &str, license: Option<String>, from: Option<&str>) -> Result<(String, String)> {
+    if let Some(l) = license {
+        return Ok((l, "operator".into()));
+    }
+    if let Some(repo) = from {
+        // The token goes to the public Hub only, never to a mirror (as for downloads).
+        let hub_url = weirdnet_model::ModelStore::from_env().hub().to_string();
+        let token = ymir_core::models::find_hf_token(&paths.state()).map(|(t, _)| t).filter(|_| hub_url == weirdnet_model::store::HUB);
+        let repo_s = repo.to_string();
+        let l = tokio::task::spawn_blocking(move || models::hub::MlxHub::new(&hub_url, token).license(&repo_s)).await??;
+        let Some(l) = l else { bail!("{repo}'s model card states no license; give it with --license (or `unknown` with --allow-unknown-license)") };
+        writeln!(out, "Teacher license: {l} (from {repo}'s model card on the Hub)")?;
+        return Ok((l, format!("hub:{repo}")));
+    }
+    let models = bridge(paths).await?.models().await.ok();
+    if let Some((l, origin)) = models.as_ref().and_then(|m| ymir_core::dataset::catalog_license(m, teacher)) {
+        let via = origin.map(|o| format!(", {o}")).unwrap_or_default();
+        writeln!(out, "Teacher license: {l} (the pool's catalog{via})")?;
+        return Ok((l, "pool".into()));
+    }
+    bail!(
+        "--jsonl needs the teacher's license (some forbid training on outputs) and the pool doesn't know `{teacher}`'s: give --license, or --license-from OWNER/NAME to read it from the Hub repo's model card; `--license unknown` with --allow-unknown-license"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1301,14 +1549,13 @@ async fn batch_jsonl(
     }
     let Some(teacher) = model else { bail!("--jsonl needs --model: the teacher model") };
     let Some(output) = a.out else { bail!("--jsonl needs --out FILE") };
-    let Some(license) = a.license else {
-        bail!("--jsonl needs --license: the teacher model's license (some forbid training on outputs); `unknown` with --allow-unknown-license")
-    };
+    let (license, license_source) = teacher_license(paths, out, &teacher, a.license, a.license_from.as_deref()).await?;
     let g = Generate {
         input: PathBuf::from(file),
         output,
         teacher,
         license,
+        license_source,
         allow_unknown_license: a.allow_unknown_license,
         defaults: RowDefaults { system: a.system, temperature: a.temperature, top_p: a.top_p, max_tokens: a.max_tokens, seed: a.seed },
         sources: a.sources,
@@ -1335,4 +1582,19 @@ async fn batch_jsonl(
     )?;
     writeln!(out, "manifest: {}", s.manifest_path.display())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pool_line_tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_pool_line_says_where_a_model_came_from_when_known() {
+        let up = json!({"id": "tuned", "weirdnet": {"purpose": "chat", "state": "warm", "origin": "upload", "license": "MIT"}});
+        assert_eq!(super::pool_line(&up), format!("{:<24} {:<10} {:<13} upload, MIT", "tuned", "chat", "ready"));
+        let hub = json!({"id": "qwen", "weirdnet": {"purpose": "chat", "state": "loadable", "origin": "hub", "license": null}});
+        assert!(super::pool_line(&hub).ends_with("on disk       hub"), "{}", super::pool_line(&hub));
+        let old = json!({"id": "e", "weirdnet": {"purpose": "embedding", "state": "warm"}});
+        assert_eq!(super::pool_line(&old), format!("{:<24} {:<10} ready", "e", "embedding"));
+    }
 }

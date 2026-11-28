@@ -61,15 +61,18 @@ python3 scripts/engine.py fetch --target x86_64-unknown-linux-gnu --out target/r
 ymirctl hw                                   # what this machine has and the model budget
 ymirctl setup --model /path/to/model.gguf    # or --llama-server PATH for your own llama.cpp
 #   or: ymirctl setup --download             # catalog models that fit, asks before downloading
+ymirctl engines install vllm                 # optional: vLLM nightly (runs Inkling 2 Mini) + Ray in a managed venv ymird finds (Linux)
 ymird &                                      # model, inference and app roles in one process
 ymirctl chat "Hello"                         # streams through the loopback bridge
+ymirctl transcribe talk.mp3 --format srt     # transcribe through the pool (--chunk auto for clips over the model limit)
+ymirctl speak "Hello" -o hello.wav           # text to speech through the pool (needs a role = "speak" model)
 ymirctl status                               # roles, models and their state
 ymirctl load <model> / ymirctl unload <model>
 ymirctl mcp                                  # MCP server for Cursor, Claude Desktop and VS Code (stdio; --http for loopback HTTP)
 ymirctl bench                                # compare every model on the pool: speed and quality, saved as JSON and Markdown
 ymirctl bridge token                         # API key for Jan: base URL http://127.0.0.1:8484/v1
 ymirctl service install                      # or `setup --service`: systemd user unit, launchd agent or Windows logon task
-ymirctl service stop / start / status        # --system: a system unit, launchd daemon or the Windows service
+ymirctl service stop / start / status        # --system: a system unit, launchd daemon, the Windows service or a FreeBSD rc.d script
 ```
 
 The bridge serves `/v1/models`, `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`.
@@ -91,6 +94,9 @@ id = "qwen2.5-7b"
 backend = "vllm"
 wrap = "http://127.0.0.1:8000/v1"     # a stock server Ymir didn't start (loopback only)
 wrap_api_key = "env:VLLM_API_KEY"     # secrets are env: or file: references, never inline
+
+[inference.placement]                 # optional: keep these models loaded on this many model nodes
+replicas = { "qwen3-8b" = 2 }
 
 [inference.alerts]
 dry_run = true                        # log what would be sent

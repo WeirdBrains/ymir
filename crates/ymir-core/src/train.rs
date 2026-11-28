@@ -21,6 +21,15 @@
 //!   `{"event": "error", "message": "..."}`. Other lines go to the run's log. Exit 0 and the
 //!   output file mean success. SIGTERM cancels; the trainer gets [`CANCEL_GRACE`] to stop.
 //!
+//! Interface 2 (training plan P3b) adds checkpoints, and Ymir still runs interface 1 trainers
+//! for runs that don't ask for them:
+//!
+//! - `train ... --checkpoint-dir DIR` writes a checkpoint after each epoch into a new folder
+//!   under `DIR` (the trained model so far and `checkpoint.json`, a [`Checkpoint`]), then prints
+//!   `{"event": "checkpoint", "dir": "epoch-0001", "epoch": 1, "step": 16}`.
+//! - `train ... --resume CKPT` carries on from the checkpoint folder `CKPT` for the epochs left.
+//!   The trainer refuses a checkpoint whose `data_sha256` or `config_sha256` is not the run's.
+//!
 //! The node's GPU is held for the run: a lock file (`state/train/lock.json`) that `ymird`
 //! honours at start, and, while `ymird` runs, a `weirdnet-backends` reservation through its
 //! control socket, so its models unload and nothing loads until the run ends.
@@ -37,10 +46,19 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::control::{self, ControlRequest};
+use crate::upload::{self, ArtifactKind, ImportSpec, ProvenanceBase, ProvenanceDataset, ProvenanceTrainer};
 use crate::{NodeConfig, Paths};
 
-/// The trainer interface version Ymir speaks.
-pub const INTERFACE: u32 = 1;
+/// The newest trainer interface version Ymir speaks (2: checkpoints and resume).
+pub const INTERFACE: u32 = 2;
+/// The oldest trainer interface Ymir still runs (without checkpoints).
+pub const MIN_INTERFACE: u32 = 1;
+/// The first interface with checkpoints and `--resume`.
+pub const CHECKPOINT_INTERFACE: u32 = 2;
+/// A checkpoint's `checkpoint.json` format.
+pub const CHECKPOINT_FORMAT: &str = "ymir-train-checkpoint/1";
+/// The file in a checkpoint folder that describes it.
+pub const CHECKPOINT_FILE: &str = "checkpoint.json";
 /// The run record's format.
 pub const RUN_FORMAT: &str = "ymir-train-run/1";
 /// How long a cancelled trainer gets after SIGTERM before it is killed.
@@ -65,6 +83,19 @@ pub struct TrainSection {
     /// Extra environment for the trainer (for example `CUDA_VISIBLE_DEVICES`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Take runs from the owner's other devices over Weirdnet (`ymirctl train run --node`,
+    /// `/ymir/train/1`, see [`crate::train_net`]). Off unless set; needs the model role and a
+    /// device identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote: bool,
+    /// With `remote`: only these devices (peer ids) may start runs. Empty: any of the owner's
+    /// linked, unrevoked devices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
+    /// Take over training jobs another node started and lost (training plan P3b), from their
+    /// last checkpoint. Off unless set: a node that serves the pool trains only when asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume: bool,
 }
 
 impl TrainSection {
@@ -306,6 +337,13 @@ pub struct TrainerVersion {
     pub build: String,
 }
 
+impl TrainerVersion {
+    /// Whether this trainer writes checkpoints and resumes from them (interface 2).
+    pub fn checkpoints(&self) -> bool {
+        self.interface >= CHECKPOINT_INTERFACE
+    }
+}
+
 /// Runs `TRAINER version`.
 pub async fn trainer_version(program: &Path, env: &BTreeMap<String, String>) -> Result<TrainerVersion> {
     let out = tokio::process::Command::new(program)
@@ -333,8 +371,8 @@ pub async fn check_trainer(train: &TrainSection) -> Result<(PathBuf, TrainerVers
         bail!("[train] has no `build`: pin the trainer build this node runs (one llama.cpp build), and Ymir refuses any other");
     };
     let v = trainer_version(&program, &train.env).await?;
-    if v.interface != INTERFACE {
-        bail!("the trainer speaks interface {}, and this Ymir speaks {INTERFACE}", v.interface);
+    if !(MIN_INTERFACE..=INTERFACE).contains(&v.interface) {
+        bail!("the trainer speaks interface {}, and this Ymir speaks {MIN_INTERFACE} to {INTERFACE}", v.interface);
     }
     if v.build.trim() != pin.trim() {
         bail!(
@@ -358,6 +396,12 @@ pub enum Event {
     },
     Log {
         message: String,
+    },
+    /// Interface 2: a checkpoint folder under `--checkpoint-dir` is complete.
+    Checkpoint {
+        dir: String,
+        epoch: u32,
+        step: u64,
     },
     Done,
     Error {
@@ -490,6 +534,12 @@ pub struct RunSpec {
     pub keep_full: bool,
     /// Reserve the node even when it is the only one serving a loaded model.
     pub force: bool,
+    /// Have the trainer write a checkpoint after each epoch (interface 2), so the run can carry
+    /// on from it later (`resume`), here or on another node (P3b).
+    pub checkpoints: bool,
+    /// Carry on from this checkpoint folder (checked with [`read_checkpoint`] against this run's
+    /// data and settings first). Implies `checkpoints`.
+    pub resume: Option<PathBuf>,
 }
 
 /// The adapter a run produced.
@@ -500,6 +550,10 @@ pub struct AdapterRecord {
     pub file: String,
     pub sha256: String,
     pub bytes: u64,
+    /// The adapter's content revision (`sha256:` and 16 hex digits, as `provenance.json` and an
+    /// upload of the same file give it). Absent in runs before the upload path (2026-11-24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// The base's `revision` it was trained on, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_revision: Option<String>,
@@ -542,6 +596,116 @@ pub struct RunRecord {
     pub started_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_ms: Option<i64>,
+    /// The checkpoints this run wrote, oldest first (only the newest is kept on disk).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<CheckpointInfo>,
+    /// The checkpoint this run carried on from: its root ([`checkpoint_root`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Checkpoints (interface 2, P3b)
+
+/// One file of a checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointFile {
+    /// Relative to the checkpoint folder, `/`-separated, no `..`.
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+/// `checkpoint.json` in a checkpoint folder: what the trainer had done and with what, so a
+/// resume can refuse a checkpoint of another dataset or other settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub format: String,
+    /// Epochs done.
+    pub epoch: u32,
+    pub epochs: u32,
+    /// Steps done over the whole run, and its total.
+    pub step: u64,
+    pub steps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss: Option<f64>,
+    pub seed: u64,
+    /// sha256 of the trainer's `--data` and `--config` files.
+    pub data_sha256: String,
+    pub config_sha256: String,
+    /// The trained model so far, relative to the folder (llama.cpp: a full GGUF).
+    pub model: String,
+    /// What carries over: `"reset"` when the optimizer's state does not (llama.cpp at the pin
+    /// saves weights only, so AdamW's moments start again at each resume).
+    pub optimizer: String,
+    pub files: Vec<CheckpointFile>,
+}
+
+/// A checkpoint a run wrote, as its record keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointInfo {
+    pub dir: String,
+    pub epoch: u32,
+    pub step: u64,
+    /// sha256 of the folder's `checkpoint.json`: the checkpoint's content root.
+    pub root: String,
+    pub bytes: u64,
+}
+
+/// The content root of a checkpoint: sha256 of its `checkpoint.json` (which lists every
+/// file's hash).
+pub fn checkpoint_root(manifest_bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(manifest_bytes))
+}
+
+pub(crate) fn safe_rel(path: &str) -> bool {
+    !path.is_empty() && !path.starts_with('/') && !path.contains('\\') && path.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// Reads and checks a checkpoint folder: its format, safe paths, and every file's size and hash.
+/// Returns it with its root.
+pub fn read_checkpoint(dir: &Path) -> Result<(Checkpoint, String)> {
+    let mpath = dir.join(CHECKPOINT_FILE);
+    let bytes = std::fs::read(&mpath).with_context(|| format!("reading {}", mpath.display()))?;
+    let c: Checkpoint = serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", mpath.display()))?;
+    if c.format != CHECKPOINT_FORMAT {
+        bail!("{}: format `{}` is not {CHECKPOINT_FORMAT}", mpath.display(), c.format);
+    }
+    if c.epoch == 0 || c.epoch > c.epochs {
+        bail!("{}: epoch {} of {} is not a checkpoint to carry on from", mpath.display(), c.epoch, c.epochs);
+    }
+    if !c.files.iter().any(|f| f.path == c.model) {
+        bail!("{}: the model `{}` is not among its files", mpath.display(), c.model);
+    }
+    for f in &c.files {
+        if !safe_rel(&f.path) || f.path == CHECKPOINT_FILE {
+            bail!("{}: `{}` is not a file path inside the checkpoint", mpath.display(), f.path);
+        }
+        let p = dir.join(&f.path);
+        let (sha, n) = hash_file(&p)?;
+        if n != f.bytes || sha != f.sha256 {
+            bail!("{} doesn't match its checkpoint ({} bytes, sha256 {sha}; the checkpoint says {} bytes, {})", p.display(), n, f.bytes, f.sha256);
+        }
+    }
+    Ok((c, checkpoint_root(&bytes)))
+}
+
+/// sha256 and size of a file, read in chunks.
+pub fn hash_file(path: &Path) -> Result<(String, u64)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut n = 0u64;
+    loop {
+        let k = f.read(&mut buf).with_context(|| format!("reading {}", path.display()))?;
+        if k == 0 {
+            break;
+        }
+        h.update(&buf[..k]);
+        n += k as u64;
+    }
+    Ok((hex::encode(h.finalize()), n))
 }
 
 /// One update while a run goes.
@@ -558,9 +722,59 @@ pub enum Update {
         in_ymird: bool,
     },
     Event(Stage, Event),
+    /// A checkpoint is written and checked (`dir` is its folder).
+    Checkpoint {
+        dir: PathBuf,
+        info: CheckpointInfo,
+    },
 }
 
-/// Runs the trainer on this node and leaves the adapter in `models_dir/adapters/`. `cancel`
+/// What a run's record says about its adapter, as an upload's options (origin `train`): the base it
+/// was trained on, the dataset record and the trainer with the run's settings. `train run` imports
+/// its own adapter with these, and `ymirctl models upload --from-run` sends a copied run's adapter
+/// with the same record (docs/design/model-upload.md, slice U5).
+pub fn import_spec(record: &RunRecord, adapter: &AdapterRecord, uploaded_ms: i64) -> ImportSpec {
+    let mut base = ProvenanceBase::default();
+    base.id = Some(record.base.clone());
+    base.revision = adapter.base_revision.clone();
+    base.quant = adapter.base_quant.clone();
+    let d = &record.dataset;
+    let mut dataset = ProvenanceDataset::default();
+    dataset.format = Some(d.format.clone());
+    dataset.sha256 = Some(d.sha256.clone());
+    dataset.rows = Some(d.rows_used as u64);
+    dataset.counts = BTreeMap::from([("rows_in".to_string(), d.rows_in as u64), ("rows_used".to_string(), d.rows_used as u64)]);
+    dataset.licenses = vec![d.license.clone()];
+    let mut trainer = ProvenanceTrainer::default();
+    trainer.name = Some(record.trainer.engine.clone());
+    trainer.build = Some(record.trainer.build.clone());
+    trainer.run = Some(record.id.clone());
+    // The rest of the run record, as Ymir's own field (kept by readers that don't know it).
+    let run = serde_json::json!({
+        "dataset": d.name,
+        "teacher": d.teacher,
+        "interface": record.trainer.interface,
+        "node": record.node,
+        "trained_from": record.trained_from,
+        "hyper": record.hyper,
+        "steps": record.steps,
+        "final_loss": record.final_loss,
+    });
+    ImportSpec {
+        id: adapter.id.clone(),
+        license: None,
+        base: Some(base),
+        origin: upload::ORIGIN_TRAIN.into(),
+        uploaded_ms: uploaded_ms.max(0) as u64,
+        disk: None,
+        dataset: Some(dataset),
+        trainer: Some(trainer),
+        extra: BTreeMap::from([("ymir_train".to_string(), run)]),
+    }
+}
+
+/// Runs the trainer on this node and leaves the adapter in `models_dir/adapters/ID/` with its
+/// `provenance.json` (origin `train`) and `adapter.json`, through the upload path. `cancel`
 /// resolving stops the run. The GPU is held for the whole run and released however it ends.
 pub async fn run(
     paths: &Paths,
@@ -570,6 +784,14 @@ pub async fn run(
     on: &mut (dyn FnMut(Update) + Send),
 ) -> Result<RunRecord> {
     let (program, version) = check_trainer(&cfg.train).await?;
+    let checkpoints = spec.checkpoints || spec.resume.is_some();
+    if checkpoints && !version.checkpoints() {
+        bail!("the trainer speaks interface {}, which has no checkpoints; a resumable run needs interface {CHECKPOINT_INTERFACE}", version.interface);
+    }
+    let resume = match &spec.resume {
+        Some(dir) => Some((dir.clone(), read_checkpoint(dir).context("checking the checkpoint to resume from")?)),
+        None => None,
+    };
     let base =
         cfg.model.local.iter().find(|m| m.id == spec.base).with_context(|| format!("no [[model.local]] with id `{}` on this node", spec.base))?;
     if base.backend.as_deref().unwrap_or("llamacpp") != "llamacpp" || base.wrap.is_some() {
@@ -594,11 +816,11 @@ pub async fn run(
     if taken {
         bail!("`{adapter_id}` is already a model or adapter on this node; pick another --id");
     }
+    upload::check_id(&adapter_id).context("the adapter's id names its directory under models_dir/adapters; pick another --id")?;
     let models_dir = cfg.models_dir();
-    let rel = format!("adapters/{}.gguf", file_safe(&adapter_id));
-    let dest = models_dir.join(&rel);
-    if dest.exists() {
-        bail!("{} exists already; pick another --id", dest.display());
+    let target = upload::target_dir(&models_dir, ArtifactKind::Adapter { format: weirdnet_model::hf::AdapterFormat::GgufLora }, &adapter_id)?;
+    if target.exists() || models_dir.join(format!("adapters/{}.gguf", file_safe(&adapter_id))).exists() {
+        bail!("{} exists already; pick another --id", target.display());
     }
     let dir = cfg.train.work_dir(paths).join(&run_id);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -607,6 +829,19 @@ pub async fn run(
     let dataset = prepare_dataset(&spec.dataset, spec.allow_unknown_license, &data)?;
     let config = dir.join("config.json");
     write_private(&config, &serde_json::to_vec_pretty(&spec.hyper)?)?;
+    if let Some((rdir, (c, _))) = &resume {
+        let (data_sha, _) = hash_file(&data)?;
+        let (config_sha, _) = hash_file(&config)?;
+        if c.data_sha256 != data_sha {
+            bail!("{} was written for other training data (sha256 {}; this run's is {data_sha})", rdir.display(), c.data_sha256);
+        }
+        if c.config_sha256 != config_sha {
+            bail!("{} was written with other settings (epochs, learning rate, context, batch, seed or rank)", rdir.display());
+        }
+        if c.epoch >= c.epochs {
+            bail!("{} has every epoch done already; extract its model instead of resuming", rdir.display());
+        }
+    }
 
     let holder = format!("ymir-train {run_id}");
     take_lock(paths, &holder, Some(&run_id), Some(std::process::id()))?;
@@ -636,6 +871,8 @@ pub async fn run(
         error: None,
         started_ms: now_ms(),
         ended_ms: None,
+        checkpoints: Vec::new(),
+        resumed_from: resume.as_ref().map(|(_, (_, root))| root.clone()),
     };
     let record_path = dir.join("run.json");
     write_private(&record_path, &serde_json::to_vec_pretty(&record)?)?;
@@ -644,10 +881,41 @@ pub async fn run(
     let adapter = dir.join("adapter.gguf");
     let log = dir.join("trainer.log");
     let env = &cfg.train.env;
-    let mut forward = |stage: Stage, ev: &Event| on(Update::Event(stage, ev.clone()));
+    let ckpt_dir = dir.join("checkpoints");
+    let mut made: Vec<CheckpointInfo> = Vec::new();
+    let mut forward = |stage: Stage, ev: &Event| {
+        if let Event::Checkpoint { dir: name, .. } = ev
+            && checkpoints
+        {
+            let cdir = ckpt_dir.join(name);
+            match safe_rel(name).then(|| read_checkpoint(&cdir)) {
+                Some(Ok((c, root))) => {
+                    let info = CheckpointInfo { dir: name.clone(), epoch: c.epoch, step: c.step, root, bytes: c.files.iter().map(|f| f.bytes).sum() };
+                    // Only the newest checkpoint is kept.
+                    if let Some(prev) = made.last()
+                        && prev.dir != info.dir
+                    {
+                        let _ = std::fs::remove_dir_all(ckpt_dir.join(&prev.dir));
+                    }
+                    made.push(info.clone());
+                    on(Update::Checkpoint { dir: cdir, info });
+                }
+                Some(Err(e)) => on(Update::Event(stage, Event::Log { message: format!("checkpoint {name} is not usable: {e:#}") })),
+                None => on(Update::Event(stage, Event::Log { message: format!("checkpoint `{name}` is not a folder name") })),
+            }
+        }
+        on(Update::Event(stage, ev.clone()))
+    };
     let s = |p: &Path| p.to_string_lossy().into_owned();
     let outcome = async {
-        let train_args = vec!["--base".into(), s(&from), "--data".into(), s(&data), "--config".into(), s(&config), "--out".into(), s(&full)];
+        let mut train_args = vec!["--base".into(), s(&from), "--data".into(), s(&data), "--config".into(), s(&config), "--out".into(), s(&full)];
+        if checkpoints {
+            std::fs::create_dir_all(&ckpt_dir).map_err(|e| StepEnd::Failed(format!("creating {}: {e}", ckpt_dir.display())))?;
+            train_args.extend(["--checkpoint-dir".into(), s(&ckpt_dir)]);
+        }
+        if let Some((rdir, _)) = &resume {
+            train_args.extend(["--resume".into(), s(rdir)]);
+        }
         let t = step(&program, Stage::Train, &train_args, env, &log, cancel, &mut forward).await?;
         if !full.is_file() {
             return Err(StepEnd::Failed("the train step wrote no model".into()));
@@ -661,23 +929,28 @@ pub async fn run(
         Ok(t)
     }
     .await;
+    drop(forward);
+    record.checkpoints = made;
 
     let result = match outcome {
         Ok(t) => {
             record.steps = t.step.max(t.steps);
             record.final_loss = t.loss;
-            install(&adapter, &dest).map(|(sha256, bytes)| {
-                record.adapter = Some(AdapterRecord {
-                    id: adapter_id.clone(),
-                    file: rel.clone(),
-                    sha256,
-                    bytes,
-                    base_revision: base.revision.clone(),
-                    base_quant: if from == served { base.quant.clone() } else { None },
-                });
+            let made = AdapterRecord {
+                id: adapter_id.clone(),
+                file: String::new(),
+                sha256: String::new(),
+                bytes: 0,
+                revision: None,
+                base_revision: base.revision.clone(),
+                base_quant: if from == served { base.quant.clone() } else { None },
+            };
+            install(&models_dir, &adapter, &record, made).map(|a| {
+                record.adapter = Some(a);
                 record.status = RunStatus::Done;
                 if !spec.keep_full {
                     let _ = std::fs::remove_file(&full);
+                    let _ = std::fs::remove_dir_all(&ckpt_dir);
                 }
             })
         }
@@ -705,16 +978,24 @@ pub async fn run(
     Ok(record)
 }
 
-/// Moves the adapter to `dest`; returns its SHA-256 and size.
-fn install(adapter: &Path, dest: &Path) -> Result<(String, u64)> {
-    let bytes = std::fs::read(adapter)?;
-    let sha = hex::encode(Sha256::digest(&bytes));
-    std::fs::create_dir_all(dest.parent().expect("has a parent"))?;
-    if std::fs::rename(adapter, dest).is_err() {
-        std::fs::copy(adapter, dest).with_context(|| format!("copying the adapter to {}", dest.display()))?;
-        std::fs::remove_file(adapter)?;
+/// Imports the run's adapter through the upload path (checked as a GGUF LoRA, hashed, linked into
+/// `models_dir/adapters/ID/ID.gguf`, `provenance.json` and `adapter.json` beside it), removes the
+/// run's copy and fills in `made`'s file, hash, size and revision.
+fn install(models_dir: &Path, adapter: &Path, record: &RunRecord, mut made: AdapterRecord) -> Result<AdapterRecord> {
+    let mut item = upload::inspect(adapter).context("checking the trainer's adapter")?;
+    if !item.kind().is_adapter() {
+        bail!("the trainer's extract-lora step wrote a {}, not a LoRA adapter", upload::kind_name(item.kind()));
     }
-    Ok((sha, bytes.len() as u64))
+    item.file_name = format!("{}.gguf", file_safe(&made.id));
+    let imported = upload::import(models_dir, &item, &import_spec(record, &made, now_ms()), &mut |_, _| {})?;
+    let file = &imported.provenance.files[0];
+    let dir = imported.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    made.file = format!("{}/{dir}/{}", upload::ADAPTERS_DIR, file.path);
+    made.sha256 = file.sha256.clone();
+    made.bytes = file.size;
+    made.revision = Some(imported.provenance.revision.clone());
+    let _ = std::fs::remove_file(adapter);
+    Ok(made)
 }
 
 /// The runs under the work directory, newest first.
@@ -730,7 +1011,7 @@ pub fn runs(paths: &Paths, train: &TrainSection) -> Vec<RunRecord> {
     out
 }
 
-fn new_run_id() -> String {
+pub(crate) fn new_run_id() -> String {
     let mut b = [0u8; 2];
     let _ = getrandom::fill(&mut b);
     let secs = now_ms() / 1000;
@@ -755,15 +1036,20 @@ fn chrono_like(secs: i64) -> String {
     format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-fn file_safe(id: &str) -> String {
+pub(crate) fn file_safe(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+') { c } else { '_' }).collect()
 }
 
-fn now_ms() -> i64 {
+/// Now in ms since the epoch, for job records.
+pub(crate) fn train_now() -> u64 {
+    now_ms().max(0) as u64
+}
+
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut o = std::fs::OpenOptions::new();

@@ -113,6 +113,7 @@ async fn read_tools_against_a_fake_pool() -> Result<()> {
         "ymir_service_status",
         "ymir_models_search",
         "ymir_models_local",
+        "ymir_transcribe",
     ] {
         assert!(names.iter().any(|n| n == t), "{t} missing from {names:?}");
     }

@@ -73,8 +73,9 @@ ymirctl status --json | jq .models</code></pre>
 
 <h2 id="models">Manage models</h2>
 <h3 id="models-cmd"><code>ymirctl models</code></h3>
-<p>Lists the pool's models (the merged catalog of every model node): id, purpose, and whether it is ready, busy, loading or
-only on disk. Use these ids with every other command and in apps like Jan.</p>
+<p>Lists the pool's models (the merged catalog of every model node): id, purpose, whether it is ready, busy, loading or
+only on disk, and, when the node knows, where it came from (<code>hub</code>, <code>upload</code> or <code>train</code>)
+and its license. Use these ids with every other command and in apps like Jan.</p>
 <pre><code>ymirctl models</code></pre>
 <h3 id="models-search"><code>ymirctl models search QUERY...</code></h3>
 <p>Searches the Hugging Face Hub for GGUF models, plus MLX models on Apple Silicon and safetensors/vLLM
@@ -150,6 +151,28 @@ the model first.</li>
 restart (<code>--load</code> loads it too). That is in memory only: <code>node.toml</code> on another node is never edited. The pull prints the
 <code>[[model.local]]</code> entry to add there to keep it after a restart.</li>
 <li>A pull streams its progress, one line per node. <code>remove --node</code> stops serving the model and deletes its files.</li>
+<li><code>upload FILE --node NAME</code>: sends a GGUF model or LoRA adapter on this machine (<code>--adapter-for BASE</code>, or
+<code>--from-run RUN_DIR</code> for a training run's adapter) to that node. It is checked there as it arrives, resumes if it
+is cut off, must leave <code>[model] upload_keep_free</code> free (by default the larger of 10% and 20 GiB), is refused by a node
+with <code>[model] upload = false</code> (which still pulls and removes), and is served
+and saved in that node's <code>node.toml</code> unless you pass <code>--no-persist</code>. A llama.cpp adapter is used from its
+base's next start. With <code>--rollout NAME</code> it becomes the next version of that rollout here, named
+<code>ID-rN</code>, at weight 0; <code>--canary PCT</code> gives it exactly that percentage of new conversations, any of
+0 to 100 (such as 20 or 50), the other versions sharing the rest. With <code>--eval ROWS</code> the share is set only if it
+does at least as well as the version that has the most traffic. <code>--inference NODE</code> adds it to that inference
+node's rollout instead, saved in its <code>node.toml</code> unless <code>--no-persist</code>.</li>
+<li><code>upload FILE --node all</code> (every model node but this one) or <code>--node A,B</code>: the file is sent once, to
+the node with the most free space (or <code>--stage NODE</code>), and the others copy it from that node, node to node. A node
+without room after what it keeps free is left out before anything is sent; one that can't copy from the other node
+gets the file from this machine instead. Each one saves it in its own <code>node.toml</code> unless <code>--no-persist</code>.</li>
+<li><code>upload DIR --node NAME</code> also sends a directory of safetensors (to a vLLM node) or MLX weights, or a PEFT LoRA
+adapter directory with <code>--adapter-for</code> a vLLM model. <code>upload mmproj.gguf --node NAME --projector-for MODEL</code>
+sends a vision projector for a llama.cpp model, saved as its <code>mmproj</code>. Pickles and code are refused. A node takes full
+models for one engine, <code>[model] upload_engine</code> (by default llama.cpp, or vLLM when <code>llamacpp = "off"</code>).</li>
+<li><code>upload DIR</code> or <code>upload mmproj.gguf --projector-for MODEL</code> without <code>--node</code>: on a machine
+that serves models it is placed in this machine's models directory and saved in its <code>node.toml</code> (it serves after
+a restart); on one that serves none it goes to the model node with the most free space after what it keeps free.
+<code>--node auto</code> picks that node for any upload.</li>
 <li><code>search --node all</code> shows each node's own fit verdict for every repo.</li>
 </ul>
 <p>A node running an older <code>ymird</code> answers that it does not take model management: upgrade it, or run the command on
@@ -157,13 +180,56 @@ that machine. Set <code>[model] remote_manage = false</code> in a node's <code>n
 <pre><code>ymirctl models search qwen3 8b --node all
 ymirctl models pull Qwen/Qwen3-8B-GGUF --node auto --serve
 ymirctl models list --node gpu-box
-ymirctl models remove qwen3-8b-q4_k_m --node gpu-box --yes</code></pre>
+ymirctl models remove qwen3-8b-q4_k_m --node gpu-box --yes
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --license apache-2.0
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node all
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --canary 20
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --inference inference-box --canary 20
+ymirctl models upload ./Tune-8B --node auto
+ymirctl models upload ./mmproj-F16.gguf --projector-for my-vision-model
+ymirctl models upload ./my-tune-Q4_K_M.gguf --node gpu-box --rollout support --canary 50 --eval support-rows.jsonl</code></pre>
 <h3 id="load"><code>ymirctl load MODEL [--node NODE]</code></h3>
 <p>Loads a model on a model node. <code>--node</code> picks the node by name (see <code>ymirctl nodes</code>).</p>
 <pre><code>ymirctl load gemma4-e4b
 ymirctl load qwen3.6-35b-a3b --node server-a</code></pre>
 <h3 id="unload"><code>ymirctl unload MODEL</code></h3>
 <p>Unloads a model everywhere it is loaded, freeing its memory.</p>
+<h3 id="move"><code>ymirctl move MODEL --to NODE [--from NODE] [--grace 60]</code></h3>
+<p>Moves a loaded model to another model node without cutting anyone off: it loads on <code>--to</code> (which needs its
+own copy of the model; <code>ymirctl models pull MODEL --node NODE</code>), new requests go there at once, and the old node
+unloads it once the answers it is streaming finish (at most <code>--grace</code> seconds). If the load on the new node
+fails, nothing changes on the old one.</p>
+<pre><code>ymirctl move qwen3.6-35b-a3b --to server-b</code></pre>
+<h3 id="placement">Keeping replicas loaded</h3>
+<p>To keep a model loaded on a number of model nodes without loading it by hand, list it in the inference node's
+<code>node.toml</code>. Every 15 seconds (<code>every_secs</code>) one step is taken per model: it loads on a node
+that has its own copy and the fewest models loaded, or unloads from an idle extra. A draining or reserved node
+doesn't count, a node with answers in flight is never unloaded, and models not listed are left alone. With
+several inference nodes, the one holding the scheduler lease places (inference nodes linked cert-only vote on it)
+and publishes where it put them as a signed plan the other inference nodes sync; a holder that sees a newer
+holder's plan stops at once.</p>
+<p>A request for a model that is loaded nowhere loads it where that is cheapest: a node that evicts nothing, then the
+one with the fewest models loaded. With <code>idle_unload_secs</code> set (at least 60), a model nobody has asked
+for in that long is unloaded to free its memory; listed models stay at their count, and the main model, the
+stand-in and the cache's embedding model stay loaded.</p>
+<pre><code>[inference.placement]
+replicas = { "qwen3.6-35b-a3b" = 2 }
+idle_unload_secs = 1800</code></pre>
+<h3 id="semantic-cache">Semantic answer cache</h3>
+<p>Every inference node replays an answer it already gave to the very same temperature-0 request. Give it an
+embedding model from the pool and it also replays answers to questions that mean the same: one user message (after
+any system prompt), text only, no tools. The question is embedded with that model, but only while it is loaded
+somewhere, and an answer is used only for the same model, weights, system prompt and sampling settings. Hits show
+as served by <code>semantic-cache</code>; a request with <code>cache: bypass</code> skips it, and
+<code>cache: refresh</code> asks the model and stores the new answer. The cache is in memory on each inference node. With <code>mode = "pool"</code> the inference nodes that
+use the same embedding model share it: each keeps part of the entries and asks the others for the rest, answering from
+the model as usual when one can't be reached. <code>ymirctl status</code> shows its members and hit counts.</p>
+<pre><code>[inference.cache]
+embedding_model = "bge-m3"   # an embedding model in the pool
+threshold = 0.12             # cosine distance: lower is stricter
+ttl = "24h"
+entries = 1024
+mode = "pool"                # optional: share it with the other inference nodes</code></pre>
 <h3 id="nodes"><code>ymirctl nodes</code></h3>
 <p>Lists the model nodes the pool routes to: serving or draining, how many of their models are ready, and requests in flight.</p>
 <h3 id="drain"><code>ymirctl drain NODE [--resume]</code></h3>
@@ -173,7 +239,12 @@ ymirctl drain server-a --resume</code></pre>
 
 <h2 id="split">Split models</h2>
 <p>A model too big for one machine can be served by a group of nodes over a private link. The model must be marked
-<code>split</code> in the pool policy first (see the <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md">design document</a>).</p>
+<code>split</code> in the pool policy first (see the <a href="https://github.com/WeirdBrains/ymir/blob/main/docs/DESIGN.md">design document</a>).
+The backend is <code>llamacpp-rpc</code> (GGUF, <code>rpc-server</code> workers) or <code>vllm-ray</code> (vLLM on a Ray cluster over the
+private link; Linux, with <a href="#engines"><code>ymirctl engines install vllm</code></a> on each member). Ray has no authentication, so
+Ymir refuses the group when any process under Ray or vLLM (Ray's workers included) listens anywhere but the private link or
+loopback, and pins Ray's workers to the link (<code>VLLM_HOST_IP</code>, <code>NCCL_SOCKET_IFNAME</code>, <code>GLOO_SOCKET_IFNAME</code>);
+see the design document's security notes.</p>
 <ul>
 <li><code>ymirctl group up MODEL</code>: plan and start the group for MODEL.</li>
 <li><code>ymirctl group down MODEL</code>: stop it; its members return to normal placement.</li>
@@ -181,6 +252,41 @@ ymirctl drain server-a --resume</code></pre>
 </ul>
 <pre><code>ymirctl group up big-model-70b
 ymirctl group status</code></pre>
+
+<h2 id="engines">Engines: vLLM and Ray</h2>
+<p><code>ymirctl engines install vllm</code> installs vLLM and Ray into a venv under Ymir's engines folder
+(<code>engines/vllm</code>), with <code>uv</code> when it is on <code>PATH</code>, else <code>python3 -m venv</code> and pip
+(Python 3.10 to 3.13). <code>ymird</code> finds both there on its own (<code>[model] vllm = "auto"</code> and
+<code>ray = "auto"</code>, the defaults), so single-node vLLM models and <code>vllm-ray</code> split models need no
+<code>PATH</code> or <code>node.toml</code> change. Restart <code>ymird</code> afterwards. vLLM runs on Linux.</p>
+<p>The default is vLLM's nightly (<a href="https://wheels.vllm.ai/nightly"><code>wheels.vllm.ai/nightly</code></a>), because Inkling 2 Mini is in vLLM main
+(<a href="https://github.com/vllm-project/vllm/pull/69028">vllm#69028</a>) but in no release yet: 0.34.0 lacks it and the
+<a href="https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini">vLLM recipe</a> asks for 0.35.0 or a nightly. The installer
+checks that the installed vLLM registers Inkling 2 Mini and records it, so <code>ymird</code> accepts the nightly even though its
+version (<code>0.34.1rc1.devN</code>) is below 0.35.0. <code>--index-url</code> (ROCm, CPU) replaces the nightly index.</p>
+<p>For NVIDIA GPUs it picks a PyTorch build the driver can run, from the CUDA version <code>nvidia-smi</code> reports: PyPI's PyTorch
+(a CUDA 13.0 build) for a CUDA 13 driver (580 or newer), PyTorch's <code>cu126</code> to <code>cu129</code> index for a CUDA 12
+driver (with <code>--version</code>; the nightly needs CUDA 13). After installing it checks that PyTorch's CUDA is not newer
+than the driver's, and <code>ymirctl engines status</code> shows both.</p>
+<table>
+<thead><tr><th>Command or flag</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>ymirctl engines install vllm</code></td><td>Make the venv and install vLLM's nightly and Ray, then check that <code>vllm --version</code> and <code>ray --version</code> run and that vLLM has Inkling 2 Mini.</td></tr>
+<tr><td><code>--version V</code></td><td>A vLLM release from PyPI, such as <code>0.34.0</code>, instead of the nightly. Inkling 2 Mini needs 0.35.0 or a nightly.</td></tr>
+<tr><td><code>--accel auto|cuda|rocm|cpu</code></td><td>The accelerator; <code>auto</code> looks for <code>nvidia-smi</code>, then <code>rocminfo</code> or <code>/opt/rocm</code>, else CPU.</td></tr>
+<tr><td><code>--index-url URL</code></td><td>A vLLM wheel index. ROCm and CPU need one, because PyPI's vLLM wheels are CUDA builds (or use a container image: <code>vllm = "image:..."</code>).</td></tr>
+<tr><td><code>--torch-backend B</code></td><td>PyTorch's build for <code>uv</code> (<code>cu130</code>, <code>cu128</code>, <code>cpu</code>, <code>auto</code> ...) instead of the one matched to the driver.</td></tr>
+<tr><td><code>--vllm-cuda cuNNN</code></td><td>Install vLLM's nightly built for that CUDA (<a href="https://wheels.vllm.ai/nightly/cu130/vllm/">for example <code>nightly/cu130</code></a>). The default nightly's kernels are CUDA 13.2 builds; the installer warns when the driver runs an older CUDA, which breaks kernels such as Inkling 2 Mini's vision encoder on a DGX Spark.</td></tr>
+<tr><td><code>--uv PATH</code>, <code>--python PATH</code></td><td>Which <code>uv</code>, or which Python for <code>-m venv</code> and pip instead of <code>uv</code>.</td></tr>
+<tr><td><code>--reinstall</code>, <code>--dry-run</code>, <code>--force</code></td><td>Make the venv afresh; print the commands without running them; install on an OS other than Linux.</td></tr>
+<tr><td><code>ymirctl engines upgrade vllm</code></td><td>Upgrade the managed vLLM and Ray (same flags).</td></tr>
+<tr><td><code>ymirctl engines status</code></td><td>Which <code>vllm</code> and <code>ray</code> <code>ymird</code> would use (managed, <code>node.toml</code> or <code>PATH</code>) and their versions.</td></tr>
+<tr><td><code>ymirctl engines uninstall vllm</code></td><td>Remove the managed venv. It removes only a venv this command made.</td></tr>
+</tbody>
+</table>
+<pre><code>ymirctl engines install vllm --dry-run
+ymirctl engines install vllm
+ymirctl engines status</code></pre>
 
 <h2 id="chat">Chat, conversations and batches</h2>
 <h3 id="chat-cmd"><code>ymirctl chat PROMPT...</code></h3>
@@ -234,7 +340,7 @@ No dataset is built in.</p>
 <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
 <tbody>
 <tr><td><code>--out FILE</code></td><td>The output (JSONL). It must not exist unless <code>--resume</code>.</td></tr>
-<tr><td><code>--license ID</code></td><td>The teacher's license, such as <code>apache-2.0</code>. Required: some licenses forbid training on a model's outputs. <code>unknown</code> needs <code>--allow-unknown-license</code>.</td></tr>
+<tr><td><code>--license ID</code></td><td>The teacher's license, such as <code>apache-2.0</code>. Some licenses forbid training on a model's outputs. Without it, the license comes from <code>--license-from OWNER/NAME</code> (that Hub repo's model card) or from the pool's catalog; with neither, the run is refused. <code>unknown</code> needs <code>--allow-unknown-license</code>.</td></tr>
 <tr><td><code>--resume</code></td><td>Continue an interrupted run: rows already answered are skipped, failed rows are tried again.</td></tr>
 <tr><td><code>--system TEXT</code></td><td>System prompt for rows without one.</td></tr>
 <tr><td><code>--temperature</code>, <code>--top-p</code>, <code>--max-tokens</code>, <code>--seed</code></td><td>Defaults for rows that don't set their own.</td></tr>
@@ -264,7 +370,11 @@ the adapter in <code>node.toml</code>. Ctrl-C cancels the run. Every run on a no
 of the pool while it trains.</p>
 <table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
 <tr><td><code>train run --base ID --dataset FILE [--id ADAPTER] [--epochs N] [--lr X] [--rank N] [--add]</code></td><td>One run. Also <code>--context</code>, <code>--batch</code>, <code>--seed</code>, <code>--from FILE</code> (train from an F32 copy of a quantised base: llama.cpp trains F32 models only), <code>--keep-full</code>, <code>--allow-unknown-license</code> and <code>--force</code>.</td></tr>
+<tr><td><code>train run ... --node NAME</code></td><td>Run on another of your model nodes instead, from any linked device, over Weirdnet through this device's <code>ymird</code>. The node needs <code>[train] remote = true</code> (and, to narrow who may, <code>callers = ["PEER_ID"]</code>). The dataset goes with the run (up to 24 MiB); <code>--from</code> names a GGUF in the node's models directory; <code>--add</code> is refused, since <code>node.toml</code> is never edited over the network: serve the adapter with <code>models adapter serve ID --base BASE --node NAME</code>. Ctrl-C cancels the run there.</td></tr>
 <tr><td><code>train reserve [--node NAME] [--force]</code>, <code>train release [--node NAME]</code></td><td>Hold a node's GPU by hand and free it. Without <code>--node</code>, this box, also across a <code>ymird</code> restart.</td></tr>
+<tr><td><code>train run ... --job</code>, <code>train resume JOB</code></td><td>A resumable job: a checkpoint after each epoch (trainer interface 2). If the run fails or stops, <code>train resume JOB</code> carries it on from the last checkpoint, checked against the job's dataset, settings, base revision and trainer build. Ctrl-C pauses a job. <code>train jobs</code> lists jobs; <code>train job pause|unpause|cancel JOB</code> manages your own. With <code>[train] resume = true</code> a node carries on other nodes' jobs (once the job record is synced).</td></tr>
+<tr><td><code>train seed questions --sources FILE --texts DIR --out FILE</code>, <code>train seed prompts ANSWERS --out FILE</code></td><td>Seed prompts from source texts you fetched (<code>DIR/ID.txt</code> or <code>.md</code> per source): excerpts become rows asking the teacher for questions; its answers become prompt rows that keep their source. Also <code>--chunk-chars</code>, <code>--questions</code>, <code>--max-per-source</code>.</td></tr>
+<tr><td><code>train status [--node NODE] [--json]</code></td><td>A model node's runs and jobs, read over Weirdnet from any of your linked devices (what Bragi's training view shows). Without <code>--node</code>, this node's.</td></tr>
 <tr><td><code>train check</code>, <code>train list</code></td><td>The trainer against the pin; past runs with their status, loss and adapter.</td></tr>
 </tbody></table>
 <p>The trainer is <code>scripts/trainer.py</code> in Ymir's repository, at the same llama.cpp build as the engine
@@ -285,13 +395,15 @@ ymirctl train run --base qwen3-8b --dataset data.jsonl --id qwen3-8b+support --e
 <p>A rollout is one name your apps ask for, with versions behind it, each a model in the pool with a traffic weight.
 It lives in this inference node's <code>node.toml</code> (<code>[[inference.rollout]]</code>). Each conversation stays
 on one version; <code>NAME@N</code> asks for a version whatever its weight. Changes apply to the running
-<code>ymird</code> at once. A version may take up to 10% of new conversations; more needs <code>--eval FILE</code>
-(an <code>ymirctl eval --out</code> file where it does at least as well as the version with the most traffic on the
-same rows) or <code>--force</code>.</p>
+<code>ymird</code> at once. <code>--canary PCT</code> on <code>add</code> or <code>weight</code> gives a version exactly
+that percentage of new conversations (any of 0 to 100), the others sharing the rest. A raw weight that gives it more
+than 10% needs <code>--eval FILE</code> (an <code>ymirctl eval --out</code> file where it does at least as well as the
+version with the most traffic on the same rows) or <code>--force</code>.</p>
 <table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
 <tr><td><code>models rollout list</code></td><td>Rollouts, versions, weights and shares (live when <code>ymird</code> runs).</td></tr>
-<tr><td><code>models rollout add NAME@N --model ID [--weight W]</code></td><td>Add a version (weight 0 by default: pinnable, no traffic yet).</td></tr>
+<tr><td><code>models rollout add NAME@N --model ID [--weight W | --canary PCT]</code></td><td>Add a version (weight 0 by default: pinnable, no traffic yet; <code>--canary 20</code>: 20% of new conversations).</td></tr>
 <tr><td><code>models rollout weight NAME@N W [--eval FILE] [--force]</code></td><td>Change a version's weight.</td></tr>
+<tr><td><code>models rollout weight NAME@N --canary PCT</code></td><td>Give it exactly PCT percent of new conversations (0 to 100); the other versions share the rest.</td></tr>
 <tr><td><code>models rollout rollback NAME</code></td><td>Move the newest version's traffic back to the version before it.</td></tr>
 <tr><td><code>models rollout retire NAME@N [--force]</code></td><td>Drop a version with no traffic; its model stays loaded until you unload it.</td></tr>
 </tbody></table>
@@ -300,6 +412,13 @@ ymirctl eval held-out.jsonl --model qwen3-8b+support-r2 --model qwen3-8b+support
 ymirctl models rollout weight support@3 100 --eval eval.jsonl
 ymirctl models rollout weight support@2 0
 ymirctl models rollout rollback support</code></pre>
+<p>Add <code>--inference NODE</code> to any of these to read or change another inference node&rsquo;s rollouts over
+Weirdnet, by that node&rsquo;s rules (<code>--eval FILE</code> sends the scored rows with the request). The change applies
+there at once and is saved in its <code>node.toml</code>; <code>--no-persist</code> changes only its live rollouts. Any of
+your linked devices may, unless that node narrows them with <code>[inference] rollout_callers</code> (peer ids);
+<code>[inference] remote_rollouts = false</code> turns it off.</p>
+<pre><code>ymirctl models rollout add support@4 --model qwen3-8b+support-r4 --inference NODE
+ymirctl models rollout rollback support --inference NODE</code></pre>
 
 <h2 id="pool">Pool and devices</h2>
 <p>These commands manage this node's place in your Weirdnet: the identity shared by your linked devices. They need
@@ -346,6 +465,17 @@ links, and <code>pool link</code> prints the list it received when discovery is 
 <h3 id="pool-revoke"><code>ymirctl pool revoke PEER</code></h3>
 <p>Revokes a device everywhere the roster reaches. Use the peer id from <code>pool devices</code>. If <code>ymird</code> is
 running on Weirdnet the change goes through it.</p>
+<h3 id="pool-share"><code>ymirctl pool share USER_ID</code></h3>
+<p>Shares this pool with another Weirdnet identity (yours on another profile, or someone else's): it records a guest grant
+that syncs to every node and prints a <code>wnet-pool1:</code> token and a <code>weirdnet-pool://share/</code> link with the
+pool's inference nodes to send them. The link holds no secrets; the grant is what lets them in. Guests get the catalog and
+inference only, never your conversations, wake cards, tasks, models, uploads or training. Options: <code>--label</code>,
+<code>--peer PEER</code> (only that device of theirs, repeatable), <code>--models a,b</code>, <code>--scopes catalog,infer</code>,
+<code>--expires 7d</code>, <code>--name</code> and <code>--node</code> (another inference node for the link).</p>
+<h3 id="pool-unshare"><code>ymirctl pool unshare USER_ID</code></h3>
+<p>Stops sharing: their next request is refused and their catalog subscriptions close within seconds, on every node.</p>
+<h3 id="pool-guests"><code>ymirctl pool guests [--all]</code></h3>
+<p>Lists the identities this pool is shared with (<code>--all</code> adds revoked and expired ones).</p>
 <h3 id="pool-init"><code>ymirctl pool init --standalone</code></h3>
 <p>Starts a brand-new identity on this node, separate from the one Morph holds, for a cloud of its own. It refuses without
 <code>--standalone</code>. To join your existing devices use <code>pool link</code> instead.</p>
@@ -392,8 +522,8 @@ parts), <code>ymir_complete</code>, <code>ymir_embed</code>, <code>ymir_service_
 <p>Resources (read-only, for clients that show them): <code>ymir://status</code>, <code>ymir://nodes</code>,
 <code>ymir://models</code> and <code>ymir://models/local</code>.</p>
 <p>Changing, marked <strong>MUTATES</strong> in their description, with <code>readOnlyHint: false</code>, and doing nothing unless
-the call says <code>confirm: true</code>: <code>ymir_load_model</code>, <code>ymir_unload_model</code> and
-<code>ymir_pull_model</code> (without <code>confirm</code> it only shows what would be downloaded). <code>ymir_remove_model</code>
+the call says <code>confirm: true</code>: <code>ymir_load_model</code>, <code>ymir_unload_model</code>,
+<code>ymir_move_model</code> (as <code>ymirctl move</code>) and <code>ymir_pull_model</code> (without <code>confirm</code> it only shows what would be downloaded). <code>ymir_remove_model</code>
 deletes downloaded files and needs <code>--allow-remove</code> as well as <code>confirm</code>. No tool edits
 <code>node.toml</code>. <code>ymirctl bench</code> is not a tool yet.</p>
 <h3 id="mcp-clients">Add it to your tools</h3>
@@ -449,7 +579,7 @@ should serve from boot, use <code>--system</code>.</p>
 <h3 id="system-service">A machine service (<code>--system</code>)</h3>
 <p>With <code>--system</code>, run as root (<code>sudo</code>) or from an elevated prompt on Windows, <code>ymirctl service</code>
 manages the machine's service instead. Its node folder defaults to <code>/var/lib/ymir</code> (Linux),
-<code>/Library/Application Support/Ymir</code> (macOS) or <code>%ProgramData%\Ymir</code> (Windows); pass
+<code>/Library/Application Support/Ymir</code> (macOS), <code>/var/db/ymir</code> (FreeBSD) or <code>%ProgramData%\Ymir</code> (Windows); pass
 <code>--home</code> for another.</p>
 <ul>
 <li><strong>Linux:</strong> a system unit, <code>/etc/systemd/system/ymird.service</code>, with <code>User=</code> set to
@@ -461,6 +591,11 @@ own virtual account <code>NT SERVICE\ymird</code> (no password). The node folder
 Administrators and that account only. Stopping it (<code>service stop --system</code>, <code>sc stop ymird</code> or the
 Services app) shuts <code>ymird</code> and its engines down cleanly; after a crash it restarts in 60 seconds. The
 Windows installer registers the same service.</li>
+<li><strong>FreeBSD:</strong> an rc.d script, <code>/usr/local/etc/rc.d/ymird</code>, that runs <code>ymird</code> as
+<code>--run-as USER</code> under <code>daemon(8)</code> (restarted 5 seconds after it exits; output in
+<code>state/logs/ymird.log</code>), enabled with <code>sysrc ymird_enable=YES</code>. FreeBSD has no per-user services, so
+there it is <code>--system</code> only. There is no bundled llama.cpp for FreeBSD: <code>pkg install llama-cpp</code> and give
+<code>ymirctl setup --llama-server /usr/local/bin/llama-server</code>.</li>
 </ul>
 <pre><code># Linux or macOS
 sudo ymirctl --home /var/lib/ymir setup --download --yes

@@ -1,0 +1,50 @@
+{
+  "format": "ymir-dataset/1",
+  "job": "dataset-fixture-large",
+  "teacher": {
+    "model": "synthetic-fixture",
+    "license": "CC0-1.0",
+    "license_source": "operator"
+  },
+  "input_name": "decentralized-networks-large.jsonl",
+  "input_sha256": "133b4b95832710a9e5b04f03832f78a55284576ef3d7911106eceadaaf3dd2af",
+  "output_name": "decentralized-networks-large.dataset.jsonl",
+  "defaults": {},
+  "sources": {
+    "name": "decentralized-networks.sources.json",
+    "sha256": "d4fe5a56c4a716041d5f9b6126c0541d3f82a8a90fdefde2ccc68b445f45815d",
+    "topic": "Decentralized networks: how they work",
+    "sources": [
+      {
+        "id": "dht-notes",
+        "title": "Synthetic notes on distributed hash tables (test fixture)",
+        "url": "https://example.org/dht-notes",
+        "license": "CC0-1.0",
+        "kind": "notes"
+      },
+      {
+        "id": "relay-notes",
+        "title": "Synthetic notes on relays and hole punching (test fixture)",
+        "url": "https://example.org/relay-notes",
+        "license": "CC-BY-4.0",
+        "kind": "notes"
+      }
+    ],
+    "rows": {
+      "dht-notes": 10,
+      "relay-notes": 6
+    }
+  },
+  "cache": "bypass",
+  "rows_in_input": 16,
+  "rows_answered": 16,
+  "rows_usable": 16,
+  "rows_failed": 0,
+  "cache_hits": 0,
+  "standins": 0,
+  "answered_by": {
+    "synthetic-fixture": 16
+  },
+  "created_ms": 1795996800000,
+  "updated_ms": 1795996800000
+}

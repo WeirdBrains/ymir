@@ -267,7 +267,6 @@ Platform & Chat models & Optional \\
 \midrule
 Linux, Windows & llama.cpp, bundled (CPU and Vulkan, or CUDA 13 build) & vLLM on Linux with NVIDIA \\
 macOS, Apple Silicon & MLX-LM with MLX weights & llama.cpp via a flag \\
-macOS, Intel & llama.cpp, bundled & \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -287,7 +286,7 @@ A model too big for any one machine can be split across a group of model nodes w
 private link of at least 10\,Gb/s by default, and tears the group down if any member is lost. The
 design is explicit that splitting is for models that do not fit, not for speed: in the repo's one
 recorded test, an 8B model split between a GPU and a CPU worker ran at 8.3 tokens/s against 63.1
-tokens/s unsplit on the GPU. The next step is to use vLLM with Ray groups \planned.
+tokens/s unsplit on the GPU. vLLM with Ray groups (\texttt{vllm-ray}: a Ray head and members on the private link, \texttt{vllm serve --distributed-executor-backend ray} on the leader) are built and tested with mock \texttt{ray} and \texttt{vllm}; a run on real GPUs is \planned.
 
 \begin{figure}[htbp]
 \centering

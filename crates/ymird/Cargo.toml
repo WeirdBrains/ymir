@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+semver.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -1,12 +1,13 @@
 # Training and fine-tuning around Ymir: implementation plan
 
-Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`); the Hub
-license lookup, seed prompts and a synced job record are still left. P4a (LoRA adapters on a loaded
+Status: plan, updated 2026-11-24. P1 is built (`ymirctl batch --jsonl` and `ymirctl eval`, the teacher
+license from the Hub or the pool catalog, and seed prompts from sources, 2026-11-25); only a synced job record is left. P4a (LoRA adapters on a loaded
 base) is built. P2 (consented conversation export) is built on the Ymir side. P3a (one run on one node) is built and
 tested against a mock trainer; no real run has been made. P4b (versioned rollout, canary and rollback) is built and
-tested against mock models. P3b has not started. This document turns the four training proposals in the
-white paper's "Training and fine-tuning (proposal)" section (its LaTeX source is not in this
-repository yet) into work items, maps each onto the modules
+tested against mock models. P3b's Ymir side is built (2026-11-25: checkpoints, trainer interface 2, resumable jobs on a
+local stand-in for the synced job record); the synced record itself waits for `weirdnet-agent` 0.6.0. This document turns the four training proposals in the
+white paper's "Training and fine-tuning (proposal)" section
+([`docs/whitepaper/sections/10-training.tex`](../whitepaper/sections/10-training.tex)) into work items, maps each onto the modules
 that exist today, and sets the order. The order below was confirmed by the project lead on 2026-11-22, and
 m3talsmith answered the open questions the same day (see "Decisions").
 
@@ -53,8 +54,17 @@ wait-for-model; `usable`, `cache_hit` and `standin` per row; manifest with the o
 manifest with each source's license; `--resume`) and `ymirctl eval` (bench scorers, optional judge). The cache mode is on
 the wire (`weirdnet-agent` 0.5.1: batch generation and evals send `bypass` with `wait_for_model`, and the
 coordinator honours it), and answer-cache entries are keyed on the weights revision where a node reports one.
-Left: the teacher license read from the Hub, turning
-fetched sources into seed prompts, and the synced job record.
+Left: the synced job record.
+
+**Teacher license and seed prompts (2026-11-25).** Without `--license`, `batch --jsonl` takes the teacher's license
+from `--license-from OWNER/NAME` (the Hub repo's model card: `cardData.license`, `license_name` for `other`, else a
+`license:` tag; `license_source` `hub:OWNER/NAME`) or from the pool catalog's `weirdnet.license` for the teacher (from
+its node's provenance records; `license_source` `pool`), and still refuses when neither knows it. `--license` stays
+the operator's (`operator`). `ymirctl train seed questions --sources FILE --texts DIR --out Q.jsonl` cuts each
+source's text (`DIR/ID.txt` or `.md`, fetched by the operator) into excerpts at paragraph breaks and writes one row per
+excerpt asking the teacher for questions it answers; after `batch --jsonl` over those rows, `train seed prompts
+ANSWERS --out PROMPTS.jsonl` turns the `Question:` lines of the usable answers into stand-alone prompt rows that keep
+their source (duplicates dropped), ready for the dataset run (`ymir_core::seed`).
 
 **Scope.** A teacher model in the pool answers or labels a file of prompts; the answers become a dataset for a
 student. The same path scores a candidate model on held-out prompts, optionally with a second model as judge.
@@ -138,18 +148,37 @@ that node, checkpoints synced, and resume on another capable node if the first g
 (`ymir-mock-trainer`, [`crates/ymir-testkit/tests/p3a.rs`](../../crates/ymir-testkit/tests/p3a.rs)), with no real
 node or model. The llama.cpp trainer that speaks the interface below is
 [`scripts/trainer.py`](../../scripts/trainer.py) (see "The llama.cpp trainer"), tested against a fake
-`llama-finetune`. Left: a real run on a node the lead clears, and `train run --node` for a remote node (today a run
-trains on the node `ymirctl` runs on; `train reserve --node` holds a remote one by hand).
+`llama-finetune`. `train run --node X` (option C, 2026-11-24) starts a run on another of the owner's model nodes
+from any linked device, app-only ones included, over Ymir's own Weirdnet protocol `/ymir/train/1`
+([`crates/ymir-core/src/train_net.rs`](../../crates/ymir-core/src/train_net.rs),
+[`crates/ymir-testkit/tests/p3a_remote.rs`](../../crates/ymir-testkit/tests/p3a_remote.rs)); see "Runs on another
+node" below. Left: a real run on a node the lead clears.
+
+**Runs on another node (P3a, option C).** Built only on published crates (`weirdnet-net` 0.8.2's
+`accept_streams`/`open_stream`, `weirdnet-agent` 0.5.2's channels and `RosterAuth`); no `weirdnet-backends` node/1
+command was added, since it has none for jobs. `ymirctl` asks its own `ymird`, which finds the node on the roster
+(a label or peer id) and sends the dataset and its manifest inline (up to 24 MiB) with the run's settings,
+presenting this device's certificate. The node's `ymird` serves `/ymir/train/1` only with `[train] remote = true`
+(off by default), to the owner's linked, unrevoked devices, narrowed by `[train] callers` (peer ids). It runs the
+same `train::run` in process, so the run reserves the node through that `ymird` like a local run, and streams the
+run's lines back. Closing the stream (Ctrl-C) cancels the run and frees the GPU. node.toml is never edited over the
+network: `--add` is refused with `--node`, `--from` names a GGUF inside the node's models directory, and the
+adapter is served with `ymirctl models adapter serve ID --base BASE --node X`. One run per node at a time (the run's
+lock). The run lives as long as the caller's stream: a job record synced across devices, so a run outlives the
+caller and resumes on another node, is P3b and waits for `weirdnet-agent`'s synced job record (not published).
 
 What a run does: checks the trainer's interface and its build against `[train] build`, and refuses any other. It
 takes only a dataset with its manifest (P1's `ymir-dataset/1`, whose teacher license must be known unless
 `--allow-unknown-license`, or P2's `ymir-conversations/1`, whose hash must match), and writes the usable rows as
 chat JSONL. It holds the node's GPU: a lock file `ymird` honours at start, and, while `ymird` runs, a reservation that
 unloads its models and places nothing there, refused when the node is the only one serving a loaded model unless
-`--force`. Then it runs `train` and `extract-lora`, moves the adapter to `models_dir/adapters/ID.gguf`, writes
-`run.json` (dataset, license, hyperparameters, trainer build, steps, loss, adapter hash) and drops the full model
-unless `--keep-full`. With `--add` it puts the adapter in node.toml with the run id as its revision and the base's
-revision and quantisation. A failed or cancelled run (Ctrl-C sends the trainer SIGTERM) releases the GPU too.
+`--force`. Then it runs `train` and `extract-lora`, imports the adapter through the upload path
+([model-upload.md](model-upload.md), U5, 2026-11-24) into `models_dir/adapters/ID/ID.gguf` with a `provenance.json`
+(origin `train`: base, dataset record, trainer and run) and `adapter.json` beside it, writes `run.json` (dataset,
+license, hyperparameters, trainer build, steps, loss, adapter hash and revision) and drops the full model unless
+`--keep-full`. With `--add` it puts the adapter in node.toml with its content revision (`sha256:` and 16 hex digits,
+the same an upload of the file gives; runs before 2026-11-24 used the run id) and the base's revision and
+quantisation. `ymirctl models upload --from-run RUN_DIR` takes a run's adapter with that record on another node. A failed or cancelled run (Ctrl-C sends the trainer SIGTERM) releases the GPU too.
 
 **Trainer interface (version 1).** `TRAINER version` prints `{"interface": 1, "engine": "llama.cpp", "build":
 "bNNNN"}`. `TRAINER train --base BASE.gguf --data DATA.jsonl --config CONFIG.json --out FULL.gguf` fine-tunes
@@ -169,23 +198,82 @@ build ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.to
   `-ub` are all `context` (`n_ctx % n_batch == 0`), so `batch` is not used. GPU layers: `YMIR_TRAINER_NGL`
   (default all), flash attention off (it has no backward pass). Upstream's progress bars become `progress` events
   over all epochs, and the last validation loss a `log`.
+- Before training, `llama-tokenize` from the same build counts the rendered text as `llama-finetune` will tokenize
+  it (2026-11-25). Upstream cuts it into windows of the trained context n (`-c` rounded up to a multiple of 256,
+  as llama.cpp pads it) every n/2 tokens, `(tokens - n - 1) / (n/2)` of them, and keeps 5% back for validation,
+  so one training step needs `2n + 1` tokens: 513 at context 256 or less. A shorter text is refused with its
+  count and the shortfall; with less, upstream's size_t arithmetic underflows and `ggml_opt_dataset_init`
+  asserts. Without `llama-tokenize` (an older `build --trainer`), that crash becomes the same refusal.
 - `extract-lora` takes every `blk.*` matrix's difference between the tuned model and the base and keeps its top
   `rank` singular directions (truncated SVD): `lora_b = U·S` [out, rank], `lora_a = Vᵀ` [rank, in], the layout
   `convert_lora_to_gguf.py` writes, with `adapter.lora.alpha = rank` so llama.cpp applies it at scale 1. Matrices
   smaller than the rank are zero-padded; unchanged ones are left out; norms, embeddings and the output head stay
   the base's. It logs how much of the change the rank keeps.
+- The SVD is randomized and truncated (2026-11-25): a sketch of `rank + 16` columns with 5 power iterations, in
+  float32, so each matrix costs O(m·n·(rank + 16)) rather than a full SVD's O(m·n·min(m, n)); matrices whose
+  smaller side is at most four sketches wide take the exact SVD. With PyTorch (a CUDA build) in the trainer's venv it
+  runs on the GPU, else on the CPU, `YMIR_TRAINER_THREADS` matrices at a time (default min(4, CPUs)) with one BLAS
+  thread each: OpenBLAS's own 16 threads spun on a busy machine, which was most of the first real run's 79 minutes.
+  `YMIR_TRAINER_SVD` = `auto` (default), `cuda`, `cpu` or `exact` (the old full float64 SVD). On Qwen2.5-0.5B
+  (168 matrices, rank 16, RTX 3060, a machine at load 30) extraction took 8 s on the CPU and 4 s on the GPU, the
+  kept share the same as the exact SVD's to 0.1%.
 - Upstream's release archives don't carry `llama-finetune`: `scripts/engine.py build --trainer` builds it at the
   pin. The Python side needs numpy, gguf 0.19.0 (llama.cpp's gguf-py at the pin) and jinja2
   ([`scripts/trainer-requirements.txt`](../../scripts/trainer-requirements.txt)), in a venv named by
   `YMIR_TRAINER_PYTHON`, never installed system-wide.
-- Known limit at this build: `llama-finetune` tokenizes with `parse_special = false`, so the chat template's
-  special tokens (`<|im_start|>` and the like) are trained as plain text rather than as the tokens the model
-  emits. Until upstream changes that, an adapter may learn turn markers the model does not use. Options: carry a
-  one-line patch in `engine.py build --trainer`, or move the pin to an upstream build that parses them.
+- Special tokens: upstream `llama-finetune` at b12628 tokenizes with `parse_special = false`, so the chat
+  template's special tokens (`<|im_start|>` and the like) would train as plain text rather than as the tokens
+  the model emits. Decision 7: `engine.py build --trainer` applies
+  [`packaging/engines/patches/llama-finetune-parse-special.patch`](../../packaging/engines/patches/llama-finetune-parse-special.patch)
+  to `examples/training/finetune.cpp` only (`parse_special = true`, and `--ymir-patches` prints
+  `parse-special`), and the trainer refuses a `llama-finetune` that doesn't name it (`REQUIRED_PATCHES` in
+  `trainer.py`). `trainer.py version` lists the patches next to the build. `llama-server` and `rpc-server` are
+  built from unpatched sources.
 - Tests: [`scripts/test_trainer.py`](../../scripts/test_trainer.py) (a fake `llama-finetune` with upstream's
-  arguments, version line and progress bars; the extracted adapter reproduces a rank-2 change exactly) and
+  arguments, version line and progress bars, `--ymir-patches`, and the base's control tokens tokenized as specials;
+  the extracted adapter reproduces a rank-2 change exactly), [`scripts/test_engine.py`](../../scripts/test_engine.py)
+  (`build --trainer` applies the patch before cmake, a serving build doesn't, and the patch applies to the
+  pinned upstream source) and
   [`crates/ymir-testkit/tests/p3a_llamacpp.rs`](../../crates/ymir-testkit/tests/p3a_llamacpp.rs) (`ymirctl train run`
   through the real wrapper). Linux CI runs both. No model has been trained with it.
+
+**P3b, Ymir side (2026-11-25).** Built on a stand-in for the synced record, so it works on one node now and across
+nodes once `weirdnet-agent` 0.6.0's `jobs` (requested 2026-11-25; the lead's plan: `JobRecord<P>` over
+`weirdnet-sync` 0.8's job log and majority-vote leases) replaces it.
+- *llama.cpp at the pin has no checkpoints.* `examples/training/finetune.cpp` at b12628 loops `llama_opt_epoch` over
+  the epochs and calls `llama_model_save_to_file` once at the end; nothing saves the optimizer's state, and
+  `llama_opt_epoch` doesn't shuffle. The learning rate is constant unless `-lr-min` is given (Ymir doesn't). So
+  `trainer.py train --checkpoint-dir DIR` runs `llama-finetune --epochs 1` once per epoch, each from the last epoch's
+  model, and each epoch trains on the same sequences in the same order as one long run would; only AdamW's moments
+  start again at each epoch (`"optimizer": "reset"` in the checkpoint).
+- *Trainer interface 2.* `train ... --checkpoint-dir DIR` writes `DIR/epoch-NNNN/` (the model so far and
+  `checkpoint.json`: format `ymir-train-checkpoint/1`, epoch, steps, loss, seed, the sha256 of the run's data and
+  config, every file's hash) and prints `{"event": "checkpoint", "dir", "epoch", "step"}`; `--resume CKPT` carries on
+  after CKPT's epoch and refuses a checkpoint of other data or settings. Ymir checks each checkpoint's files before it
+  keeps it, keeps only the newest in the run, and drops them when the run is done (a failed run keeps its last).
+  Interface 1 trainers still run plain runs.
+- *Jobs* ([`crates/ymir-core/src/train_job.rs`](../../crates/ymir-core/src/train_job.rs)). `ymirctl train run --job`
+  posts a job (`ymir.train`: base and its revision, the dataset as a content-addressed bundle, settings, adapter id,
+  trainer build) and runs it under a claim: a lease (60 s, renewed every 20 s) whose term fences every write, so a
+  node that lost the job can't overwrite the next holder's record. Each checkpoint goes into the blob store and the
+  record (its root and who holds it). The run ends the job as done, failed with a retry (after the GPU was held: a
+  crash, out of memory, a lost node; up to 3 attempts, 60 s apart), failed for good (before: the job can't run here or
+  anywhere), or paused (Ctrl-C, no attempt spent). If the lease is lost the run stops. `train resume JOB` claims it
+  again, after [`check_resumable`]: the same trainer build (interface 2), the base at the same revision, the `--from`
+  file in the models directory, the adapter id free, and `[train] resume = true` for another node's job. A lapsed
+  lease can be taken over after 5 minutes, so a network blip doesn't move a multi-GB job. `train jobs` and
+  `train job pause|unpause|cancel` (owner only) manage them.
+- *Stand-ins.* `JobStore` is the API asked of `weirdnet-agent` 0.6.0; `FileJobStore` keeps it in
+  `state/train/jobs/` on one node with the same semantics, and `LocalBlobs` keeps bundles in `state/train/blobs/`
+  (hard links where possible). Swapping in the synced record and a blob fetch from the holders over Weirdnet is the
+  remaining step; nothing else changes. Not yet: a node taking over stalled jobs by itself (it will watch the synced
+  record), and hardware checks beyond the base and trainer (`needs` is recorded, not enforced).
+- Tests: [`crates/ymir-testkit/tests/p3b.rs`](../../crates/ymir-testkit/tests/p3b.rs) (two node homes sharing the
+  stand-in stores: a job lost after epoch 1 is refused by a node with another base revision or without `resume`,
+  then carried on from epoch 1's checkpoint by one with them; Ctrl-C pauses; a run that loses its lease stops and
+  writes nothing over the new holder; an interface 1 trainer can't run a job; the `ymirctl` commands), the store's
+  unit tests (fencing, takeover wait, back-off, attempts, owner operations, candidates, blob hashes) and
+  `scripts/test_trainer.py` (per-epoch checkpoints, resume and its refusals).
 
 **Work, in two parts.**
 - **P3a, one node, no hand-off.** `ymirctl train reserve --node X` drains the node, unloads its models, and
@@ -260,7 +348,8 @@ the same, and raising a canary only moves the conversations it gains. `name@N` p
 the name is refused. The catalog lists the name and each `name@N`. `Accepted` names what the app asked for, so
 a version isn't reported as a stand-in, and answers are cached under the version's model id. `ymirctl models
 rollout list | add | weight | rollback | retire` edits node.toml and applies it to the running ymird at once
-(`ControlRequest::Rollouts`). A version may take up to 10 percent of new conversations freely. More than that needs
+(`ControlRequest::Rollouts`). `--canary PCT` names a share outright (0 to 100), set exactly and uncapped (m3talsmith,
+2026-11-25). Through a raw weight a version may take up to 10 percent of new conversations freely. More than that needs
 `--eval FILE`, a `ymirctl eval --out` file in which its model passes at least the share of the checks (and of the
 judge, when both were judged) that the version with the most traffic passes on the same rows, or `--force`.
 `rollback` moves the newest version's traffic back to the one before it. `retire` drops a version without traffic,
@@ -282,6 +371,38 @@ command. Answers from different versions must not share answer-cache entries: do
 (`[[model.local]] revision`, keyed with `get_rev`/`put_rev`); P4 must set it for every fine-tune. Adapters are tied to the exact base revision and quantisation; loading one on another base must be
 refused, not attempted (done in P4a for adapters in `node.toml` that record their base).
 
+### Optional: two-node data-parallel LoRA on a private link (design, 2026-11-25)
+
+**Status.** Design only; nothing is built. It needs two decisions from m3talsmith first (below).
+
+**Why it can't be llama.cpp.** The pinned trainer cannot do it: `llama-finetune` at b12628
+(`examples/training/finetune.cpp`) is one process on one context, looping `llama_opt_epoch` over the dataset and saving
+once; it has no rank, no gradient exchange and no optimizer state to share. Data-parallel training needs a trainer that
+averages gradients between processes, which in practice is PyTorch with `torch.distributed` (NCCL over the link) and
+PEFT for the LoRA, the "PEFT/TRL trainer behind the same interface" decision 1 left for later. Its bases are
+safetensors, not GGUF: the adapter it makes is converted to a GGUF LoRA (llama.cpp's `convert_lora_to_gguf.py`) for
+P4a to serve, and the base it trains on has to be the same weights as the served GGUF (recorded by revision).
+
+**Shape.**
+- Trainer interface 3: `train` takes `--world-size N --rank R --rendezvous ADDR:PORT`; `version` says
+  `"data_parallel": true`. Rank 0 writes checkpoints (interface 2's format) and the adapter; other ranks write nothing.
+- The link is configured on each node, never discovered: `[[train.link]] node = "PEER", address = "...", min_gbps = 10`
+  in node.toml (the address is the peer's on the private link). Ymir refuses an address on an interface that carries
+  Weirdnet traffic or a default route, so the run can't fall back to the internet.
+- `ymirctl train run --nodes A,B` (or a P3b job with `needs.nodes = 2`): the asking `ymird` reserves both GPUs over
+  `/ymir/train/1` as today; the two nodes run a link probe (one TCP stream for two seconds over the configured
+  addresses) and refuse below `min_gbps`; both must have the same base revision and trainer build. Then each node starts
+  its rank with the same dataset (sent with the run, as now) and streams its lines; rank 0's are the run's. Either
+  rank failing or its caller closing cancels both and releases both GPUs.
+- With P3b, the job's lease is held by rank 0's node; resume restarts both ranks from rank 0's last checkpoint, on the
+  same pair or another pair that passes the same checks.
+- Tests: the mock trainer with ranks on loopback (a fake rendezvous), the probe against loopback with a threshold, and
+  the refusals (no link configured, a slow link, mismatched revision or build, one node not opted in).
+
+**Decisions needed (m3talsmith).** (1) A second trainer: PyTorch + PEFT for data-parallel runs, pinned like the
+llama.cpp one, with its Python dependencies on the nodes. (2) Which two nodes share a private link of 10 Gb/s or more,
+and the OK for a first run on them (both serve the pool).
+
 ## Order (confirmed 2026-11-22)
 
 Smallest useful end-to-end slice first. Slices 1 and 2 together give a complete loop with no new GPU
@@ -296,8 +417,10 @@ serve it as an adapter, and score it against the base through the pool.
 4. **P3a: reserve a node and run the external trainer on it, one node, no hand-off.** Built (2026-11-24) on the
    `weirdnet-backends` 0.4.3 reservation, tested with a mock trainer; each run on a serving node needs the lead's OK.
 5. **P4b: versions, canary weights and rollback**, gated by P1's eval. Built (2026-11-24) against mock models.
-6. **P3b: synced training job record and checkpoint resume**, once `weirdnet-agent` has the synced job record.
-7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet.
+6. **P3b: synced training job record and checkpoint resume.** Ymir side built (2026-11-25) on a local stand-in; the
+   synced record waits for `weirdnet-agent` 0.6.0's `jobs`.
+7. Optional, later: two-node data-parallel LoRA over a private link (10 Gb/s or faster), never over Weirdnet. Designed
+   (2026-11-25, above); waits on a second trainer and a node pair.
 
 ## Testing
 
@@ -319,13 +442,33 @@ serve it as an adapter, and score it against the base through the pool.
 2. **Non-goal:** reworded in [DESIGN.md](../DESIGN.md#non-goals) to "Ymir feeds, schedules and serves a
    separate trainer".
 3. **First dataset and eval topic:** "Decentralized networks: how they work". Datasets stay configurable and none
-   is built in; the tests use a small synthetic fixture on this topic. Sources for the real dataset can be fetched
+   is built in; the tests use a small synthetic fixture on this topic (`crates/ymir-testkit/tests/fixtures/decentralized-networks.jsonl` as batch input, and `decentralized-networks.dataset.jsonl` with its manifest as a dataset `train run` takes). That one renders to 256 tokens, too few for a real `llama-finetune` step; `decentralized-networks-large.dataset.jsonl` (16 conversations, 1297 tokens with Qwen2.5's template) is the one for a first real run. Sources for the real dataset can be fetched
    by m3talsmith when needed.
 4. **Conversation training flag (P2):** the Bragi toggle comes after Bragi v1; the Ymir side of P2 can be built
    before it, but nothing is exported until a conversation can be flagged.
 5. **Version traffic weights (P4b):** in Ymir's `balance` for now (see the proposal below).
-6. **White paper:** to be committed under `docs/whitepaper/` by m3talsmith. Until it is on main, this plan refers to
-   its "Training and fine-tuning (proposal)" section by title; a link to the section's source replaces this note then.
+6. **White paper:** committed under [`docs/whitepaper/`](../whitepaper/) by m3talsmith. The proposals this plan
+   implements are in [`sections/10-training.tex`](../whitepaper/sections/10-training.tex).
+
+## Decisions (2026-11-24, m3talsmith)
+
+7. **Trainer pin and special tokens** (updated by m3talsmith 2026-11-24): patch `llama-finetune` in Ymir's
+   trainer build to tokenize with `parse_special = true`, staying on b12628, and drop the patch once upstream
+   releases the fix and the pin moves past it. This replaces the same day's first answer (move the pin, no local
+   patch), because no upstream build has the fix: `examples/training/finetune.cpp` calls `common_tokenize(ctx, params.prompt,
+   true)` (`parse_special` defaults to false) at b12628, at the latest build b12680 and at `v1.0.0`, and the file
+   was last changed in ggml-org/llama.cpp#20834 (2026-07-23). The fix in flight is draft
+   ggml-org/llama.cpp#31258 (LoRA fine-tuning with a chat-rendering path that tokenizes with `parse_special =
+   true`), not merged. The patch is
+   [`packaging/engines/patches/llama-finetune-parse-special.patch`](../../packaging/engines/patches/llama-finetune-parse-special.patch),
+   applied by `engine.py build --trainer` only and required by `trainer.py`. The trainer and the bundled
+   serving engine share one pin ([`packaging/engines/llama.cpp.toml`](../../packaging/engines/llama.cpp.toml):
+   `engine.py build --trainer` builds `llama-finetune` at it, and `trainer.py` refuses any other build), so a later
+   pin move moves the serving engine too, and needs the Inkling checks in [DESIGN.md](../DESIGN.md) redone at the new
+   build. `weirdnet-backends` does not pin a llama.cpp build.
+8. **Releases ("Just release"):** once work is on main and CI is green, agents tag, publish and release without
+   waiting for m3talsmith's approval, following AGENTS.md. This replaces "nothing publishes without m3talsmith's
+   OK" from 2026-11-22.
 
 ### Proposal: where version weights could live later
 

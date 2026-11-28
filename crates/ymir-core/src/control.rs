@@ -27,6 +27,16 @@ pub enum ControlRequest {
     Unload {
         model: String,
     },
+    /// Move a model to another model node (M6): load it on `to`, then unload it from `from` (or
+    /// where it is loaded) once what it has there finishes, at most `grace_secs`.
+    Move {
+        model: String,
+        to: String,
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default = "move_grace")]
+        grace_secs: u64,
+    },
     /// Stop sending a model node new requests (it finishes what it has), or resume it.
     Drain {
         node: String,
@@ -64,6 +74,22 @@ pub enum ControlRequest {
     /// Revoke a device (`ymirctl pool revoke`).
     PoolRevoke {
         peer: String,
+    },
+    /// Share the pool with another Weirdnet identity (`ymirctl pool share`): record the guest
+    /// grant in the live, synced pool records.
+    PoolShare {
+        grant: crate::guests::GuestGrant,
+    },
+    /// Revoke a guest identity's grant (`ymirctl pool unshare`).
+    PoolUnshare {
+        user_id: String,
+    },
+    /// Wake a Bragi device (peer id or label) through its relay so it syncs (`ymirctl pool
+    /// wake`); `reason` is `message` or `connection`.
+    PoolWake {
+        device: String,
+        #[serde(default = "message")]
+        reason: String,
     },
     /// Add a message to a conversation in this node's context store (it syncs to the user's
     /// other inference and app nodes).
@@ -142,12 +168,56 @@ pub enum ControlRequest {
         node: String,
         request: crate::models::ModelsOp,
     },
+    /// A training run on another of the user's model nodes over Weirdnet (`ymirctl train run
+    /// --node`). The answer is a stream of [`crate::train_net::TrainLine`]s ending with `done` or
+    /// `failed`; closing the connection cancels the run.
+    Train {
+        /// A roster label or a peer id.
+        node: String,
+        request: crate::train_net::TrainOp,
+    },
+    /// A call on the synced training job board this daemon holds (`ymirctl train run --job`
+    /// on Weirdnet; see [`crate::train_jobs_ctl`]).
+    Jobs {
+        call: crate::train_jobs_ctl::JobCall,
+    },
+    /// Another model node's training status over Weirdnet (`ymirctl train status --node`,
+    /// `/ymir/train-status/1`).
+    TrainStatus {
+        /// A roster label or a peer id.
+        node: String,
+    },
     /// The versioned rollouts in force (P4b), or, with `set`, replace them live (new
     /// conversations follow at once). `ymirctl models rollout` also writes them to node.toml.
     Rollouts {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         set: Option<Vec<crate::rollout::Rollout>>,
     },
+    /// Another inference node's rollouts over Weirdnet (`ymirctl models rollout --inference NODE`,
+    /// `/ymir/rollouts/1`): read them, or change them by that node's rules.
+    RemoteRollouts {
+        /// A roster label or a peer id.
+        node: String,
+        request: crate::rollouts_net::Request,
+    },
+    /// Speech to text through the pool (audio design milestone 1): `bytes` of audio follow this
+    /// line on the connection, raw (local transport only; see [`transcribe`]). Goes through the
+    /// app role's pool, so the inference role routes it as it routes infer/2 `Transcribe`.
+    Transcribe(TranscribeJob),
+    /// The transcriber a request would use and its audio limits from catalog/1, so a client can
+    /// plan chunks (audio design milestone 3). Nothing is sent to a model.
+    TranscribeTarget {
+        #[serde(default)]
+        model: Option<String>,
+    },
+    /// Text to speech through the pool (`weirdnet-agent` 0.5.11 infer/2 `Speak`): the reference
+    /// clips of cloned voices follow this line raw, `clips[i]` bytes for the i-th cloned voice
+    /// (local transport only; see [`speak`]). The answer's audio follows the answer line, raw
+    /// ([`SpeechReply::bytes`]). Neither text, clip nor audio is logged.
+    Speak(SpeakJob),
+    /// The speaker a speech request would use and its catalog/1 profile, so a client can plan
+    /// long text (`max_input_chars`) and pick formats. Nothing is sent to a model.
+    SpeakTarget(SpeakJob),
     /// Stop `ymird` cleanly (engines too), as SIGTERM does. Local transport only: this is how
     /// `ymirctl service stop` stops a Windows scheduled task, which has no signal to send.
     Shutdown,
@@ -155,6 +225,14 @@ pub enum ControlRequest {
 
 fn user() -> String {
     "user".into()
+}
+
+fn message() -> String {
+    "message".into()
+}
+
+fn move_grace() -> u64 {
+    60
 }
 
 fn yes() -> bool {
@@ -208,6 +286,24 @@ pub struct NodeModel {
     /// The concurrent sequences it is set to run, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<u32>,
+    /// The context per request the engine reported when the model last loaded (llama-server
+    /// `/props`, vLLM `max_model_len`; `weirdnet-backends` 0.4.9), when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+    /// The weights' revision the node reports (node.toml's `revision`, or an upload's), which
+    /// keys the answer cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// What a speaker speaks (`weirdnet-backends` 0.4.10 `ModelStatus::speech`), when it speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<weirdnet_agent::speech::SpeechProfile>,
+    /// The model's license, when known (the node's record, the speech profile or the catalog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// For a speaker: whether guests of a shared pool may use it (`[model.local.speak] guests`,
+    /// else closed for a restricted license).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -229,6 +325,9 @@ pub struct StatusReport {
     /// This device on Weirdnet, once it has an identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkStatus>,
+    /// The semantic answer cache, when it is on (M6; pool mode shows its members and counters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::semantic::CacheStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,6 +375,161 @@ pub struct ControlResponse {
     /// The rollouts in force, for [`ControlRequest::Rollouts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollouts: Option<Vec<crate::rollout::Rollout>>,
+    /// Another inference node's answer, for [`ControlRequest::RemoteRollouts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_rollouts: Option<crate::rollouts_net::Rollouts>,
+    /// The answer to [`ControlRequest::TrainStatus`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train_status: Option<crate::train_net::TrainStatus>,
+    /// The answer to [`ControlRequest::Jobs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::train_jobs_ctl::JobReply>,
+    /// The answer to [`ControlRequest::Transcribe`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscribeReply>,
+    /// The answer to [`ControlRequest::TranscribeTarget`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcriber: Option<Transcriber>,
+    /// The answer to [`ControlRequest::Speak`]; its audio follows the answer line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<SpeechReply>,
+    /// The answer to [`ControlRequest::SpeakTarget`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<Speaker>,
+}
+
+/// The most reference audio one [`ControlRequest::Speak`] carries, all clips together (each clip
+/// is also held to infer/2's 30 MiB, `MAX_REFERENCE_BYTES`).
+pub const MAX_SPEAK_CLIP_BYTES: u64 = 31 << 20;
+
+/// A speech request for the control socket: the infer/2 request with every cloned voice's audio
+/// left empty, and the length of each clip that follows the line, in [`SpeakRequest::all_voices`]
+/// order.
+///
+/// [`SpeakRequest::all_voices`]: weirdnet_agent::remote::infer::v2::SpeakRequest::all_voices
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpeakJob {
+    pub request: weirdnet_agent::remote::infer::v2::SpeakRequest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<u64>,
+}
+
+impl SpeakJob {
+    /// `request` with its clips taken out (to send after the line).
+    pub fn split(mut request: weirdnet_agent::remote::infer::v2::SpeakRequest) -> (Self, Vec<Vec<u8>>) {
+        use weirdnet_agent::remote::infer::v2::Voice;
+        let mut clips = Vec::new();
+        let voices = request.voice.iter_mut().chain(request.voices.iter_mut().map(|v| &mut v.voice));
+        for v in voices {
+            if let Voice::Clone { audio, .. } = v {
+                clips.push(std::mem::take(audio));
+            }
+        }
+        request.cert = None;
+        (Self { request, clips: clips.iter().map(|c| c.len() as u64).collect() }, clips)
+    }
+
+    /// The request with `clips` put back, checked against [`Self::clips`].
+    pub fn join(self, clips: Vec<Vec<u8>>) -> Result<weirdnet_agent::remote::infer::v2::SpeakRequest> {
+        use weirdnet_agent::remote::infer::v2::Voice;
+        let mut request = self.request;
+        request.cert = None;
+        let mut it = clips.into_iter();
+        let voices = request.voice.iter_mut().chain(request.voices.iter_mut().map(|v| &mut v.voice));
+        for v in voices {
+            if let Voice::Clone { audio, .. } = v {
+                *audio = it.next().context("fewer reference clips than cloned voices")?;
+            }
+        }
+        if it.next().is_some() {
+            bail!("more reference clips than cloned voices");
+        }
+        Ok(request)
+    }
+
+    fn check_clips(&self) -> Result<u64, String> {
+        let cloned = self.request.all_voices().filter(|v| matches!(v, weirdnet_agent::remote::infer::v2::Voice::Clone { .. })).count();
+        if cloned != self.clips.len() {
+            return Err(format!("{} reference clip lengths for {cloned} cloned voices", self.clips.len()));
+        }
+        let max = weirdnet_agent::remote::infer::v2::MAX_REFERENCE_BYTES as u64;
+        if let Some(c) = self.clips.iter().find(|c| **c == 0 || **c > max) {
+            return Err(format!("a reference clip takes 1 to {max} bytes, not {c}"));
+        }
+        let total: u64 = self.clips.iter().sum();
+        if total > MAX_SPEAK_CLIP_BYTES {
+            return Err(format!("the reference clips are {total} bytes together; one request carries at most {MAX_SPEAK_CLIP_BYTES}"));
+        }
+        Ok(total)
+    }
+}
+
+/// Speech and where it came from; [`Self::bytes`] of audio follow the answer line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeechReply {
+    pub bytes: u64,
+    pub format: weirdnet_agent::speech::AudioFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u16>,
+    pub model: String,
+    pub node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<weirdnet_agent::remote::infer::v2::Usage>,
+    /// Request fields the model received but does not use (`Meta::ignored`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
+}
+
+/// The speaker a request would be routed to, and its profile from catalog/1 (absent when no node
+/// reports one; never defaulted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Speaker {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<weirdnet_agent::speech::SpeechProfile>,
+}
+
+/// Largest audio clip one [`ControlRequest::Transcribe`] carries: infer/2 frames are at most
+/// 32 MiB (`weirdnet-agent` `MAX_FRAME`), less room for the rest of the request. Longer audio is
+/// chunked by the client (`ymirctl transcribe --chunk auto`).
+pub const MAX_TRANSCRIBE_BYTES: u64 = 31 << 20;
+
+/// A transcription request; the audio follows on the connection.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TranscribeJob {
+    /// How many bytes of audio follow the request line.
+    pub bytes: u64,
+    /// `wav`, `mp3`, `flac`, ...
+    pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timestamps: bool,
+}
+
+/// A transcript and where it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscribeReply {
+    pub transcript: weirdnet_agent::remote::infer::v2::Transcript,
+    pub model: String,
+    pub node: String,
+}
+
+/// The transcriber a request would be routed to, and what catalog/1 reports for it (each field
+/// absent when no node reports it; never defaulted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transcriber {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_max_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
 }
 
 /// An answer to [`ControlRequest::Chat`].
@@ -315,6 +569,13 @@ impl ControlResponse {
             groups: Vec::new(),
             group_losses: Vec::new(),
             rollouts: None,
+            remote_rollouts: None,
+            train_status: None,
+            job: None,
+            transcript: None,
+            transcriber: None,
+            speech: None,
+            speaker: None,
         }
     }
     fn err(message: impl Into<String>) -> Self {
@@ -329,6 +590,123 @@ impl ControlResponse {
             groups: Vec::new(),
             group_losses: Vec::new(),
             rollouts: None,
+            remote_rollouts: None,
+            train_status: None,
+            job: None,
+            transcript: None,
+            transcriber: None,
+            speech: None,
+            speaker: None,
+        }
+    }
+}
+
+impl ControlHandler {
+    /// [`ControlRequest::Transcribe`], with its audio read. Neither the audio nor the transcript
+    /// is logged.
+    pub async fn transcribe(&self, job: TranscribeJob, audio: Vec<u8>) -> ControlResponse {
+        use weirdnet_agent::remote::infer::v2::TranscribeRequest;
+        let Some(pool) = &self.pool else {
+            return ControlResponse::err("transcription needs the app role (it asks the pool like the bridge does)");
+        };
+        let mut r = TranscribeRequest::new(audio, job.format).with_timestamps(job.timestamps);
+        if let Some(m) = job.model {
+            r = r.with_model(m);
+        }
+        if let Some(l) = job.language.filter(|l| !l.trim().is_empty()) {
+            r = r.with_language(l);
+        }
+        if let Some(p) = job.prompt.filter(|p| !p.trim().is_empty()) {
+            r = r.with_prompt(p);
+        }
+        match pool.transcribe(r, &weirdnet_agent::CancelToken::new()).await {
+            Ok(t) => {
+                let mut resp = ControlResponse::ok("transcribed");
+                resp.transcript = Some(TranscribeReply { transcript: t.transcript, model: t.model, node: t.node });
+                resp
+            }
+            Err(e) => ControlResponse::err(e.to_string()),
+        }
+    }
+
+    /// [`ControlRequest::Speak`], with its clips read: the whole speech, through the pool. The
+    /// audio comes back beside the answer (to write after its line).
+    pub async fn speak(&self, job: SpeakJob, clips: Vec<Vec<u8>>) -> (ControlResponse, Vec<u8>) {
+        let Some(pool) = &self.pool else {
+            return (ControlResponse::err("speech needs the app role (it asks the pool like the bridge does)"), Vec::new());
+        };
+        let request = match job.join(clips) {
+            Ok(r) => r,
+            Err(e) => return (ControlResponse::err(e.to_string()), Vec::new()),
+        };
+        match pool.speak(request, &weirdnet_agent::CancelToken::new()).await {
+            Ok(s) => {
+                let mut resp = ControlResponse::ok("spoken");
+                resp.speech = Some(SpeechReply {
+                    bytes: s.audio.len() as u64,
+                    format: s.format,
+                    sample_rate: s.sample_rate,
+                    channels: s.channels,
+                    model: s.model,
+                    node: s.node,
+                    usage: s.usage,
+                    ignored: s.meta.ignored.clone(),
+                });
+                (resp, s.audio)
+            }
+            Err(e) => (ControlResponse::err(e.to_string()), Vec::new()),
+        }
+    }
+
+    /// [`ControlRequest::SpeakTarget`]: routed as the speech request would be, from catalog/1.
+    pub async fn speak_target(&self, job: SpeakJob) -> ControlResponse {
+        let Some(pool) = &self.pool else {
+            return ControlResponse::err("speech needs the app role (it asks the pool like the bridge does)");
+        };
+        let catalog = match pool.catalog().await {
+            Ok(c) => c,
+            Err(e) => return ControlResponse::err(format!("no catalog from the pool: {e}")),
+        };
+        let mut needs = job.request.needs();
+        // The clips are not sent for routing; their lengths are. Length and format are left
+        // out: the caller splits long text to the speaker's `max_input_chars` and converts to a
+        // format it doesn't make.
+        needs.reference_bytes = job.clips.iter().max().copied();
+        needs.input_chars = 0;
+        needs.format = None;
+        // A named speaker with no profile yet is left to its node (it loads, then checks).
+        let unknown = job.request.model.as_deref().and_then(|m| catalog.find(m)).is_some_and(crate::coordinator::speaker_unknown);
+        let routed =
+            if unknown { Ok(job.request.model.clone().unwrap_or_default()) } else { catalog.route_speak(job.request.model.as_deref(), &needs) };
+        match routed {
+            Ok(id) => {
+                let profile = catalog.find(&id).and_then(|m| m.speech.clone());
+                let mut resp = ControlResponse::ok("speaker");
+                resp.speaker = Some(Speaker { model: id, profile });
+                resp
+            }
+            Err(e) => ControlResponse::err(e.to_string()),
+        }
+    }
+
+    /// [`ControlRequest::TranscribeTarget`]: routed as a transcription would be, from catalog/1.
+    pub async fn transcribe_target(&self, model: Option<&str>) -> ControlResponse {
+        let Some(pool) = &self.pool else {
+            return ControlResponse::err("transcription needs the app role (it asks the pool like the bridge does)");
+        };
+        let catalog = match pool.catalog().await {
+            Ok(c) => c,
+            Err(e) => return ControlResponse::err(format!("no catalog from the pool: {e}")),
+        };
+        match catalog.route_transcribe(model) {
+            Ok(id) => {
+                let limits = catalog.find(&id).map(|m| m.limits).unwrap_or_default();
+                let mut resp = ControlResponse::ok("transcriber");
+                resp.transcriber =
+                    Some(Transcriber { model: id, audio_max_seconds: limits.audio_max_seconds, max_request_bytes: limits.max_request_bytes });
+                resp
+            }
+            Err(e) => ControlResponse::err(e.to_string()),
         }
     }
 }
@@ -349,6 +727,12 @@ pub struct ControlHandler {
     pub pool: Option<Arc<weirdnet_agent::pool::Pool>>,
     /// Model management over Weirdnet (needs a device identity).
     pub models: Option<Arc<crate::models::ModelsHub>>,
+    /// Training runs on other model nodes over Weirdnet (needs a device identity).
+    pub train: Option<Arc<crate::train_net::TrainHub>>,
+    /// The synced training job board and this device's id on it (Weirdnet).
+    pub jobs: Option<(Arc<crate::train_board::BoardJobStore>, String)>,
+    /// Fetches training bundles from the user's other devices (Weirdnet).
+    pub blobs: Option<Arc<crate::blobs_net::BlobsClient>>,
     /// Woken by [`ControlRequest::Shutdown`]; `ymird` waits on it next to its signals.
     pub exit: Arc<tokio::sync::Notify>,
 }
@@ -444,10 +828,51 @@ impl ControlHandler {
         Ok(())
     }
 
+    /// Runs a training request on another node and writes its lines to `w`; `closed` resolving
+    /// (the asking `ymirctl` went away) cancels it.
+    async fn stream_train<W: AsyncWrite + Unpin>(
+        &self,
+        node: String,
+        op: crate::train_net::TrainOp,
+        w: &mut W,
+        closed: impl std::future::Future<Output = ()>,
+    ) -> Result<()> {
+        use crate::train_net::TrainLine;
+        let Some(hub) = self.train.clone() else {
+            let line = TrainLine::Failed { message: "training on another node needs a device identity on this one (see `ymirctl pool link`)".into() };
+            return write_line(w, &line).await;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let done = hub.run(&node, op, &tx).await;
+            let _ = tx.send(match done {
+                Ok(record) => TrainLine::Done { record: Box::new(record) },
+                Err(message) => TrainLine::Failed { message },
+            });
+        });
+        tokio::pin!(closed);
+        loop {
+            tokio::select! {
+                line = rx.recv() => match line {
+                    Some(line) => write_line(w, &line).await?,
+                    None => break,
+                },
+                _ = &mut closed => {
+                    // Dropping the stream to the node cancels the run there.
+                    task.abort();
+                    break;
+                }
+            }
+        }
+        let _ = task.await;
+        Ok(())
+    }
+
     pub async fn handle(&self, req: ControlRequest) -> ControlResponse {
         match req {
-            // Streamed by `stream_models`, which `connection` calls instead.
+            // Streamed by `stream_models` and `stream_train`, which `connection` calls instead.
             ControlRequest::Models { .. } => ControlResponse::err("models requests are streamed"),
+            ControlRequest::Train { .. } => ControlResponse::err("train requests are streamed"),
             ControlRequest::Rollouts { set } => {
                 let Some(c) = &self.coordinator else {
                     return ControlResponse::err("rollouts are routed by an inference node; this one has no inference role");
@@ -461,6 +886,47 @@ impl ControlHandler {
                 resp.rollouts = Some(c.rollouts());
                 resp
             }
+            ControlRequest::RemoteRollouts { node, request } => {
+                let Some(hub) = &self.models else {
+                    return ControlResponse::err("changing rollouts over Weirdnet needs a device identity on this node (see `ymirctl pool link`)");
+                };
+                match hub.rollouts(&node, request).await {
+                    Ok((label, r)) => {
+                        let mut resp = ControlResponse::ok(label);
+                        resp.remote_rollouts = Some(r);
+                        resp
+                    }
+                    Err(e) => ControlResponse::err(e),
+                }
+            }
+            ControlRequest::Jobs { call } => {
+                let Some((store, me)) = &self.jobs else {
+                    return ControlResponse::err("this node is not on Weirdnet, so it has no synced training job board");
+                };
+                let mut resp = ControlResponse::ok("");
+                resp.job = Some(
+                    crate::train_jobs_ctl::serve(store.as_ref(), self.blobs.as_deref().map(|b| b as &dyn crate::train_job::BlobFetch), me, call)
+                        .await,
+                );
+                resp
+            }
+            ControlRequest::TrainStatus { node } => {
+                let Some(hub) = &self.train else {
+                    return ControlResponse::err("training status over Weirdnet needs a device identity on this node (see `ymirctl pool link`)");
+                };
+                match hub.status(&node).await {
+                    Ok((label, s)) => {
+                        let mut resp = ControlResponse::ok(label);
+                        resp.train_status = Some(s);
+                        resp
+                    }
+                    Err(e) => ControlResponse::err(e),
+                }
+            }
+            ControlRequest::Transcribe(_) => ControlResponse::err("a transcription request carries audio: send it over the control socket"),
+            ControlRequest::TranscribeTarget { model } => self.transcribe_target(model.as_deref()).await,
+            ControlRequest::Speak(_) => ControlResponse::err("a speech request returns audio: send it over the control socket"),
+            ControlRequest::SpeakTarget(job) => self.speak_target(job).await,
             ControlRequest::Shutdown => {
                 tracing::info!("shutdown requested over the control socket");
                 self.exit.notify_one();
@@ -472,7 +938,28 @@ impl ControlHandler {
                     .iter()
                     .flat_map(|n| {
                         n.status().into_iter().map(|s| NodeModel {
-                            purpose: if crate::model_node::embeds(&s) { "embedding".into() } else { "chat".into() },
+                            revision: n.revision(&s.id),
+                            license: n.origin(&s.id).1.or_else(|| {
+                                crate::model_node::speaks(&s)
+                                    .then(|| {
+                                        s.speech
+                                            .as_ref()
+                                            .and_then(|p| p.license.clone())
+                                            .or_else(|| weirdnet_model::hw::find(&s.id).and_then(|e| e.license()).map(str::to_string))
+                                    })
+                                    .flatten()
+                            }),
+                            guests: self.coordinator.as_ref().filter(|_| crate::model_node::speaks(&s)).map(|c| c.guests_may_speak(&s.id)),
+                            speech: s.speech.clone(),
+                            purpose: if crate::model_node::embeds(&s) {
+                                "embedding".into()
+                            } else if crate::model_node::speaks(&s) {
+                                "speak".into()
+                            } else if crate::model_node::transcribes(&s) {
+                                "transcribe".into()
+                            } else {
+                                "chat".into()
+                            },
                             node: n.name().to_string(),
                             id: s.id,
                             engine: s.engine,
@@ -487,6 +974,7 @@ impl ControlHandler {
                             base: s.base,
                             context: s.context,
                             slots: s.slots,
+                            context_tokens: s.context_tokens,
                         })
                     })
                     .collect();
@@ -516,6 +1004,13 @@ impl ControlHandler {
                     groups: Vec::new(),
                     group_losses: Vec::new(),
                     rollouts: None,
+                    remote_rollouts: None,
+                    train_status: None,
+                    job: None,
+                    transcript: None,
+                    transcriber: None,
+                    speech: None,
+                    speaker: None,
                     status: Some(StatusReport {
                         node: self.node.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -527,6 +1022,7 @@ impl ControlHandler {
                         nodes,
                         alerts: self.alerter.as_ref().map(|a| a.failing()).unwrap_or_default(),
                         network: self.network_status(),
+                        cache: self.coordinator.as_ref().and_then(|c| c.semantic()).map(|s| s.status()),
                     }),
                 }
             }
@@ -550,6 +1046,13 @@ impl ControlHandler {
                 match result {
                     Ok(on) if on.is_empty() => ControlResponse::ok(format!("{model} was not loaded")),
                     Ok(on) => ControlResponse::ok(format!("{model} unloaded on {}", on.join(", "))),
+                    Err(e) => ControlResponse::err(e.to_string()),
+                }
+            }
+            ControlRequest::Move { model, to, from, grace_secs } => {
+                let Some(c) = &self.coordinator else { return ControlResponse::err("moving a model needs the inference role") };
+                match c.move_model(&model, from.as_deref(), &to, std::time::Duration::from_secs(grace_secs)).await {
+                    Ok((from, to)) => ControlResponse::ok(format!("{model} moved from {from} to {to}")),
                     Err(e) => ControlResponse::err(e.to_string()),
                 }
             }
@@ -752,10 +1255,41 @@ impl ControlHandler {
                 r.batch = items;
                 r
             }
+            ControlRequest::PoolWake { device, reason } => {
+                let Some((m, node)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                let reason = match reason.as_str() {
+                    "message" => weirdnet_push::Reason::MessageWaiting,
+                    "connection" => weirdnet_push::Reason::ConnectionRequested,
+                    other => return ControlResponse::err(format!("unknown wake reason {other:?} (message or connection)")),
+                };
+                let devices = crate::wake::wakeable(m);
+                let Some(d) = crate::wake::find(&devices, &device) else {
+                    return ControlResponse::err(format!("{device} shares no wake card with this node"));
+                };
+                match crate::wake::wake(node, d, reason).await {
+                    Ok(weirdnet_push::relaywake::Delivery::Delivered) => ControlResponse::ok(format!("woke {}", d.label)),
+                    Ok(other) => ControlResponse::err(format!("{}: the relay answered {other:?}", d.label)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
             ControlRequest::PoolRevoke { peer } => {
                 let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
                 match m.revoke(&peer) {
                     Ok(c) => ControlResponse::ok(format!("{} ({}) is revoked", c.label, c.peer_id)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::PoolShare { grant } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                match crate::guests::share(m, &grant) {
+                    Ok(()) => ControlResponse::ok(format!("shared with {}", grant.user_id)),
+                    Err(e) => ControlResponse::err(format!("{e:#}")),
+                }
+            }
+            ControlRequest::PoolUnshare { user_id } => {
+                let Some((m, _)) = &self.network else { return ControlResponse::err("this node is not on Weirdnet") };
+                match crate::guests::unshare(m, &user_id, crate::train::now_ms()) {
+                    Ok(g) => ControlResponse::ok(format!("{} is no longer shared with", g.user_id)),
                     Err(e) => ControlResponse::err(format!("{e:#}")),
                 }
             }
@@ -867,6 +1401,59 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, handl
                 handler.stream_models(node, request, &mut w).await?;
                 continue;
             }
+            Ok(ControlRequest::Transcribe(job)) => {
+                if job.bytes == 0 || job.bytes > MAX_TRANSCRIBE_BYTES {
+                    // The audio that follows can't be skipped safely: answer and close.
+                    let resp = ControlResponse::err(format!(
+                        "a transcription request takes 1 to {MAX_TRANSCRIBE_BYTES} bytes of audio, not {} (longer audio: `ymirctl transcribe --chunk auto`)",
+                        job.bytes
+                    ));
+                    let mut out = serde_json::to_vec(&resp)?;
+                    out.push(b'\n');
+                    w.write_all(&out).await?;
+                    break;
+                }
+                let reader = lines.get_mut();
+                let take = reader.get_mut();
+                take.set_limit(take.limit().saturating_add(job.bytes));
+                let mut audio = vec![0u8; usize::try_from(job.bytes)?];
+                reader.read_exact(&mut audio).await?;
+                handler.transcribe(job, audio).await
+            }
+            Ok(ControlRequest::Speak(job)) => {
+                let total = match job.check_clips() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // Clips that follow can't be skipped safely: answer and close.
+                        let mut out = serde_json::to_vec(&ControlResponse::err(e))?;
+                        out.push(b'\n');
+                        w.write_all(&out).await?;
+                        break;
+                    }
+                };
+                let reader = lines.get_mut();
+                let take = reader.get_mut();
+                take.set_limit(take.limit().saturating_add(total));
+                let mut clips = Vec::with_capacity(job.clips.len());
+                for len in &job.clips {
+                    let mut clip = vec![0u8; usize::try_from(*len)?];
+                    reader.read_exact(&mut clip).await?;
+                    clips.push(clip);
+                }
+                let (resp, audio) = handler.speak(job, clips).await;
+                let mut out = serde_json::to_vec(&resp)?;
+                out.push(b'\n');
+                w.write_all(&out).await?;
+                w.write_all(&audio).await?;
+                w.flush().await?;
+                continue;
+            }
+            Ok(ControlRequest::Train { node, request }) => {
+                // The caller sends nothing more; its side closing ends the run.
+                let closed = async { while let Ok(Some(_)) = lines.next_line().await {} };
+                handler.stream_train(node, request, &mut w, closed).await?;
+                break;
+            }
             Ok(req) => handler.handle(req).await,
             Err(e) => ControlResponse::err(format!("bad request: {e}")),
         };
@@ -938,6 +1525,33 @@ pub async fn request_models(
     bail!("ymird closed the control connection")
 }
 
+/// Sends a training request for another node to the `ymird` at `socket` and calls `on_line` for
+/// each line until the run ends. Returns the run's record. Dropping the future cancels the run.
+pub async fn request_train(
+    socket: &Path,
+    node: &str,
+    op: crate::train_net::TrainOp,
+    mut on_line: impl FnMut(&crate::train_net::TrainLine),
+) -> Result<crate::train::RunRecord> {
+    use crate::train_net::TrainLine;
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    write_line(&mut w, &ControlRequest::Train { node: node.to_string(), request: op }).await?;
+    let mut lines = BufReader::new(r).lines();
+    while let Some(line) = lines.next_line().await? {
+        match serde_json::from_str::<TrainLine>(&line) {
+            Ok(TrainLine::Done { record }) => return Ok(*record),
+            Ok(TrainLine::Failed { message }) => bail!("{message}"),
+            Ok(l) => on_line(&l),
+            Err(_) => match serde_json::from_str::<ControlResponse>(&line) {
+                Ok(r) if !r.ok => bail!("this ymird does not start runs on other nodes (upgrade it): {}", r.message.unwrap_or_default()),
+                _ => bail!("ymird sent something this ymirctl does not understand (are they the same version?)"),
+            },
+        }
+    }
+    bail!("ymird closed the control connection")
+}
+
 /// Sends one request to the `ymird` at `socket`.
 pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlResponse> {
     let stream = connect(socket).await?;
@@ -950,6 +1564,78 @@ pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlRespo
     Ok(serde_json::from_str(&resp)?)
 }
 
+/// Transcribes `audio` through the `ymird` on `socket` ([`ControlRequest::Transcribe`]).
+pub async fn transcribe(socket: &Path, mut job: TranscribeJob, audio: &[u8]) -> Result<TranscribeReply> {
+    job.bytes = audio.len() as u64;
+    if job.bytes > MAX_TRANSCRIBE_BYTES {
+        bail!("the audio is {} bytes; one request takes at most {MAX_TRANSCRIBE_BYTES} (use --chunk auto)", job.bytes);
+    }
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    let mut line = serde_json::to_vec(&ControlRequest::Transcribe(job))?;
+    line.push(b'\n');
+    w.write_all(&line).await?;
+    w.write_all(audio).await?;
+    w.flush().await?;
+    let mut lines = BufReader::new(r).lines();
+    let resp = lines.next_line().await?.context("ymird closed the control connection")?;
+    let r: ControlResponse =
+        serde_json::from_str(&resp).context("ymird sent something this ymirctl does not understand (are they the same version?)")?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    r.transcript.context("ymird sent no transcript (is it older than this ymirctl?)")
+}
+
+/// Speech for `request` through the `ymird` on `socket` ([`ControlRequest::Speak`]): the answer
+/// and the audio.
+pub async fn speak(socket: &Path, request: weirdnet_agent::remote::infer::v2::SpeakRequest) -> Result<(SpeechReply, Vec<u8>)> {
+    let (job, clips) = SpeakJob::split(request);
+    job.check_clips().map_err(|e| anyhow::anyhow!(e))?;
+    let stream = connect(socket).await?;
+    let (r, mut w) = tokio::io::split(stream);
+    let mut line = serde_json::to_vec(&ControlRequest::Speak(job))?;
+    line.push(b'\n');
+    w.write_all(&line).await?;
+    for c in &clips {
+        w.write_all(c).await?;
+    }
+    w.flush().await?;
+    let mut reader = BufReader::new(r);
+    let mut resp = String::new();
+    if reader.read_line(&mut resp).await? == 0 {
+        bail!("ymird closed the control connection");
+    }
+    let r: ControlResponse =
+        serde_json::from_str(&resp).context("ymird sent something this ymirctl does not understand (are they the same version?)")?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    let reply = r.speech.context("ymird sent no speech (is it older than this ymirctl?)")?;
+    let mut audio = vec![0u8; usize::try_from(reply.bytes)?];
+    reader.read_exact(&mut audio).await.context("ymird closed the connection before all the audio came")?;
+    Ok((reply, audio))
+}
+
+/// The speaker the pool would use for `request` (its model, or the pool's pick), with its profile.
+pub async fn speak_target(socket: &Path, speech: &weirdnet_agent::remote::infer::v2::SpeakRequest) -> Result<Speaker> {
+    let (job, _) = SpeakJob::split(speech.clone());
+    let r = request(socket, &ControlRequest::SpeakTarget(job)).await?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    r.speaker.context("ymird sent no speaker (is it older than this ymirctl?)")
+}
+
+/// The transcriber the pool would use for `model` (or its pick), with its audio limits.
+pub async fn transcribe_target(socket: &Path, model: Option<&str>) -> Result<Transcriber> {
+    let r = request(socket, &ControlRequest::TranscribeTarget { model: model.map(str::to_string) }).await?;
+    if !r.ok {
+        bail!("{}", r.message.unwrap_or_default());
+    }
+    r.transcriber.context("ymird sent no transcriber (is it older than this ymirctl?)")
+}
+
 /// Whether a `ymird` answers on `socket`.
 pub async fn reachable(socket: &Path) -> bool {
     request(socket, &ControlRequest::Status).await.is_ok()
@@ -957,4 +1643,43 @@ pub async fn reachable(socket: &Path) -> bool {
 
 fn no_context() -> ControlResponse {
     ControlResponse::err("this node keeps no conversations: it needs the inference or app role and a device identity (see `ymirctl pool link`)")
+}
+
+#[cfg(test)]
+mod speak_tests {
+    use super::*;
+    use weirdnet_agent::remote::infer::v2::{ScriptTurn, SpeakRequest, Voice};
+
+    fn clone(n: usize) -> Voice {
+        Voice::clone_from(vec![7; n], "wav", None, true)
+    }
+
+    #[test]
+    fn speak_jobs_carry_clips_beside_the_line() {
+        let req = SpeakRequest::script(vec![ScriptTurn::new(0, "a"), ScriptTurn::new(1, "b")])
+            .with_voice(clone(3))
+            .with_speaker_voice(0, Voice::preset("vivian"))
+            .with_speaker_voice(1, clone(5));
+        let (job, clips) = SpeakJob::split(req.clone());
+        assert_eq!(job.clips, [3, 5]);
+        assert_eq!(clips, [vec![7; 3], vec![7; 5]]);
+        // The line carries no audio.
+        let line = serde_json::to_string(&ControlRequest::Speak(job.clone())).unwrap();
+        assert!(line.len() < 1024, "{line}");
+        assert_eq!(job.check_clips(), Ok(8));
+        assert_eq!(job.clone().join(clips.clone()).unwrap(), req);
+        assert!(job.clone().join(clips[..1].to_vec()).is_err());
+        assert!(job.clone().join([clips.clone(), vec![vec![1]]].concat()).is_err());
+
+        // Lengths that don't match the voices, or out of range, are refused before reading.
+        let mut bad = job.clone();
+        bad.clips.pop();
+        assert!(bad.check_clips().is_err());
+        let mut bad = job.clone();
+        bad.clips[0] = 0;
+        assert!(bad.check_clips().is_err());
+        let mut bad = job;
+        bad.clips[0] = weirdnet_agent::remote::infer::v2::MAX_REFERENCE_BYTES as u64 + 1;
+        assert!(bad.check_clips().is_err());
+    }
 }

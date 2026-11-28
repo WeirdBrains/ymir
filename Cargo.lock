@@ -334,6 +334,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -796,6 +797,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1192,6 +1199,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ab6bbd053d3cdc62ba3de82aae11530a97bbd5b3a572fbdbcd0f0e545e3ff21"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1247,6 +1268,16 @@ name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
+
+[[package]]
+name = "filetime"
+version = "0.2.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1255e7a9f1902190d4c10a75f2f7f495d3d3ce13e9ba26e6c48683a0f4dbed7"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "find-crate"
@@ -1337,6 +1368,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2995,6 +3036,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.9",
+ "version_check",
+]
+
+[[package]]
 name = "multiaddr"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3062,6 +3120,12 @@ dependencies = [
  "tracing",
  "unsigned-varint",
 ]
+
+[[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "ndk-context"
@@ -3799,6 +3863,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -4430,6 +4495,12 @@ dependencies = [
 
 [[package]]
 name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+
+[[package]]
+name = "spin"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
@@ -4464,7 +4535,7 @@ checksum = "227c4f8561598188d0df96dbe749824576174bba278b5b6bb2eacff1066067d0"
 dependencies = [
  "hashbrown 0.16.1",
  "rustversion",
- "spin",
+ "spin 0.10.1",
 ]
 
 [[package]]
@@ -4564,6 +4635,16 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
 
 [[package]]
 name = "tempfile"
@@ -5262,11 +5343,12 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.5.2"
+version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24bd8f1d320657607ec709c0467ff3d6444c7417e31f56ee9a8258b353975143"
+checksum = "f4570b4a0c4e44f89f8dbee73786a762899fe00870aa24b825f0a87701db3a3f"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "cbor4ii",
  "futures",
  "serde",
@@ -5303,12 +5385,13 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.4.3"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f80d14773feecc00dc943c2ab33513cba0108c5b5579421ab607305c7921e5d1"
+checksum = "9316154ec5c4ba319ee5191b454dda77fe154565b20a7c47f8e2e89d1d08be70"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "futures",
  "getrandom 0.3.4",
  "libc",
@@ -5387,12 +5470,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "weirdnet-model"
-version = "0.5.2"
+name = "weirdnet-media"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67de1c28ee6b786514d232d3fb4651faef265ddd5675d8b4cf7707c87c09a75e"
+checksum = "f7ef239fd9d63ccc767bd2987b07e39b9892e27ad83dc839118de93fe16708a2"
 dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "weirdnet-model"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8518259d183738046846f68639de249e7e3e6112950bafa189b0ae83143d2f7"
+dependencies = [
+ "async-trait",
  "dirs",
+ "fs4",
  "minijinja",
  "minijinja-contrib",
  "serde",
@@ -5401,13 +5497,14 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "ureq",
+ "weirdnet-agent",
 ]
 
 [[package]]
 name = "weirdnet-net"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75a48adc55905fdd8343424eaf56fcf74ddbd0933e447c940a7a982d4af4586f"
+checksum = "8f35282781ea979ba5588ddd283566198b08beb9a124cde84aebdb549efcbf05"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -5434,16 +5531,36 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-openai"
-version = "0.2.2"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a2772e7e9fbe7f6c3bec96f79d45af0bc089e3257450f7d8501cf190657fb82"
+checksum = "d5cbe96eede5ca147ce2dcdc2ac0d6fac5d35cff574fd714cedab1ccd644c6ab"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures",
  "getrandom 0.3.4",
  "serde_json",
  "tokio",
  "weirdnet-agent",
+]
+
+[[package]]
+name = "weirdnet-push"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96f335b3941fc348172a266a5ad5f210c8fbf590863f70ce58a856b4c43fa8a3"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.21",
+ "weirdnet-keys",
+ "zeroize",
 ]
 
 [[package]]
@@ -5460,20 +5577,22 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-semcache"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "931d31e8df68f4dbaf3b0e694a4178784699048bc0f07411f361736a1f22bb75"
+checksum = "248f3d86c8e2a3668ca41e92f01df28fd19757bd1760921693b627f0f09074d6"
 dependencies = [
+ "async-trait",
  "serde",
  "sha2 0.10.9",
+ "tokio",
  "weirdnet-agent",
 ]
 
 [[package]]
 name = "weirdnet-sync"
-version = "0.7.1"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef64f9f02036cb50ad2984a5df77e556b5abce9448863b4b4ff77d833beac9a4"
+checksum = "b6919d89ebe595683d01cb92b8e401ab402768aa08cbed4393bc33c27fd2bd55"
 dependencies = [
  "blake3",
  "cbor4ii",
@@ -5858,26 +5977,31 @@ checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
 
 [[package]]
 name = "ymir-core"
-version = "0.8.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum",
  "dirs",
+ "flate2",
  "futures",
  "getrandom 0.3.4",
  "hex",
+ "if-addrs",
  "libc",
  "regex",
  "reqwest",
  "semver",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-stream",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit",
  "tracing",
  "weirdnet-agent",
  "weirdnet-alerts",
@@ -5887,6 +6011,7 @@ dependencies = [
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",
+ "weirdnet-push",
  "weirdnet-semcache",
  "weirdnet-sync",
  "weirdnet-update",
@@ -5895,12 +6020,15 @@ dependencies = [
 
 [[package]]
 name = "ymir-testkit"
-version = "0.8.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures",
+ "hex",
  "libc",
  "reqwest",
  "semver",
@@ -5914,9 +6042,12 @@ dependencies = [
  "weirdnet-alerts",
  "weirdnet-backends",
  "weirdnet-mcp",
+ "weirdnet-media",
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-openai",
+ "weirdnet-push",
+ "weirdnet-semcache",
  "weirdnet-sync",
  "weirdnet-update",
  "ymir-core",
@@ -5925,7 +6056,7 @@ dependencies = [
 
 [[package]]
 name = "ymirctl"
-version = "0.8.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5937,6 +6068,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "libc",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
@@ -5950,6 +6082,7 @@ dependencies = [
  "weirdnet-backends",
  "weirdnet-device-link",
  "weirdnet-mcp",
+ "weirdnet-media",
  "weirdnet-model",
  "weirdnet-net",
  "weirdnet-sync",
@@ -5961,10 +6094,11 @@ dependencies = [
 
 [[package]]
 name = "ymird"
-version = "0.8.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "clap",
+ "semver",
  "tokio",
  "tracing",
  "tracing-subscriber",

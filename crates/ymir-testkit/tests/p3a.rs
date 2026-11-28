@@ -139,7 +139,7 @@ async fn a_run_trains_an_adapter_with_the_pinned_trainer_and_adds_it() -> Result
     let data = generated(tmp.path(), "kad.jsonl", "apache-2.0")?;
 
     let out = ctl(&h.home, &["train", "check"]).await?;
-    assert!(out.contains("mock build b0000 (interface 1), as pinned"), "{out}");
+    assert!(out.contains("mock build b0000 (interface 2), as pinned"), "{out}");
 
     let d = data.display().to_string();
     let out =
@@ -147,18 +147,34 @@ async fn a_run_trains_an_adapter_with_the_pinned_trainer_and_adds_it() -> Result
     assert!(out.contains("for `alpha+kad`"), "{out}");
     assert!(out.contains("ymird isn't running; the run holds the GPU"), "{out}");
     assert!(out.contains("train: 4/4") && out.contains("extract-lora: 1/1"), "{out}");
-    assert!(out.contains("Done: 4 steps, final loss 0.4000. Adapter `alpha+kad` is adapters/alpha+kad.gguf"), "{out}");
+    assert!(out.contains("Done: 4 steps, final loss 0.4000. Adapter `alpha+kad` is adapters/alpha+kad/alpha+kad.gguf"), "{out}");
     assert!(out.contains("Added it to node.toml on `alpha`"), "{out}");
 
-    assert_eq!(std::fs::read_to_string(h.models().join("adapters/alpha+kad.gguf"))?, "GGUF mock lora rank 8");
+    assert!(out.contains("Provenance: adapters/alpha+kad/provenance.json (origin train, run "), "{out}");
+    let stored = h.models().join("adapters/alpha+kad");
+    let bytes = std::fs::read(stored.join("alpha+kad.gguf"))?;
+    assert!(bytes.windows(16).any(|w| w == b"mock lora rank 8"), "the trainer's adapter, moved in");
     let dir = run_dir(&h, &out);
+    assert!(!dir.join("adapter.gguf").exists(), "the run's copy is removed once imported");
     let r = record(&dir)?;
     assert_eq!((r.status, r.steps, r.base.as_str(), r.trained_from.as_str()), (RunStatus::Done, 4, "alpha", "alpha.gguf"));
     assert_eq!((r.dataset.rows_in, r.dataset.rows_used, r.dataset.license.as_str()), (4, 2, "apache-2.0"));
     assert_eq!(r.dataset.teacher.as_deref(), Some("teacher-8b"));
     assert_eq!((r.trainer.build.as_str(), r.hyper.epochs, r.hyper.rank, r.reserved_in_ymird), ("b0000", 2, 8, false));
     let a = r.adapter.clone().unwrap();
-    assert_eq!((a.base_revision.as_deref(), a.base_quant.as_deref(), a.bytes), (Some("r1"), Some("Q4_K_M"), 21));
+    assert_eq!((a.base_revision.as_deref(), a.base_quant.as_deref(), a.bytes), (Some("r1"), Some("Q4_K_M"), bytes.len() as u64));
+    assert_eq!(a.file, "adapters/alpha+kad/alpha+kad.gguf");
+    // The same provenance.json an upload writes (origin train), with the run's record in it.
+    let p = ymir_core::upload::read_provenance(&stored).expect("provenance.json");
+    assert_eq!((p.origin.as_str(), p.id.as_str(), p.files[0].sha256.as_str()), ("train", "alpha+kad", a.sha256.as_str()));
+    assert_eq!(Some(p.revision.clone()), a.revision);
+    let base = p.base.clone().unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("alpha"), Some("r1"), Some("Q4_K_M")));
+    assert_eq!(p.dataset.as_ref().unwrap().licenses, ["apache-2.0"]);
+    let t = p.trainer.clone().unwrap();
+    assert_eq!((t.name.as_deref(), t.build.as_deref(), t.run.as_deref()), (Some("mock"), Some("b0000"), Some(r.id.as_str())));
+    assert_eq!(p.extra["ymir_train"]["hyper"]["rank"], 8);
+    assert!(stored.join("adapter.json").is_file(), "listed like a pulled adapter");
     assert!(!dir.join("full.gguf").exists(), "the full model is dropped unless --keep-full");
     // The trainer got the usable rows only, each ending in the teacher's answer.
     let rows: Vec<Value> = std::fs::read_to_string(dir.join("data.jsonl"))?.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
@@ -175,7 +191,7 @@ async fn a_run_trains_an_adapter_with_the_pinned_trainer_and_adds_it() -> Result
     assert_eq!(lora.len(), 1);
     assert_eq!(
         (lora[0].id.as_str(), lora[0].file.as_str(), lora[0].revision.as_deref()),
-        ("alpha+kad", "adapters/alpha+kad.gguf", Some(r.id.as_str()))
+        ("alpha+kad", "adapters/alpha+kad/alpha+kad.gguf", a.revision.as_deref())
     );
     assert_eq!((lora[0].base_revision.as_deref(), lora[0].base_quant.as_deref()), (Some("r1"), Some("Q4_K_M")));
 
@@ -183,12 +199,16 @@ async fn a_run_trains_an_adapter_with_the_pinned_trainer_and_adds_it() -> Result
     let chats = conversations(tmp.path())?;
     let out = ctl(&h.home, &["train", "run", "--base", "alpha", "--dataset", &chats.display().to_string(), "--keep-full"]).await?;
     assert!(out.contains("To serve it: ymirctl models adapter add alpha adapters/alpha+ft-"), "{out}");
+    assert!(out.contains("--revision sha256:"), "{out}");
     let r2 = record(&run_dir(&h, &out))?;
     assert_eq!((r2.dataset.rows_used, r2.dataset.teacher.clone()), (1, None));
     assert!(run_dir(&h, &out).join("full.gguf").exists(), "--keep-full");
 
     let list = ctl(&h.home, &["train", "list"]).await?;
-    assert!(list.contains("done") && list.contains("-> alpha+kad (adapters/alpha+kad.gguf)") && list.contains("chats.jsonl (1 rows)"), "{list}");
+    assert!(
+        list.contains("done") && list.contains("-> alpha+kad (adapters/alpha+kad/alpha+kad.gguf)") && list.contains("chats.jsonl (1 rows)"),
+        "{list}"
+    );
     Ok(())
 }
 

@@ -9,7 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use weirdnet_agent::pool::Pool;
 use weirdnet_agent::remote::catalog::{self, CatalogFeed};
-use weirdnet_agent::remote::infer::v2::{self, EmbedBackend, Finish, InferBackend, Output, Usage};
+use weirdnet_agent::remote::infer::v2::{
+    self, EmbedBackend, Finish, InferBackend, Output, SpeakBackend, SpeakRequest, TranscribeBackend, TranscribeRequest, Transcript, Usage,
+};
 use weirdnet_agent::remote::infer::{self, Admission, InferHost};
 use weirdnet_agent::remote::{Authorize, Caller, MemoryDialer, RemoteError};
 use weirdnet_agent::{CancelToken, DeltaSink, Message, ModelBackend, ModelError, ModelTurn, ToolCall, ToolSpec};
@@ -17,7 +19,9 @@ use weirdnet_backends::error::engine_error;
 
 use crate::context::ContextStore;
 use crate::coordinator::{Coordinator, Prepared, Sink};
+use crate::guests::{GrantView, GuestGrant};
 use crate::membership::{Membership, SyncNode};
+use weirdnet_agent::serve::{CallerIdentity, GuestScope, SharedPoolAuth};
 
 /// Everyone: for this box's own bridge, in process.
 pub struct AllowAll;
@@ -75,11 +79,37 @@ pub struct InferenceHost {
     coord: Arc<Coordinator>,
     auth: Arc<dyn Authorize>,
     context: Option<ContextAccess>,
+    guests: Option<Guests>,
+}
+
+/// Guests of a shared pool (see [`crate::guests`]): who they are, and their live grants.
+#[derive(Clone)]
+pub struct Guests {
+    pub auth: Arc<SharedPoolAuth>,
+    pub grants: GrantView,
+}
+
+impl Guests {
+    /// `Some(grant)` for a guest caller, `None` for one of the user's own devices.
+    fn grant_of(&self, caller: &Caller) -> Result<Option<GuestGrant>, RemoteError> {
+        match self.auth.identify(caller, GuestScope::Infer)? {
+            CallerIdentity::Guest(g) => (self.grants)(&g.user_id).map(Some).ok_or_else(|| RemoteError::refused("not-shared")),
+            _ => Ok(None),
+        }
+    }
 }
 
 impl InferenceHost {
     pub fn new(coord: Arc<Coordinator>, auth: Arc<dyn Authorize>) -> Self {
-        Self { coord, auth, context: None }
+        Self { coord, auth, context: None, guests: None }
+    }
+
+    /// Also answers guests of a shared pool: `guests.auth` decides who gets in (it replaces the
+    /// roster check given to [`new`](Self::new)), and guests never get `Input::Context` or a model
+    /// outside their grant's allowlist.
+    pub fn with_guests(mut self, guests: Option<Guests>) -> Self {
+        self.guests = guests;
+        self
     }
 
     /// Answers `ContextRef` requests from `context` and writes each answer back to it.
@@ -91,10 +121,19 @@ impl InferenceHost {
 
 impl InferHost for InferenceHost {
     fn authorize(&self, caller: &Caller) -> Result<(), RemoteError> {
-        self.auth.authorize(caller)
+        match &self.guests {
+            Some(g) => g.auth.authorize_for(caller, GuestScope::Infer),
+            None => self.auth.authorize(caller),
+        }
     }
 
-    fn open(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+    fn open(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+            && !grant.allows_model(model.unwrap_or_default())
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
         Ok(Arc::new(TurnBackend { coord: self.coord.clone(), model: model.map(str::to_string) }))
     }
 
@@ -102,9 +141,22 @@ impl InferHost for InferenceHost {
         if matches!(request.input, v2::Input::Context(_)) && self.context.is_none() {
             return Err(RemoteError::BadRequest { message: "this node holds no conversations".into() });
         }
+        let grant = match &self.guests {
+            Some(g) => g.grant_of(caller)?,
+            None => None,
+        };
+        // A guest never reads the owner's conversations (ymir.context).
+        if grant.is_some() && matches!(request.input, v2::Input::Context(_)) {
+            return Err(RemoteError::refused("guest-context"));
+        }
         // A device's batch work is capped, so it can't crowd out the others (interactive is not).
         let hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&caller.peer)?) };
         let prepared = self.coord.prepare(request)?;
+        if let Some(grant) = &grant
+            && !(grant.allows_model(&prepared.model) || request.model.as_deref().is_some_and(|m| grant.allows_model(m)))
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
         Ok(Arc::new(RoutedBackend {
             _hold: hold,
             coord: self.coord.clone(),
@@ -116,9 +168,121 @@ impl InferHost for InferenceHost {
         }))
     }
 
-    fn open_embed(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
+    fn open_embed(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
         let model = self.coord.resolve_embedding(model)?;
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+            && !grant.allows_model(&model)
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
         Ok(Arc::new(Embedder { coord: self.coord.clone(), model }))
+    }
+
+    /// Speech to text (video design, milestone 2): routed to a model node whose copy of the
+    /// model transcribes ([`Coordinator::resolve_transcriber`]); a 400 when the pool has none or
+    /// the named model doesn't transcribe. The caller was admitted by [`Self::authorize`]; a guest
+    /// of a shared pool only gets a transcriber in its grant's allowlist, as for chat and embeddings.
+    fn open_transcribe(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn TranscribeBackend>, RemoteError> {
+        let model = self.coord.resolve_transcriber(model)?;
+        if let Some(g) = &self.guests
+            && let Some(grant) = g.grant_of(caller)?
+            && !grant.allows_model(&model)
+        {
+            return Err(RemoteError::refused("guest-model"));
+        }
+        Ok(Arc::new(Transcriber { coord: self.coord.clone(), model, caller: caller.clone() }))
+    }
+
+    /// Speech out (infer/2 `Speak`, audio design milestones 7–9). The guest rules come first: a
+    /// guest of a shared pool never clones a voice (`guest-clone`; a per-grant `clone` switch is
+    /// designed, not built), only names a speaker in its grant's allowlist (`guest-model`), and
+    /// never gets a speaker closed to guests ([`Coordinator::guests_may_speak`]: a restricted
+    /// license such as Fish Audio Drama 3's unless the operator set `guests = true`,
+    /// `guest-license`). With no model named, a guest's pick is made among the speakers it may
+    /// use. Then the request is routed to a model node whose copy of the speaker covers it
+    /// ([`Coordinator::resolve_speaker`]); a 400 says what each speaker lacks. Nothing here logs
+    /// the text or the clip.
+    fn open_speak(&self, caller: &Caller, request: &SpeakRequest) -> Result<Arc<dyn SpeakBackend>, RemoteError> {
+        let grant = match &self.guests {
+            Some(g) => g.grant_of(caller)?,
+            None => None,
+        };
+        if let Some(grant) = &grant {
+            if request.clones() {
+                return Err(RemoteError::refused("guest-clone"));
+            }
+            if let Some(m) = request.model.as_deref() {
+                if !grant.allows_model(m) {
+                    return Err(RemoteError::refused("guest-model"));
+                }
+                if !self.coord.guests_may_speak(m) {
+                    return Err(RemoteError::refused("guest-license"));
+                }
+            }
+        }
+        let coord = self.coord.clone();
+        let allowed = |id: &str| grant.as_ref().is_none_or(|g| g.allows_model(id) && coord.guests_may_speak(id));
+        let model = self.coord.resolve_speaker(request.model.as_deref(), &request.needs(), &allowed)?;
+        Ok(Arc::new(Speaker { coord: self.coord.clone(), model, caller: caller.clone() }))
+    }
+}
+
+/// One speech request, on the speaker [`InferHost::open_speak`] picked. Neither the text, the
+/// reference clip nor the audio is cached or logged: they are content.
+struct Speaker {
+    coord: Arc<Coordinator>,
+    model: String,
+    caller: Caller,
+}
+
+#[async_trait]
+impl SpeakBackend for Speaker {
+    fn name(&self) -> String {
+        self.model.clone()
+    }
+
+    async fn speak(&self, request: &SpeakRequest, cancel: &CancelToken) -> Result<v2::AudioStream, RemoteError> {
+        // A device's batch work is capped, as for chat, so it can't crowd out the others.
+        let _hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&self.caller.peer)?) };
+        let run = self.coord.speak(&self.model, request);
+        let (audio, node) = tokio::select! {
+            _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
+            r = run => r?,
+        };
+        tracing::debug!(model = %self.model, node = %node, chars = request.input.chars(), "speaking");
+        Ok(audio)
+    }
+}
+
+/// One transcription, on the model [`InferHost::open_transcribe`] picked. Neither the audio nor
+/// the transcript is cached or logged: they are content.
+struct Transcriber {
+    coord: Arc<Coordinator>,
+    model: String,
+    caller: Caller,
+}
+
+#[async_trait]
+impl TranscribeBackend for Transcriber {
+    fn name(&self) -> String {
+        self.model.clone()
+    }
+
+    async fn transcribe(&self, request: &TranscribeRequest, cancel: &CancelToken) -> Result<Transcript, RemoteError> {
+        Ok(self.transcribe_counted(request, cancel).await?.0)
+    }
+
+    async fn transcribe_counted(&self, request: &TranscribeRequest, cancel: &CancelToken) -> Result<(Transcript, Option<Usage>), RemoteError> {
+        // A device's batch work is capped, as for chat, so it can't crowd out the others.
+        let _hold = if request.priority == v2::Priority::Interactive { None } else { Some(self.coord.enter_batch(&self.caller.peer)?) };
+        let run = self.coord.transcribe(&self.model, request);
+        let ((transcript, usage), node) = tokio::select! {
+            _ = cancel.cancelled() => return Err(RemoteError::Cancelled),
+            r = run => r?,
+        };
+        tracing::debug!(model = %self.model, node = %node, bytes = request.audio.len(), "transcribed");
+        Ok((transcript, usage))
     }
 }
 
@@ -317,11 +481,16 @@ impl catalog::CatalogHost for LiveCatalog {
         self.refresh();
         catalog::CatalogHost::watch(&self.feed, caller)
     }
+
+    fn recheck(&self, caller: &Caller) -> Result<(), RemoteError> {
+        catalog::CatalogHost::recheck(&self.feed, caller)
+    }
 }
 
 /// A [`LiveCatalog`]; its refresh task stops with its last holder.
 pub fn catalog_feed(coord: Arc<Coordinator>, auth: Arc<dyn Authorize>, every: Duration) -> Arc<LiveCatalog> {
-    let live = Arc::new(LiveCatalog { coord, feed: CatalogFeed::new(auth), last: Mutex::new(Vec::new()) });
+    // Re-checked subscriptions: a revoked device or guest stops following within RECHECK_EVERY.
+    let live = Arc::new(LiveCatalog { coord, feed: CatalogFeed::new(auth).rechecking(), last: Mutex::new(Vec::new()) });
     live.refresh();
     let weak = Arc::downgrade(&live);
     tokio::spawn(async move {

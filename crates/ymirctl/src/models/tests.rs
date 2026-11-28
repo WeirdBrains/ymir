@@ -71,6 +71,7 @@ impl Fixture {
 fn pull_args(repo: &str) -> PullArgs {
     PullArgs {
         repo: repo.into(),
+        accept_license: None,
         quant: None,
         file: None,
         context: None,
@@ -470,4 +471,412 @@ fn context_with_ymird_running_sizes_a_loaded_model_with_its_own_memory_counted_b
     // idle `tiny` for it, as it would at load.
     let big = s.lines().find(|l| l.trim_start().starts_with("big")).unwrap();
     assert!(big.contains("it would unload idle tiny") && !big.contains("may not fit"), "{big}");
+}
+
+// ---- `models upload` (docs/design/model-upload.md, U1) ----
+
+/// A LoRA adapter GGUF header for `arch`, plus some weight bytes.
+fn lora_bytes(arch: &str) -> Vec<u8> {
+    let mut o = b"GGUF".to_vec();
+    o.extend(3u32.to_le_bytes());
+    o.extend(0u64.to_le_bytes());
+    o.extend(3u64.to_le_bytes());
+    for (k, v) in [("general.architecture", arch), ("general.type", "adapter"), ("adapter.type", "lora")] {
+        o.extend((k.len() as u64).to_le_bytes());
+        o.extend(k.as_bytes());
+        o.extend(8u32.to_le_bytes());
+        o.extend((v.len() as u64).to_le_bytes());
+        o.extend(v.as_bytes());
+    }
+    o.resize(o.len() + 2048, 5);
+    o
+}
+
+/// Uploads without looking at the real disk's free space (the box or CI runner may be nearly full).
+fn run_upload(ctx: &Ctx, out: &mut dyn Write, a: &upload::UploadArgs) -> Result<()> {
+    upload::run_with(ctx, out, a, None)
+}
+
+fn upload_args(file: &std::path::Path) -> upload::UploadArgs {
+    upload::UploadArgs {
+        file: Some(file.to_path_buf()),
+        from_run: None,
+        name: None,
+        adapter_for: None,
+        projector_for: None,
+        license: Some("apache-2.0".into()),
+        role: None,
+        no_register: false,
+        dir: DirArgs { dir: None },
+        node: None,
+        stage: None,
+        rollout: Default::default(),
+    }
+}
+
+/// A node.toml with a llama.cpp base `base` (file `base.gguf` in the fixture, revision r1).
+fn with_base(fx: &Fixture) -> (Ctx, std::path::PathBuf) {
+    let base = fx.dir.path().join("base.gguf");
+    std::fs::write(&base, gguf_bytes(10_000, 9)).unwrap();
+    let cfg = format!(
+        // A literal TOML string, so a Windows path's backslashes are not read as escapes.
+        "[node]\nname = \"n\"\n\n[[model.local]]\nid = \"base\"\nrole = \"main\"\nfile = '{}'\nrevision = \"r1\"\nquant = \"Q4_K_M\"\n",
+        base.display()
+    );
+    (fx.ctx(32, Some(&cfg)), base)
+}
+
+#[test]
+fn upload_of_a_model_imports_it_with_provenance_and_prints_its_entry() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let src = fx.dir.path().join("my-tune-Q4_K_M.gguf");
+    let bytes = gguf_bytes(50_000, 6);
+    std::fs::write(&src, &bytes).unwrap();
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { no_register: true, ..upload_args(&src) }).unwrap();
+    let s = text(out);
+    let dest = ctx.dir().join("my-tune-q4_k_m/my-tune-Q4_K_M.gguf");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    let p = ymir_core::upload::read_provenance(dest.parent().unwrap()).unwrap();
+    assert_eq!((p.license.as_deref(), p.files[0].sha256.as_str()), (Some("apache-2.0"), sha(&bytes).as_str()));
+    assert!(s.contains("model (llama)") && s.contains(&format!("revision {}", p.revision)), "{s}");
+    assert!(s.contains("[[model.local]]\nid = \"my-tune-q4_k_m\"") && s.contains(&format!("revision = \"{}\"", p.revision)), "{s}");
+    assert!(s.contains("node.toml was not changed"), "{s}");
+    assert_eq!(std::fs::read_to_string(&ctx.config).unwrap(), "[node]\nname = \"n\"\n");
+    // It lists like any downloaded model, and uploading it again copies nothing.
+    let mut out = Vec::new();
+    list(&ctx, &mut out).unwrap();
+    assert!(text(out).contains("my-tune-q4_k_m"));
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { name: Some("my-tune-q4_k_m".into()), no_register: true, ..upload_args(&src) }).unwrap();
+    assert!(text(out).contains("nothing was copied"));
+}
+
+#[test]
+fn upload_adds_the_model_to_node_toml_by_default_and_refuses_a_taken_id() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let src = fx.dir.path().join("tuned.gguf");
+    std::fs::write(&src, gguf_bytes(20_000, 7)).unwrap();
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload_args(&src)).unwrap();
+    assert!(text(out).contains("Added `tuned`"));
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let m = cfg.model.local.iter().find(|m| m.id == "tuned").unwrap();
+    assert_eq!(m.role.as_deref(), Some("chat"));
+    assert!(m.revision.as_deref().is_some_and(|r| r.starts_with("sha256:")));
+    let ctx = fx.ctx(32, None);
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { name: Some("base".into()), ..upload_args(&src) }).unwrap_err();
+    assert!(err.to_string().contains("already has a model or adapter `base`"), "{err}");
+    // Without node.toml there is nothing to add it to: it imports and says so.
+    let bare = Fixture::new();
+    let ctx = bare.ctx(32, None);
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload_args(&src)).unwrap();
+    assert!(text(out).contains("nothing was registered"));
+}
+
+#[test]
+fn upload_records_a_license_when_given_and_does_not_need_one() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let src = fx.dir.path().join("m.gguf");
+    std::fs::write(&src, gguf_bytes(5_000, 1)).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { license: Some("bad/license".into()), ..upload_args(&src) }).unwrap_err();
+    assert!(err.to_string().contains("license id"), "{err}");
+    assert!(!ctx.dir().join("m").exists(), "nothing copied before the checks pass");
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { license: None, no_register: true, ..upload_args(&src) }).unwrap();
+    assert!(!text(out).contains("license"));
+    assert_eq!(ymir_core::upload::read_provenance(&ctx.dir().join("m")).unwrap().license, None);
+}
+
+#[test]
+fn upload_keeps_ten_percent_or_twenty_gib_of_the_disk_free() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(32, Some("[node]\nname = \"n\"\n"));
+    let src = fx.dir.path().join("m.gguf");
+    std::fs::write(&src, gguf_bytes(5_000, 1)).unwrap();
+    let err = upload::run_with(&ctx, &mut Vec::new(), &upload_args(&src), Some((20 << 30, 100 << 30))).unwrap_err();
+    assert!(err.to_string().contains("must stay free"), "{err}");
+    upload::run_with(&ctx, &mut Vec::new(), &upload_args(&src), Some((21 << 30, 100 << 30))).unwrap();
+}
+
+#[test]
+fn upload_of_an_adapter_checks_its_base_and_says_llama_cpp_needs_a_restart() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let src = fx.dir.path().join("support.gguf");
+    std::fs::write(&src, lora_bytes("llama")).unwrap();
+    // An adapter needs its base named, and a model must not name one.
+    let err = run_upload(&ctx, &mut Vec::new(), &upload_args(&src)).unwrap_err();
+    assert!(err.to_string().contains("--adapter-for"), "{err}");
+    let model = fx.dir.path().join("full.gguf");
+    std::fs::write(&model, gguf_bytes(5_000, 2)).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { adapter_for: Some("base".into()), ..upload_args(&model) }).unwrap_err();
+    assert!(err.to_string().contains("full model"), "{err}");
+    // A base that isn't in node.toml, and one of another architecture, are refused before copying.
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { adapter_for: Some("nope".into()), ..upload_args(&src) }).unwrap_err();
+    assert!(err.to_string().contains("no [[model.local]] with id `nope`"), "{err}");
+    let other = fx.dir.path().join("other.gguf");
+    std::fs::write(&other, lora_bytes("qwen3")).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &upload::UploadArgs { adapter_for: Some("base".into()), ..upload_args(&other) }).unwrap_err();
+    assert!(err.to_string().contains("different model"), "{err}");
+    assert!(!ctx.dir().join("adapters").exists());
+    // The right one imports, registers with its revision and the base's, and says when it serves.
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { adapter_for: Some("base".into()), ..upload_args(&src) }).unwrap();
+    let s = text(out);
+    assert!(s.contains("Added LoRA adapter `base+support`") && s.contains("llama.cpp loads a new adapter file only when its base starts"), "{s}");
+    assert!(!s.to_ascii_lowercase().contains("live"), "never claims the adapter is live: {s}");
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let a = &cfg.model.local[0].lora[0];
+    assert_eq!((a.id.as_str(), a.base_revision.as_deref(), a.base_quant.as_deref()), ("base+support", Some("r1"), Some("Q4_K_M")));
+    assert!(a.revision.as_deref().is_some_and(|r| r.starts_with("sha256:")));
+    let dir = ctx.dir().join("adapters/base+support");
+    let p = ymir_core::upload::read_provenance(&dir).unwrap();
+    let base = p.base.unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref()), (Some("base"), Some("r1")));
+    assert!(dir.join("adapter.json").is_file());
+    let stored = ctx.store.adapters();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].id, "base+support");
+}
+
+// ---- `models upload --from-run` (docs/design/model-upload.md, U5) ----
+
+/// A finished `train run` directory whose adapter is `bytes` at `file` (relative to models_dir),
+/// trained on revision `base_revision` of `base`.
+fn finished_run(fx: &Fixture, bytes: &[u8], file: &str, base_revision: &str) -> std::path::PathBuf {
+    let dir = fx.dir.path().join("runs/20261124-150000-abcd");
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = serde_json::json!({
+        "format": ymir_core::train::RUN_FORMAT, "id": "20261124-150000-abcd", "node": "gpu1", "status": "done",
+        "base": "base", "trained_from": "base.gguf",
+        "dataset": {"name": "kad.jsonl", "sha256": "ab", "format": "ymir-dataset/1", "license": "mit", "teacher": "teacher-8b", "rows_in": 4, "rows_used": 2},
+        "hyper": {"epochs": 2, "learning_rate": 1e-5, "context": 2048, "batch": 4, "seed": 0, "rank": 8},
+        "trainer": {"interface": 1, "engine": "llama.cpp", "build": "b12628"},
+        "steps": 4, "final_loss": 0.4,
+        "adapter": {"id": "base+kad", "file": file, "sha256": sha(bytes), "bytes": bytes.len(), "base_revision": base_revision, "base_quant": "Q4_K_M"},
+        "reserved_in_ymird": false, "started_ms": 1, "ended_ms": 2
+    });
+    std::fs::write(dir.join("run.json"), serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    dir
+}
+
+fn from_run_args(run: &std::path::Path, file: Option<&std::path::Path>) -> upload::UploadArgs {
+    upload::UploadArgs { file: file.map(std::path::Path::to_path_buf), from_run: Some(run.to_path_buf()), license: None, ..upload_args(run) }
+}
+
+#[test]
+fn upload_from_a_run_carries_the_run_record_as_provenance() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let bytes = lora_bytes("llama");
+    // A run made on another node: its adapter was copied here with its run directory.
+    let copied = fx.dir.path().join("base+kad.gguf");
+    std::fs::write(&copied, &bytes).unwrap();
+    let run = finished_run(&fx, &bytes, "adapters/base+kad/base+kad.gguf", "r1");
+    // Without the file, the run's adapter must be in this node's models directory.
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, None)).unwrap_err();
+    assert!(err.to_string().contains("not in this node's models directory"), "{err}");
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &from_run_args(&run, Some(&copied))).unwrap();
+    let s = text(out);
+    assert!(s.contains("From run 20261124-150000-abcd on gpu1 (origin train)"), "{s}");
+    assert!(s.contains("Added LoRA adapter `base+kad` on `base`") && s.contains("only when its base starts"), "{s}");
+    let dir = ctx.dir().join("adapters/base+kad");
+    let p = ymir_core::upload::read_provenance(&dir).unwrap();
+    assert_eq!((p.origin.as_str(), p.license.as_deref(), p.files[0].sha256.as_str()), ("train", None, sha(&bytes).as_str()));
+    let base = p.base.clone().unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("base"), Some("r1"), Some("Q4_K_M")));
+    let d = p.dataset.clone().unwrap();
+    assert_eq!((d.licenses, d.rows, d.format.as_deref()), (vec!["mit".to_string()], Some(2), Some("ymir-dataset/1")));
+    assert_eq!(p.extra["ymir_train"]["teacher"], "teacher-8b");
+    let t = p.trainer.clone().unwrap();
+    assert_eq!((t.name.as_deref(), t.build.as_deref(), t.run.as_deref()), (Some("llama.cpp"), Some("b12628"), Some("20261124-150000-abcd")));
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let a = &cfg.model.local[0].lora[0];
+    assert_eq!((a.id.as_str(), a.revision.as_deref(), a.base_revision.as_deref()), ("base+kad", Some(p.revision.as_str()), Some("r1")));
+    // Now on this node, the file can be left out: the same bytes are already there.
+    let mut out = Vec::new();
+    run_upload(&ctx, &mut out, &upload::UploadArgs { no_register: true, ..from_run_args(&run, None) }).unwrap();
+    assert!(text(out).contains("nothing was copied"));
+}
+
+#[test]
+fn upload_from_a_run_refuses_other_bytes_another_base_revision_and_unfinished_runs() {
+    let fx = Fixture::new();
+    let (ctx, _) = with_base(&fx);
+    let bytes = lora_bytes("llama");
+    let copied = fx.dir.path().join("a.gguf");
+    std::fs::write(&copied, &bytes).unwrap();
+    // Another file than the run made.
+    let mut other = bytes.clone();
+    other.push(1);
+    let run = finished_run(&fx, &other, "adapters/base+kad/base+kad.gguf", "r1");
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("SHA-256 differs"), "{err}");
+    // Trained on another revision of the base than this node serves.
+    let run = finished_run(&fx, &bytes, "adapters/base+kad/base+kad.gguf", "r0");
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("trained on revision r0 of `base`"), "{err}");
+    // A run that failed has no adapter.
+    let path = run.join("run.json");
+    let t = std::fs::read_to_string(&path).unwrap().replace("\"done\"", "\"failed\"");
+    std::fs::write(&path, t).unwrap();
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&run, Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("did not finish"), "{err}");
+    let err = run_upload(&ctx, &mut Vec::new(), &from_run_args(&fx.dir.path().join("nope"), Some(&copied))).unwrap_err();
+    assert!(err.to_string().contains("train run"), "{err:#}");
+    assert!(!ctx.dir().join("adapters").exists(), "nothing copied before the checks pass");
+}
+
+// ---- `models upload --node` (docs/design/model-upload.md, U2): what is sent ----
+
+#[test]
+fn an_upload_to_another_node_carries_the_files_and_the_run_record() {
+    let fx = Fixture::new();
+    let bytes = lora_bytes("llama");
+    let run = finished_run(&fx, &bytes, "adapters/base+kad/base+kad.gguf", "r1");
+    // The adapter is found in the run directory when FILE is left out.
+    std::fs::write(run.join("base+kad.gguf"), &bytes).unwrap();
+    let a = upload::UploadArgs { node: Some("gpu".into()), ..from_run_args(&run, None) };
+    let mut out = Vec::new();
+    let op = upload::remote_op(&mut out, &a).unwrap();
+    assert!(text(out).contains("LoRA adapter (llama)") && op.persist && op.role.is_none());
+    let up = &op.upload;
+    assert_eq!((up.id.as_str(), up.adapter_for.as_deref(), up.serve), ("base+kad", Some("base"), true));
+    assert_eq!(up.files.len(), 1);
+    assert_eq!(
+        (up.files[0].path.as_str(), up.files[0].sha256.trim_start_matches("sha256:")),
+        ("base+kad.gguf", sha(&bytes).trim_start_matches("sha256:"))
+    );
+    assert_eq!(op.local, vec![std::fs::canonicalize(run.join("base+kad.gguf")).unwrap()]);
+    let p = &up.provenance;
+    assert_eq!(p.origin, "train");
+    let base = p.base.clone().unwrap();
+    assert_eq!((base.id.as_deref(), base.revision.as_deref(), base.quant.as_deref()), (Some("base"), Some("r1"), Some("Q4_K_M")));
+    assert_eq!(p.trainer.as_ref().and_then(|t| t.run.as_deref()), Some("20261124-150000-abcd"));
+    // --no-persist; a model with --adapter-for and an adapter without a base are refused here.
+    let op = upload::remote_op(&mut Vec::new(), &upload::UploadArgs { no_register: true, ..a }).unwrap();
+    assert!(!op.persist);
+    let lone = fx.dir.path().join("lone.gguf");
+    std::fs::write(&lone, &bytes).unwrap();
+    let err = upload::remote_op(&mut Vec::new(), &upload::UploadArgs { node: Some("gpu".into()), ..upload_args(&lone) }).unwrap_err();
+    assert!(err.to_string().contains("--adapter-for BASE"), "{err}");
+}
+
+/// The eight text-to-speech entries weirdnet-model 0.5.5 ships, with purpose, engine, license and
+/// profile; only Drama 3 is restricted.
+#[test]
+fn the_catalog_lists_the_speakers() {
+    use weirdnet_model::hw::{self, Purpose};
+    let speakers = hw::by_purpose(Purpose::Speak);
+    let ids: Vec<&str> = speakers.iter().map(|e| e.spec.id.as_str()).collect();
+    let mut want = vec![
+        hw::QWEN3_TTS_0_6B_CUSTOMVOICE,
+        hw::QWEN3_TTS_0_6B_BASE,
+        hw::QWEN3_TTS_1_7B_CUSTOMVOICE,
+        hw::QWEN3_TTS_1_7B_VOICEDESIGN,
+        hw::QWEN3_TTS_1_7B_BASE,
+        hw::KOKORO_82M,
+        hw::VOXCPM2,
+        hw::FISH_AUDIO_DRAMA_3,
+    ];
+    let mut got = ids.clone();
+    got.sort_unstable();
+    want.sort_unstable();
+    assert_eq!(got, want);
+    for e in &speakers {
+        assert!(e.speaks() && e.speech().is_some(), "{}", e.spec.id);
+        assert_eq!(e.restricted(), e.spec.id == hw::FISH_AUDIO_DRAMA_3, "{}", e.spec.id);
+        assert!(e.license().is_some(), "{}", e.spec.id);
+        // GGUF speakers come with their projector (the audio generator).
+        assert_eq!(e.is_gguf(), e.projector().is_some(), "{}", e.spec.id);
+    }
+
+    let mut out = Vec::new();
+    catalog::run(&mut out, &CatalogArgs { purpose: Some("speak".into()), json: false }).unwrap();
+    let s = text(out);
+    assert_eq!(s.lines().filter(|l| l.contains("[speak]")).count(), 8, "{s}");
+    assert!(s.contains("fish-audio-drama-3 [speak] llamacpp") && s.contains("--accept-license fish-audio-community"), "{s}");
+    assert!(s.contains("qwen3-tts-1.7b-customvoice [speak] vllm-omni"), "{s}");
+    assert!(s.contains("9 preset voices") && s.contains("designs voices") && s.contains("clones"), "{s}");
+    assert!(!s.contains("[chat]"), "{s}");
+    assert!(s.contains("--register") && !s.contains("0.4.10"), "{s}");
+
+    let mut out = Vec::new();
+    catalog::run(&mut out, &CatalogArgs { purpose: None, json: true }).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let all = v.as_array().unwrap();
+    assert!(all.iter().any(|e| e["purpose"] == "chat"));
+    let drama = all.iter().find(|e| e["id"] == hw::FISH_AUDIO_DRAMA_3).unwrap();
+    assert_eq!((drama["license"].as_str(), drama["restricted"].as_bool()), (Some("fish-audio-community"), Some(true)));
+    assert!(drama["speech"]["script_speakers"].as_u64().unwrap() > 1, "{drama}");
+    let kokoro = all.iter().find(|e| e["id"] == hw::KOKORO_82M).unwrap();
+    assert_eq!(kokoro["speech"]["presets"].as_array().unwrap().len(), 54);
+    assert_eq!(kokoro["engine"], "llamacpp");
+    assert!(kokoro["projector"]["file"].as_str().unwrap().starts_with("mmproj-"));
+    assert!(catalog::run(&mut Vec::new(), &CatalogArgs { purpose: Some("sing".into()), json: false }).is_err());
+}
+
+/// Drama 3 by catalog id or by either of its Hub repos: refused without --accept-license before
+/// the Hub is asked anything; with it, the download starts (against the mock Hub here).
+#[test]
+fn drama_3_needs_its_license_accepted_before_any_request() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(64, None);
+    for target in ["fish-audio-drama-3", "ggml-org/drama-3-GGUF", "fishaudio/drama-3"] {
+        for accepted in [None, Some("apache-2.0")] {
+            let e =
+                pull(&ctx, &mut Vec::new(), &PullArgs { accept_license: accepted.map(str::to_string), ..pull_args(target) }).unwrap_err().to_string();
+            assert!(e.contains("fish-audio-community") && e.contains("Nothing was downloaded"), "{target}: {e}");
+        }
+    }
+    assert!(fx.hub.state.lock().unwrap().paths.is_empty(), "the Hub was asked: {:?}", fx.hub.state.lock().unwrap().paths);
+
+    // Accepted (any case): a dry run prints the plan, a pull goes to the Hub for the pinned files.
+    let accepted = || PullArgs { accept_license: Some("Fish-Audio-Community".into()), ..pull_args("fish-audio-drama-3") };
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { dry_run: true, ..accepted() }).unwrap();
+    let s = text(out);
+    assert!(s.contains("license fish-audio-community (accepted)") && s.contains("role = \"speak\"") && s.contains("mmproj = "), "{s}");
+    assert!(s.contains("Guests of a shared pool don't get this speaker"), "{s}");
+    assert!(s.contains("Dry run"), "{s}");
+    assert!(fx.hub.state.lock().unwrap().paths.is_empty());
+    // Past the gate: the mock Hub has no such file (or this disk has no room for it).
+    let e = pull(&ctx, &mut Vec::new(), &accepted()).unwrap_err().to_string();
+    assert!(!e.contains("Nothing was downloaded"), "{e}");
+    let asked = fx.hub.state.lock().unwrap().paths.clone();
+    assert!(e.contains("free space") || asked.iter().any(|p| p.starts_with("/ggml-org/drama-3-GGUF/resolve/main/")), "{e}: {asked:?}");
+
+    // An unrestricted speaker needs no acceptance.
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { dry_run: true, ..pull_args("kokoro-82m") }).unwrap();
+    let s = text(out);
+    assert!(s.contains("kokoro-82m: ") && s.contains("[speak] on llamacpp") && !s.contains("(accepted)"), "{s}");
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &pull_args("qwen3-tts-1.7b-voicedesign")).unwrap();
+    let s = text(out);
+    assert!(s.contains("nothing to download") && s.contains("backend = \"vllm-omni\"") && s.contains("vLLM-Omni fetches"), "{s}");
+    assert!(!s.contains("Guests of a shared pool"), "apache-2.0: open to guests: {s}");
+}
+
+/// A speaker registers like any catalog model: node.toml gets `role = "speak"` and validates
+/// (a vLLM-Omni checkpoint downloads nothing, so this needs no Hub).
+#[test]
+fn speakers_register_with_the_speak_role() {
+    let fx = Fixture::new();
+    let ctx = fx.ctx(64, Some("[roles]\nmodel = true\n"));
+    let mut out = Vec::new();
+    pull(&ctx, &mut out, &PullArgs { register: true, ..pull_args("qwen3-tts-0.6b-customvoice") }).unwrap();
+    let s = text(out);
+    assert!(s.contains("Added `qwen3-tts-0.6b-customvoice`"), "{s}");
+    let cfg = NodeConfig::load(&ctx.config).unwrap();
+    let m = cfg.model.local.iter().find(|m| m.id == "qwen3-tts-0.6b-customvoice").unwrap();
+    assert!(m.is_speaker() && m.backend.as_deref() == Some("vllm-omni"), "{m:?}");
+    cfg.validate().unwrap();
+    assert_eq!(cfg.launches()[0].engine, weirdnet_backends::EngineKind::VllmOmni);
 }
