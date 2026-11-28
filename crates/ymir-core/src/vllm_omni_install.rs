@@ -329,12 +329,14 @@ pub fn uninstall(venv: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     struct Fake {
         on_path: Vec<&'static str>,
         os: &'static str,
         cuda: Option<(u32, u32)>,
     }
 
+    #[cfg(unix)]
     impl Probe for Fake {
         fn which(&self, program: &str) -> Option<PathBuf> {
             self.on_path.contains(&program).then(|| PathBuf::from(format!("/usr/bin/{program}")))
@@ -350,6 +352,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn fake(on_path: &[&'static str], cuda: Option<(u32, u32)>) -> Fake {
         Fake { on_path: on_path.to_vec(), os: "linux", cuda }
     }
