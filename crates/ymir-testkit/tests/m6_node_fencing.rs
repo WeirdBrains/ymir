@@ -18,13 +18,13 @@ use weirdnet_backends::{ModelState, ModelStatus};
 use weirdnet_net::Multiaddr;
 use weirdnet_semcache::NoCache;
 use weirdnet_sync::Term;
+use ymir_core::NodeConfig;
 use ymir_core::control::{self, ControlRequest};
 use ymir_core::coordinator::Coordinator;
 use ymir_core::membership::{Membership, SyncNode};
 use ymir_core::model_node::ModelNode;
 use ymir_core::placement::{Fence, Lead, PlacementPlan, PlacementPolicy, PlanBook, PublishedPlan, SCHEDULER_LEASE};
 use ymir_core::remote::{RemoteModelNode, RemoteOptions};
-use ymir_core::{Daemon, NodeConfig};
 
 #[path = "common/pool.rs"]
 mod pool;
@@ -71,11 +71,6 @@ async fn connect(model_h: &Home, inf_h: &Home) -> Result<(Arc<RemoteModelNode>, 
     Ok((Arc::new(rn), node))
 }
 
-async fn start_model(h: &Home) -> Result<Daemon> {
-    let d = start(h).await?;
-    Ok(d)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_model_node_refuses_an_older_scheduler_term_even_after_a_restart() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -86,7 +81,7 @@ async fn the_model_node_refuses_an_older_scheduler_term_even_after_a_restart() -
     prelink(&first, &inf_h, "inf");
     drop(first);
 
-    let model = start_model(&model_h).await?;
+    let model = start(&model_h).await?;
     let (rn, _net) = connect(&model_h, &inf_h).await?;
     assert!(rn.fencing(), "a 0.4.11 model node says it fences");
 
@@ -105,7 +100,7 @@ async fn the_model_node_refuses_an_older_scheduler_term_even_after_a_restart() -
     assert_eq!(saved.seen(SCHEDULER_LEASE), Some(2));
     drop(rn);
     model.shutdown().await;
-    let model = start_model(&model_h).await?;
+    let model = start(&model_h).await?;
     let (rn, _net2) = connect(&model_h, &inf_h).await?;
     let e = rn.load_fenced("alpha", false, &scheduler(1)).await.expect_err("still refused after a restart");
     assert!(matches!(FenceRefusal::from_error(&e), Some(FenceRefusal::Stale { seen: 2, .. })), "{e}");

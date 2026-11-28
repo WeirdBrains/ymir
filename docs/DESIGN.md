@@ -2194,7 +2194,7 @@ Each milestone lands its `weirdnet-*` crate work first (Weirdnet lead), publishe
 - **M6 Workload spreading (core)** (built 2026-11-19, partly; see [M6 status](#m6-status-built-2026-11-19-partly)). Built: load-balanced routing across replicas,
   device fairness and priority classes, batch job fan-out, and the pool benchmark; several inference
   nodes active-active. Moving a model between nodes, and placement with replica counts under the scheduler lease, are built
-  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). The published placement plan with holder-side fencing and cloud-wide swap are built (2026-11-27). The pool-mode (shared) semantic cache is built (`weirdnet-semcache` 0.2.3, 2026-11-27). Still to do: fencing on model nodes (a `weirdnet-backends` gap), replication on queue wait and prefix warming. Exit
+  (`ymirctl move`, `[inference.placement]`, 2026-11-26). A semantic answer cache on each inference node is built (`[inference.cache] embedding_model`, `weirdnet-semcache` 0.2.2, 2026-11-26). The published placement plan with holder-side fencing and cloud-wide swap are built (2026-11-27). The pool-mode (shared) semantic cache is built (`weirdnet-semcache` 0.2.3, 2026-11-27). Fencing on model nodes is built (`weirdnet-backends` 0.4.11, 2026-11-28). Still to do: replication on queue wait and prefix warming. Exit
   test: two inference nodes, three model nodes, two replicas of one model, mixed interactive and batch
   load from two app devices; interactive p95 wait stays under target and neither device starves.
 - **M7 Split models** (in progress 2026-11-20; see [M7 status](#m7-status-built-2026-11-20-llamacpp-rpc-only) and [vLLM with Ray](#m7-vllm-with-ray-groups-built-2026-11-26-mocks-only)). llama.cpp RPC groups and vLLM-on-Ray groups are built (opt-in pool policy, private-link-only planning and binds, group up and down, teardown when a member is lost). Still to do: a `vllm-ray` run on real GPUs, and the big-mode reproduction on server-a/server-b.
@@ -2666,16 +2666,26 @@ that release, and the M6 p95 comparison is between two equally delayed runs unti
   Tests: `placement::tests`, [crates/ymir-core/tests/placement_plan.rs](../crates/ymir-core/tests/placement_plan.rs)
   (publish on change only, stale term and lost lease take no step, mid-round loss) and `m6_scheduler_lease.rs` (the
   plan crosses Weirdnet; the old holder's plan is refused after the takeover).
+- **Fencing on model nodes** (built 2026-11-28, `weirdnet-backends` 0.4.11). The holder sends each placement step as
+  node/1 `LoadFenced`/`UnloadFenced` with the fence `(ymir.scheduler, term)` (`ModelNode::load_fenced` and
+  `unload_fenced`) to every model node whose capability record says `fencing`; nodes before 0.4.11 get the unfenced
+  command, as before. Every model node serves with `NodeService::with_fence_file(state/model-fence.cbor)`: it keeps the
+  newest term per lease name across restarts and refuses an older one (`FenceRefusal::Stale`) without loading or
+  unloading anything. The holder reads the refusal back: the round stops, the node's term goes into the holder's
+  `Fence`, and it takes no further step until it holds a newer term (never retried). Unfenced `Load`/`Unload` (an
+  operator's `ymirctl load`/`unload`, `ymirctl move`, cold loads) still run, since `fence_required` stays off; a node
+  that does require a fence and refuses a lease-less placer is left out of its later rounds. So a stale holder that
+  has not yet seen the newer plan can no longer add or drop a replica. Tests:
+  [placement_plan.rs](../crates/ymir-core/tests/placement_plan.rs) (the term on every step, stale load and unload
+  refusals stopping the round and the holder, unfenced steps to old nodes, a node that requires a fence) and
+  [m6_node_fencing.rs](../crates/ymir-testkit/tests/m6_node_fencing.rs) (a real model daemon over Weirdnet: older term
+  refused with the model untouched, the term kept across a restart, a stale placement round stopped at the node).
 
 **Gaps:**
 
-- **Not built: fencing on model nodes, replication on queue wait, prefix warming.** The plan, holder-side
-  fencing and cloud-wide swap are built (above). Model nodes cannot refuse a stale holder's load or unload:
-  `weirdnet-backends` 0.4.9 node/1 `Command::Load { model, force }` and `Unload { model }` carry no lease term, and
-  the `Authorize` hook sees the caller but not the command, so there is nowhere to run a `FenceGuard` (a
-  Weirdnet gap: a `fence: Option<(LeaseName, Term)>` on both commands, checked by `NodeService` against a persisted
-  guard). Until then a stale holder that has not yet seen the newer plan can at worst add or drop one replica for a
-  round, which the next round undoes. Also not built: several seed-holding inference nodes taking part in the lease
+- **Not built: replication on queue wait, prefix warming.** The plan, fencing (holder side and on model nodes)
+  and cloud-wide swap are built (above). A model node before `weirdnet-backends` 0.4.11 still takes a stale holder's
+  unfenced step, which the next round undoes. Also not built: several seed-holding inference nodes taking part in the lease
   (they would need an `ymir.inference` grant of their own) and warm-prefix data in the capability record. The scorer ignores prefill and decode speed, uncached prompt length, round-trip time
   and relays for the same reason.
 - **The semantic cache: pool mode built, not persisted.** `mode = "pool"` shares it (see [Shared semantic cache](#shared-semantic-cache)); entries are still in memory and lost on restart, are not moved when members change, the exact cache is not shared, and there is no Redis backend.

@@ -6,6 +6,16 @@ All notable changes to Ymir are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Model-node fencing for placement (M6): the `ymir.scheduler` lease holder's loads and unloads carry its term
+  (`weirdnet-backends` 0.4.11 `LoadFenced`/`UnloadFenced`), model nodes keep the newest term seen in
+  `state/model-fence.cbor` and refuse older ones, and a refused holder stops placing until it holds a newer term.
+
+### Changed
+
+- Needs `weirdnet-backends` 0.4.11.
+
 ### Removed
 
 - Intel (x86_64) macOS: macOS is now Apple Silicon (`aarch64-apple-darwin`) only. The release no longer builds
