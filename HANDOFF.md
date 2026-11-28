@@ -2,6 +2,10 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-28 EST: DESIGN notes Bragi's cert-only default (on main)
+
+Doc only. [DESIGN](docs/DESIGN.md) M10 now says Bragi (branch `feat/cert-only-default`) links any Ymir server code cert-only as an inference node by default, with `bragi-tui link CODE --full-identity` as the opt-out. Checked: the real Bragi/Ymir link e2e against this tree's `ymird`/`ymirctl` passes in both modes; `check_links.py` ok. No code changed. **Next:** unchanged.
+
 ## 2026-11-27 16:10 EST: M6 pool-mode semantic cache on `weirdnet-semcache` 0.2.3 (on main)
 
 Follows the Weirdnet lead's `weirdnet-semcache` 0.2.3 (`pool` feature). Built on the dev box with mocks and loopback Weirdnet nodes on branch `m6-placement-swap-cache`, rebased onto `3291afd` (v0.23.0, Intel macOS dropped, M7 Pass 2 fixes) and committed straight to main; no live node touched. Details in [DESIGN](docs/DESIGN.md#shared-semantic-cache).
