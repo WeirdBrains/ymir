@@ -2,6 +2,13 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-28 08:55 EST: v0.24.0 tagged (GitHub release and TAUR waiting on signing)
+
+**Release:** `scripts/weirdnet_release.py cut` (minor) from `f07b113` (CI green on Linux, macOS and Windows, run 46148589074): release commit [`052cb79`](https://github.com/WeirdBrains/ymir/commit/052cb79dcb3b7ac12206263de3ad14354f42001c), tag [`v0.24.0`](https://github.com/WeirdBrains/ymir/tree/v0.24.0), pushed atomically; the script's checks (fmt, clippy `-D warnings`, `cargo test --workspace --locked`) passed. Contents: M6 model-node fencing on `weirdnet-backends` 0.4.11 (merge `2e80027`), Intel macOS dropped (first release without an Intel Mac build), the `vllm-ray` port hardening, `ymirctl models rollout list` without an inference role (merge `16b192a`). The Release workflow (run 46150877441) builds the files on the tag. Before the release, `f07b113` merged `changelog-0.24.0`, which folds the duplicate `### Added`/`### Changed` headings in `[Unreleased]` into one section per kind.
+
+- **Not done yet:** the GitHub release, `assets 0.24.0`, the Arch recipes and TAUR `ymir-bin`/`ymir-cuda-bin` 0.24.0. The Arch `.sig`s and the signed update bundles are made only on the signing host (`sign-release.sh 0.24.0`, key never leaves it), and that host was offline (mid OS upgrade).
+- **Next:** when the signing host is back: download the Release run's artifacts into `dist/`, leak scan, `sign-release.sh 0.24.0`, `weirdnet_release.py github 0.24.0`, `assets 0.24.0`, `package.py --recipe` and commit, then `taur 0.24.0 --dry-run` and without `--dry-run`.
+
 ## 2026-11-28 07:56 EST: M6 model-node fencing on `weirdnet-backends` 0.4.11 (merged `m6-node-fencing`)
 
 m3talsmith (11-28): "Release backends 0.4.11 and wire Ymir fencing". Closes Weirdnet gap (1) from the 11-27 placement entry: [weirdnet-backends 0.4.11](https://crates.io/crates/weirdnet-backends/0.4.11) carries a lease term on node/1 (`LoadFenced`/`UnloadFenced`). Built on the dev box with mocks and loopback Weirdnet daemons on branch `m6-node-fencing` (commits `6d5478b`, `2553d43`, `0b67dd7`, main merged in at `317002d`); no live node touched. Details in [DESIGN](docs/DESIGN.md) "Fencing on model nodes".
