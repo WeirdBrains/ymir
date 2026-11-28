@@ -5385,9 +5385,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-backends"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9316154ec5c4ba319ee5191b454dda77fe154565b20a7c47f8e2e89d1d08be70"
+checksum = "81c71f080e5168fa969af161a9459889cdb5ef16a6f505c0eaa7609e92415564"
 dependencies = [
  "async-trait",
  "axum",

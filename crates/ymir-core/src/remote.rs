@@ -136,7 +136,9 @@ pub fn connect_pool(node: Arc<SyncNode>, m: &Membership, hints: &[(PeerId, Vec<M
 /// to the user's devices. On a box that also has the inference role (`combined`), the model
 /// role leaves `/weirdnet-agent/infer/2` to the inference role, so one box serves both. The
 /// inference role uses its own models in process.
-/// `hardware` goes into the capability record (for placement).
+/// `hardware` goes into the capability record (for placement). With `fence_file`, the node
+/// checks placement-lease fences on node/1 `LoadFenced`/`UnloadFenced` against the terms kept
+/// there (`weirdnet-backends` 0.4.11); unfenced `Load`/`Unload` (an operator's) still run.
 #[allow(clippy::too_many_arguments)]
 pub fn serve_model(
     node: &Arc<SyncNode>,
@@ -148,10 +150,17 @@ pub fn serve_model(
     combined: bool,
     workers: Option<Arc<dyn weirdnet_backends::node::GroupWorkers>>,
     callers: &[String],
+    fence_file: Option<&std::path::Path>,
 ) -> Result<(NodeServer, Arc<NodeService>), RemoteError> {
     let auth = role_auth(m, callers);
     let host = Arc::new(ModelHost::new(supervisor, auth.clone()));
     let mut service = NodeService::new(host, m.node_key().clone(), Some(m.our_cert()), auth).with_admission(slots.max(1), queue);
+    // The placement-lease terms this node has seen, kept across restarts, so an inference node
+    // that lost the `ymir.scheduler` lease can't load or unload here after a newer holder has.
+    if let Some(path) = fence_file {
+        service =
+            service.with_fence_file(path).map_err(|e| RemoteError::unavailable(format!("reading the placement fence {}: {e}", path.display())))?;
+    }
     if let Some((hw, budget)) = hardware {
         service = service.with_hardware(hw, budget);
     }
@@ -503,6 +512,30 @@ impl ModelNode for RemoteModelNode {
         Box::pin(async move {
             self.permitted()?;
             self.client.unload(&self.peer, model).await
+        })
+    }
+
+    fn fencing(&self) -> bool {
+        self.record().is_some_and(|c| c.fencing)
+    }
+
+    /// Fenced when the node's record says it checks fences (`weirdnet-backends` 0.4.11); a
+    /// node before that fails a fenced command, so it gets an unfenced one.
+    fn load_fenced<'a>(&'a self, model: &'a str, force: bool, fence: &'a weirdnet_backends::fence::Fence) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.permitted()?;
+            if self.fencing() {
+                self.client.load_fenced(&self.peer, model, force, fence).await
+            } else {
+                self.client.load(&self.peer, model, force).await
+            }
+        })
+    }
+
+    fn unload_fenced<'a>(&'a self, model: &'a str, fence: &'a weirdnet_backends::fence::Fence) -> BoxFuture<'a, Result<(), RemoteError>> {
+        Box::pin(async move {
+            self.permitted()?;
+            if self.fencing() { self.client.unload_fenced(&self.peer, model, fence).await } else { self.client.unload(&self.peer, model).await }
         })
     }
 
