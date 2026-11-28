@@ -2,6 +2,16 @@
 
 A running log of finished work, newest first. Each entry says what changed, the commits, the checks run and what was not tested, what is left, and what is next.
 
+## 2026-11-28 08:07 EST: rollout list on a node without the inference role (on main)
+
+Merged `fix/rollout-list-no-inference` with `--no-ff` (Michael, 11-24/11-28). `ymirctl models rollout list` on a running node without the inference role said "ymird is not running here"; it now says the node has no inference role (a ControlResponse refusal is told apart from a dead socket), lists any rollouts in node.toml without suggesting `add`, and still shows provenance when models list answers. Also fixed two Windows CI failures already on main (`af893ee`): `vllm_omni_install` Fake helpers gated to unix tests, and the speak-role test's mmproj path parsed as a TOML literal string so `C:\Users\...` is not a `\U` escape.
+
+- **Commits:** `274b10a` (the fix), `11b453c` (branch tip), `16b192a` (this merge).
+- **Tests:** `list_says_why_it_shows_node_toml`, `provenance_lines_name_origin_license_base_and_dataset`, `p4b::rollout_list_on_a_node_without_inference_says_so`. CI [46146421530](https://github.com/WeirdBrains/ymir/actions/runs/46146421530) green on Linux, macOS and Windows.
+- **Not tested:** a live multi-node rollout list from a model-only machine.
+- **Left:** none for this item. No release; the fencing work can include it.
+- **Next:** unchanged (M6 node fencing is on `m6-node-fencing`).
+
 ## 2026-11-28 EST: DESIGN notes Bragi's cert-only default (on main)
 
 Doc only. [DESIGN](docs/DESIGN.md) M10 now says Bragi (branch `feat/cert-only-default`) links any Ymir server code cert-only as an inference node by default, with `bragi-tui link CODE --full-identity` as the opt-out. Checked: the real Bragi/Ymir link e2e against this tree's `ymird`/`ymirctl` passes in both modes; `check_links.py` ok. No code changed. **Next:** unchanged.
@@ -737,10 +747,9 @@ B go to the Weirdnet lead once the plan is confirmed.
 **On main (ac8aa63, CI green on Linux, macOS, Windows):** the llama.cpp trainer wrapper (feafb07), the Windows bench sandbox (e8923bf), the M9 bundle fetcher (b202a74), Infra's v0.8.0 PKGBUILD hashes (b99aabc). Release-ready: ac8aa63.
 
 **Open branches, all pushed:**
-- `fix/rollout-list-no-inference` (1 commit on ac8aa63): `ymirctl models rollout list` on a running node without the inference role said "ymird is not running here"; it now says the node has no inference role (the ControlResponse refusal is told apart from a dead socket). Unit test + `p4b.rs` e2e against a model-only ymird. CI 45455967977 green on all three OSes. **Left: merge (`--no-ff`) and push.**
 - `chore/helpers-0.3.3` (1 commit): vendors weirdnet-project-helpers 0.3.3 (validate and `--dry-run` compare `[[requires]]` versions offline) and pins `helpers = "0.3.3"`. `validate` passes, and fails with requires 0.4.2 against Cargo.toml 0.4.3. CI 45456634158 (Linux, macOS green; Windows pending at writing). **Left: merge once Windows is green.**
 - `feat/m9-bsd-packages`: FreeBSD `.pkg` + rc.d service, FreeBSD/OpenBSD `tar.gz`, `engine.py` without ggml-rpc RDMA on BSD, manual `bsd.yml`. Already merged in: main up to ac8aa63 and the fetcher. In the FreeBSD VM: cargo build, engine from source, package, `pkg add`, binaries, user and home all work. **Left: `service ymird start` did not come up** (run 45451131242: no `ymirctl status` in 60 s). The rc.d pidfile fix and failure diagnostics (syslog, ps, foreground ymird) are in run 45454646555, still running at writing; read its log, fix, re-run. **Before merging: remove the TEMPORARY `push:` trigger at the top of `.github/workflows/bsd.yml`.** HANDOFF/DESIGN/CHANGELOG entries for BSD are on the branch (the HANDOFF "RESULT" placeholder needs the final run result).
-- Older local branches pushed so nothing is only on a machine (already merged or superseded, kept for reference): `feat/m10-cert-only`, `feat/p2-training-export`, `feat/p3a-trainer`, `fix/p2-tombstones`, `fix/post-031`, `deps/backends-0.4.2`, `fix/pages-doc-links`, `fix/plan-total-and-requires`, `fix/test-port-race`, `p4a-slots-base-revision`, `weirdnet-live-adapters`.
+- Older local branches pushed so nothing is only on a machine (already merged or superseded, kept for reference): `fix/rollout-list-no-inference`, `feat/m10-cert-only`, `feat/p2-training-export`, `feat/p3a-trainer`, `fix/p2-tombstones`, `fix/post-031`, `deps/backends-0.4.2`, `fix/pages-doc-links`, `fix/plan-total-and-requires`, `fix/test-port-race`, `p4a-slots-base-revision`, `weirdnet-live-adapters`.
 
 **Blocked / decisions:**
 - OpenBSD: its rust package is 1.81 (7.6), the workspace needs 1.99, and rustup has no OpenBSD.
