@@ -92,13 +92,11 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: RolloutCmd) -> Result<
     let mut rollouts = cfg.inference.rollout.clone();
     if let RolloutCmd::List = cmd {
         let live = live(paths).await;
-        let (shown, note) = match live {
-            Some(l) if l != rollouts => (l, Some("ymird's live rollouts differ from node.toml (shown: live)")),
-            Some(l) => (l, None),
-            None => (rollouts, Some("ymird is not running here: shown from node.toml")),
-        };
+        // Suggest `add` only where rollouts are routed (or could be once ymird starts).
+        let hint = !matches!(live, Live::NoInference);
+        let (shown, note) = list_source(live, rollouts);
         let prov = if shown.is_empty() { Default::default() } else { provenance(paths).await };
-        return list(out, &shown, note, &prov);
+        return list(out, &shown, note, hint, &prov);
     }
     let said = apply(&mut rollouts, &cmd)?;
     ymir_core::rollout::validate(&rollouts)?;
@@ -114,9 +112,44 @@ pub async fn run(paths: &Paths, out: &mut dyn Write, cmd: RolloutCmd) -> Result<
     Ok(())
 }
 
-async fn live(paths: &Paths) -> Option<Vec<Rollout>> {
-    let r = control::request(&paths.socket(), &ControlRequest::Rollouts { set: None }).await.ok()?;
-    r.rollouts
+/// What the local ymird says about rollouts.
+#[derive(Debug)]
+pub enum Live {
+    /// The rollouts in force.
+    Rollouts(Vec<Rollout>),
+    /// ymird is running but routes no rollouts: no inference role here.
+    NoInference,
+    /// No ymird answered.
+    NotRunning,
+}
+
+async fn live(paths: &Paths) -> Live {
+    match control::request(&paths.socket(), &ControlRequest::Rollouts { set: None }).await {
+        Ok(r) => match r.rollouts {
+            Some(l) if r.ok => Live::Rollouts(l),
+            // A running ymird without a coordinator (the only refusal of a plain read).
+            _ => Live::NoInference,
+        },
+        Err(_) => Live::NotRunning,
+    }
+}
+
+/// Which rollouts `list` shows (live or node.toml's) and the note under them.
+pub fn list_source(live: Live, file: Vec<Rollout>) -> (Vec<Rollout>, Option<&'static str>) {
+    match live {
+        Live::Rollouts(l) if l != file => (l, Some("ymird's live rollouts differ from node.toml (shown: live)")),
+        Live::Rollouts(l) => (l, None),
+        Live::NoInference if file.is_empty() => {
+            (file, Some("This node has no inference role, so no rollouts are routed here (they belong in an inference node's node.toml)."))
+        }
+        Live::NoInference => (
+            file,
+            Some(
+                "This node has no inference role, so ymird routes none of these: shown from node.toml, used only if the node gets the inference role.",
+            ),
+        ),
+        Live::NotRunning => (file, Some("ymird is not running here: shown from node.toml")),
+    }
 }
 
 /// Where each served model came from, as the pool's model nodes record it (best effort: empty
@@ -151,8 +184,8 @@ pub fn provenance_line(p: &Provenance) -> String {
     parts.join(", ")
 }
 
-fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>, prov: &HashMap<String, Provenance>) -> Result<()> {
-    if rollouts.is_empty() {
+fn list(out: &mut dyn Write, rollouts: &[Rollout], note: Option<&str>, hint: bool, prov: &HashMap<String, Provenance>) -> Result<()> {
+    if rollouts.is_empty() && hint {
         writeln!(out, "No rollouts. Add one with `ymirctl models rollout add NAME@1 --model ID --weight 100`.")?;
     }
     for r in rollouts {
@@ -253,7 +286,7 @@ pub async fn run_remote(paths: &Paths, out: &mut dyn Write, node: &str, cmd: Rol
         if listing {
             let prov = if got.rollouts.is_empty() { Default::default() } else { provenance(paths).await };
             let note = format!("on {label}, live");
-            return list(out, &got.rollouts, Some(note.as_str()), &prov);
+            return list(out, &got.rollouts, Some(note.as_str()), true, &prov);
         }
         writeln!(out, "{}", got.said.unwrap_or_default())?;
         match (got.saved, got.note) {
@@ -327,6 +360,26 @@ mod tests {
     }
 
     #[test]
+    fn list_says_why_it_shows_node_toml() {
+        let say = |live, file: Vec<Rollout>, hint| {
+            let (shown, note) = list_source(live, file);
+            let mut out = Vec::new();
+            list(&mut out, &shown, note, hint, &HashMap::new()).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let s = say(Live::NoInference, vec![], false);
+        assert!(s.contains("no inference role, so no rollouts are routed here") && !s.contains("not running") && !s.contains("Add one"), "{s}");
+        let s = say(Live::NoInference, ro(), false);
+        assert!(s.contains("support@2") && s.contains("no inference role") && !s.contains("not running"), "{s}");
+        let s = say(Live::NotRunning, vec![], true);
+        assert!(s.contains("Add one") && s.contains("ymird is not running here"), "{s}");
+        let s = say(Live::Rollouts(ro()), ro(), true);
+        assert!(s.contains("support@2") && !s.contains("node.toml"), "{s}");
+        let s = say(Live::Rollouts(vec![]), ro(), true);
+        assert!(s.contains("differ from node.toml"), "{s}");
+    }
+
+    #[test]
     fn a_canary_is_free_more_needs_an_eval_and_rollback_moves_traffic_back() {
         let mut r = ro();
         apply(&mut r, &add("support@3", "s3", 5, Gate::default())).unwrap();
@@ -379,7 +432,7 @@ mod tests {
         assert_eq!(provenance_line(&p), "origin train, license apache-2.0, base org/base, dataset sha256:0123456789ab");
         let mut list_out = Vec::new();
         let r = vec![Rollout { name: "support".into(), versions: vec![Version { version: 2, model: "b+t-r2".into(), weight: 0 }] }];
-        list(&mut list_out, &r, None, &HashMap::from([("b+t-r2".to_string(), p)])).unwrap();
+        list(&mut list_out, &r, None, true, &HashMap::from([("b+t-r2".to_string(), p)])).unwrap();
         let s = String::from_utf8(list_out).unwrap();
         assert!(s.contains("support@2") && s.contains("origin train, license apache-2.0"), "{s}");
     }

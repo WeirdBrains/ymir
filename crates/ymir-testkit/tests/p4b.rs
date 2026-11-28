@@ -101,3 +101,22 @@ async fn a_rollout_takes_a_canary_needs_an_eval_for_more_and_rolls_back_live() -
     daemon.shutdown().await;
     Ok(())
 }
+
+/// On a running node without the inference role, `rollout list` says that, not that ymird is
+/// down (found on the nodes after 0.8.0).
+#[tokio::test(flavor = "multi_thread")]
+async fn rollout_list_on_a_node_without_inference_says_so() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (home, paths) = setup(tmp.path())?;
+    let toml = std::fs::read_to_string(paths.config())?.replace("inference = true\napp = true", "inference = false\napp = false");
+    std::fs::write(paths.config(), toml)?;
+    let daemon = Daemon::start(NodeConfig::load(&paths.config())?, paths.clone()).await?;
+    let s = ctl(&home, &["models", "rollout", "list"]).await?;
+    assert!(s.contains("no inference role"), "{s}");
+    assert!(!s.contains("not running"), "{s}");
+    daemon.shutdown().await;
+    // Stopped: now it is the node.toml view.
+    let s = ctl(&home, &["models", "rollout", "list"]).await?;
+    assert!(s.contains("ymird is not running here"), "{s}");
+    Ok(())
+}
