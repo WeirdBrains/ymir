@@ -11,31 +11,6 @@ All notable changes to Ymir are listed here. The format follows
 - Model-node fencing for placement (M6): the `ymir.scheduler` lease holder's loads and unloads carry its term
   (`weirdnet-backends` 0.4.11 `LoadFenced`/`UnloadFenced`), model nodes keep the newest term seen in
   `state/model-fence.cbor` and refuse older ones, and a refused holder stops placing until it holds a newer term.
-
-### Changed
-
-- Needs `weirdnet-backends` 0.4.11.
-
-### Removed
-
-- Intel (x86_64) macOS: macOS is now Apple Silicon (`aarch64-apple-darwin`) only. The release no longer builds
-  `ymir-VERSION-x86_64-apple-darwin.tar.gz`/`.zip` or the `ymir-VERSION-macos-x86_64.update.tar.gz` self-update bundle, the
-  Homebrew formula is arm64-only, the pinned llama.cpp `macos-x64` engine is gone, and the macOS workflow no longer runs on
-  `macos-15-intel`. v0.23.0 is the last release with an Intel Mac build; Intel Macs can still build from source with
-  llama.cpp, unsupported.
-
-### Security
-
-- `vllm-ray`: `ray_trust_firewall = true` now allows all-interface Ray listeners only on the firewalled ports, the new
-  `[model] ray_trusted_ports` (default `6390-6399` and `10000-10999`, the documented `ymir_ray` firewall ranges). An
-  all-interface listener on any other port is refused. The 0.22.1 run on two DGX Sparks had two outside any firewall rule
-  (`*:42477`, a vLLM worker, and `0.0.0.0:44217`, a Ray agent) that the check let through.
-- Ray's and vLLM's ports are pinned into those ranges unless `ray_args` sets them: node manager, object manager,
-  runtime-env agent, dashboard agent and metrics ports (10003 to 10008), workers 10010 to 10899, the head's client server 10001,
-  and `VLLM_PORT=10900` for vLLM's internal ports. The default `ray_port` is 6390 (was 6379, Redis's port).
-
-### Added
-
 - `ymirctl engines install vllm` records the CUDA vLLM's own kernels are built with (the wheel version's `cuNNN` tag, or 13.2 for
   the default nightly) and warns when it is newer than the driver's, with the way out: a newer driver, or the new
   `--vllm-cuda cuNNN`, which installs from that vLLM nightly variant's index. On driver 580 (CUDA 13.0) the default nightly's
@@ -109,11 +84,30 @@ All notable changes to Ymir are listed here. The format follows
 
 ### Changed
 
+- Needs `weirdnet-backends` 0.4.11.
 - `weirdnet-semcache` 0.2.3 with the `pool` feature (was 0.2.2).
+
+### Removed
+
+- Intel (x86_64) macOS: macOS is now Apple Silicon (`aarch64-apple-darwin`) only. The release no longer builds
+  `ymir-VERSION-x86_64-apple-darwin.tar.gz`/`.zip` or the `ymir-VERSION-macos-x86_64.update.tar.gz` self-update bundle, the
+  Homebrew formula is arm64-only, the pinned llama.cpp `macos-x64` engine is gone, and the macOS workflow no longer runs on
+  `macos-15-intel`. v0.23.0 is the last release with an Intel Mac build; Intel Macs can still build from source with
+  llama.cpp, unsupported.
 
 ### Fixed
 
 - `ymirctl models rollout list` on a node without the inference role said "ymird is not running here" while ymird was running. It now says the node has no inference role, so no rollouts are routed there (and lists any in node.toml without suggesting `add`).
+
+### Security
+
+- `vllm-ray`: `ray_trust_firewall = true` now allows all-interface Ray listeners only on the firewalled ports, the new
+  `[model] ray_trusted_ports` (default `6390-6399` and `10000-10999`, the documented `ymir_ray` firewall ranges). An
+  all-interface listener on any other port is refused. The 0.22.1 run on two DGX Sparks had two outside any firewall rule
+  (`*:42477`, a vLLM worker, and `0.0.0.0:44217`, a Ray agent) that the check let through.
+- Ray's and vLLM's ports are pinned into those ranges unless `ray_args` sets them: node manager, object manager,
+  runtime-env agent, dashboard agent and metrics ports (10003 to 10008), workers 10010 to 10899, the head's client server 10001,
+  and `VLLM_PORT=10900` for vLLM's internal ports. The default `ray_port` is 6390 (was 6379, Redis's port).
 
 ## [0.23.0] - 2026-11-27
 
